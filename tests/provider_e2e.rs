@@ -504,13 +504,11 @@ fn receipt_event(
 }
 
 fn provider_evidence_fixture(name: &str) -> Value {
-    json!({
-        "digest": format!("sha256:{}", "11".repeat(32)),
-        "data": format!(
-            "data:application/json;base64,{}",
-            BASE64.encode(format!(r#"{{"fixture":"{name}"}}"#).as_bytes())
-        ),
-    })
+    let evidence = private_ai_gateway::aggregator::session::EvidenceRef::from_bytes(
+        "application/json",
+        format!(r#"{{"fixture":"{name}"}}"#).as_bytes(),
+    );
+    json!({ "digest": evidence.digest, "data": evidence.data_uri })
 }
 
 fn chutes_key_binding(e2e_pubkey: &str) -> private_ai_gateway::aci::receipt::ChannelBinding {

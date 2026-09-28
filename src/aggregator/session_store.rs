@@ -5,12 +5,19 @@
 //! per line, replayed into an in-memory index on open:
 //!
 //! ```text
-//! {"seq":0,"ts":1700000000,"type":"session","fingerprint":"…","retention_until":1700003600,"payload_b64":"…"}
+//! {"seq":0,"ts":1700000000,"type":"evidence","payload_b64":"…"}
+//! {"seq":1,"ts":1700000000,"type":"attested_session","fingerprint":"…","retention_until":1700003600,"content_type":"application/json","payload_b64":"…"}
 //! ```
 //!
-//! `payload_b64` carries the sealed document bytes (JCS form, whose hash is
-//! the session id), so replay reproduces identical records; the id is always
-//! recomputed from those bytes, never trusted from disk.
+//! A session's evidence bundle is stored once, as an `evidence` record whose
+//! `sha256:` digest is its key. Many Chutes instance sessions cite the same
+//! fleet bundle, so storing it inline would repeat it once per session. An
+//! `attested_session` record carries the document without `evidence.data`;
+//! replay rebuilds the served bytes from the bundle the document's
+//! `evidence.digest` names, and recomputes the session id from them. Every
+//! stored session has a complete bundle (§8.2): digest plus the data it hashes.
+//! Records of any other type, including the pre-bundle `session` type, are
+//! skipped.
 //!
 //! Two deadlines govern a record:
 //!
@@ -19,6 +26,9 @@
 //! * the store-side `retention_until` — how long the record keeps being
 //!   served by id. Retention MUST outlive every receipt citing the session,
 //!   so each citation pushes it forward without touching the sealed bytes.
+//!
+//! A bundle has no deadline of its own: it lives while a retained session
+//! cites it.
 //!
 //! `fingerprint` is a local, implementation-owned key over a channel's
 //! verified material. It exists only so the hot path can find "the current
@@ -34,10 +44,13 @@ use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
-use super::session::AttestedSession;
+use super::session::{AttestedSession, EvidenceRef, SessionDocument};
+use crate::aci::digest;
 
+/// Record type tag for an evidence bundle line.
+const RECORD_TYPE_EVIDENCE: &str = "evidence";
 /// Record type tag for a session line.
-const RECORD_TYPE_SESSION: &str = "session";
+const RECORD_TYPE_SESSION: &str = "attested_session";
 
 /// One line in the append-only session log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,8 +59,13 @@ struct SessionLogRecord {
     ts: u64,
     #[serde(rename = "type")]
     record_type: String,
-    fingerprint: String,
-    retention_until: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retention_until: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_type: Option<String>,
+    /// Evidence: the bundle bytes. Session: the document without `evidence.data`.
     payload_b64: String,
 }
 
@@ -58,45 +76,116 @@ pub trait SessionStore: Send + Sync {
     /// may still be live (§8 retention).
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession>;
 
-    /// Reuse the current session and extend retention, or atomically seal and persist it.
+    /// The id of the channel's current session, with its retention extended to
+    /// at least `retention_until`. Without one, atomically seal and store a new
+    /// session, which must carry a complete evidence bundle.
     fn current_or_seal(
         &self,
         fingerprint: &str,
         retention_until: u64,
         now: u64,
         seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<AttestedSession>;
+    ) -> io::Result<String>;
+}
+
+/// A session split for storage: its id, the document without `evidence.data`,
+/// and the evidence bundle the document's digest names.
+struct SplitSession {
+    session_id: String,
+    stripped: SessionDocument,
+    digest: String,
+    content_type: String,
+    bundle: Vec<u8>,
+}
+
+impl SplitSession {
+    fn new(session: AttestedSession) -> io::Result<Self> {
+        let (content_type, bundle) = session.document().evidence.decode().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "attested session has no complete evidence bundle (§8.2)",
+            )
+        })?;
+        let session_id = session.session_id().to_string();
+        let mut stripped = session.document().clone();
+        stripped.evidence.data_uri = None;
+        let digest = stripped
+            .evidence
+            .digest
+            .clone()
+            .expect("decode requires a digest");
+        Ok(Self {
+            session_id,
+            stripped,
+            digest,
+            content_type,
+            bundle,
+        })
+    }
 }
 
 struct SessionEntry {
-    session: AttestedSession,
+    stripped: SessionDocument,
+    content_type: String,
     fingerprint: String,
     retention_until: u64,
 }
 
+impl SessionEntry {
+    fn digest(&self) -> &str {
+        self.stripped
+            .evidence
+            .digest
+            .as_deref()
+            .expect("stored sessions carry a digest")
+    }
+}
+
+struct Bundle {
+    bytes: Vec<u8>,
+    /// Retained sessions citing this bundle; it is dropped at zero.
+    citers: usize,
+    /// Whether the log already holds this bundle's `evidence` record.
+    persisted: bool,
+}
+
 /// In-memory session index shared by both stores: id→entry plus a
-/// fingerprint→current-id map and a retention-deadline index so eviction
-/// costs only what actually lapsed.
+/// fingerprint→current-id map, a retention-deadline index so eviction costs
+/// only what actually lapsed, and one copy of each evidence bundle.
 #[derive(Default)]
 struct SessionIndex {
     by_id: HashMap<String, SessionEntry>,
     by_fingerprint: HashMap<String, String>,
     by_retention: BTreeMap<u64, HashSet<String>>,
+    bundles: HashMap<String, Bundle>,
 }
 
 impl SessionIndex {
-    fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
-        let id = session.session_id().to_string();
-        if let Some(prev) = self.by_id.insert(
-            id.clone(),
-            SessionEntry {
-                session,
-                fingerprint: fingerprint.clone(),
-                retention_until,
-            },
-        ) {
-            if prev.retention_until != retention_until {
-                self.drop_retention_hint(&id, prev.retention_until);
+    fn insert(&mut self, fingerprint: String, split: SplitSession, retention_until: u64) {
+        let SplitSession {
+            session_id: id,
+            stripped,
+            digest,
+            content_type,
+            bundle,
+        } = split;
+        let entry = SessionEntry {
+            stripped,
+            content_type,
+            fingerprint: fingerprint.clone(),
+            retention_until,
+        };
+        match self.by_id.insert(id.clone(), entry) {
+            Some(prev) => self.drop_retention_hint(&id, prev.retention_until),
+            None => {
+                self.bundles
+                    .entry(digest)
+                    .or_insert(Bundle {
+                        bytes: bundle,
+                        citers: 0,
+                        persisted: false,
+                    })
+                    .citers += 1;
             }
         }
         self.by_retention
@@ -115,7 +204,8 @@ impl SessionIndex {
         }
     }
 
-    /// Pop every bucket whose retention deadline is at or before `now`.
+    /// Pop every bucket whose retention deadline is at or before `now`, and
+    /// drop bundles no retained session cites any more.
     fn evict_lapsed(&mut self, now: u64) {
         while let Some((&retention_until, _)) = self.by_retention.first_key_value() {
             if retention_until > now {
@@ -126,44 +216,64 @@ impl SessionIndex {
                 .pop_first()
                 .expect("first_key_value just returned a bucket");
             for id in ids {
-                if let Some(entry) = self.by_id.remove(&id) {
-                    if self.by_fingerprint.get(&entry.fingerprint) == Some(&id) {
-                        self.by_fingerprint.remove(&entry.fingerprint);
+                let Some(entry) = self.by_id.remove(&id) else {
+                    continue;
+                };
+                if self.by_fingerprint.get(&entry.fingerprint) == Some(&id) {
+                    self.by_fingerprint.remove(&entry.fingerprint);
+                }
+                if let Some(bundle) = self.bundles.get_mut(entry.digest()) {
+                    bundle.citers -= 1;
+                    if bundle.citers == 0 {
+                        self.bundles.remove(entry.digest());
                     }
                 }
             }
         }
     }
 
-    fn get(&mut self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        self.evict_lapsed(now);
-        self.by_id.get(session_id).map(|e| e.session.clone())
+    /// Rebuild the served session: the stored document plus its bundle.
+    fn rebuild(&self, id: &str, entry: &SessionEntry) -> Option<AttestedSession> {
+        let bundle = self.bundles.get(entry.digest())?;
+        let mut document = entry.stripped.clone();
+        document.evidence = EvidenceRef::from_bytes(&entry.content_type, &bundle.bytes);
+        let session = AttestedSession::seal(document).ok()?;
+        (session.session_id() == id).then_some(session)
     }
 
-    fn current(
-        &mut self,
-        fingerprint: &str,
-        retention_until: u64,
-        now: u64,
-    ) -> Option<AttestedSession> {
+    fn get(&mut self, session_id: &str, now: u64) -> Option<AttestedSession> {
+        self.evict_lapsed(now);
+        let entry = self.by_id.get(session_id)?;
+        self.rebuild(session_id, entry)
+    }
+
+    fn current(&mut self, fingerprint: &str, retention_until: u64, now: u64) -> Option<String> {
         self.evict_lapsed(now);
         let id = self.by_fingerprint.get(fingerprint)?.clone();
         let entry = self.by_id.get_mut(&id)?;
-        if now >= entry.session.document().expires_at {
+        if now >= entry.stripped.expires_at {
             return None; // validity lapsed; record stays for retention only
         }
         if retention_until > entry.retention_until {
             let old = entry.retention_until;
             entry.retention_until = retention_until;
-            let session = entry.session.clone();
             self.drop_retention_hint(&id, old);
             self.by_retention
                 .entry(retention_until)
                 .or_default()
-                .insert(id);
-            return Some(session);
+                .insert(id.clone());
         }
-        Some(entry.session.clone())
+        Some(id)
+    }
+
+    fn bundle_persisted(&self, digest: &str) -> bool {
+        self.bundles.get(digest).is_some_and(|b| b.persisted)
+    }
+
+    fn mark_persisted(&mut self, digest: &str) {
+        if let Some(bundle) = self.bundles.get_mut(digest) {
+            bundle.persisted = true;
+        }
     }
 }
 
@@ -177,14 +287,78 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
     });
 }
 
+fn evidence_line(seq: u64, ts: u64, bundle: &[u8]) -> io::Result<String> {
+    record_line(&SessionLogRecord {
+        seq,
+        ts,
+        record_type: RECORD_TYPE_EVIDENCE.to_string(),
+        fingerprint: None,
+        retention_until: None,
+        content_type: None,
+        payload_b64: BASE64.encode(bundle),
+    })
+}
+
+fn session_line(
+    seq: u64,
+    ts: u64,
+    fingerprint: &str,
+    retention_until: u64,
+    content_type: &str,
+    stripped: &SessionDocument,
+) -> io::Result<String> {
+    let document =
+        serde_json::to_vec(stripped).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    record_line(&SessionLogRecord {
+        seq,
+        ts,
+        record_type: RECORD_TYPE_SESSION.to_string(),
+        fingerprint: Some(fingerprint.to_string()),
+        retention_until: Some(retention_until),
+        content_type: Some(content_type.to_string()),
+        payload_b64: BASE64.encode(document),
+    })
+}
+
+fn record_line(record: &SessionLogRecord) -> io::Result<String> {
+    let mut line =
+        serde_json::to_string(record).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    line.push('\n');
+    Ok(line)
+}
+
+/// Rebuild a replayed session from its record and the bundles read so far.
+/// `None` for anything that does not reproduce a complete, consistent
+/// session: a missing bundle, an unparsable document, or a content type that
+/// is not a single `data:` media type.
+fn replay_session(
+    record: &SessionLogRecord,
+    bundles: &HashMap<String, Vec<u8>>,
+) -> Option<SplitSession> {
+    let content_type = record.content_type.as_deref()?;
+    if content_type.contains(";base64") || content_type.contains(',') {
+        return None;
+    }
+    let document = BASE64.decode(record.payload_b64.as_bytes()).ok()?;
+    let mut document: SessionDocument = serde_json::from_slice(&document).ok()?;
+    let digest = document.evidence.digest.clone()?;
+    let bundle = bundles.get(&digest)?;
+    document.evidence = EvidenceRef::from_bytes(content_type, bundle);
+    let session = AttestedSession::seal(document).ok()?;
+    SplitSession::new(session).ok()
+}
+
 /// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
-/// index sit behind separate locks; creation holds both while sealing and writing.
+/// index sit behind separate locks. Creating a session holds the writer lock
+/// throughout, so concurrent callers seal a channel's session once, while
+/// reads never wait on the file.
 ///
-/// The hot path appends a line only when a *new* session is sealed; a repeat
-/// request extends the current session's retention in the index without
-/// writing (see [`SessionStore::current_or_seal`]).
-/// [`JsonlSessionStore::compact`] then rewrites the file from the live index,
-/// dropping lapsed records and persisting the extended retention deadlines.
+/// The hot path appends only when a *new* session is sealed, plus its bundle's
+/// `evidence` record the first time that bundle is written; a repeat request
+/// extends the current session's retention in the index without writing (see
+/// [`SessionStore::current_or_seal`]). [`JsonlSessionStore::compact`] then
+/// rewrites the file from the live index, dropping lapsed records and
+/// uncited bundles and persisting the extended retention deadlines.
 ///
 /// Single-writer is enforced with an advisory lock on a *separate* lock file
 /// (`<log>.lock`) that is never renamed, held for the whole lifetime of the
@@ -202,6 +376,9 @@ pub struct JsonlSessionStore {
 struct LogWriter {
     file: File,
     next_seq: u64,
+    /// A failed append may have left a partial line; the next append starts
+    /// with a newline so its records never merge into that line.
+    needs_separator: bool,
 }
 
 /// Take the advisory exclusive lock that enforces single-writer (see
@@ -235,20 +412,18 @@ fn lock_path_for(path: &Path) -> PathBuf {
 
 impl JsonlSessionStore {
     /// Open (creating if absent) the log at `path`, replaying existing records
-    /// into the in-memory index. Malformed lines are skipped so a partially
-    /// written tail never blocks startup.
+    /// into the in-memory index. Malformed lines, records of unknown type, and
+    /// sessions whose bundle is missing are skipped, so a partially written
+    /// tail or an older log format never blocks startup.
     ///
     /// Takes an advisory exclusive lock on `<path>.lock` *before* reading the
     /// log, so only one process ever writes it — failing with
     /// [`io::ErrorKind::WouldBlock`] if another holds the lock.
     ///
     /// `now` drops records whose retention already lapsed instead of loading
-    /// them. They would be evicted by the first `compact` anyway, so this only
-    /// changes when the work happens — but it decides whether startup is
-    /// proportional to the *live* set or to everything appended since the last
-    /// compaction, which for a busy log is the difference between booting and
-    /// exhausting memory before serving a request. Taken as a parameter rather
-    /// than read from the clock so the store stays deterministic, like
+    /// them, so startup is proportional to the *live* set rather than to
+    /// everything appended since the last compaction. Taken as a parameter
+    /// rather than read from the clock so the store stays deterministic, like
     /// `compact`.
     pub fn open(path: impl AsRef<Path>, now: u64) -> io::Result<Self> {
         let path: PathBuf = path.as_ref().to_path_buf();
@@ -258,6 +433,7 @@ impl JsonlSessionStore {
 
         let mut next_seq = 0u64;
         let mut index = SessionIndex::default();
+        let mut bundles: HashMap<String, Vec<u8>> = HashMap::new();
         let replay_file = match File::open(&path) {
             Ok(file) => Some(file),
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
@@ -286,45 +462,60 @@ impl JsonlSessionStore {
                     continue; // corrupt seq at u64::MAX; skip rather than overflow
                 };
                 next_seq = next_seq.max(seq_after);
-                if record.record_type != RECORD_TYPE_SESSION {
-                    continue;
+                match record.record_type.as_str() {
+                    // A bundle is keyed by its own hash, so a tampered payload
+                    // simply answers to a digest no session names.
+                    RECORD_TYPE_EVIDENCE => {
+                        if let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) {
+                            bundles.insert(digest::sha256_hex(&bytes), bytes);
+                        }
+                    }
+                    RECORD_TYPE_SESSION => {
+                        let (Some(fingerprint), Some(retention_until)) =
+                            (record.fingerprint.as_ref(), record.retention_until)
+                        else {
+                            continue;
+                        };
+                        // Ahead of the rebuild: a lapsed record costs a decode, a
+                        // parse and a digest hash before eviction would drop it.
+                        if retention_until <= now {
+                            continue;
+                        }
+                        // The id is recomputed from the rebuilt bytes, so a
+                        // tampered document resolves to an id no receipt cites.
+                        if let Some(split) = replay_session(&record, &bundles) {
+                            index.insert(fingerprint.clone(), split, retention_until);
+                        }
+                    }
+                    _ => continue,
                 }
-                // Ahead of the decode: a lapsed record costs a base64 decode, a
-                // parse and a digest hash before eviction would drop it.
-                if record.retention_until <= now {
-                    continue;
-                }
-                let Ok(bytes) = BASE64.decode(record.payload_b64.as_bytes()) else {
-                    continue;
-                };
-                // The id is recomputed from the exact persisted bytes
-                // (`AttestedSession::from_bytes`), so a tampered payload simply
-                // resolves to a different id than any receipt cites. The
-                // evidence `data`, however, must still hash to its in-document
-                // `digest` (§8.2) — refuse to serve a swapped payload.
-                let Ok(session) = AttestedSession::from_bytes(bytes) else {
-                    continue;
-                };
-                if !session.document().evidence.digest_matches_data() {
-                    continue;
-                }
-                index.insert(record.fingerprint, session, record.retention_until);
             }
+        }
+        // Every bundle that reached the index came from an `evidence` record.
+        for bundle in index.bundles.values_mut() {
+            bundle.persisted = true;
         }
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
             _lock_file: lock_file,
-            writer: Mutex::new(LogWriter { file, next_seq }),
+            writer: Mutex::new(LogWriter {
+                file,
+                next_seq,
+                needs_separator: false,
+            }),
             index: Mutex::new(index),
         })
     }
 
     /// Rewrite the log from the retained (non-lapsed) index: drop lapsed
-    /// records, collapse duplicates, and persist each record's current
-    /// retention deadline (which the hot path extends in the index without
-    /// appending). Returns the number of records kept.
+    /// records and uncited bundles, collapse duplicates, and persist each
+    /// record's current retention deadline (which the hot path extends in the
+    /// index without appending). Bundles are written before the sessions that
+    /// cite them, and sessions oldest first, so replay's last-insert-wins
+    /// fingerprint map resolves to the newest session. Returns the number of
+    /// session records kept.
     ///
     /// Records are written and synced to a temp file before an atomic rename.
     /// The replacement append handle is opened before the rename, so a
@@ -336,30 +527,39 @@ impl JsonlSessionStore {
         // can never deadlock against each other.
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
 
-        let live: Vec<(String, AttestedSession, u64)> = {
+        // Serialize under the index lock, then write without it, so reads
+        // never wait on the file.
+        let (lines, kept) = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
             index.evict_lapsed(now);
-            index
-                .by_id
-                .values()
-                .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
-                .collect()
+            let mut sessions: Vec<(&String, &SessionEntry)> = index.by_id.iter().collect();
+            sessions.sort_by(|(a_id, a), (b_id, b)| {
+                a.stripped
+                    .established_at
+                    .cmp(&b.stripped.established_at)
+                    .then_with(|| a_id.cmp(b_id))
+            });
+            let mut lines = Vec::with_capacity(index.bundles.len() + sessions.len());
+            for bundle in index.bundles.values() {
+                lines.push(evidence_line(lines.len() as u64, now, &bundle.bytes)?);
+            }
+            for (_, entry) in &sessions {
+                lines.push(session_line(
+                    lines.len() as u64,
+                    now,
+                    &entry.fingerprint,
+                    entry.retention_until,
+                    &entry.content_type,
+                    &entry.stripped,
+                )?);
+            }
+            (lines, sessions.len())
         };
 
         let tmp = self.path.with_extension("jsonl.tmp");
         {
             let mut out = File::create(&tmp)?;
-            for (seq, (fingerprint, session, retention_until)) in live.iter().enumerate() {
-                let mut line = serde_json::to_string(&SessionLogRecord {
-                    seq: seq as u64,
-                    ts: now,
-                    record_type: RECORD_TYPE_SESSION.to_string(),
-                    fingerprint: fingerprint.clone(),
-                    retention_until: *retention_until,
-                    payload_b64: BASE64.encode(session.bytes()),
-                })
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                line.push('\n');
+            for line in &lines {
                 out.write_all(line.as_bytes())?;
             }
             out.sync_all()?; // durable temp contents before it becomes the log
@@ -371,51 +571,95 @@ impl JsonlSessionStore {
         let new_file = OpenOptions::new().append(true).open(&tmp)?;
         std::fs::rename(&tmp, &self.path)?;
 
+        // Every retained bundle is now in the log. A bundle added after the
+        // snapshot was appended by `current_or_seal`, which needs the writer lock
+        // held here, so none exists.
+        for bundle in self
+            .index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .bundles
+            .values_mut()
+        {
+            bundle.persisted = true;
+        }
         w.file = new_file;
-        w.next_seq = live.len() as u64;
-        Ok(live.len())
+        w.next_seq = lines.len() as u64;
+        w.needs_separator = false;
+        Ok(kept)
     }
 }
 
-impl LogWriter {
+impl JsonlSessionStore {
+    /// Append `split` (and its bundle, if the log lacks it) in one write, then
+    /// index it. The caller holds the writer lock; the index lock is taken only
+    /// around the file write, so reads never wait on it.
     fn append(
-        &mut self,
+        &self,
+        w: &mut LogWriter,
         fingerprint: &str,
-        session: &AttestedSession,
+        split: SplitSession,
         retention_until: u64,
         now: u64,
     ) -> io::Result<u64> {
-        let seq = self.next_seq;
+        let bundle_persisted = self
+            .index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .bundle_persisted(&split.digest);
+
         // Refuse to write a record we cannot assign a successor to, rather than
         // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
         // the gateway's startup compaction renumbers from zero before serving.
-        let Some(next_seq) = seq.checked_add(1) else {
-            return Err(io::Error::new(
+        let overflow = || {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
                 "session log sequence number overflowed u64::MAX",
-            ));
+            )
         };
-        let mut line = serde_json::to_string(&SessionLogRecord {
+        let mut seq = w.next_seq;
+        let mut out = String::new();
+        if w.needs_separator {
+            out.push('\n');
+        }
+        // The bundle goes first, so a session record never precedes the bundle
+        // it cites; both land in one write.
+        if !bundle_persisted {
+            out.push_str(&evidence_line(seq, now, &split.bundle)?);
+            seq = seq.checked_add(1).ok_or_else(overflow)?;
+        }
+        let session_seq = seq;
+        out.push_str(&session_line(
             seq,
-            ts: now,
-            record_type: RECORD_TYPE_SESSION.to_string(),
-            fingerprint: fingerprint.to_string(),
+            now,
+            fingerprint,
             retention_until,
-            payload_b64: BASE64.encode(session.bytes()),
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        line.push('\n');
+            &split.content_type,
+            &split.stripped,
+        )?);
+        let next_seq = seq.checked_add(1).ok_or_else(overflow)?;
         // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
         // `file` ever becomes a `BufWriter`, restore a flush or records can sit
         // unwritten on a crash.
-        self.file.write_all(line.as_bytes())?;
-        self.next_seq = next_seq;
-        Ok(seq)
+        if let Err(err) = w.file.write_all(out.as_bytes()) {
+            w.needs_separator = true;
+            return Err(err);
+        }
+        w.next_seq = next_seq;
+        w.needs_separator = false;
+        // Update the index under the writer lock so the log and index advance
+        // together: `compact` rewrites the log *from* the index, so an index that
+        // lagged a completed append could drop an on-disk record.
+        let digest = split.digest.clone();
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        index.insert(fingerprint.to_string(), split, retention_until);
+        index.mark_persisted(&digest);
+        index.evict_lapsed(now);
+        Ok(session_seq)
     }
-}
 
-#[cfg(test)]
-impl JsonlSessionStore {
+    /// Store `session` unconditionally, returning its log sequence number.
+    #[cfg(test)]
     fn put_session(
         &self,
         fingerprint: &str,
@@ -423,50 +667,46 @@ impl JsonlSessionStore {
         retention_until: u64,
         now: u64,
     ) -> io::Result<u64> {
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-        let seq = writer.append(fingerprint, &session, retention_until, now)?;
-        index.insert(fingerprint.to_string(), session, retention_until);
-        index.evict_lapsed(now);
-        Ok(seq)
+        let split = SplitSession::new(session)?;
+        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        self.append(&mut w, fingerprint, split, retention_until, now)
     }
 }
 
 impl SessionStore for JsonlSessionStore {
+    fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id, now)
+    }
+
     fn current_or_seal(
         &self,
         fingerprint: &str,
         retention_until: u64,
         now: u64,
         seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<AttestedSession> {
-        if let Some(session) = self
-            .index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
-        {
-            return Ok(session);
+    ) -> io::Result<String> {
+        let current = |store: &Self| {
+            store
+                .index
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .current(fingerprint, retention_until, now)
+        };
+        if let Some(id) = current(self) {
+            return Ok(id);
         }
-        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(session) = index.current(fingerprint, retention_until, now) {
-            return Ok(session);
+        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        // Another caller may have sealed it while this one waited for the writer.
+        if let Some(id) = current(self) {
+            return Ok(id);
         }
-        let session = seal()?;
-        writer.append(fingerprint, &session, retention_until, now)?;
-        // Update the index under the writer lock: compact rewrites the log from the index,
-        // so an index lagging a completed append could drop an on-disk record.
-        index.insert(fingerprint.to_string(), session.clone(), retention_until);
-        index.evict_lapsed(now);
-        Ok(session)
-    }
-
-    fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session_id, now)
+        let split = SplitSession::new(seal()?)?;
+        let id = split.session_id.clone();
+        self.append(&mut w, fingerprint, split, retention_until, now)?;
+        Ok(id)
     }
 }
 
@@ -479,35 +719,36 @@ pub struct InMemorySessionStore {
 }
 
 impl SessionStore for InMemorySessionStore {
-    fn current_or_seal(
-        &self,
-        fingerprint: &str,
-        retention_until: u64,
-        now: u64,
-        seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<AttestedSession> {
-        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(session) = index.current(fingerprint, retention_until, now) {
-            return Ok(session);
-        }
-        let session = seal()?;
-        index.insert(fingerprint.to_string(), session.clone(), retention_until);
-        index.evict_lapsed(now);
-        Ok(session)
-    }
-
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
         self.index
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(session_id, now)
     }
+
+    fn current_or_seal(
+        &self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+        seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
+    ) -> io::Result<String> {
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(id) = index.current(fingerprint, retention_until, now) {
+            return Ok(id);
+        }
+        let split = SplitSession::new(seal()?)?;
+        let id = split.session_id.clone();
+        index.insert(fingerprint.to_string(), split, retention_until);
+        index.evict_lapsed(now);
+        Ok(id)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregator::session::{EvidenceRef, SessionClaims, SessionDocument};
+    use crate::aggregator::session::SessionClaims;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -557,7 +798,24 @@ mod tests {
             .count()
     }
 
+    /// The bundle every test session cites, as Chutes instances share one.
+    const FLEET_BUNDLE: &[u8] = br#"{"instances":["a","b"]}"#;
+
     fn session(endpoint: &str, established_at: u64, expires_at: u64) -> AttestedSession {
+        session_with(
+            endpoint,
+            established_at,
+            expires_at,
+            EvidenceRef::from_bytes("application/json", FLEET_BUNDLE),
+        )
+    }
+
+    fn session_with(
+        endpoint: &str,
+        established_at: u64,
+        expires_at: u64,
+        evidence: EvidenceRef,
+    ) -> AttestedSession {
         AttestedSession::seal(SessionDocument {
             api_version: "aci/1".to_string(),
             upstream_name: "phala-direct".to_string(),
@@ -568,9 +826,31 @@ mod tests {
             identity: None,
             channel_binding: vec![],
             claims: SessionClaims::default(),
-            evidence: EvidenceRef::default(),
+            evidence,
         })
         .unwrap()
+    }
+
+    /// The current session's id, or an error instead of sealing a new one.
+    fn reuse_only(
+        store: &dyn SessionStore,
+        fp: &str,
+        retention: u64,
+        now: u64,
+    ) -> io::Result<String> {
+        store.current_or_seal(fp, retention, now, &mut || {
+            Err(io::Error::other("cache miss"))
+        })
+    }
+
+    fn seal_into(
+        store: &dyn SessionStore,
+        fp: &str,
+        session: AttestedSession,
+        retention: u64,
+        now: u64,
+    ) -> io::Result<String> {
+        store.current_or_seal(fp, retention, now, &mut || Ok(session.clone()))
     }
 
     /// Replay must be proportional to the live set, not to everything appended
@@ -587,7 +867,7 @@ mod tests {
             store.put_session("fp-live", live, 9_000, 0).unwrap();
             store.put_session("fp-lapsed", lapsed, 1_000, 0).unwrap();
         }
-        assert_eq!(count_lines(&path), 2, "both records are on disk");
+        assert_eq!(count_lines(&path), 3, "one shared bundle and both sessions");
 
         // Reopened past the lapsed record's deadline but before the live one's.
         let reopened = open_store_at(&path, 5_000);
@@ -625,17 +905,6 @@ mod tests {
         assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
     }
 
-    fn reuse_only(
-        store: &dyn SessionStore,
-        fp: &str,
-        retention: u64,
-        now: u64,
-    ) -> io::Result<AttestedSession> {
-        store.current_or_seal(fp, retention, now, &mut || {
-            Err(io::Error::other("cache miss"))
-        })
-    }
-
     #[test]
     fn current_or_seal_extends_retention_without_a_log_append() {
         let path = temp_path();
@@ -664,13 +933,11 @@ mod tests {
         let store = InMemorySessionStore::default();
         let s = session("https://x", 1_000, 2_000);
         let id = s.session_id().to_string();
-        store
-            .current_or_seal("fp-x", 9_000, 1_000, &mut || Ok(s.clone()))
-            .unwrap();
+        seal_into(&store, "fp-x", s, 9_000, 1_000).unwrap();
 
         assert!(reuse_only(&store, "fp-x", 9_000, 1_500).is_ok());
-        // Validity lapsed: no longer current, still resolvable
-        // by id for receipts that cite it.
+        // Validity lapsed: no longer current, still resolvable by id for
+        // receipts that cite it.
         assert!(reuse_only(&store, "fp-x", 9_000, 2_000).is_err());
         assert!(store.get_session(&id, 2_000).is_some());
     }
@@ -680,14 +947,10 @@ mod tests {
         let store = InMemorySessionStore::default();
         let a = session("https://a", 1_000, 2_000);
         let a_id = a.session_id().to_string();
-        store
-            .current_or_seal("fp-a", 2_000, 1_000, &mut || Ok(a.clone()))
-            .unwrap();
+        seal_into(&store, "fp-a", a, 2_000, 1_000).unwrap();
         // A later write past A's retention deadline evicts it.
         let b = session("https://b", 5_000, 10_000);
-        store
-            .current_or_seal("fp-b", 10_000, 5_000, &mut || Ok(b.clone()))
-            .unwrap();
+        seal_into(&store, "fp-b", b.clone(), 10_000, 5_000).unwrap();
 
         assert!(store.get_session(&a_id, 5_000).is_none());
         assert!(store.get_session(b.session_id(), 5_000).is_some());
@@ -723,7 +986,8 @@ mod tests {
             let store = open_store(&path);
             let seq_a = store.put_session("fp-a", a.clone(), 5_000, 1_000).unwrap();
             let seq_b = store.put_session("fp-b", b.clone(), 5_000, 1_001).unwrap();
-            assert_eq!((seq_a, seq_b), (0, 1));
+            // `a` also writes the shared bundle, at seq 0.
+            assert_eq!((seq_a, seq_b), (1, 2));
         }
 
         let store = open_store(&path);
@@ -732,16 +996,11 @@ mod tests {
         assert_eq!(store.get_session(b.session_id(), 2_000), Some(b));
         // The fingerprint index survives replay too.
         assert_eq!(
-            store
-                .current_or_seal("fp-a", 5_000, 2_000, &mut || Err(io::Error::other(
-                    "cache miss"
-                )))
-                .unwrap()
-                .session_id(),
+            reuse_only(&store, "fp-a", 5_000, 2_000).unwrap(),
             a.session_id()
         );
         let next = session("https://node-7.example.net", 1_002, 5_000);
-        assert_eq!(store.put_session("fp-c", next, 5_000, 1_002).unwrap(), 2);
+        assert_eq!(store.put_session("fp-c", next, 5_000, 1_002).unwrap(), 3);
 
         drop(store);
         cleanup(&path);
@@ -763,11 +1022,15 @@ mod tests {
             store
                 .put_session("fp-gone", lapsed.clone(), 4_000, 1_000)
                 .unwrap();
-            assert_eq!(count_lines(&path), 4);
+            assert_eq!(
+                count_lines(&path),
+                5,
+                "the bundle plus four session records"
+            );
 
             let kept = store.compact(now).unwrap();
             assert_eq!(kept, 1, "only the retained record is kept");
-            assert_eq!(count_lines(&path), 1);
+            assert_eq!(count_lines(&path), 2, "the retained record and its bundle");
             assert!(store.get_session(lapsed.session_id(), now).is_none());
             assert_eq!(
                 store.get_session(live.session_id(), now),
@@ -822,46 +1085,104 @@ mod tests {
     }
 
     #[test]
-    fn evidence_data_not_matching_its_digest_is_skipped_on_replay() {
-        use crate::aci::digest;
-
-        // A document whose evidence digest covers "abc" but whose data was
-        // swapped for "xyz": the session id still matches the (tampered) bytes,
-        // so only the digest check catches the swap.
-        let doc = SessionDocument {
-            api_version: "aci/1".to_string(),
-            upstream_name: "phala-direct".to_string(),
-            endpoint: Some("https://node-7.example.net".to_string()),
-            verifier_id: "phala-direct/1".to_string(),
-            established_at: 1_000,
-            expires_at: 9_000,
-            identity: None,
-            channel_binding: vec![],
-            claims: SessionClaims::default(),
-            evidence: EvidenceRef {
-                digest: Some(digest::sha256_hex(b"abc")),
-                data_uri: Some("data:text/plain;base64,eHl6".to_string()), // "xyz"
-            },
+    fn a_session_without_a_complete_bundle_is_refused() {
+        let swapped = EvidenceRef {
+            digest: Some(digest::sha256_hex(b"abc")),
+            data_uri: Some("data:text/plain;base64,eHl6".to_string()), // "xyz"
         };
-        let swapped = AttestedSession::seal(doc).unwrap();
-        assert!(!swapped.document().evidence.digest_matches_data());
+        for evidence in [EvidenceRef::default(), swapped] {
+            let s = session_with("https://x", 1_000, 9_000, evidence);
+            let err =
+                seal_into(&InMemorySessionStore::default(), "fp", s, 9_000, 1_000).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+    }
 
+    #[test]
+    fn a_shared_bundle_is_stored_once_and_dropped_with_its_last_citer() {
         let path = temp_path();
-        open_store(&path)
-            .put_session("fp", swapped.clone(), 9_000, 1_000)
-            .unwrap();
+        let store = open_store(&path);
+        for (i, endpoint) in ["https://a", "https://b", "https://c"].iter().enumerate() {
+            let s = session(endpoint, 1_000, 2_000);
+            store
+                .put_session(&format!("fp-{i}"), s, 2_000 + i as u64, 1_000)
+                .unwrap();
+        }
+        assert_eq!(count_lines(&path), 4, "one bundle and three sessions");
+        assert_eq!(store.index.lock().unwrap().bundles.len(), 1);
 
-        let reopened = open_store(&path);
-        assert!(reopened.get_session(swapped.session_id(), 2_000).is_none());
+        store.compact(5_000).unwrap();
+        assert!(store.index.lock().unwrap().bundles.is_empty());
+        assert_eq!(count_lines(&path), 0);
 
-        drop(reopened);
+        drop(store);
         cleanup(&path);
     }
 
-    fn concurrently_seal(store: &dyn SessionStore) -> AttestedSession {
+    #[test]
+    fn older_record_types_are_skipped_on_replay() {
+        let path = temp_path();
+        let old = session("https://x", 1_000, 9_000);
+        let line = serde_json::json!({
+            "seq": 0, "ts": 1_000, "type": "session", "fingerprint": "fp",
+            "retention_until": 9_000, "payload_b64": BASE64.encode(old.bytes()),
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let store = open_store(&path);
+        assert!(store.get_session(old.session_id(), 2_000).is_none());
+        assert!(reuse_only(&store, "fp", 9_000, 2_000).is_err());
+        let next = session("https://y", 2_000, 9_000);
+        assert_eq!(store.put_session("fp", next, 9_000, 2_000).unwrap(), 2);
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_session_citing_a_tampered_bundle_is_skipped_on_replay() {
+        let path = temp_path();
+        let s = session("https://x", 1_000, 9_000);
+        open_store(&path)
+            .put_session("fp", s.clone(), 9_000, 1_000)
+            .unwrap();
+        let log = std::fs::read_to_string(&path).unwrap();
+        let tampered = log.replace(&BASE64.encode(FLEET_BUNDLE), &BASE64.encode(b"forged"));
+        assert_ne!(log, tampered);
+        std::fs::write(&path, tampered).unwrap();
+
+        let store = open_store(&path);
+        assert!(store.get_session(s.session_id(), 2_000).is_none());
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn compaction_keeps_the_newest_session_current_across_restart() {
+        let path = temp_path();
+        let old = session("https://x", 1_000, 2_000);
+        let new = session("https://x", 2_500, 9_000);
+        {
+            let store = open_store(&path);
+            store.put_session("fp", old, 9_000, 1_000).unwrap();
+            store.put_session("fp", new.clone(), 9_000, 2_500).unwrap();
+            store.compact(3_000).unwrap();
+        }
+        let store = open_store(&path);
+        assert_eq!(
+            reuse_only(&store, "fp", 9_000, 3_000).unwrap(),
+            new.session_id()
+        );
+
+        drop(store);
+        cleanup(&path);
+    }
+
+    fn concurrently_seal(store: &dyn SessionStore) -> String {
         let barrier = std::sync::Barrier::new(2);
         let seals = AtomicU64::new(0);
-        let sessions = std::thread::scope(|scope| {
+        let ids = std::thread::scope(|scope| {
             let tasks: Vec<_> = [1_000, 1_001]
                 .into_iter()
                 .map(|now| {
@@ -884,23 +1205,23 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(seals.load(Ordering::SeqCst), 1);
-        assert_eq!(sessions[0].bytes(), sessions[1].bytes());
-        sessions[0].clone()
+        assert_eq!(ids[0], ids[1]);
+        ids[0].clone()
     }
 
     #[test]
     fn concurrent_current_or_seal_is_atomic_in_memory() {
         let store = InMemorySessionStore::default();
-        let sealed = concurrently_seal(&store);
-        assert_eq!(store.get_session(sealed.session_id(), 1_002), Some(sealed));
+        let id = concurrently_seal(&store);
+        assert!(store.get_session(&id, 1_002).is_some());
     }
 
     #[test]
     fn concurrent_current_or_seal_writes_one_replayable_jsonl_record() {
         let path = temp_path();
         let store = open_store(&path);
-        let sealed = concurrently_seal(&store);
-        assert_eq!(count_lines(&path), 1);
+        let id = concurrently_seal(&store);
+        assert_eq!(count_lines(&path), 2, "the bundle and one session");
         drop(store);
         let replayed = open_store(&path);
         let current = replayed
@@ -908,8 +1229,8 @@ mod tests {
                 panic!("replayed session must be reused")
             })
             .unwrap();
-        assert_eq!(current.bytes(), sealed.bytes());
-        assert_eq!(count_lines(&path), 1);
+        assert_eq!(current, id);
+        assert_eq!(count_lines(&path), 2);
         drop(replayed);
         cleanup(&path);
     }
@@ -919,20 +1240,8 @@ mod tests {
         // A replayed `seq` of u64::MAX - 1 leaves `next_seq` at u64::MAX; the
         // next append must return an error rather than overflow `seq + 1`.
         let path = temp_path();
-        let good = session("https://node-7.example.net", 1_000, 9_000);
-        let seeded = SessionLogRecord {
-            seq: u64::MAX - 1,
-            ts: 1_000,
-            record_type: RECORD_TYPE_SESSION.to_string(),
-            fingerprint: "fp".to_string(),
-            retention_until: 9_000,
-            payload_b64: BASE64.encode(good.bytes()),
-        };
-        std::fs::write(
-            &path,
-            format!("{}\n", serde_json::to_string(&seeded).unwrap()),
-        )
-        .unwrap();
+        let seeded = evidence_line(u64::MAX - 1, 1_000, FLEET_BUNDLE).unwrap();
+        std::fs::write(&path, seeded).unwrap();
 
         let store = open_store(&path);
         let next = session("https://node-9.example.net", 2_000, 9_000);

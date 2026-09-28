@@ -108,7 +108,7 @@ fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<Str
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -151,7 +151,7 @@ fn counting_provider_script(
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -247,7 +247,7 @@ async fn chutes_provider_verifier_records_provider_session_material() {
         "result": "verified",
         "verifier_id": "chutes/external-test/v1",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -351,7 +351,7 @@ async fn secret_ai_provider_verifier_passes_workload_pin_to_the_bridge() {
         "verifier_id": "private-ai-verifier/secret-ai/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -587,7 +587,7 @@ async fn router_shares_one_channel_verification_across_models() {
             "result": "verified",
             "verifier_id": "router-cache-test/v1",
             "evidence": {
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:1002ddd41f83cd5c03a5996c33385a9e55666861f126b9ce8d0f920bab742123",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
             },
             "channel_bindings": [{
@@ -670,6 +670,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
         let mut output = json!({
             "result": "verified",
             "verifier_id": "scope-seam-test/v1",
+            "evidence": {
+                "digest": "sha256:07bb47d210221ac3d4f98e79ee4e60aad10755302bb1a73f31b90eda0271b6e4",
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoic2NvcGUifQ==",
+            },
             "channel_bindings": [{
                 "type": "tls_spki_sha256",
                 "origin": "https://provider.example",
@@ -743,7 +747,7 @@ async fn external_provider_refresh_keeps_existing_cache_on_failure() {
         "verifier_id": "tinfoil/external-test/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -808,7 +812,7 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
         expires_at: tokio::time::Instant::now(),
         not_after: u64::MAX,
         evidence: Some(json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:91e6e5801d0dfe51430cd6de68e48925ea49d48aeaba4bf83e09d1acf49ed51d",
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
