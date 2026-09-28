@@ -1378,6 +1378,7 @@ pub(super) fn responses_call_item(
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
         return json!({
+            "id": format!("tsc_{call_id}"),
             "type": "tool_search_call",
             "call_id": call_id,
             "status": status,
@@ -2591,8 +2592,8 @@ mod tests {
         assert_eq!(
             out["output"],
             json!([{
-                "type": "tool_search_call", "call_id": "ts_1", "status": "completed",
-                "execution": "client", "arguments": { "query": "mail" }
+                "id": "tsc_ts_1", "type": "tool_search_call", "call_id": "ts_1",
+                "status": "completed", "execution": "client", "arguments": { "query": "mail" }
             }])
         );
         // Without the tool declared, a function of that name stays a function.

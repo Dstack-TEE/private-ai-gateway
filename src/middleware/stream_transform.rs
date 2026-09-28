@@ -1165,7 +1165,8 @@ impl ChatEvents for ResponsesEvents {
         self.done_item(item, out);
     }
 
-    /// A call reaches the client complete: added, its input in one delta,
+    /// A call reaches the client complete: added, its input in one delta and
+    /// its done event (a tool search carries its arguments in the item), then
     /// done. One cut off by a limit is reported incomplete.
     fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
         let item = responses_call_item(&self.tools, &call.id, call.name, "", "in_progress");
@@ -2235,8 +2236,8 @@ mod tests {
         assert_eq!(
             out[3]["item"],
             json!({
-                "type": "tool_search_call", "call_id": "ts_1", "status": "completed",
-                "execution": "client", "arguments": { "query": "mail" }
+                "id": "tsc_ts_1", "type": "tool_search_call", "call_id": "ts_1",
+                "status": "completed", "execution": "client", "arguments": { "query": "mail" }
             })
         );
     }

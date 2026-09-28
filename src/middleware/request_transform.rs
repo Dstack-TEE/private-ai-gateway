@@ -1208,9 +1208,9 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
 /// `output_config.effort` states the level directly. Otherwise a thinking
 /// budget is bucketed as claude-code-router and new-api bucket it (≤1024 low,
 /// ≤8192 medium, above that high): most Chat reasoning dialects carry only an
-/// effort. Adaptive thinking, or enabled thinking without a budget, means
-/// Anthropic's default, high. A shape this gateway cannot read asks for
-/// nothing it could honour.
+/// effort. Adaptive thinking means Anthropic's default, high; enabled
+/// thinking without a budget reads the same way, as CC-Switch reads it. A
+/// shape this gateway cannot read asks for nothing it could honour.
 pub fn messages_reasoning(params: &Value) -> (Option<ReasoningConfig>, bool) {
     // An effort this gateway does not know states no level.
     let effort = params
@@ -2329,7 +2329,7 @@ fn chat_tools(
         match tool.get("type").and_then(Value::as_str) {
             Some("function") => {
                 let name = required_string(tool, "name", "function tool")?;
-                push_chat_tool(tool, name, None, &mut translated, &mut function_names)?;
+                push_chat_tool(tool, name, None, &mut translated, &mut function_names);
             }
             Some("custom") => {
                 // A grammar-constrained tool still takes its input as text.
@@ -2349,7 +2349,7 @@ fn chat_tools(
                     })),
                     &mut translated,
                     &mut function_names,
-                )?;
+                );
             }
             Some("namespace") => {
                 let namespace = required_string(tool, "name", "namespace tool")?;
@@ -2363,24 +2363,37 @@ fn chat_tools(
                     }
                     let name = required_string(child, "name", "namespace function tool")?;
                     let flat = flatten_namespace_tool_name(namespace, name);
-                    push_chat_tool(child, &flat, None, &mut translated, &mut function_names)?;
+                    push_chat_tool(child, &flat, None, &mut translated, &mut function_names);
                 }
             }
             // Codex runs tool search itself; the model calls it as a function.
-            Some("tool_search") => push_chat_tool(
-                &json!({ "description": "Search and load tools, plugins, connectors, and MCP namespaces for the current task." }),
-                TOOL_SEARCH_PROXY_NAME,
-                Some(json!({
+            // Codex runs tool search itself; the model calls it as a function,
+            // with the client's own schema when it declares one.
+            Some("tool_search") => {
+                let mut proxy = tool.clone();
+                if proxy.get("description").is_none() {
+                    proxy["description"] = json!(
+                        "Search and load tools, plugins, connectors, and MCP namespaces for the current task."
+                    );
+                }
+                let default_parameters = json!({
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "What tools to search for." },
                         "limit": { "type": "integer", "description": "The most tool groups to return." }
                     },
                     "required": ["query"]
-                })),
-                &mut translated,
-                &mut function_names,
-            )?,
+                });
+                push_chat_tool(
+                    &proxy,
+                    TOOL_SEARCH_PROXY_NAME,
+                    tool.get("parameters")
+                        .is_none()
+                        .then_some(default_parameters),
+                    &mut translated,
+                    &mut function_names,
+                );
+            }
             // Hosted tools (`web_search`, ...) have no Chat counterpart. Codex
             // advertises them alongside client tools even when a turn does not
             // need them, so they are omitted.
@@ -2390,17 +2403,18 @@ fn chat_tools(
     Ok((translated, tool_map, function_names))
 }
 
+/// Add a Chat function. A name already declared keeps its first declaration,
+/// as CC-Switch keeps it: Codex re-declares the groups each tool search
+/// loaded, and two searches may load the same one.
 fn push_chat_tool(
     source: &Value,
     name: &str,
     parameters: Option<Value>,
     translated: &mut Vec<Value>,
     function_names: &mut HashSet<String>,
-) -> Result<(), TransformError> {
+) {
     if !function_names.insert(name.to_string()) {
-        return Err(TransformError::invalid_request(format!(
-            "duplicate function tool name {name}"
-        )));
+        return;
     }
     let mut function = Map::new();
     function.insert("name".into(), json!(name));
@@ -2414,7 +2428,6 @@ fn push_chat_tool(
         function.remove("strict");
     }
     translated.push(json!({ "type": "function", "function": function }));
-    Ok(())
 }
 
 fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
@@ -2741,20 +2754,26 @@ mod tests {
             "type": "namespace", "name": "mcp__mail",
             "tools": [{ "type": "function", "name": "_search", "parameters": { "type": "object" } }]
         });
+        // Two searches that loaded the same group declare it once.
+        let search = |call_id: &str| {
+            [
+                json!({
+                    "type": "tool_search_call", "call_id": call_id, "execution": "client",
+                    "arguments": { "query": "mail" }
+                }),
+                json!({
+                    "type": "tool_search_output", "call_id": call_id, "execution": "client",
+                    "status": "completed", "tools": [loaded.clone()]
+                }),
+            ]
+        };
+        let mut input = vec![json!({ "type": "message", "role": "user", "content": "find mail" })];
+        input.extend(search("ts_1"));
+        input.extend(search("ts_2"));
         let chat = responses_to_chat_params(&json!({
             "model": "m",
             "tools": [{ "type": "tool_search" }],
-            "input": [
-                { "type": "message", "role": "user", "content": "find mail" },
-                {
-                    "type": "tool_search_call", "call_id": "ts_1", "execution": "client",
-                    "arguments": { "query": "mail" }
-                },
-                {
-                    "type": "tool_search_output", "call_id": "ts_1", "execution": "client",
-                    "status": "completed", "tools": [loaded]
-                }
-            ]
+            "input": input
         }))
         .unwrap();
         let names: Vec<&Value> = chat["tools"]
@@ -2773,6 +2792,20 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("mcp__mail"));
+
+        // A client that declares its own search schema keeps it.
+        let goal = json!({
+            "type": "object",
+            "properties": { "goal": { "type": "string" } },
+            "required": ["goal"]
+        });
+        let chat = responses_to_chat_params(&json!({
+            "model": "m",
+            "tools": [{ "type": "tool_search", "execution": "client", "parameters": goal }],
+            "input": "find mail"
+        }))
+        .unwrap();
+        assert_eq!(chat["tools"][0]["function"]["parameters"], goal);
     }
 
     #[test]
