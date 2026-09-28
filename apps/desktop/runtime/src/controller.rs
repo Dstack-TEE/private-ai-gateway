@@ -43,6 +43,8 @@ use crate::{
     Error,
 };
 
+const USAGE_DATABASE: &str = "usage.sqlite3";
+
 pub struct RuntimeOptions {
     pub launcher: Arc<dyn VerifierLauncher>,
     pub helper_path: PathBuf,
@@ -273,7 +275,7 @@ impl DesktopRuntime {
         };
         let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
         let proxy = ProxyState::new(proxy_events_tx)?;
-        let (usage, usage_error) = match UsageStore::open(data_dir.join("usage.sqlite3")) {
+        let (usage, usage_error) = match UsageStore::open(data_dir.join(USAGE_DATABASE)) {
             Ok(store) => (Arc::new(store), None),
             Err(error) => match UsageStore::memory() {
                 Ok(store) => (
@@ -533,11 +535,12 @@ impl DesktopRuntime {
     }
 }
 
-/// Restores the agents' own configuration without a backend, as a stop that
-/// ends the session does: each connection is suspended through the same
-/// projector, apply lock and restoration journal, so protection resumes it
-/// later. The instance lock is held throughout, so no backend starts
-/// meanwhile. `None` while a backend runs: restore through it instead.
+/// Does without a backend what a stop that ends the session does: ends the
+/// saved protection session, so the next backend start does not resume it,
+/// and restores the agents' own configuration, suspending each connection
+/// through the same projector, apply lock and restoration journal until
+/// protection is started again. The instance lock is held throughout, so no
+/// backend starts meanwhile. `None` while a backend runs: stop through it.
 pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentStatus>>, String> {
     if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
         return Err(
@@ -546,10 +549,19 @@ pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentSt
         );
     }
     let data_dir = app_data_dir()?;
-    let Some(_instance) = lock::instance(&data_dir)
+    // A backend that `service stop` just ended may hold it for a moment longer.
+    let Some(_instance) = lock::instance_within(&data_dir, std::time::Duration::from_secs(2))
         .map_err(|error| format!("Cannot take the instance lock: {error}"))?
     else {
         return Ok(None);
+    };
+    // As in `SessionManager::stop_with_reconnect`, the session ends before the
+    // agents are restored; without a usage database there is no session.
+    let usage = data_dir.join(USAGE_DATABASE);
+    let session = if usage.exists() {
+        UsageStore::open(usage).and_then(|usage| usage.end_session())
+    } else {
+        Ok(())
     };
     let local_state = LocalState::open(&data_dir);
     local_state.set_importing(crate::settings::legacy::secrets_pending(&data_dir));
@@ -559,6 +571,7 @@ pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentSt
     if !failures.is_empty() {
         return Err(agent_failures(failures));
     }
+    session?;
     Ok(Some(projector.scan(None)?.0))
 }
 

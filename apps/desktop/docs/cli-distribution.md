@@ -27,7 +27,10 @@ before replacing or removing files. The uninstall hook then calls
 `private-ai-proxy --yes stop --offline`, which restores agents that a backend
 that was not running left pointed at the Local API. In-app updates run the
 installer with `/UPDATE`, which never runs the uninstaller, so they keep agents
-pointed at the Local API for the updated backend. The installer holds the
+pointed at the Local API for the updated backend. Running a newer installer by
+hand is different: Tauri's reinstall page defaults to "Uninstall before
+installing", so a manual upgrade runs the uninstall hook and restores the
+agents; they are connected again when protection next starts. The installer holds the
 [`startup.lock` installer gate](client-architecture.md#lifecycle) across stop
 and file replacement, including after the updater UI exits. The hooks never use
 `setx`, rewrite an unrelated PATH entry, kill processes by image name, or elevate themselves. A conflicting

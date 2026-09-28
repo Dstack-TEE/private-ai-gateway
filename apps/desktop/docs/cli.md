@@ -208,12 +208,16 @@ but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
 When no backend is running, `service stop` restores nothing, and agents may
 still point at the Local API: after an update that was not relaunched, a crash,
-or a Windows sign-out. `stop --offline` restores them without a backend, as
-`stop` would: it uses the same restoration journal under the same lock, keeps
-each connection for the next protection session, and changes nothing when run
-again. It holds the backend's instance lock while it works and is refused while
-a backend runs; use `stop` or `service stop` then. The Windows uninstaller runs
-it after `service stop`. On macOS (moving the app to the Trash) and Linux (the
+or a Windows sign-out. `stop --offline` does what `stop` does, without a
+backend: it ends the saved protection session, so the next backend start does
+not resume it, and restores the agents through the same restoration journal
+under the same lock, keeping each connection until protection is started again.
+Running it again changes nothing. It holds the backend's instance lock while it
+works and is refused while a backend runs; use `stop` or `service stop` then.
+The Windows uninstaller runs it after `service stop`; if it fails, the
+uninstaller shows why and asks whether to uninstall anyway, keeping the restore
+data (a silent uninstall continues and logs why). If the app data was also
+to be deleted, it cancels instead, since the app data holds the restore data. On macOS (moving the app to the Trash) and Linux (the
 packages run no removal scripts) nothing does, so run `pap --yes service stop`
 and then `pap stop --offline` before removing the app. Mac App Store builds
 restore agents only through the app's Stop All and Quit.

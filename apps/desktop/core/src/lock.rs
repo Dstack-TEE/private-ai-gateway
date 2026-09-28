@@ -7,7 +7,11 @@
 //! processes: the lock is held from the revision check through the final
 //! rename and manifest update.
 
-use std::{fmt, fs, io, path::Path};
+use std::{
+    fmt, fs, io,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use crate::private_fs::create_private_dir;
 
@@ -64,6 +68,19 @@ pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
         Ok(()) => Ok(Some(InstanceLock { _file: file })),
         Err(fs::TryLockError::WouldBlock) => Ok(None),
         Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// [`instance`], waiting up to `wait` for a holder to release it: Windows may
+/// release a `LockFileEx` lock shortly after its process exits.
+pub fn instance_within(data_dir: &Path, wait: Duration) -> io::Result<Option<InstanceLock>> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let lock = instance(data_dir)?;
+        if lock.is_some() || Instant::now() >= deadline {
+            return Ok(lock);
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -127,6 +144,23 @@ mod tests {
         assert!(instance(dir.path()).unwrap().is_none());
         drop(first);
         eventually(|| instance(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn instance_within_waits_for_a_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = instance(dir.path()).unwrap().unwrap();
+        assert!(instance_within(dir.path(), Duration::from_millis(100))
+            .unwrap()
+            .is_none());
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        assert!(instance_within(dir.path(), Duration::from_secs(5))
+            .unwrap()
+            .is_some());
+        releaser.join().unwrap();
     }
 
     #[test]

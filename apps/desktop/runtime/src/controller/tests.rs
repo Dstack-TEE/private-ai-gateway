@@ -1050,12 +1050,35 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
         .map(|path| std::fs::read(path).unwrap())
     };
 
+    // The backend saved its protection session before it stopped without
+    // ending it; the next backend start resumes a saved session.
+    let usage = directory.join(USAGE_DATABASE);
+    UsageStore::open(usage.clone())
+        .unwrap()
+        .save_active_session("interrupted", 1)
+        .unwrap();
+    let resumes = || {
+        let (events, _) = tokio::sync::mpsc::channel(8);
+        SessionManager::new(
+            ProxyState::new(events).unwrap(),
+            Arc::new(UsageStore::open(usage.clone()).unwrap()),
+            Arc::new(NoVerifier),
+            executor.handle().clone(),
+            AppState::default(),
+        )
+        .snapshot()
+        .unwrap()
+        .reconnecting
+    };
+    assert!(resumes());
+
     // A running backend owns the agents; nothing is touched.
     let before = snapshot();
     let backend = lock::instance(&directory).unwrap().unwrap();
     assert_eq!(restore_agents_offline(helper.clone()), Ok(None));
     assert_eq!(snapshot(), before);
     assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_some());
+    assert!(resumes());
     drop(backend);
 
     let statuses = restore_agents_offline(helper.clone()).unwrap().unwrap();
@@ -1078,6 +1101,9 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
     let suspended = status(Agent::ClaudeCode.id());
     assert!(suspended.recorded && !suspended.connected && !suspended.authorized);
     assert!(!status(Agent::Codex.id()).recorded);
+    // The session ended as a stop ends it, so no start resumes it and
+    // projects the agents again.
+    assert!(!resumes());
 
     // Restoring again changes nothing.
     let after = snapshot();

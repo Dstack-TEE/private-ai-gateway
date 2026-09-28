@@ -166,9 +166,22 @@ Var PapStartupLockPath
     ; that true if it ever runs it. A manual reinstall that uninstalls first
     ; restores them, as the service stop above does.
     ${If} $UpdateMode <> 1
-      ExecWait '"$R4" --yes stop --offline' $R0
+      ; The reason goes to the uninstall details.
+      nsExec::ExecToLog '"$R4" --yes stop --offline'
+      Pop $R0
       ${If} $R0 != 0
-        !insertmacro PAP_FAIL "Private AI Proxy could not restore the coding agents' configuration. Uninstall was cancelled. Open Private AI Proxy, choose Stop All and Quit, then retry."
+        ; The restore can keep failing (a damaged agent config or restore
+        ; record, a pending 0.1 import), so it does not block uninstalling;
+        ; its data stays unless the user asked to delete it.
+        ${If} $DeleteAppDataCheckboxState = 1
+          !insertmacro PAP_FAIL "Your coding agents could not be restored: see details. Uninstall was cancelled because deleting the app data would also delete the original agent settings and keys needed to restore them. Fix the problem shown in the details and retry, or uninstall without deleting the app data."
+        ${EndIf}
+        DetailPrint "Your coding agents could not be restored. The restore data stays in the app data folder; after reinstalling, pap stop --offline finishes it once the problem above is fixed."
+        ${IfNot} ${Silent}
+          ${IfNot} ${Cmd} `MessageBox MB_YESNO|MB_ICONEXCLAMATION "Your coding agents could not be restored: see details. Uninstall anyway?$\n$\nThe restore data stays in %APPDATA%, and running pap stop --offline after reinstalling finishes it once the problem in the details is fixed." IDYES`
+            !insertmacro PAP_FAIL "Uninstall was cancelled. Your coding agents were not restored: see details."
+          ${EndIf}
+        ${EndIf}
       ${EndIf}
     ${EndIf}
     ; Remove the owned alias on upgrades too, before replacing the canonical executable.
