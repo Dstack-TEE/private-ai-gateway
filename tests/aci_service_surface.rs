@@ -39,6 +39,7 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
+use private_ai_gateway::aggregator::session::EvidenceRef;
 use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -278,7 +279,7 @@ impl UpstreamVerifier for AlwaysVerified {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
             evidence: Some(serde_json::json!({
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:b30c37cf9f05fd749ffcb958a95794dc48e4cafad6316877c9e84b1e590c31dd",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
             })),
             ..event_from_request(&request, VerificationResult::Verified)
@@ -349,9 +350,13 @@ impl UpstreamVerifier for RotatingVerifier {
         let nonce = self.verifications.fetch_add(1, Ordering::Relaxed);
         let event = UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
-            evidence: Some(serde_json::json!({
-                "digest": sha256_hex(nonce.to_string().as_bytes()),
-            })),
+            evidence: Some(
+                serde_json::to_value(EvidenceRef::from_bytes(
+                    "application/json",
+                    nonce.to_string().as_bytes(),
+                ))
+                .unwrap(),
+            ),
             ..event_from_request(&request, VerificationResult::Verified)
         };
         self.cache_event(&request, event.clone());

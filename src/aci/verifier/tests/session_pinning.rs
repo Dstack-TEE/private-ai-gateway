@@ -23,6 +23,7 @@ use crate::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
+use crate::aggregator::session::EvidenceRef;
 use crate::aggregator::upstream_config::{
     AttestationScope, UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
@@ -271,6 +272,10 @@ async fn session_listing_matches_pin_gate_across_routes() {
                     origin: "https://provider.example".to_string(),
                     spki_sha256: "aa".repeat(32),
                 }],
+                evidence: Some(
+                    serde_json::to_value(EvidenceRef::from_bytes("application/json", b"{}"))
+                        .unwrap(),
+                ),
                 ..Default::default()
             })),
         );
