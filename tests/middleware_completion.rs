@@ -1990,6 +1990,39 @@ async fn malformed_chat_success_on_messages_returns_502_upstream() {
     assert_eq!(report["errorMessage"], "upstream_malformed_response");
 }
 
+// A malformed success after a failover is reported on the route and attempt
+// that produced it, after the attempt that failed over.
+#[tokio::test]
+async fn malformed_chat_success_after_failover_keeps_attempts() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    // Route a is out of capacity; route b answers 200 with no message.
+    let (service, forwarded, _) = build_sequenced_service(vec![503, 200]);
+    let (status, _, _) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, messages_input(false))
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(*forwarded.lock().unwrap(), ["a:gpt-test", "b:gpt-test"]);
+
+    let failover = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(0)).await;
+    assert_eq!(failover["selectedRouteId"], "a:gpt-test");
+    assert_eq!(failover["status"], 503);
+    let malformed = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
+    assert_eq!(malformed["selectedRouteId"], "b:gpt-test");
+    assert_eq!(malformed["status"], 502);
+    assert_eq!(malformed["errorSource"], "upstream");
+    assert_eq!(malformed["errorMessage"], "upstream_malformed_response");
+}
+
 // A converted stream that ends in an in-band error still reports what the
 // upstream spent, on the route that spent it.
 #[tokio::test]

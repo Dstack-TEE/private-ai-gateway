@@ -1216,8 +1216,8 @@ fn selected_route(
 }
 
 /// Assemble the client-facing streaming pipeline for one committed upstream
-/// stream: the format/visibility/sanitize transforms, then the meter. The meter
-/// sits innermost so it only ever parses real upstream SSE bytes; the caller
+/// stream: the format/visibility/sanitize transforms, then the meter, which
+/// reads what the client receives (and a bridge's own usage). The caller
 /// layers the keep-alive and finalizer outside it.
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,

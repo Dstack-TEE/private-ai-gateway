@@ -1193,7 +1193,7 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
         .and_then(|config| config.get("format"))
         .filter(|format| !format.is_null())
     {
-        if let Some(format) = messages_response_format(format)? {
+        if let Some(format) = messages_response_format(format) {
             chat.insert("response_format".into(), format);
         }
     }
@@ -1546,18 +1546,15 @@ fn messages_tool_choice(choice: &Value, tools: &[Value]) -> Result<Option<Value>
 /// Chat `response_format` for `output_config.format`: Anthropic's structured
 /// output constrains the response to a JSON schema, as a strict Chat
 /// `json_schema` format does.
-fn messages_response_format(format: &Value) -> Result<Option<Value>, TransformError> {
+fn messages_response_format(format: &Value) -> Option<Value> {
     let schema = format
         .get("schema")
         .filter(|schema| schema.is_object())
-        .filter(|_| format.get("type").and_then(Value::as_str) == Some("json_schema"));
-    let Some(schema) = schema else {
-        return Ok(None);
-    };
-    Ok(Some(json!({
+        .filter(|_| format.get("type").and_then(Value::as_str) == Some("json_schema"))?;
+    Some(json!({
         "type": "json_schema",
         "json_schema": { "name": "output", "schema": schema, "strict": true },
-    })))
+    }))
 }
 
 // ── Config tables ────────────────────────────────────────────────────────────

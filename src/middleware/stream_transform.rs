@@ -22,10 +22,10 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, anthropic_usage, chat_cache_tokens, function_call_arguments, i64_field, item_id,
-    malformed_response_error, message_item, normalize_reasoning_usage_value, now_millis, now_secs,
-    output_text_part, reasoning_item, reasoning_text, refusal_part, responses_call_item,
-    responses_call_value, responses_object, responses_usage, synthesized_call_id, thinking_block,
+    self, function_call_arguments, i64_field, item_id, malformed_response_error, message_item,
+    messages_usage, normalize_reasoning_usage_value, now_millis, now_secs, output_text_part,
+    reasoning_item, reasoning_text, refusal_part, responses_call_item, responses_call_value,
+    responses_object, responses_usage, synthesized_call_id, thinking_block,
     transform_finish_reason, unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity,
     ResponsesHead,
 };
@@ -831,17 +831,6 @@ impl MessagesEvents {
 
 fn report_usage(slot: &UpstreamUsage, usage: Value) {
     *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(usage);
-}
-
-fn messages_usage(usage: Option<&Value>) -> Value {
-    let usage = usage.unwrap_or(&Value::Null);
-    let (cache_read, cache_creation) = chat_cache_tokens(usage);
-    anthropic_usage(
-        i64_field(usage, "prompt_tokens"),
-        i64_field(usage, "completion_tokens"),
-        cache_read,
-        cache_creation,
-    )
 }
 
 impl ChatEvents for MessagesEvents {
@@ -2312,8 +2301,7 @@ mod tests {
                     if item.get("content").is_some() {
                         assert_eq!(item["content"], event["item"]["content"], "{event}");
                     }
-                    let streamed = item["arguments"].as_str().unwrap_or_default();
-                    if !streamed.is_empty() && event["item"]["status"] == "completed" {
+                    if item["type"] == "function_call" && event["item"]["status"] == "completed" {
                         assert_eq!(item["arguments"], event["item"]["arguments"], "{event}");
                     }
                     *item = event["item"].clone();
@@ -2586,7 +2574,7 @@ mod tests {
         for odd in [
             // A changed identity: the first one stands.
             tool_event(json!({ "index": 0, "id": "call_9", "function": { "name": "h" } })),
-            // A late fragment of a call already delivered.
+            // An interleaved fragment of an earlier call joins it.
             tool_event(json!({ "index": 0, "function": { "arguments": " " } })),
             // Fields of an unexpected shape read as absent.
             chat_event(json!({ "content": 7, "tool_calls": {} }), None),

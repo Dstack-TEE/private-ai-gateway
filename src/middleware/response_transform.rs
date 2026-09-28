@@ -34,10 +34,6 @@ impl std::fmt::Display for ResponseTransformError {
 
 impl std::error::Error for ResponseTransformError {}
 
-fn malformed_response(message: &'static str) -> ResponseTransformError {
-    ResponseTransformError(message)
-}
-
 /// Transform a 2xx upstream body for `format`/`endpoint` into the client surface,
 /// applying OpenAI compatibility normalization before any format conversion.
 pub fn transform_response(
@@ -981,6 +977,18 @@ pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
     )
 }
 
+/// Anthropic usage for a Chat usage object.
+pub(super) fn messages_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let (cache_read, cache_creation) = chat_cache_tokens(usage);
+    anthropic_usage(
+        i64_field(usage, "prompt_tokens"),
+        i64_field(usage, "completion_tokens"),
+        cache_read,
+        cache_creation,
+    )
+}
+
 /// Anthropic usage for a Chat prompt total. Chat counts cached tokens inside
 /// `prompt_tokens`; Anthropic's `input_tokens` excludes them and states each
 /// cache bucket beside it, so the buckets are taken out of the total rather
@@ -1533,8 +1541,9 @@ fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -
     })
 }
 
-/// Decode only the wrapper we advertised upstream. Invalid or truncated JSON
-/// must never become executable custom-tool input.
+/// The input inside the wrapper we advertised upstream, when the model
+/// produced it; [`responses_call_value`] decides what becomes of one it did
+/// not.
 fn custom_tool_input(arguments: &str) -> Option<String> {
     serde_json::from_str::<Value>(arguments)
         .ok()?
@@ -1610,7 +1619,7 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
 /// or content limit is dropped as Anthropic drops an unfinished one.
 fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransformError> {
     if response.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(malformed_response("chat response reports an error"));
+        return Err(ResponseTransformError("chat response reports an error"));
     }
     let choice = response
         .get("choices")
@@ -1619,7 +1628,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
     let message = choice
         .and_then(|choice| choice.get("message"))
         .filter(|message| message.is_object())
-        .ok_or_else(|| malformed_response("chat response requires a message"))?;
+        .ok_or(ResponseTransformError("chat response requires a message"))?;
     let finish = ChatFinish::parse(
         choice
             .and_then(|choice| choice.get("finish_reason"))
@@ -1655,7 +1664,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         .unwrap_or_default();
     let calls = chat_tool_calls(tool_calls, &id);
     if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
-        return Err(malformed_response(
+        return Err(ResponseTransformError(
             "chat response has tool calls, none of them with a name",
         ));
     }
@@ -1676,15 +1685,6 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         content.push(json!({ "type": "text", "text": "" }));
     }
 
-    let response_usage = response.get("usage").unwrap_or(&Value::Null);
-    let (cache_read, cache_creation) = chat_cache_tokens(response_usage);
-    let usage = anthropic_usage(
-        i64_field(response_usage, "prompt_tokens"),
-        i64_field(response_usage, "completion_tokens"),
-        cache_read,
-        cache_creation,
-    );
-
     Ok(json!({
         "id": id,
         "type": "message",
@@ -1693,7 +1693,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         "model": response.get("model").cloned().unwrap_or(Value::Null),
         "stop_reason": finish.stop_reason(has_tool_calls),
         "stop_sequence": Value::Null,
-        "usage": usage,
+        "usage": messages_usage(response.get("usage")),
     }))
 }
 
