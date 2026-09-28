@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.1.6...desktop-v0.2.0) (2026-09-28)
+
+Private AI Proxy 0.2.0 is the first stable release since 0.1.6. It rebuilds the app around one local API, plain settings files and a lean, native-feeling window.
+
+### Highlights
+
+* **Settings you can read and edit.** `~/.config/private-ai-proxy/config.toml` holds settings and `credentials.toml` (mode 0600) holds API keys and the web UI password. The OS keychain is no longer used. On macOS App Store builds the files stay in the app container. `pap settings` edits them and keeps your comments.
+* **Fail closed, everywhere.** Agents stay pointed at the proxy when verification fails, the network drops, or the app restarts for an update; the proxy refuses requests until the service verifies again. Only an explicit stop, disconnect, Stop All and Quit, or Reset settings restores an agent's original configuration.
+* **Agents.** Codex 0.157.1 (TEE models only in `/model`; the app offers to stop Codex's background service so new settings apply), Claude Code 2.1.242+, OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, with install-independent detection. Proxied models show as `name [TEE]`.
+* **Receipts.** Every delivered response is audited after delivery; request details show the raw signed receipt, and a failed audit names the check that failed.
+* **Web UI.** One setting, a generated rotatable password, and cookie sessions.
+* **Clear answers.** A refusal says why: requests during an outage get `503 gateway_not_verified` and resume on their own, a missing key names the Local API key, and busy, unreachable or unavailable services are named.
+* **Native feel.** Errors appear in a dialog, background events as system notifications; no web-style toasts. Dialogs keep a stable height and scroll inside; the default window fits every page.
+* **CLI.** `pap curl` sends one request pinned to the verified TLS key; `--json` failures report the backend's error code in `error.code`.
+* **Distribution.** Per-channel update feeds, npm platform binaries as versions of one package, Linux packages without maintainer scripts, SBOMs and build attestations for every release.
+
+### Upgrade notes
+
+* 0.1 settings and keychain credentials are imported once on first launch, then the keychain entries are removed. Don't sync `credentials.toml` to a public dotfiles repository.
+* If the keychain can't be read during that import, the import is not retried; profiles that lost their key ask you to sign in again.
+* The management API is HTTP on a new local endpoint; 0.1 `pap` clients cannot manage a 0.2 backend. `pap status --json` reports `backend.apiVersion`.
+* Receipt audits report after delivery and never block a response.
+* "Production OS image" is the service-reported RTMR3 `os-image-hash`; it is not bound to MRTD/RTMR0–2.
+* Before uninstalling, use Stop All and Quit (or `pap service stop`) so agents are restored.
+* Windows builds are not Authenticode-signed yet; in-app updates are signature-checked.
+
 ## [0.2.0-beta.11](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.10...desktop-v0.2.0-beta.11) (2026-09-27)
 
 
