@@ -2519,7 +2519,7 @@ mod tests {
     /// message beside it.
     #[test]
     fn truncation_and_errors_win_over_tool_call_repair() {
-        let body = |finish_reason: &str, error: Value| {
+        let body = |finish_reason: &str, error: Value, call: Value| {
             json!({
                 "id": "c",
                 "error": error,
@@ -2527,13 +2527,14 @@ mod tests {
                     "message": {
                         "role": "assistant",
                         "content": "partial",
-                        "tool_calls": [{ "id": "call_1", "function": { "arguments": "{\"a\":" } }]
+                        "tool_calls": [call]
                     },
                     "finish_reason": finish_reason
                 }]
             })
         };
-        let cut = body("length", Value::Null);
+        let nameless = json!({ "id": "call_1", "function": { "arguments": "{\"a\":" } });
+        let cut = body("length", Value::Null, nameless);
         let message =
             transform_response(ProviderFormat::Openai, Endpoint::Messages, cut.clone()).unwrap();
         assert_eq!(message["stop_reason"], "max_tokens");
@@ -2544,7 +2545,9 @@ mod tests {
         let response = openai_chat_to_responses(cut, &json!({}), "resp");
         assert_eq!(response["status"], "incomplete");
 
-        let failed = body("error", json!({ "message": "engine failed" }));
+        // A runnable call beside the error: only the error can fail the turn.
+        let runnable = json!({ "id": "call_1", "function": { "name": "f", "arguments": "{}" } });
+        let failed = body("error", json!({ "message": "engine failed" }), runnable);
         assert!(
             transform_response(ProviderFormat::Openai, Endpoint::Messages, failed.clone()).is_err()
         );
