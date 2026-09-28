@@ -2,7 +2,7 @@
 
 Tests a published Linux x64 desktop package against the live RedPill service
 with every supported coding agent: Claude Code, Codex, OpenCode, Pi, Oh My Pi,
-OpenClaw, Hermes and Qwen Code. An agent the package predates (it is missing
+OpenClaw, Hermes, Qwen Code and Kilo CLI. An agent the package predates (it is missing
 from `pap agents list`) is skipped and shows `skip` in the summary. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
 runs it nightly and before a stable release
 ([Live end-to-end test](../docs/distribution.md#live-end-to-end-test)).
@@ -86,8 +86,8 @@ baseline the app supports (`agent-bridge/resources/codex/manifest.json`).
 Hermes is pinned to a release tag and installed with that tag's own
 `scripts/install.sh`, since the current installer expects the current source
 tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
-Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
-`OPENCODE_DISABLE_AUTOUPDATE`).
+Claude Code, OpenCode and Kilo self-updates are off (`DISABLE_AUTOUPDATER`,
+`OPENCODE_DISABLE_AUTOUPDATE`, `KILO_DISABLE_AUTOUPDATE`).
 
 The installer scripts are not checksummed. Apart from Hermes', they are
 served from unversioned URLs and change independently of the agent release

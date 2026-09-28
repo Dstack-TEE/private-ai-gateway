@@ -3,6 +3,7 @@ import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
+import kiloIcon from "@lobehub/icons-static-svg/icons/kilocode.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
 import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
@@ -33,6 +34,7 @@ const AGENT_ICONS: Record<string, string> = {
   hermes: hermesIcon,
   openclaw: openClawIcon,
   "qwen-code": qwenCodeIcon,
+  kilo: kiloIcon,
 };
 
 function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): React.JSX.Element {

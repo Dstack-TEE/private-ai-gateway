@@ -52,7 +52,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if matches!(agent, Agent::OpenCode | Agent::QwenCode) {
+        if matches!(agent, Agent::OpenCode | Agent::KiloCli | Agent::QwenCode) {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
             assert_scan(
@@ -83,6 +83,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
             Agent::QwenCode => &["providerProtocol", "private-ai-proxy"][..],
+            Agent::KiloCli => &["model"][..],
         };
         config.set_str(field, "external-edit").unwrap();
         write(&path, &config.render().unwrap());

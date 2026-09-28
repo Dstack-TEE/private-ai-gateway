@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code; do
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -88,6 +88,11 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code; d
       pinned "$QWEN_CODE_VERSION" qwen --version
       # Only a prompt creates ~/.qwen; without an auth type it exits 1.
       qwen -p hi >/dev/null 2>&1 || test -d "$HOME/.qwen"
+      ;;
+    kilo)
+      from_script kilo https://kilo.ai/cli/install --version "$KILO_VERSION" --no-modify-path
+      pinned "$KILO_VERSION" kilo --version
+      test -d "$HOME/.config/kilo"
       ;;
   esac
 done

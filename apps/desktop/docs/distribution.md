@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw, Hermes and Qwen Code, checks a real reply through the
+OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code and Kilo CLI, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -464,7 +464,7 @@ API keys nor OAuth credentials are written there. These tokens authorize the
 agent's local inference surface, not management RPC or upstream API access. They
 do not protect against other programs running as the same OS user.
 
-OpenCode uses its file reference and OpenClaw its `singleValue` file SecretRef.
+OpenCode and Kilo CLI use their file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
 Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
 quoted `/bin/cat` path. Qwen Code reads keys only as values, so its

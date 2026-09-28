@@ -40,6 +40,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::OpenClaw => r#"{"agents":{"defaults":{"model":{"primary":"original/native","fallbacks":["original/fallback"]}}}}"#,
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
+            Agent::KiloCli => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::QwenCode => r#"{"model":{"name":"native"},"security":{"auth":{"selectedType":"qwen-oauth"}},"env":{"OTHER":"kept"}}"#,
         };
             write(&config, original);
@@ -131,7 +132,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             assert!(tokens.agent_for(&first_token).is_none());
             let mut restored = doc(&sandbox, agent);
             match agent {
-                Agent::OpenCode => assert!(restored
+                Agent::OpenCode | Agent::KiloCli => assert!(restored
                     .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
                     .is_none()),
                 Agent::Pi | Agent::OhMyPi => assert!(restored
@@ -433,7 +434,9 @@ fn opencode_process_overrides_follow_official_merge_order() {
                 "{\"model\":\"private-ai-proxy/test\",}",
             );
         }
-        let result = sandbox.projector.check_opencode_merge(&expected, true);
+        let result = sandbox
+            .projector
+            .check_opencode_merge(Agent::OpenCode, &expected, true);
         assert_eq!(
             result.is_ok(),
             matches!(case.as_str(), "explicit" | "directory"),
@@ -443,7 +446,7 @@ fn opencode_process_overrides_follow_official_merge_order() {
             // A default model is not owned when the user did not select one.
             assert!(sandbox
                 .projector
-                .check_opencode_merge(&expected, false)
+                .check_opencode_merge(Agent::OpenCode, &expected, false)
                 .is_ok());
         }
         return;
@@ -557,7 +560,7 @@ fn opencode_2_provider_entry_in_the_owned_file_is_refused() {
     }));
     let error = sandbox
         .projector
-        .check_opencode_merge(&projected, false)
+        .check_opencode_merge(Agent::OpenCode, &projected, false)
         .unwrap_err();
     assert!(error.contains("/providers/private-ai-proxy"), "{error}");
 }
@@ -1145,4 +1148,55 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
         1,
         "nothing reached the verified upstream"
     );
+}
+
+#[test]
+fn kilo_uses_the_opencode_projection_and_guards_its_own_layers() {
+    let sandbox = sandbox("kilo-layers");
+    let agent = Agent::KiloCli;
+    let path = agent.config_path(&sandbox.home, false);
+    assert_eq!(path, sandbox.home.join(".config/kilo/kilo.json"));
+    // Kilo seeds kilo.jsonc, which merges after kilo.json.
+    write(
+        &path.with_file_name("kilo.jsonc"),
+        "{\n  // seeded\n  \"$schema\": \"https://app.kilo.ai/config.json\"\n}\n",
+    );
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let ConfigDoc::Json(connected) = doc(&sandbox, agent) else {
+        unreachable!()
+    };
+    let token_path = sandbox.projector.tokens.path(agent.id());
+    assert_eq!(
+        connected["provider"]["private-ai-proxy"],
+        opencode_provider(&catalog, ENDPOINT, &token_path)
+    );
+    assert_eq!(
+        connected["provider"]["private-ai-proxy"]["options"]["apiKey"],
+        format!("{{file:{}}}", token_path.display())
+    );
+    assert_eq!(connected["model"], "private-ai-proxy/openai/gpt-oss-20b");
+
+    // A user layer in ~/.kilo merges after the global file.
+    let home_layer = sandbox.home.join(".kilo/opencode.json");
+    write(&home_layer, r#"{"model":"other/model"}"#);
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(!status.authorized && tokens.is_empty());
+    assert!(status.attention.as_deref().unwrap().contains("/model"));
+    let error = sandbox
+        .projector
+        .preview(agent, true, Some(&catalog), &claude_options())
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        desktop_core::protocol::ErrorCode::ConfigurationConflict
+    );
+    fs::remove_file(&home_layer).unwrap();
+    disconnect(&sandbox, agent);
+    let restored = doc(&sandbox, agent);
+    assert_eq!(restored.get_value(&["model"]), None);
+    assert!(restored
+        .get_value(&["provider", "private-ai-proxy", "options", "apiKey"])
+        .is_none());
 }

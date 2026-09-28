@@ -26,14 +26,17 @@ impl AgentIntegration for Agent {
             | Self::Hermes
             | Self::OpenClaw
             | Self::OhMyPi
-            | Self::QwenCode => Surface::ChatCompletions,
+            | Self::QwenCode
+            | Self::KiloCli => Surface::ChatCompletions,
         }
     }
 
     fn format(self) -> Format {
         match self {
             Agent::Codex => Format::Toml,
-            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi | Agent::QwenCode => Format::Json,
+            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi | Agent::QwenCode | Agent::KiloCli => {
+                Format::Json
+            }
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
@@ -51,12 +54,9 @@ impl AgentIntegration for Agent {
             Agent::ClaudeCode => override_dir("CLAUDE_CONFIG_DIR")
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("settings.json"),
-            Agent::OpenCode => override_dir("OPENCODE_CONFIG").unwrap_or_else(|| {
-                override_dir("XDG_CONFIG_HOME")
-                    .unwrap_or_else(|| home.join(".config"))
-                    .join("opencode")
-                    .join("opencode.json")
-            }),
+            Agent::OpenCode | Agent::KiloCli => opencode_family::layers(self)
+                .map(|layers| layers.config_path(home, tool_env))
+                .unwrap_or_default(),
             Agent::QwenCode => override_dir("QWEN_HOME")
                 .filter(|path| !path.as_os_str().is_empty())
                 .map(|path| match path.strip_prefix("~") {
@@ -129,6 +129,10 @@ impl AgentIntegration for Agent {
             }
             Agent::Hermes => {
                 "Hermes uses a machine-local token command. Start a new session without --api-key or --base-url overrides; existing native credentials and fallbacks are never erased."
+            }
+            Agent::KiloCli => {
+                "Kilo CLI will use an app-owned provider catalog generated from the verified \
+                 service and a file-backed machine-local token. Restart Kilo after applying."
             }
             Agent::QwenCode => {
                 "Qwen Code will use an app-owned OpenAI-compatible model provider generated from the verified service. Qwen Code reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Restart Qwen Code after applying; a project .qwen/settings.json that defines modelProviders replaces this catalog."

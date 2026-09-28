@@ -148,9 +148,13 @@ impl Projector {
                 }
             }
         }
-        if agent == Agent::OpenCode {
-            self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))
-                .map_err(AgentError::ConfigurationConflict)?;
+        if opencode_family::layers(agent).is_some() {
+            self.check_opencode_merge(
+                agent,
+                doc,
+                fields.iter().any(|field| field.path == ["model"]),
+            )
+            .map_err(AgentError::ConfigurationConflict)?;
         }
         Ok(edit)
     }
@@ -244,42 +248,28 @@ impl Projector {
         }
     }
 
-    /// OpenCode 1.18.29+ deep-merges these process-level sources in order.
-    /// OpenCode 2 reads the same V1 files and normalizes them in memory, but
-    /// its native `providers` entry overlays the V1 `provider` one we write,
-    /// so no source may define `providers.private-ai-proxy`.
+    /// OpenCode 1.18.29+ (and its forks) deep-merge these process-level
+    /// sources in order. OpenCode 2 reads the same V1 files and normalizes them
+    /// in memory, but its native `providers` entry overlays the V1 `provider`
+    /// one we write, so no source may define `providers.private-ai-proxy`.
     /// Keep the original write/restore path: selecting JSONC instead would
     /// strand old connection journals and our JSON writer would lose comments.
     /// Project/managed/remote sources need CLI context; references stay opaque
     /// here so inspection never reads an API key file or executes anything.
     pub(super) fn check_opencode_merge(
         &self,
+        agent: Agent,
         doc: &ConfigDoc,
         owns_model: bool,
     ) -> Result<(), String> {
+        let name = agent.name();
         let ConfigDoc::Json(projected) = doc else {
-            return Err("OpenCode requires a JSON projection".to_string());
+            return Err(format!("{name} requires a JSON projection"));
         };
-        let global = self
-            .tool_env
-            .then(|| env_path("XDG_CONFIG_HOME"))
-            .flatten()
-            .unwrap_or_else(|| self.home.join(".config"))
-            .join("opencode");
-        let target = Agent::OpenCode.config_path(&self.home, self.tool_env);
-        let mut paths = vec![
-            global.join("config.json"),
-            global.join("opencode.json"),
-            global.join("opencode.jsonc"),
-        ];
-        if self.tool_env {
-            if let Some(path) = env_path("OPENCODE_CONFIG") {
-                paths.push(path);
-            }
-            if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
-                paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
-            }
-        }
+        let layers = opencode_family::layers(agent)
+            .ok_or_else(|| format!("{name} does not use the OpenCode config format"))?;
+        let target = agent.config_path(&self.home, self.tool_env);
+        let paths = layers.paths(&self.home, self.tool_env);
         let mut merged = serde_json::json!({});
         let mut sources = Vec::new();
         for path in paths {
@@ -290,13 +280,14 @@ impl Projector {
                     Ok(text) => text,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(_) => return Err(format!(
-                        "Cannot verify OpenCode config merge: {} is unreadable. Access is disabled; \
-                         fix that file or Disconnect to restore the original config.", path.display(),
+                        "Cannot verify {name} config merge: {} is unreadable. Access is disabled; \
+                         fix that file or Disconnect to restore the original config.",
+                        path.display(),
                     )),
                 };
                 parse_jsonc(&text).map_err(|reason| {
                     format!(
-                        "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; \
+                        "Cannot verify {name} config merge: {} is {reason}. Access is disabled; \
                      fix that file or Disconnect to restore the original config.",
                         path.display(),
                     )
@@ -305,21 +296,20 @@ impl Projector {
             sources.push(path.display().to_string());
             merge_opencode_config(&mut merged, layer);
         }
+        let content = layers.var("CONFIG_CONTENT");
         if self.tool_env {
-            if let Some(text) =
-                env::var_os("OPENCODE_CONFIG_CONTENT").filter(|text| !text.is_empty())
-            {
+            if let Some(text) = env::var_os(&content).filter(|text| !text.is_empty()) {
                 let layer = text
                     .to_str()
                     .ok_or_else(|| "not valid Unicode".to_string())
                     .and_then(parse_jsonc)
                     .map_err(|reason| {
                         format!(
-                        "Cannot verify OpenCode config merge: OPENCODE_CONFIG_CONTENT is {reason}. \
-                         Access is disabled; fix that override or Disconnect.",
-                    )
+                            "Cannot verify {name} config merge: {content} is {reason}. \
+                             Access is disabled; fix that override or Disconnect.",
+                        )
                     })?;
-                sources.push("OPENCODE_CONFIG_CONTENT".to_string());
+                sources.push(content);
                 merge_opencode_config(&mut merged, layer);
             }
         }
@@ -337,7 +327,7 @@ impl Projector {
                         .any(|value| value.as_str() == Some("private-ai-proxy"))
             })
         }) {
-            return Err("OpenCode's enabled_providers/disabled_providers exclude private-ai-proxy or are invalid. Resolve those filters in OpenCode; they will not be overwritten".to_string());
+            return Err(format!("{name}'s enabled_providers/disabled_providers exclude private-ai-proxy or are invalid. Resolve those filters in {name}; they will not be overwritten"));
         }
         for (pointer, expected) in [
             (
@@ -352,7 +342,7 @@ impl Projector {
             }
             if merged.pointer(pointer) != expected {
                 return Err(format!(
-                    "OpenCode's merged config changes the gateway-owned field {pointer}. \
+                    "{name}'s merged config changes the gateway-owned field {pointer}. \
                      Access is disabled. Review {} without changing unrelated providers, \
                      or Disconnect to restore the original config.",
                     sources.join(", "),
@@ -521,10 +511,10 @@ impl Projector {
                 }
             }
         }
-        if agent == Agent::OpenCode && status.authorized {
+        if opencode_family::layers(agent).is_some() && status.authorized {
             if let Some(doc) = &doc {
                 let owns_model = record.fields.iter().any(|field| field.path == ["model"]);
-                if let Err(attention) = self.check_opencode_merge(doc, owns_model) {
+                if let Err(attention) = self.check_opencode_merge(agent, doc, owns_model) {
                     status.connected = false;
                     status.authorized = false;
                     status.attention = Some(attention);

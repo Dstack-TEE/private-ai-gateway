@@ -91,6 +91,15 @@ const ALL_AGENTS = [
     prompt: ["qwen", "-p", PROMPT],
     selfWritten: ["$version"],
   },
+  {
+    id: "kilo",
+    sentinel: { file: ".config/kilo/kilo.json", path: ["autoupdate"], value: false },
+    surface: "chat",
+    files: [".config/kilo/kilo.json"],
+    prompt: ["kilo", "run", PROMPT],
+    // Kilo migrates an existing config to permission.bash: allow once.
+    selfWritten: ["$schema", "permission"],
+  },
 ];
 
 // run.sh --agents limits the test, like the installs, to these ids.

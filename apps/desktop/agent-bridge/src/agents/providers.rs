@@ -154,7 +154,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             }
             fields
         }
-        Agent::OpenCode => {
+        Agent::OpenCode | Agent::KiloCli => {
             let provider = "private-ai-proxy";
             let mut fields = vec![generated_catalog(
                 &["provider", provider],
