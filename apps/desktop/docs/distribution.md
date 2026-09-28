@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code, Kilo CLI, Cline CLI, Crush and MiMo Code, checks a real reply through the
+OpenCode, Pi, Oh My Pi, OpenClaw, Hermes, Qwen Code, Kilo CLI, Cline CLI, Crush, MiMo Code and Aider, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -423,7 +423,7 @@ starts scoped access and holds it for its lifetime, and immediately
 scans and shows the detected Agents. Detection derives each Agent's configuration path
 from that authorized Home and reports the Agent when the folder holding that file exists
 (for example `~/.codex`); Cline CLI, whose settings folder appears only once a provider
-is saved, is detected by `~/.cline`. Every supported Agent creates this folder on its first run,
+is saved, is detected by `~/.cline`, and Aider, whose config sits in Home, by `~/.aider`. Every supported Agent creates this folder on its first run,
 so detection is the same for every install method (package managers, standalone
 installers, Homebrew, or wrappers such as Superset) and in both distributions, with no
 PATH or login-shell lookup. An Agent installed but never run is listed as not detected
@@ -468,9 +468,9 @@ do not protect against other programs running as the same OS user.
 OpenCode, Kilo CLI and MiMo Code use their file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
 Pi, Oh My Pi, Hermes and Crush use their existing credential-command contracts
-with a quoted `/bin/cat` path. Qwen Code and Cline CLI read keys only as values, so
-Qwen Code's `settings.json` `env` block and Cline's `providers.json` hold the
-agent token itself, in both distributions; disconnect removes it and revokes
+with a quoted `/bin/cat` path. Qwen Code, Cline CLI and Aider read keys only as
+values, so Qwen Code's `settings.json` `env` block, Cline's `providers.json` and
+`~/.aider.conf.yml` hold the agent token itself, in both distributions; disconnect removes it and revokes
 the token. No external Agent launches a PAP
 executable or reads the app container. The same transaction journal restores owned configuration,
 revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory

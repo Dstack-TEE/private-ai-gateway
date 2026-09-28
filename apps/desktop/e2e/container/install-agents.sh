@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo cline crush mimo-code; do
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code kilo cline crush mimo-code aider; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -108,6 +108,16 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes qwen-code ki
       from_script mimo-code https://mimo.xiaomi.com/install --version "$MIMO_CODE_VERSION" --no-modify-path
       pinned "$MIMO_CODE_VERSION" mimo --version
       test -d "$HOME/.config/mimocode"
+      ;;
+    aider)
+      # aider.chat/install.sh always installs the latest aider-chat, so this
+      # is the documented uv install with a pinned uv and aider.
+      from_script uv "https://astral.sh/uv/$UV_VERSION/install.sh" --no-modify-path
+      logged aider uv tool install --python python3.12 --with pip "aider-chat@$AIDER_VERSION"
+      pinned "$AIDER_VERSION" aider --version
+      # The first run creates ~/.aider; this one only disables analytics.
+      aider --analytics-disable --exit --no-git --yes-always --no-check-update >/dev/null 2>&1 ||
+        test -d "$HOME/.aider"
       ;;
   esac
 done

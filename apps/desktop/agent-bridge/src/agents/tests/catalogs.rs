@@ -1052,3 +1052,45 @@ fn crush_writes_its_data_file_and_keeps_model_picks() {
             .get_value(&[])
     );
 }
+
+#[test]
+fn aider_routes_openai_models_and_keeps_its_yaml() {
+    let sandbox = sandbox("aider-config");
+    let agent = Agent::Aider;
+    // Aider creates ~/.aider on its first run; its config sits in Home.
+    assert!(!agent_status(&sandbox.projector.scan(None).unwrap().0, agent).installed);
+    fs::create_dir_all(sandbox.home.join(".aider")).unwrap();
+    assert!(agent_status(&sandbox.projector.scan(None).unwrap().0, agent).installed);
+    let path = sandbox.home.join(".aider.conf.yml");
+    assert_eq!(agent.config_path(&sandbox.home, false), path);
+    let original = "# my settings\nmodel: gpt-4o\nopenai-api-base: https://api.openai.com/v1\ndark-mode: true\n";
+    write(&path, original);
+    assert!(apply_connect(&sandbox, agent, &catalog(), &claude_options()).authorized);
+    let token = sandbox.projector.tokens.read(agent.id()).unwrap().unwrap();
+    let connected = fs::read_to_string(&path).unwrap();
+    assert!(connected.starts_with("# my settings\n"));
+    let connected = doc(&sandbox, agent);
+    assert_eq!(
+        connected.get_str(&["openai-api-base"]).as_deref(),
+        Some("http://127.0.0.1:4180/v1")
+    );
+    assert_eq!(connected.get_str(&["openai-api-key"]), Some(token));
+    assert_eq!(
+        connected.get_str(&["model"]).as_deref(),
+        Some("openai/openai/gpt-oss-20b")
+    );
+    assert_eq!(
+        connected.get_value(&["dark-mode"]),
+        Some(ConfigValue::Bool(true))
+    );
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&[]),
+        ConfigDoc::parse(Format::Yaml, original)
+            .unwrap()
+            .get_value(&[])
+    );
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .starts_with("# my settings\n"));
+}

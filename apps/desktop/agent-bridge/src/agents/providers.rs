@@ -61,6 +61,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
         Agent::QwenCode => qwen_code::fields(inputs, base, default_model)?,
         Agent::ClineCli => cline::fields(inputs, base, default_model)?,
         Agent::Crush => crush::fields(inputs, base, default_model)?,
+        Agent::Aider => aider::fields(inputs, base, default_model)?,
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_proxy"),

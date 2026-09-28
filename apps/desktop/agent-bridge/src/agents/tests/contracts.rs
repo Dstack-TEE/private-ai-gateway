@@ -41,6 +41,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
             Agent::Crush => r#"{"models":{"large":{"model":"native","provider":"anthropic"},"small":{"model":"haiku","provider":"anthropic"}},"options":{"tui":{"compact_mode":true}}}"#,
+            Agent::Aider => "model: gpt-4o\nopenai-api-key: old-secret\ndark-mode: true\n",
             Agent::MimoCode => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::KiloCli => r#"{"model":"original/native","provider":{"original":{"name":"User provider"}}}"#,
             Agent::ClineCli => r#"{"version":1,"lastUsedProvider":"anthropic","modes":{},"providers":{"anthropic":{"settings":{"provider":"anthropic","apiKey":"user-anthropic-key"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"},"openai-compatible":{"settings":{"provider":"openai-compatible","apiKey":"old-secret","baseUrl":"https://original.invalid/v1","model":"native","protocol":"openai-responses"},"updatedAt":"2026-01-01T00:00:00.000Z","tokenSource":"manual"}}}"#,
@@ -161,7 +162,10 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 .unwrap()
                 .get(agent.id())
                 .cloned();
-            if matches!(agent, Agent::ClaudeCode | Agent::QwenCode | Agent::ClineCli) {
+            if matches!(
+                agent,
+                Agent::ClaudeCode | Agent::QwenCode | Agent::ClineCli | Agent::Aider
+            ) {
                 assert!(record.is_none());
             } else {
                 let record = record.unwrap();
@@ -628,6 +632,7 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
         (Agent::ClineCli, "stored-auth"),
         (Agent::Crush, "user-layer"),
         (Agent::Crush, "crushrc"),
+        (Agent::Aider, "home-dotenv"),
     ] {
         let sandbox = sandbox(&format!("conflict-{}-{case}", agent.id()));
         let catalog = catalog();
@@ -699,6 +704,10 @@ fn native_auth_and_routing_conflicts_are_read_only_and_deauthorize() {
             (Agent::Crush, _) => write(
                 &sandbox.home.join(".config/crush/crushrc"),
                 "provider private-ai-proxy --api-key sk-test-hidden\n",
+            ),
+            (Agent::Aider, _) => write(
+                &sandbox.home.join(".env"),
+                "AIDER_OPENAI_API_BASE=https://other.invalid/v1\n",
             ),
             (Agent::ClineCli, _) => edited
                 .set_value(

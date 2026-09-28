@@ -33,7 +33,8 @@ impl AgentIntegration for Agent {
             | Self::KiloCli
             | Self::ClineCli
             | Self::Crush
-            | Self::MimoCode => Surface::ChatCompletions,
+            | Self::MimoCode
+            | Self::Aider => Surface::ChatCompletions,
         }
     }
 
@@ -50,7 +51,7 @@ impl AgentIntegration for Agent {
             | Agent::MimoCode => Format::Json,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
-            Agent::OhMyPi => Format::Yaml,
+            Agent::OhMyPi | Agent::Aider => Format::Yaml,
         }
     }
 
@@ -60,6 +61,7 @@ impl AgentIntegration for Agent {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::ClineCli => cline::config_path(home, tool_env),
             Agent::Crush => crush::config_path(home, tool_env),
+            Agent::Aider => aider::config_path(home),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
@@ -100,6 +102,7 @@ impl AgentIntegration for Agent {
     fn detection_dir(self, home: &Path, tool_env: bool) -> PathBuf {
         match self {
             Agent::ClineCli => cline::detection_dir(home, tool_env),
+            Agent::Aider => aider::detection_dir(home),
             _ => self
                 .config_path(home, tool_env)
                 .parent()
@@ -165,6 +168,9 @@ impl AgentIntegration for Agent {
             Agent::ClineCli => {
                 "Cline CLI will use its built-in OpenAI-compatible provider pointed at the verified service, and lists the service's models itself. Cline only accepts that built-in provider, so the one you had there is saved and restored on disconnect. Cline reads keys only as values, so its settings hold this agent's machine-local token, which is revoked on disconnect. Run \"cline hub stop\" or restart Cline after applying. The Cline editor extensions keep their own settings and are not changed."
             }
+            Agent::Aider => {
+                "Aider will send openai/ models to the verified service with the selected default model. Aider reads keys only as values, so ~/.aider.conf.yml holds this agent's machine-local token, which is revoked on disconnect; the OpenAI endpoint and key it held are restored then. A .aider.conf.yml or .env in a project may override these settings."
+            }
             Agent::Crush => {
                 "Crush will use an app-owned provider catalog generated from the verified service, with a machine-local token command, written to its data file where it also saves the models you pick. Restart Crush after applying. Project crush.json files are not inspected and may override the provider."
             }
@@ -175,7 +181,7 @@ impl AgentIntegration for Agent {
     }
 
     fn static_token(self) -> bool {
-        matches!(self, Agent::QwenCode | Agent::ClineCli)
+        matches!(self, Agent::QwenCode | Agent::ClineCli | Agent::Aider)
     }
 
     fn user_selection(self, path: &[String]) -> bool {

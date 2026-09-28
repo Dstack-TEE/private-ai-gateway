@@ -2,7 +2,7 @@
 
 Tests a published Linux x64 desktop package against the live RedPill service
 with every supported coding agent: Claude Code, Codex, OpenCode, Pi, Oh My Pi,
-OpenClaw, Hermes, Qwen Code, Kilo CLI, Cline CLI, Crush and MiMo Code. An agent the package predates (it is missing
+OpenClaw, Hermes, Qwen Code, Kilo CLI, Cline CLI, Crush, MiMo Code and Aider. An agent the package predates (it is missing
 from `pap agents list`) is skipped and shows `skip` in the summary. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
 runs it nightly and before a stable release
 ([Live end-to-end test](../docs/distribution.md#live-end-to-end-test)).
@@ -89,6 +89,10 @@ tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
 Claude Code, OpenCode, Kilo and MiMo Code self-updates are off
 (`DISABLE_AUTOUPDATER`, `OPENCODE_DISABLE_AUTOUPDATE`, `KILO_DISABLE_AUTOUPDATE`,
 `MIMOCODE_DISABLE_AUTOUPDATE`).
+
+Aider's installer always installs its latest release, so Aider is installed the
+documented way with uv instead: `UV_VERSION` pins uv and `AIDER_VERSION`
+aider-chat, whose dependencies are pinned exactly.
 
 The installer scripts are not checksummed. Apart from Hermes', they are
 served from unversioned URLs and change independently of the agent release

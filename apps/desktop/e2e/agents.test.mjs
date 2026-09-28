@@ -128,6 +128,24 @@ const ALL_AGENTS = [
     prompt: ["mimo", "run", PROMPT],
     selfWritten: ["$schema"],
   },
+  {
+    id: "aider",
+    sentinel: { file: ".aider.conf.yml", path: ["dark-mode"], value: true },
+    surface: "chat",
+    files: [".aider.conf.yml"],
+    prompt: [
+      "aider",
+      "--message",
+      PROMPT,
+      "--no-git",
+      "--yes-always",
+      "--no-check-update",
+      "--no-show-release-notes",
+      "--no-show-model-warnings",
+      "--no-pretty",
+      "--no-stream",
+    ],
+  },
 ];
 
 // run.sh --agents limits the test, like the installs, to these ids.

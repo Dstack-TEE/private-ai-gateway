@@ -175,6 +175,9 @@ impl Projector {
                 .map_err(AgentError::ConfigurationConflict),
             Agent::ClineCli => cline::validate(doc),
             Agent::Crush => crush::validate(&self.home, self.tool_env),
+            Agent::Aider => {
+                aider::validate(&self.home, self.tool_env, options.default_model.is_some())
+            }
             Agent::QwenCode => qwen_code::validate(
                 &self.home,
                 self.tool_env,

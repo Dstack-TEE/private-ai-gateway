@@ -52,10 +52,10 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if matches!(
-            agent,
-            Agent::OpenCode | Agent::KiloCli | Agent::MimoCode | Agent::QwenCode | Agent::ClineCli
-        ) {
+        // A {file:} reference or a token held as a value runs no helper.
+        if agent.static_token()
+            || matches!(agent, Agent::OpenCode | Agent::KiloCli | Agent::MimoCode)
+        {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
             assert_scan(
@@ -89,6 +89,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::KiloCli | Agent::MimoCode => &["model"][..],
             Agent::ClineCli => &["providers", "openai-compatible", "settings", "baseUrl"][..],
             Agent::Crush => &["providers", "private-ai-proxy"][..],
+            Agent::Aider => &["openai-api-base"][..],
         };
         config.set_str(field, "external-edit").unwrap();
         write(&path, &config.render().unwrap());
