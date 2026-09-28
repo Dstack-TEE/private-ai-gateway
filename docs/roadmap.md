@@ -30,7 +30,7 @@ These are gaps in the implementation. What ACI does not cover by design is in
 - Receipts live in memory for one hour and are lost on restart. They do not name the downstream domain or session a request used.
 - Sessions are stored as content-addressed JSONL, not in a witnessed log.
 - Router providers (NEAR AI, Tinfoil, SecretAI) are trusted for per-model TEE coverage, and the instance that served a request is not identified.
-- Chutes instance sessions carry no evidence, so a client cannot re-check a Chutes receipt's provider evidence; see item 4 of the [conformance gap review](reviews/aci-spec-conformance-gaps.md).
+- No client can re-verify Chutes evidence itself (§9.2(4)), because no Chutes evidence re-verifier exists yet; see item 4 of the [conformance gap review](reviews/aci-spec-conformance-gaps.md).
 - A non-`UpToDate` TCB is recorded as a refuted claim, not a failure. Relying parties enforce their own TCB policy.
 - E2EE covers selected fields, not metadata. It is not available on `/v1/responses` or as an Anthropic Messages profile.
 - The Private AI Proxy Local API and `pap serve` are plain local HTTP endpoints, not TEE-backed services.

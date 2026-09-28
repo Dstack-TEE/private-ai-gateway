@@ -54,21 +54,31 @@ verification result.
 The durable store is an append-only log with one record per line:
 
 ```json
-{"seq":0,"ts":1700000000,"type":"session","fingerprint":"<hex>","retention_until":1700003600,"payload_b64":"<sealed document>"}
+{"seq":0,"ts":1700000000,"type":"evidence","payload_b64":"<bundle bytes>"}
+{"seq":1,"ts":1700000000,"type":"attested_session","fingerprint":"<hex>","retention_until":1700003600,"content_type":"application/json","payload_b64":"<document without evidence.data>"}
 ```
 
-On startup the gateway replays the log into an in-memory index. `payload_b64`
-carries the sealed document bytes, and the session id is always recomputed from
-them, never read from disk. `fingerprint` is a local key over a channel's
-verified material that lets the request path find the current session for a
-channel without sealing again. It is never served. Receipt signatures link
-requests to session ids. At-rest durability and confidentiality remain
-deployment concerns.
+Each evidence bundle is stored once and found by the hash of its bytes. Chutes
+instance sessions share one fleet bundle, so storing it inline would repeat it
+once per instance. A session record carries its document without
+`evidence.data`. On startup the gateway replays the log into an in-memory
+index: it rebuilds each document from the bundle its `evidence.digest` names
+and recomputes the session id from the rebuilt bytes, never reading an id from
+disk. A tampered bundle answers to a digest no session names, so its sessions
+are skipped. Records of any other type are skipped, which lets the gateway
+start on a log written by an older release. Every stored session carries a
+complete bundle, its digest plus the data that hashes to it.
+
+`fingerprint` is a local key over a channel's verified material that lets the
+request path find the current session for a channel without sealing again. It
+is never served. Receipt signatures link requests to session ids. At-rest
+durability and confidentiality remain deployment concerns.
 
 The gateway holds an advisory lock on a separate lock file so only one process
 can own the log. On startup and hourly after that, it rewrites the live,
 non-expired index through a synced temporary file and an atomic rename,
-dropping duplicate, expired, malformed, or truncated history. The file names
+dropping duplicate, expired, malformed, or truncated history and any bundle
+no retained session cites. The file names
 and their `state_dir` location are listed in
 [Runtime state files](configuration-reference.md#runtime-state-files).
 

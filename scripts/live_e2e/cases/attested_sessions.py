@@ -120,24 +120,18 @@ def assert_upstream_attested_session(
             f"{tee.get('status')!r}"
         )
 
-    # The full record embeds the exact evidence bytes; digest must match. A
-    # Chutes instance session (E2EE binding with a key_id; chutes_instance_id in
-    # src/aggregator/service/claims.rs) carries no evidence.
+    # The full record embeds the exact evidence bytes; digest must match.
     evidence = require_object(session, "evidence", provider.name)
     data = evidence.get("data")
-    if chutes_instance_session(provider, session):
-        if evidence:
-            raise RuntimeError(f"{provider.name} Chutes instance session carries evidence")
-    elif not isinstance(data, str) or not data.startswith("data:"):
+    if not isinstance(data, str) or not data.startswith("data:"):
         raise RuntimeError(f"{provider.name} attested session evidence missing data URI")
-    else:
-        evidence_bytes = base64.b64decode(data.split(",", 1)[1])
-        expect_equal(
-            provider,
-            "evidence.digest",
-            "sha256:" + hashlib.sha256(evidence_bytes).hexdigest(),
-            evidence.get("digest"),
-        )
+    evidence_bytes = base64.b64decode(data.split(",", 1)[1])
+    expect_equal(
+        provider,
+        "evidence.digest",
+        "sha256:" + hashlib.sha256(evidence_bytes).hexdigest(),
+        evidence.get("digest"),
+    )
 
     bindings = session.get("channel_binding")
     if not isinstance(bindings, list) or not bindings:
@@ -163,17 +157,8 @@ def assert_upstream_attested_session(
         "binding_count": len(bindings),
         "binding_types": sorted(t for t in binding_types if t),
         "evidence_digest": evidence.get("digest"),
-        "evidence_has_data_uri": data is not None,
+        "evidence_has_data_uri": True,
     }
-
-
-def chutes_instance_session(provider: Provider, session: dict[str, Any]) -> bool:
-    return provider.provider == "chutes" and any(
-        isinstance(binding, dict)
-        and binding.get("type") == "e2ee_public_key_sha256"
-        and binding.get("key_id")
-        for binding in session.get("channel_binding") or []
-    )
 
 
 def require_object(value: dict[str, Any], key: str, provider_name: str) -> dict[str, Any]:

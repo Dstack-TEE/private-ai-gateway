@@ -74,11 +74,11 @@ item.
    served over. A §9.2(4) deep audit remains impossible for Chutes until a
    chutes-specific evidence re-verifier exists (see the §9.2 audits item
    below) — §9.2(2) (`aci` CLI upstream-2; verifier-ts
-   `checkSessionEvidence`) now passes. The session store still accepts
-   records with empty evidence (it rejects only evidence whose `data` does
-   not hash to `digest`), so a Chutes verifier that stops emitting the
-   bundle degrades to the pre-fix state with a warning in the logs rather
-   than a hard failure.
+   `checkSessionEvidence`) now passes. Every stored session carries a
+   complete bundle: the external verifier boundary rejects a verified result
+   without one, and the session store refuses to store such a session. The
+   store keeps the fleet bundle once, as a shared `evidence` record that each
+   instance session cites by digest.
 5. **Streaming upstream errors carry no receipt.** A streaming request whose
    upstream answers non-200 is returned as a buffered error without a
    receipt (inherited dstack-vllm-proxy behavior,

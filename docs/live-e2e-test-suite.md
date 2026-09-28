@@ -61,8 +61,7 @@ For each entry with the `chat` capability, the case:
    `request.received.body_hash`.
 6. Fetches each cited session, recomputes its ID from the fetched bytes,
    requires the entry's `binding` type, checks the evidence digest, and
-   requires `tee_attested` to be asserted. Chutes instance sessions carry no
-   evidence, so for them the case requires empty evidence instead.
+   requires `tee_attested` to be asserted.
 
 ### Embeddings case
 
