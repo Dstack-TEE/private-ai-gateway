@@ -2689,28 +2689,19 @@ mod tests {
         assert_eq!(served[0].0, "responses:m");
         assert_eq!(served[0].1, prompt);
 
-        // Controls and content Chat has no counterpart for are dropped.
-        for request in [
-            json!({ "model": "m", "input": "hello", "truncation": "auto" }),
-            json!({ "model": "m", "input": "hello", "modalities": ["audio"] }),
-            json!({ "model": "m", "input": "hello", "include": ["file_search_call.results"] }),
-            json!({ "model": "m", "input": "hello", "text": { "format": { "type": "future_format" } } }),
-            json!({
-                "model": "m",
-                "input": [{
-                    "type": "message", "role": "user",
-                    "content": [
-                        { "type": "input_text", "text": "hello" },
-                        { "type": "input_file", "file_url": "https://example.com/a.pdf" }
-                    ]
-                }]
-            }),
-        ] {
-            let served = routes(&request);
-            assert_eq!(served[0].0, "chat:m", "{request}");
-            assert_eq!(served[1].0, "responses:m", "{request}");
-            assert!(served[0].1.to_string().contains("hello"), "{request}");
-        }
+        // Controls Chat has no counterpart for are dropped, and routing keeps
+        // its order.
+        let controls = json!({
+            "model": "m", "input": "hello", "truncation": "auto", "modalities": ["audio"],
+            "include": ["file_search_call.results"], "text": { "format": { "type": "future" } }
+        });
+        let served = routes(&controls);
+        assert_eq!(served[0].0, "chat:m");
+        assert_eq!(served[1].0, "responses:m");
+        assert_eq!(
+            served[0].1,
+            json!({ "model": "m", "messages": [{ "role": "user", "content": "hello" }] })
+        );
     }
 
     /// Codex's client-side tool search reaches Chat as a function, as

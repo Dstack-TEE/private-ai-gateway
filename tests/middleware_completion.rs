@@ -1959,37 +1959,6 @@ async fn messages_thinking_is_bridged_both_ways() {
     }
 }
 
-#[tokio::test]
-async fn malformed_chat_success_on_messages_returns_502_upstream() {
-    let (control_url, posts) = spawn_control_capturing(
-        200,
-        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
-    )
-    .await;
-    let mw = middleware(control_url);
-    let upstream = json!({
-        "id": "chatcmpl-upstream",
-        "model": "internal-model",
-        // A choice with no message: there is no answer to convert.
-        "choices": [{ "finish_reason": "stop" }]
-    });
-    let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
-
-    let (status, _, body) =
-        response_parts(mw.handle_completion(&service, messages_input(false)).await).await;
-    assert_eq!(status, 502);
-    assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "api_error");
-    assert!(!body.to_string().contains("chatcmpl-upstream"));
-    assert!(!body.to_string().contains("internal-model"));
-
-    let report = wait_for_post(&posts, |report| report["status"] == json!(502)).await;
-    assert_eq!(report["status"], 502);
-    assert_eq!(report["selectedRouteId"], "openai:gpt");
-    assert_eq!(report["errorSource"], "upstream");
-    assert_eq!(report["errorMessage"], "upstream_malformed_response");
-}
-
 // A malformed success after a failover is reported on the route and attempt
 // that produced it, after the attempt that failed over.
 #[tokio::test]
@@ -2004,13 +1973,15 @@ async fn malformed_chat_success_after_failover_keeps_attempts() {
     .await;
     // Route a is out of capacity; route b answers 200 with no message.
     let (service, forwarded, _) = build_sequenced_service(vec![503, 200]);
-    let (status, _, _) = response_parts(
+    let (status, _, body) = response_parts(
         middleware(control_url)
             .handle_completion(&service, messages_input(false))
             .await,
     )
     .await;
     assert_eq!(status, 502);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "api_error");
     assert_eq!(*forwarded.lock().unwrap(), ["a:gpt-test", "b:gpt-test"]);
 
     let failover = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(0)).await;

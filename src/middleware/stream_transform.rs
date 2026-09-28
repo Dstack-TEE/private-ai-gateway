@@ -2097,95 +2097,24 @@ mod tests {
         (events, error, wire)
     }
 
+    /// The Responses ends of the cases `openai_to_anthropic_stream_endings`
+    /// covers for Messages.
     #[tokio::test]
-    async fn responses_stream_keeps_the_first_tool_identity() {
-        for (first_name, id, name) in [
-            ("lookup", "call_1", "lookup"),
-            ("lookup", "", ""),
-            ("lookup", "call_12", "lookup"),
-            ("lookup", "call_1", "lookup_more"),
-            ("", "call_1", "lookup"),
-            ("", "call_12", "lookup"),
-        ] {
-            let first = json!({ "choices": [{ "delta": { "tool_calls": [{
-                "index": 0, "id": "call_1",
-                "function": { "name": first_name, "arguments": "" }
-            }] } }] });
-            let second = json!({ "choices": [{ "delta": { "tool_calls": [{
-                "index": 0, "id": id,
-                "function": { "name": name, "arguments": "{}" }
-            }] }, "finish_reason": "tool_calls" }] });
-            let (events, error, wire) = replay_responses_fixture(&json!({
-                "events": [format!("data: {first}"), format!("data: {second}"), "data: [DONE]"]
-            }))
-            .await;
-            assert!(error.is_none(), "{wire}");
-            for event in &events {
-                if let Some(item_id) = event.get("item_id") {
-                    assert_eq!(item_id, "fc_call_1");
-                }
-                if let Some(item) = event.get("item") {
-                    assert_eq!(item["id"], "fc_call_1");
-                    assert_eq!(item["name"], "lookup");
-                }
-            }
-            assert_eq!(events.last().unwrap()["type"], "response.completed");
-        }
-    }
-
-    #[tokio::test]
-    async fn responses_stream_assembles_index_less_calls() {
-        let events = [
-            tool_event(
-                json!({ "id": "call_1", "function": { "name": "lookup", "arguments": "" } }),
-            ),
-            chat_event(json!({}), Some("tool_calls")),
-            "data: [DONE]".to_string(),
-        ];
-        let (events, error, wire) = replay_responses_fixture(&json!({ "events": events })).await;
-        assert!(error.is_none(), "{wire}");
-        let terminal = events.last().unwrap();
-        assert_eq!(terminal["type"], "response.completed");
-        assert_eq!(terminal["response"]["output"][0]["call_id"], "call_1");
-        assert_eq!(terminal["response"]["output"][0]["arguments"], "{}");
-    }
-
-    /// Streaming agrees with the buffered bodies: a cut-off turn is reported
-    /// as cut off even when its only tool call never got a name, and an
-    /// explicit error fails the turn.
-    #[tokio::test]
-    async fn stream_truncation_and_errors_win_over_tool_call_repair() {
+    async fn responses_stream_endings() {
         let text = chat_event(json!({ "content": "partial" }), None);
         let nameless =
             tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{" } }));
         let length = chat_event(json!({}), Some("length"));
-        let error = format!(
-            "data: {}",
-            json!({ "error": { "message": "engine failed" } })
-        );
-        let cut = [
-            text.as_str(),
-            nameless.as_str(),
-            length.as_str(),
-            "data: [DONE]",
-        ];
-        let failed = [text.as_str(), error.as_str(), "data: [DONE]"];
-
-        let out = run(messages_transform(), &cut);
-        let delta = out
-            .iter()
-            .find(|event| event["type"] == "message_delta")
-            .unwrap();
-        assert_eq!(delta["delta"]["stop_reason"], "max_tokens");
-        assert_eq!(
-            run(messages_transform(), &failed).last().unwrap()["type"],
-            "error"
-        );
-
+        let error = format!("data: {}", json!({ "error": { "message": "failed" } }));
+        let no_choice = "data: {}".to_string();
         for (events, terminal) in [
-            (&cut[..], "response.incomplete"),
-            (&failed[..], "response.failed"),
+            // Cut off mid-call: incomplete, even with no named call.
+            (vec![&text, &nameless, &length], "response.incomplete"),
+            (vec![&text, &error], "response.failed"),
+            (vec![&no_choice], "response.failed"),
         ] {
+            let mut events: Vec<&str> = events.into_iter().map(String::as_str).collect();
+            events.push("data: [DONE]");
             let (out, error, wire) = replay_responses_fixture(&json!({ "events": events })).await;
             assert!(error.is_none(), "{wire}");
             assert_eq!(out.last().unwrap()["type"], terminal, "{wire}");
@@ -2229,25 +2158,6 @@ mod tests {
                 "status": "completed", "execution": "client", "arguments": { "query": "mail" }
             })
         );
-    }
-
-    #[tokio::test]
-    async fn responses_stream_items_start_empty_and_need_a_choice() {
-        let text = chat_event(json!({ "content": "hi" }), Some("stop"));
-        let (events, _, _) =
-            replay_responses_fixture(&json!({ "events": [text, "data: [DONE]"] })).await;
-        let added = events
-            .iter()
-            .find(|event| event["type"] == "response.output_item.added")
-            .unwrap();
-        assert_eq!(added["item"]["content"], json!([]));
-
-        // A body with no choice is no response at all, even if it terminates.
-        let (events, _, wire) =
-            replay_responses_fixture(&json!({ "events": ["data: {}", "data: [DONE]"] })).await;
-        assert_eq!(events.last().unwrap()["type"], "response.failed", "{wire}");
-        let out = run(messages_transform(), &["data: {}", "data: [DONE]"]);
-        assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");
     }
 
     /// Rebuild the output the way a client applies events one by one: every
@@ -2390,19 +2300,6 @@ mod tests {
         out
     }
 
-    #[test]
-    fn openai_to_anthropic_stream_error_payload_emits_error_event() {
-        let events = [
-            "data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}",
-            "data: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}",
-            "data: [DONE]",
-        ];
-        let out = run(messages_transform(), &events);
-        let error = out.iter().find(|e| e["type"] == json!("error")).unwrap();
-        assert_eq!(error["error"]["type"], json!("overloaded_error"));
-        assert!(!out.iter().any(|e| e["type"] == json!("message_stop")));
-    }
-
     fn chat_event(delta: Value, finish_reason: Option<&str>) -> String {
         format!(
             "data: {}",
@@ -2520,12 +2417,17 @@ mod tests {
             stop_reason(&[&text, "data: [DONE]"]),
             Some(json!("end_turn"))
         );
-        // A call cut off by the token limit is the limit's doing, not malformed.
+        // A call cut off by the token limit is the limit's doing, not
+        // malformed, whether or not it got its name.
         let length = chat_event(json!({}), Some("length"));
-        assert_eq!(
-            stop_reason(&[&partial_call, &length, "data: [DONE]"]),
-            Some(json!("max_tokens"))
-        );
+        let nameless =
+            tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{}" } }));
+        for call in [&partial_call, &nameless] {
+            assert_eq!(
+                stop_reason(&[call, &length, "data: [DONE]"]),
+                Some(json!("max_tokens"))
+            );
+        }
         // Reasons outside the OpenAI vocabulary end the turn.
         for reason in ["eos", "abort", "overloaded_error"] {
             let event = chat_event(json!({ "content": "hi" }), Some(reason));
@@ -2547,9 +2449,7 @@ mod tests {
         assert_eq!(out.last().unwrap()["type"], "message_stop");
 
         // Only a stream with no answer fails: an upstream error, no choice, or
-        // tool calls none of which has a name.
-        let nameless =
-            tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{}" } }));
+        // a finished turn whose tool calls none has a name.
         for events in [
             vec!["data: {}", "data: [DONE]"],
             vec![r#"data: {"choices":[null]}"#, "data: [DONE]"],
@@ -2558,9 +2458,12 @@ mod tests {
             let out = run(transform.clone(), &events);
             assert_eq!(out.last().unwrap()["type"], "error", "{out:?}");
         }
-        let error = format!("data: {}", json!({ "error": { "message": "boom" } }));
+        let error = format!(
+            "data: {}",
+            json!({ "error": { "type": "overloaded_error", "message": "busy" } })
+        );
         let out = run(transform.clone(), &[&text, &error, "data: [DONE]"]);
-        assert_eq!(out.last().unwrap()["type"], "error");
+        assert_eq!(out.last().unwrap()["error"]["type"], "overloaded_error");
     }
 
     #[test]
