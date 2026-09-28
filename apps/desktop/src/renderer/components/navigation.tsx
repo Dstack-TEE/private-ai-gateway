@@ -25,13 +25,17 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
   const current = useMatches({ select: (matches) => matches.at(-1)?.routeId });
   const { updates } = useShell();
   return (
-    <aside className="sidebar min-w-0 pt-3 pr-2 pb-3 pl-2 flex flex-col gap-0.5 bg-sidebar border-r border-r-sidebar-border [&_nav]:grid [&_nav]:gap-0.5 max-[620px]:pl-2 max-[620px]:pr-2 max-[440px]:pl-1.5 max-[440px]:pr-1.5">
-      {overlaidTitleBar && <div className="sidebar-drag relative flex-[0_0_28px]" data-tauri-drag-region />}
-      <div className="sidebar-brand min-h-9.5 mt-0 mr-1.5 mb-5 ml-1.5 flex items-center gap-2.25 font-semibold whitespace-nowrap overflow-hidden [&_>_*]:pointer-events-none [&_span]:overflow-hidden [&_span]:text-ellipsis max-[780px]:[&_>_span:last-child]:text-xs max-[620px]:justify-center max-[620px]:p-0 max-[620px]:[&_>_span:last-child]:hidden" {...titleBarDragRegion}>
-        <BrandMark className="brand-mark size-9" />
-        <span className="sidebar-brand-copy min-w-0 flex flex-col gap-0.5 text-sm leading-4.5 [&_small]:text-xs [&_small]:leading-4 [&_small]:font-normal [&_small]:text-muted-foreground"><span>{brand.productName}</span><small>{brand.byline}</small></span>
+    <aside className="flex min-w-0 flex-col gap-0.5 border-r border-r-sidebar-border bg-sidebar px-2 py-3 max-[440px]:px-1.5">
+      {overlaidTitleBar && <div className="relative flex-[0_0_28px]" data-tauri-drag-region />}
+      {/* The brand drags the window where the title bar is overlaid, so its parts take no pointer events. */}
+      <div className="mx-1.5 mb-5 flex min-h-9.5 items-center gap-2.25 overflow-hidden font-semibold whitespace-nowrap max-[620px]:justify-center" {...titleBarDragRegion}>
+        <BrandMark className="pointer-events-none size-9" />
+        <span className="pointer-events-none flex min-w-0 flex-col gap-0.5 overflow-hidden text-sm leading-4.5 text-ellipsis max-[780px]:text-xs max-[620px]:hidden">
+          <span className="truncate">{brand.productName}</span>
+          <small className="text-xs leading-4 font-normal text-muted-foreground">{brand.byline}</small>
+        </span>
       </div>
-      <nav ref={navigationRef} className="w-full" aria-label="Main navigation">
+      <nav ref={navigationRef} className="grid w-full gap-0.5" aria-label="Main navigation">
         <SidebarMenu>
         {pages.map((page) => {
           const Icon = page.icon;
@@ -63,14 +67,14 @@ export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElemen
   const page = useMatches({ select: (matches) => matches.at(-1) });
   const protection = state.protection;
   return (
-    <header className="page-header flex-[0_0_56px] mt-0 mr-6 mb-0 ml-6 pt-2 flex items-center justify-between gap-3 [&_h1]:text-xl [&_h1]:font-semibold [&_h1]:tracking-normal [&_h1]:pointer-events-none [&_h1]:select-none max-[620px]:pl-4 max-[620px]:pr-4 max-[440px]:basis-13 max-[440px]:mt-0 max-[440px]:mr-3 max-[440px]:mb-0 max-[440px]:ml-3 max-[440px]:pt-1.75 max-[440px]:gap-2" {...titleBarDragRegion}>
-      <h1 ref={titleRef} tabIndex={-1}>{page?.staticData.title}</h1>
+    <header className="mx-6 flex flex-[0_0_56px] items-center justify-between gap-3 pt-2 max-[620px]:px-4 max-[440px]:mx-3 max-[440px]:basis-13 max-[440px]:gap-2 max-[440px]:pt-1.75" {...titleBarDragRegion}>
+      <h1 ref={titleRef} tabIndex={-1} className="pointer-events-none text-xl font-semibold select-none">{page?.staticData.title}</h1>
       {page?.fullPath !== "/" && (
-        <div className="page-protection min-w-0 ml-auto flex items-center gap-2">
-          <span className={cn("page-switch-copy min-w-0 grid justify-items-end leading-4 [&_strong]:text-xs [&_.protection-status]:grid [&_.protection-status]:grid-cols-[14px_auto] [&_.protection-status]:justify-items-end [&_.protection-status]:gap-x-1.25 [&_.protection-status]:gap-y-0 [&_.protection-duration]:col-span-full", toneTextClass[protection.tone])}>
-            <strong><ProtectionStatus state={state} /></strong>
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          <span className={cn("grid min-w-0 justify-items-end leading-4", toneTextClass[protection.tone])}>
+            <strong className="text-xs"><ProtectionStatus state={state} variant="header" /></strong>
           </span>
-          <ProtectedControl state={state} pending={protectionPending} compact iconOnly onToggle={toggleProtection} />
+          <ProtectedControl state={state} pending={protectionPending} compact onToggle={toggleProtection} />
         </div>
       )}
     </header>

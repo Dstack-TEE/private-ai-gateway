@@ -1,12 +1,8 @@
 @theme {
-  --animate-brand-icon-pulse: brand-icon-pulse 1.5s ease-in-out infinite;
   --animate-track-left: track-left 60s linear infinite;
   --animate-track-right: track-right 60s linear infinite;
   --animate-control-spin: control-spin 900ms linear infinite;
 
-  @keyframes brand-icon-pulse {
-    50% { opacity: 0.68; }
-  }
   @keyframes track-left {
     to { transform: translateX(-50%); }
   }

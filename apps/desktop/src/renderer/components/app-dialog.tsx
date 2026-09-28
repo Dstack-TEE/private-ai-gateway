@@ -52,6 +52,11 @@ export function AppDialog({ open, title, description, className, dismissible = t
   </Dialog>;
 }
 
+/** The part of an `AppDialog` that scrolls, out to the dialog's edges so its scrollbar sits there. */
+export function AppDialogBody({ className, children }: PropsWithChildren<{ className?: string }>): React.JSX.Element {
+  return <div className={cn("-mx-6 min-h-0 overflow-y-auto px-6", className)}>{children}</div>;
+}
+
 /** The footer of a dialog that only presents information. */
 export function DoneFooter(): React.JSX.Element {
   return <DialogFooter><DialogClose render={<Button variant="outline" />}>Done</DialogClose></DialogFooter>;

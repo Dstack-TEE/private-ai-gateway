@@ -8,10 +8,10 @@ import { UpdateControl, UpdateChannelControl } from "../updates";
 import { Button } from "../components/ui/button";
 import { AppearanceControl } from "../components/appearance";
 import { ExportDiagnostics } from "../components/maintenance";
-import { Item, ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
+import { ItemActions, ItemContent, ItemTitle, ItemDescription } from "../components/ui/item";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
+import { SettingsItem, SettingsSection, SettingsList, SettingsLink, SettingsToggle } from "../components/settings";
 import type { LaunchPreference, WebUiStatus } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities as distribution, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
@@ -36,7 +36,7 @@ function CliRegistrationControl(): React.JSX.Element {
         ? <>Installed at {directory}. This app can run <code>pap</code>; your terminal’s PATH may differ.</>
         : <>Installed at {directory}. Add this directory to your terminal’s PATH.</>
       : directory ? `Default location: ${directory}` : "Command registration is unavailable.";
-  return <Item>
+  return <SettingsItem>
     <ItemContent>
       <ItemTitle><code>pap</code> command</ItemTitle>
       <ItemDescription>{description}</ItemDescription>
@@ -46,7 +46,7 @@ function CliRegistrationControl(): React.JSX.Element {
         {busy ? "Working…" : registration?.installed ? "Remove" : "Install"}
       </Button>
     </ItemActions>
-  </Item>;
+  </SettingsItem>;
 }
 
 /** One scannable line, like the Local API row; the dialog holds the controls. */
@@ -60,7 +60,7 @@ function webUiSummary(status: WebUiStatus): string {
 function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
   const reportFailure = useReportFailure();
   const mutation = useMutation({ mutationFn: onSignOut, onError: (error) => reportFailure("Could not sign out", error) });
-  return <Item>
+  return <SettingsItem>
     <ItemContent>
       <ItemTitle>This browser</ItemTitle>
       <ItemDescription>Signing out ends this browser session. Sign in again with the web UI password.</ItemDescription>
@@ -70,7 +70,7 @@ function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JS
         {mutation.isPending ? "Signing Out…" : "Sign Out"}
       </Button>
     </ItemActions>
-  </Item>;
+  </SettingsItem>;
 }
 
 function useLaunchPreferences() {
@@ -119,7 +119,7 @@ export function SettingsPage(): React.JSX.Element {
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
   const starting = state.protection.phase === "starting";
   return (
-    <div className="max-w-230 min-h-full mt-0 mr-auto mb-0 ml-auto">
+    <div className="mx-auto min-h-full max-w-230">
       {state.configFiles.error && <Alert variant="destructive" className="mb-5">
         <AlertTitle>Settings file not applied</AlertTitle>
         <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
@@ -143,19 +143,19 @@ export function SettingsPage(): React.JSX.Element {
           {session && <SignOutControl onSignOut={session.signOut} />}
       </SettingsSection>
 
-      <Collapsible className="group mt-5 [&:first-child]:mt-0 [&_[data-slot=collapsible-trigger]]:mb-2 [&_[aria-expanded=true]_>_svg]:rotate-90">
-        <CollapsibleTrigger render={<Button variant="ghost" />}><ChevronRight size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
+      <Collapsible className="mt-5 first:mt-0">
+        <CollapsibleTrigger render={<Button variant="ghost" className="mb-2" />}><ChevronRight className="group-aria-expanded/button:rotate-90" size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
           <DevelopmentOsControl disabled={locked} />
           {distribution.nativeUpdates && <UpdateChannelControl api={desktopApi} updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
-          {state.configFiles.configPath && <Item>
+          {state.configFiles.configPath && <SettingsItem>
             <ItemContent>
               <ItemTitle>Settings file</ItemTitle>
               <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
             </ItemContent>
-          </Item>}
+          </SettingsItem>}
           <ExportDiagnostics api={desktopApi} />
           <SettingsLink title="Reset settings" disabled={locked} onClick={shell.resetSettings} />
           </SettingsList>

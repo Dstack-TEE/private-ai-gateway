@@ -14,8 +14,9 @@ import { PROFILE_TRANSFER, ProfileTransfer } from "../components/maintenance";
 import { Field, FieldError, FieldGroup, FieldLabel } from "../components/ui/field";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Input } from "../components/ui/input";
+import { ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle } from "../components/ui/item";
 import { IconButton } from "../components/controls";
-import { AppDialog, useDialog, type DialogControl } from "../components/app-dialog";
+import { AppDialog, AppDialogBody, useDialog, type DialogControl } from "../components/app-dialog";
 import { useConfirm, type Confirmation } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
@@ -25,6 +26,7 @@ import { desktopApi, distributionCapabilities, web } from "../lib/environment";
 import { profileIsAvailable } from "../lib/protection";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
+import { cn } from "../lib/utils";
 
 export function ProfilesDialog({
   state,
@@ -72,34 +74,39 @@ export function ProfilesDialog({
     <AppDialog {...control} title="Profiles" className="h-[min(calc(100%-2rem),34rem)] sm:max-w-xl" dismissible={!workingProfileId && !transferBusy} onClose={onClose}>
       <p className="text-sm">Choose the service used when protection starts.</p>
       {!activeProfileAvailable && (
-        <p className="banner profile-availability flex items-start gap-1.75 rounded-lg bg-[var(--warning-bg)] px-3 py-2.25 text-warning wrap-anywhere">
+        <p className="flex items-start gap-1.75 rounded-lg bg-warning/10 px-3 py-2.25 text-warning wrap-anywhere">
           <TriangleAlert size={15} aria-hidden="true" />
           {activeProfile ? `${activeConnection} for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
-      {state.profiles.length > 0 && <div className="profile-list min-h-0 flex-auto overflow-auto bg-card border border-border rounded-2xl" role="list" aria-label="AI service profiles">
+      {state.profiles.length > 0 && <ItemGroup className="min-h-0 flex-auto gap-0 overflow-auto rounded-2xl border bg-card" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
           const active = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
           const status = profileIsAvailable(profile, state) ? "Ready" : connectionRequirement(profile);
+          // The edit button sits over the end of the row, which is one button.
           return (
-            <div className={`profile-list-row min-w-0 grid grid-cols-[minmax(0,_1fr)_52px] items-center border-b border-b-border [&.is-active]:bg-muted [&.is-active_.profile-select]:bg-transparent last:border-b-0 [&_>_button:last-child]:col-start-2 [&_>_button:last-child]:row-start-1 [&_>_button:last-child]:justify-self-center ${active ? " is-active" : ""}`} role="listitem" key={profile.id}>
+            <div role="listitem" key={profile.id} className={cn("grid min-w-0 grid-cols-[minmax(0,1fr)_52px] items-center border-b last:border-b-0", active && "bg-muted")}>
               <ActionItem
-                type="button"
-                className="profile-select col-span-full row-start-1 min-w-0 pr-17 [&_>_span:nth-child(2)]:min-w-0 [&_>_span:nth-child(2)]:flex-auto [&_>_span:nth-child(2)]:grid [&_>_span:nth-child(2)]:gap-0.5 [&_strong]:min-w-0 [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_small]:min-w-0 [&_small]:overflow-hidden [&_small]:text-ellipsis [&_small]:whitespace-nowrap [&_strong]:text-foreground [&_strong]:text-sm [&_strong]:font-semibold [&_small]:text-muted-foreground [&_small]:text-xs [&_>_svg]:flex-none [&_>_svg]:text-foreground"
+                className={cn("col-span-full row-start-1 min-w-0 pr-17", active && "hover:bg-transparent")}
                 aria-current={active || undefined}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => select(profile)}
               >
                 <ServiceLogo provider={profile.provider} size="large" />
-                <span><strong>{profile.name}</strong><small>{serviceHost(profile.remoteUrl)} · {status}</small></span>
-                {working ? <LoaderCircle className="is-spinning animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : active ? <Check size={16} aria-hidden="true" /> : null}
+                <ItemContent className="min-w-0 flex-auto gap-0.5">
+                  <ItemTitle className="w-full line-clamp-none truncate leading-5 font-semibold">{profile.name}</ItemTitle>
+                  <ItemDescription className="line-clamp-none truncate text-xs">{serviceHost(profile.remoteUrl)} · {status}</ItemDescription>
+                </ItemContent>
+                {(working || active) && <ItemActions>
+                  {working ? <LoaderCircle className="animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+                </ItemActions>}
               </ActionItem>
-              <IconButton size="icon-sm" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({ profile })}><Pencil /></IconButton>
+              <IconButton size="icon-sm" className="col-start-2 row-start-1 justify-self-center" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({ profile })}><Pencil /></IconButton>
             </div>
           );
         })}
-      </div>}
+      </ItemGroup>}
       {transfer && !transfer.failed && <p role="status" className="text-sm text-muted-foreground">{transfer.message}</p>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       <DialogFooter>
@@ -310,22 +317,22 @@ export function ProfileEditorDialog({
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
-        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
-        <FieldGroup className="gap-4 [&_[data-slot=field]]:gap-2">
-        <Field>
+        <AppDialogBody className="py-1">
+        <FieldGroup className="gap-4">
+        <Field className="gap-2">
         <FieldLabel id="profile-provider-label">Provider</FieldLabel>
-        <ToggleGroup variant="outline" className="service-presets w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { const next = Object.values(SERVICE_PROVIDERS).find((service) => service.id === value); if (next) void chooseService(next.id); }}>
+        <ToggleGroup variant="outline" className="w-full grid grid-cols-3 gap-2 max-[440px]:grid-cols-1" value={[draft.provider]} disabled={frozen || working} aria-labelledby="profile-provider-label" onValueChange={([value]) => { const next = Object.values(SERVICE_PROVIDERS).find((service) => service.id === value); if (next) void chooseService(next.id); }}>
           {Object.values(SERVICE_PROVIDERS).map((service) => (
-            <ToggleGroupItem key={service.id} value={service.id} className="service-preset min-w-0 text-left [&_.service-logo]:w-4.5 [&_.service-logo]:h-4.5 [&_.service-custom-icon]:w-4.5 [&_.service-custom-icon]:h-4.5 [&_strong]:min-w-0 [&_strong]:flex-auto [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_>_svg]:flex-none [&_>_svg]:text-foreground" aria-label={service.label}>
-              <ServiceLogo provider={service.id} />
-              <strong>{service.label}</strong>
-              {draft.provider === service.id && <Check size={15} aria-hidden="true" />}
+            <ToggleGroupItem key={service.id} value={service.id} className="min-w-0 text-left" aria-label={service.label}>
+              <ServiceLogo provider={service.id} className="size-4.5" />
+              <strong className="min-w-0 flex-auto truncate">{service.label}</strong>
+              {draft.provider === service.id && <Check className="flex-none text-foreground" size={15} aria-hidden="true" />}
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
         </Field>
-          <FormField id="profile-name" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
-          {!provider.presetUrl && <FormField id="profile-endpoint" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} autoComplete="off" /></FormField>}
+          <FormField id="profile-name" className="gap-2" label="Profile name"><Input id="profile-name" value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} disabled={frozen || working} autoComplete="off" /></FormField>
+          {!provider.presetUrl && <FormField id="profile-endpoint" className="gap-2" label="Service endpoint" description={<>Requires ACI support. <Button type="button" variant="link" className="h-auto p-0 text-xs align-baseline" onClick={() => { void desktopApi.openAboutLink("aci").catch(reportError); }}>About ACI<ExternalLink size={12} aria-hidden="true" /></Button></>}><Input id="profile-endpoint" aria-describedby="profile-endpoint-note" value={draft.remoteUrl} onChange={(event) => setDraft((current) => ({ ...current, remoteUrl: event.target.value }))} disabled={frozen || working} spellCheck={false} autoComplete="off" /></FormField>}
           <Tabs value={provider.accountLogin ? authMethod : "apiKey"} className="gap-4"
             onValueChange={(next) => { if (next === "account" || next === "apiKey") void chooseAuthMethod(next); }}>
             {provider.accountLogin && <TabsList aria-label="Connection method" className="w-full">
@@ -353,7 +360,7 @@ export function ProfileEditorDialog({
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
                     scope={accountScope} images={selectedAccount.images} onSignIn={signIn}
                     credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
-                  {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" label="Workspace">
+                  {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" className="gap-2" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },
                       ...(workspaces ?? []).map((workspace) => ({ value: String(workspace.id), label: workspace.name })),
@@ -362,11 +369,11 @@ export function ProfileEditorDialog({
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
                     {!authorized && <FieldError>{workspaceError && `Could not load account workspaces. ${workspaceError}`}</FieldError>}
                   </FormField>}
-                </> : <Button type="button" variant="default" size="lg" className="w-full [&_.service-logo]:size-4" disabled={working || frozen || !draft.name.trim()} onClick={signIn}><ServiceLogo provider={draft.provider} />Connect {provider.label}</Button>}
+                </> : <Button type="button" variant="default" size="lg" className="w-full" disabled={working || frozen || !draft.name.trim()} onClick={signIn}><ServiceLogo provider={draft.provider} className="size-4" />Connect {provider.label}</Button>}
               </FieldGroup>
             </TabsContent>
             <TabsContent value="apiKey">
-              <FormField id="profile-key" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
+              <FormField id="profile-key" className="gap-2" label={keyLabel} description={savedCredentialApplies ? "Leave blank to keep the saved key." : "Stored securely on this device."}>
                 <Input id="profile-key" type="password" value={apiKeyDraft} onChange={(event) => setApiKeyDraft(event.target.value)} placeholder={savedCredentialApplies ? "Replace the saved key" : `Paste your ${keyLabel}`} disabled={frozen || working} autoComplete="off" spellCheck={false} aria-describedby="profile-key-note" />
                 {distributionCapabilities.accountPortalLinks && provider.accountLogin && <Button type="button" variant="link" size="sm" className="h-auto justify-start self-start p-0" disabled={working || frozen} onClick={() => {
                   void desktopApi.openApiKeyPage(draft.provider).catch(reportError);
@@ -375,7 +382,7 @@ export function ProfileEditorDialog({
             </TabsContent>
           </Tabs>
         </FieldGroup>
-        </div>
+        </AppDialogBody>
         <FieldError>{error}</FieldError>
         {copyStatus}
         <DialogFooter>
@@ -392,7 +399,7 @@ export function ProfileEditorDialog({
 function CallbackForm({ disabled, onContinue }: { disabled: boolean; onContinue(callbackUrl: string): void }): React.JSX.Element {
   const [callbackUrl, setCallbackUrl] = useState("");
   return <div className="mt-3 space-y-2">
-    <FormField id="account-callback" label="Callback URL">
+    <FormField id="account-callback" className="gap-2" label="Callback URL">
       <Input id="account-callback" type="password" value={callbackUrl} autoComplete="off" spellCheck={false} disabled={disabled}
         placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackUrl(event.target.value)} />
     </FormField>

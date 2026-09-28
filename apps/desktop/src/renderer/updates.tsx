@@ -5,7 +5,8 @@ import type { DesktopApi, UpdateInfo, UpdateChannel } from "../shared/contracts"
 import { Button } from "./components/ui/button";
 import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group";
 import { FieldLabel } from "./components/ui/field";
-import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
+import { ItemContent, ItemTitle, ItemDescription, ItemActions } from "./components/ui/item";
+import { SettingsItem } from "./components/settings";
 import { useConfirm, useReportFailure } from "./components/confirm";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
@@ -95,7 +96,7 @@ export function UpdateChannelControl({ api, updates }: { api: DesktopApi; update
     },
     onError: (error) => reportFailure("Could not change the update channel", error),
   });
-  return <Item>
+  return <SettingsItem>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>
       <ItemDescription id="update-channel-note">{updates.channel === "beta" ? "Beta and stable releases" : "Stable releases"}</ItemDescription>
@@ -105,7 +106,7 @@ export function UpdateChannelControl({ api, updates }: { api: DesktopApi; update
         if (!updates.busy && (value === "stable" || value === "beta") && value !== updates.channel) change.mutate(value);
       }}><ToggleGroupItem value="stable">Stable</ToggleGroupItem><ToggleGroupItem value="beta">Beta</ToggleGroupItem></ToggleGroup>
     </ItemActions>
-  </Item>;
+  </SettingsItem>;
 }
 
 export function UpdateControl({ updates, productName, desktop }: { updates: ReturnType<typeof useUpdates>; productName: string; desktop: boolean }): React.JSX.Element {
@@ -118,19 +119,19 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
     : "You’re up to date";
   const manual = !busy && !ready && info?.version ? info : undefined;
   const commands = manual?.upgradeCommands ?? [];
-  return <Item>
+  return <SettingsItem>
     <ItemContent className="min-w-0">
       <ItemTitle>{productName}</ItemTitle>
       {manual && <>
         <ItemDescription>{commands.length ? (desktop ? `Quit ${productName}, then run:` : "Run:")
           : manual.downloadUrl ? "Extract this archive into a new directory:" : `Update it from the ${productName} desktop app or its package manager.`}</ItemDescription>
-        {(commands.length > 0 || manual.downloadUrl) && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 text-xs select-text" data-slot="upgrade-commands">{commands.length ? commands.join("\n") : manual.downloadUrl}</pre>}
+        {(commands.length > 0 || manual.downloadUrl) && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 text-xs select-text">{commands.length ? commands.join("\n") : manual.downloadUrl}</pre>}
       </>}
     </ItemContent>
     <ItemActions className="ml-auto max-w-full flex-wrap justify-end text-right">
-      <span className="text-sm font-medium tabular-nums" data-slot="app-version">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
+      <span className="text-sm font-medium tabular-nums">{currentVersion ? `v${currentVersion}` : "Version unavailable"}</span>
       {ready ? <Button disabled={Boolean(busy)} onClick={updates.restart}><RotateCw aria-hidden="true" />Restart to Update</Button> : <ItemDescription className="max-w-sm text-right" role="status">{label}</ItemDescription>}
       {ready && <span role="status" className="sr-only">{label}</span>}
     </ItemActions>
-  </Item>;
+  </SettingsItem>;
 }

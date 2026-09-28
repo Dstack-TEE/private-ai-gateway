@@ -9,7 +9,7 @@ import { Field, FieldGroup, FieldLabel, FieldError, FieldSeparator } from "../co
 import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
-import { AppDialog, type DialogControl } from "../components/app-dialog";
+import { AppDialog, AppDialogBody, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
@@ -36,7 +36,7 @@ export function LocalApiPanel({
   const reportFailure = useReportFailure();
   const { copy, isCopied, status } = useCopy((error, label) => reportFailure(`Could not copy the ${label}`, error));
   return (
-    <div className="copy-rows relative grid auto-rows-auto gap-3">
+    <div className="relative grid auto-rows-auto gap-3">
       <CopyRow title="Endpoint" copyLabel={endpointLabel} value={proxyUrl} copied={isCopied(proxyUrl)} onCopy={copy} />
       <CopyRow
         title="API key"
@@ -47,7 +47,7 @@ export function LocalApiPanel({
         copied={isCopied(clientKey)}
         onCopy={copy}
       >
-        <IconButton className="row-action relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+        <IconButton className="relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </CopyRow>
       {status}
     </div>
@@ -73,17 +73,17 @@ function CopyRow({
   onCopy(label: string, value: string): void;
 }>): React.JSX.Element {
   return (
-    <Item variant="muted" size="xs" className="copy-row relative h-14 min-w-0 overflow-hidden">
+    <Item variant="muted" size="xs" className="relative h-14 min-w-0 overflow-hidden">
       <Button
         variant="ghost"
-        className="copy-surface absolute inset-0 flex size-full min-h-0 min-w-0 flex-col items-start justify-center gap-0.5 rounded-none border-0 bg-transparent py-2.25 pr-[min(100px,_40%)] pl-3 text-left hover:bg-muted [&:focus-visible_.copy-feedback]:opacity-100 [&:hover_.copy-feedback]:opacity-100 [&_code]:max-w-full [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap"
+        className="absolute inset-0 flex size-full min-h-0 min-w-0 flex-col items-start justify-center gap-0.5 rounded-none border-0 bg-transparent py-2.25 pr-[min(100px,40%)] pl-3 text-left hover:bg-muted"
         disabled={!value}
         aria-label={`${copyLabel}: ${ariaValue ?? "Unavailable"}. Copy`}
         onClick={() => { if (value) onCopy(copyLabel, value); }}
       >
-        <span className="row-title text-xs font-normal text-muted-foreground">{title}</span>
+        <span className="text-xs font-normal text-muted-foreground">{title}</span>
         <code className="block w-full flex-none overflow-hidden text-ellipsis whitespace-nowrap text-sm text-foreground">{displayValue ?? "Unavailable"}</code>
-        <span className={cn("copy-feedback absolute right-13.5 top-1/2 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
+        <span className={cn("absolute top-1/2 right-13.5 -translate-y-1/2 text-xs font-semibold text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/button:opacity-100 group-focus-visible/button:opacity-100", copied && "text-primary opacity-100")}>{copied ? "Copied" : "Copy"}</span>
       </Button>
       {children}
     </Item>
@@ -152,14 +152,14 @@ export function LocalApiDialog({
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
-        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
+        <AppDialogBody className="py-1">
           <FieldGroup>
           <ListenerFields api={desktopApi} idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
           <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Local API key</FieldLabel>
             <InputGroup>
-              <InputGroupInput id="local-client-key" className="mono font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey ?? ""} readOnly />
+              <InputGroupInput id="local-client-key" className="font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey ?? ""} readOnly />
               <InputGroupAddon align="inline-end">
                 <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                 <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{isCopied(clientKey) ? <Check /> : <Copy />}</InputGroupButton></Hint>
@@ -169,7 +169,7 @@ export function LocalApiDialog({
             {clientKey === "" && <FieldError>The Local API key is unavailable. Rotate it to restore access.</FieldError>}
           </Field>
           </FieldGroup>
-        </div>
+        </AppDialogBody>
         <FieldError>{error}</FieldError>
         {status}
         <DialogFooter>

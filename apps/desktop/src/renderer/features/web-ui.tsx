@@ -7,7 +7,7 @@ import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "
 import { Hint } from "../components/hint";
 import { ListenerFields } from "../components/listen-address";
 import { SettingsList, SettingsToggle } from "../components/settings";
-import { AppDialog, type DialogControl } from "../components/app-dialog";
+import { AppDialog, AppDialogBody, type DialogControl } from "../components/app-dialog";
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { AuthoredError, errorMessage } from "../lib/error-message";
@@ -116,7 +116,7 @@ export function WebUiDialog({
   return (
     <AppDialog {...control} title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
-        <div className="-mx-6 min-h-0 overflow-y-auto px-6 py-1">
+        <AppDialogBody className="py-1">
           <FieldGroup>
             <SettingsList>
               <SettingsToggle label="Web UI" checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
@@ -145,7 +145,7 @@ export function WebUiDialog({
               </Field>}
             </>}
           </FieldGroup>
-        </div>
+        </AppDialogBody>
         <FieldError>{error}</FieldError>
         {copyStatus}
         <DialogFooter>
