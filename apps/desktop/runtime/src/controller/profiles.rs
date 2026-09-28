@@ -47,7 +47,7 @@ impl DesktopRuntime {
         let _operation = self.configuration_change()?;
         let initial = self.manager.snapshot()?;
         if initial.status == VerificationStatus::Verifying {
-            return Err("Wait for the current verification to finish".into());
+            return Err(Error::verifying(&initial));
         }
         let reconnect = initial.session_active
             || (self.manager.is_running()? && !initial.configuration_verification);
@@ -227,7 +227,7 @@ impl DesktopRuntime {
         let _operation = self.configuration_change()?;
         let previous = self.manager.snapshot()?;
         if previous.status == VerificationStatus::Verifying {
-            return Err("Wait for the current verification to finish".into());
+            return Err(Error::verifying(&previous));
         }
         if previous.active_profile_id == profile_id {
             return Ok(previous);

@@ -5,7 +5,7 @@ impl DesktopRuntime {
     pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, Error> {
         let operation = self.lifecycle.try_lock().map_err(|_| Error::busy())?;
         if self.exiting.load(Ordering::Acquire) {
-            return Err("The app is closing".into());
+            return Err(Error::closing());
         }
         Ok(operation)
     }

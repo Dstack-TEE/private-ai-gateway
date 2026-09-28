@@ -433,6 +433,59 @@ fn a_switch_is_refused_only_before_anything_changes() {
     );
 }
 
+/// While protection is still starting, a profile change is refused with a
+/// reason the caller can act on, and nothing changes.
+#[test]
+fn a_change_during_a_start_says_which_profile_is_starting() {
+    use desktop_core::protocol::ErrorCode;
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let profile = |id: &str, name: &str| ConfidentialProfileInput {
+        id: id.into(),
+        name: name.into(),
+        provider: desktop_core::contracts::ServiceProvider::Custom,
+        remote_url: format!("https://{id}.invalid"),
+    };
+    for (id, name) in [("other", "Other"), ("ready", "Ready")] {
+        executor
+            .block_on(runtime.save_configuration(profile(id, name), true, Some("test-key".into())))
+            .unwrap();
+    }
+    let starting = AppState {
+        status: VerificationStatus::Verifying,
+        session_active: true,
+        ..runtime.state().unwrap()
+    };
+    runtime.manager.restore_snapshot(starting.clone());
+
+    let refused =
+        desktop_core::protocol::Error::from(runtime.activate_profile("other".into()).unwrap_err());
+    assert_eq!(refused.code, ErrorCode::Busy);
+    assert_eq!(
+        refused.message,
+        "Protection is starting on Ready; try again when it finishes."
+    );
+    let refused = executor
+        .block_on(runtime.save_configuration(profile("new", "New"), true, Some("key".into())))
+        .unwrap_err();
+    assert_eq!(refused.code(), ErrorCode::Busy);
+    assert_eq!(runtime.state().unwrap().active_profile_id, "ready");
+    assert_eq!(runtime.settings.config().unwrap().active_profile, "ready");
+
+    runtime.manager.restore_snapshot(AppState {
+        configuration_verification: true,
+        ..starting
+    });
+    assert_eq!(
+        runtime
+            .activate_profile("other".into())
+            .unwrap_err()
+            .to_string(),
+        "A profile is being verified; try again when it finishes."
+    );
+}
+
 #[test]
 fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
     let executor = tokio::runtime::Runtime::new().unwrap();
@@ -524,8 +577,8 @@ fn shutdown_blocks_later_configuration_changes() {
     let state = runtime.state().unwrap();
     assert_eq!(state.status, VerificationStatus::Stopped);
     assert_eq!(
-        runtime.start(state.config).unwrap_err().to_string(),
-        "The app is closing"
+        runtime.start(state.config).unwrap_err(),
+        crate::Error::closing()
     );
     assert!(matches!(
         runtime
@@ -536,7 +589,7 @@ fn shutdown_blocks_later_configuration_changes() {
                 ConnectOptions::default()
             )
             .unwrap_err(),
-        crate::Error::Internal(message) if message == "The app is closing"
+        error if error == crate::Error::closing()
     ));
 }
 
@@ -577,11 +630,8 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
         );
     });
     assert_eq!(
-        runtime
-            .start(runtime.state().unwrap().config)
-            .unwrap_err()
-            .to_string(),
-        "The app is closing"
+        runtime.start(runtime.state().unwrap().config).unwrap_err(),
+        crate::Error::closing()
     );
 }
 
