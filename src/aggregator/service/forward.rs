@@ -707,25 +707,11 @@ impl AciService {
             // the establishing round's evidence for the whole validity
             // window; the enforceable channel binding, not the evidence
             // freshness, is what each request is served over.
-            let evidence = event
-                .evidence
-                .as_ref()
-                .map(EvidenceRef::from_value)
-                .unwrap_or_default();
-            if evidence.digest.is_none() && evidence.data_uri.is_none() {
-                tracing::warn!(
-                    upstream = %event.upstream_name,
-                    model = %event.model_id,
-                    "verified upstream session carries no evidence bundle; the session \
-                     record will not survive a §9.2 evidence audit"
-                );
-            }
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),
                 vec![binding.clone()],
                 claims,
-                evidence,
                 now,
                 expires_at,
                 instance.is_none(),
@@ -829,7 +815,8 @@ impl AciService {
     /// bindings whose nonce-bound evidence rotates every verification round:
     /// covering the digest would make every request mint a new session. The
     /// sealed document still carries the establishing round's evidence, so
-    /// the record stays deep-auditable per §8.2 for its whole window.
+    /// the record stays deep-auditable per §8.2 for its whole window. The
+    /// evidence bundle is copied only when a new session is sealed.
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -837,12 +824,16 @@ impl AciService {
         identity: Option<WorkloadIdentityRef>,
         channel_bindings: Vec<ChannelBinding>,
         claims: SessionClaims,
-        evidence: EvidenceRef,
         now: u64,
         expires_at: u64,
         fingerprint_covers_evidence: bool,
     ) -> Result<String, ServiceError> {
-        let no_digest = None;
+        let evidence_value = event.evidence.as_ref();
+        let evidence_digest = evidence_value
+            .filter(|_| fingerprint_covers_evidence)
+            .and_then(|value| value.get("digest"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -850,11 +841,7 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: if fingerprint_covers_evidence {
-                &evidence.digest
-            } else {
-                &no_digest
-            },
+            evidence_digest: &evidence_digest,
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
@@ -865,7 +852,7 @@ impl AciService {
             self.session_store
                 .current_session(&fingerprint, retention_until, now)
         {
-            return Ok(existing.session_id().to_string());
+            return Ok(existing);
         }
 
         let session = AttestedSession::seal(SessionDocument {
@@ -878,7 +865,9 @@ impl AciService {
             identity,
             channel_binding: channel_bindings,
             claims,
-            evidence,
+            evidence: evidence_value
+                .map(EvidenceRef::from_value)
+                .unwrap_or_default(),
         })
         .map_err(|err| ServiceError::SessionStore(format!("seal attested session: {err}")))?;
         let session_id = session.session_id().to_string();

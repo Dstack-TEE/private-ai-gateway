@@ -21,6 +21,7 @@ use super::current_unix_secs;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
+use crate::aggregator::session::EvidenceRef;
 use crate::aggregator::upstream_config::AttestationScope;
 
 #[derive(Debug, thiserror::Error)]
@@ -348,8 +349,10 @@ impl ExternalProviderVerifier {
                     .to_string(),
             );
         }
+        let mut evidence = output.evidence.clone();
         if result == VerificationResult::Verified {
             self.enforce_attested_scope(output.attested_scope.as_deref())?;
+            evidence = Some(canonical_verified_evidence(evidence)?);
         }
         Ok(UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
@@ -363,7 +366,7 @@ impl ExternalProviderVerifier {
             result,
             required: request.required,
             reason: output.reason.clone(),
-            evidence: output.evidence.clone(),
+            evidence,
             channel_bindings,
             provider_claims: output.provider_claims.clone(),
         })
@@ -507,6 +510,24 @@ struct ExternalChannelBinding {
     key_id: Option<String>,
     algorithm: Option<String>,
     public_key_sha256: Option<String>,
+}
+
+/// A verified result must carry evidence whose data hashes to its digest
+/// (§8.2); the session that records it keeps those bytes for audit. The data
+/// URI is re-encoded canonically so a stored session rebuilds byte for byte.
+fn canonical_verified_evidence(evidence: Option<Value>) -> Result<Value, String> {
+    let Some(mut evidence) = evidence else {
+        return Err("provider verifier returned verified without evidence".to_string());
+    };
+    let Some((content_type, bytes)) = EvidenceRef::from_value(&evidence).decode() else {
+        return Err(
+            "provider verifier returned verified with evidence whose data does not hash to its digest"
+                .to_string(),
+        );
+    };
+    let canonical = EvidenceRef::from_bytes(&content_type, &bytes);
+    evidence["data"] = Value::String(canonical.data_uri.unwrap_or_default());
+    Ok(evidence)
 }
 
 fn parse_external_channel_bindings(

@@ -172,6 +172,29 @@ impl EvidenceRef {
             Err(_) => false, // claims a digest but the data is not decodable
         }
     }
+
+    /// Split a complete bundle into its content type and decoded bytes. `None`
+    /// unless `data` is `data:<content-type>;base64,<b64>` and the bytes hash to
+    /// `digest`.
+    pub fn decode(&self) -> Option<(String, Vec<u8>)> {
+        let digest = self.digest.as_deref()?;
+        let rest = self.data_uri.as_deref()?.strip_prefix("data:")?;
+        let (content_type, b64) = rest.split_once(";base64,")?;
+        let bytes = BASE64.decode(b64.as_bytes()).ok()?;
+        (digest::sha256_hex(&bytes) == digest).then(|| (content_type.to_string(), bytes))
+    }
+
+    /// The canonical bundle for `bytes`: its `sha256:` digest and a
+    /// `data:<content-type>;base64,<b64>` URI.
+    pub fn from_bytes(content_type: &str, bytes: &[u8]) -> Self {
+        Self {
+            digest: Some(digest::sha256_hex(bytes)),
+            data_uri: Some(format!(
+                "data:{content_type};base64,{}",
+                BASE64.encode(bytes)
+            )),
+        }
+    }
 }
 
 /// Verified identity keys captured into a session (§8.2 `identity`). For

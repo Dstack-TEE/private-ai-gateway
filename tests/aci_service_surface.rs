@@ -275,7 +275,7 @@ impl UpstreamVerifier for AlwaysVerified {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
             evidence: Some(serde_json::json!({
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:b30c37cf9f05fd749ffcb958a95794dc48e4cafad6316877c9e84b1e590c31dd",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
             })),
             ..event_from_request(&request, VerificationResult::Verified)
