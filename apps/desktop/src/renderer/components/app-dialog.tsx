@@ -42,7 +42,7 @@ export function AppDialog({ open, title, description, className, dismissible = t
   dismissible?: boolean;
 }>): React.JSX.Element {
   return <Dialog open={open} disablePointerDismissal onOpenChange={(next) => { if (!next && dismissible) onClose(); }} onOpenChangeComplete={onOpenChangeComplete}>
-    <DialogContent showCloseButton={false} finalFocus={finalFocus} className={cn("flex max-h-[calc(100%-2rem)] flex-col gap-4", className)}>
+    <DialogContent showCloseButton={false} finalFocus={finalFocus} className={cn("flex max-h-[min(calc(100%-2rem),40rem)] flex-col gap-4", className)}>
       <DialogHeader>
         <DialogTitle>{title}</DialogTitle>
         {description && <DialogDescription>{description}</DialogDescription>}
