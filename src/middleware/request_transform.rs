@@ -245,9 +245,18 @@ pub fn build_candidates(
 ) -> Result<Vec<(String, Value, Endpoint)>, TransformError> {
     let mut shaped: Vec<(String, Value, Endpoint)> = Vec::new();
     let mut first_error: Option<TransformError> = None;
+    // Converted once; every Chat candidate of a Messages request shares it.
+    let messages_chat = (endpoint == Endpoint::Messages
+        && candidates
+            .iter()
+            .any(|candidate| candidate.format == ProviderFormat::Openai))
+    .then(|| messages_to_chat_params(params));
     for candidate in candidates {
-        let shaped_body =
-            shape_candidate(params, endpoint, candidate, requested_reasoning, responses);
+        let bridge = match &messages_chat {
+            Some(chat) => Bridge::Messages(chat),
+            None => responses.map_or(Bridge::None, Bridge::Responses),
+        };
+        let shaped_body = shape_candidate(params, endpoint, candidate, requested_reasoning, bridge);
         match shaped_body {
             Ok((upstream_endpoint, body)) => {
                 shaped.push((candidate.route_id.clone(), body, upstream_endpoint))
@@ -268,6 +277,16 @@ pub fn build_candidates(
     }
 }
 
+/// The Chat bridge a request may take to a Chat-only candidate.
+#[derive(Clone, Copy)]
+enum Bridge<'a> {
+    None,
+    /// `params` is already the chat conversion of this Responses request.
+    Responses(ResponsesCandidateInput<'a>),
+    /// The chat conversion of a Messages request, or why it has none.
+    Messages(&'a Result<Value, TransformError>),
+}
+
 /// One candidate's upstream endpoint and body. Both bridged surfaces reach a
 /// Chat-only candidate as a chat request, so reasoning is encoded in that
 /// candidate's dialect exactly as for a client's own chat request.
@@ -276,14 +295,14 @@ fn shape_candidate(
     endpoint: Endpoint,
     candidate: &RouteCandidate,
     requested_reasoning: Option<&ReasoningConfig>,
-    responses: Option<ResponsesCandidateInput<'_>>,
+    bridge: Bridge<'_>,
 ) -> Result<(Endpoint, Value), TransformError> {
     let shape = |params: &Value, endpoint| {
         let params = candidate_params(params, endpoint, candidate, requested_reasoning)?;
         transform_to_provider_request(candidate.format, &params, endpoint, candidate.engine)
     };
-    match responses {
-        Some(responses) if candidate.supports_endpoint(RESPONSES_PATH) => {
+    match bridge {
+        Bridge::Responses(responses) if candidate.supports_endpoint(RESPONSES_PATH) => {
             let body = transform_to_provider_request(
                 candidate.format,
                 responses.original,
@@ -292,8 +311,7 @@ fn shape_candidate(
             )?;
             Ok((Endpoint::CreateModelResponse, body))
         }
-        // `params` is already the chat conversion of the Responses request.
-        Some(responses) => match responses.bridge_error {
+        Bridge::Responses(responses) => match responses.bridge_error {
             Some(err) => Err(err.clone()),
             None => Ok((
                 Endpoint::ChatComplete,
@@ -302,11 +320,11 @@ fn shape_candidate(
         },
         // The upstream router serves a chat-format route's /v1/messages on
         // its chat path, so the endpoint stays the client's.
-        None if endpoint == Endpoint::Messages && candidate.format == ProviderFormat::Openai => {
-            let chat = messages_to_chat_params(params)?;
-            Ok((endpoint, shape(&chat, Endpoint::ChatComplete)?))
+        Bridge::Messages(chat) if candidate.format == ProviderFormat::Openai => {
+            let chat = chat.as_ref().map_err(TransformError::clone)?;
+            Ok((endpoint, shape(chat, Endpoint::ChatComplete)?))
         }
-        None => Ok((endpoint, shape(params, endpoint)?)),
+        Bridge::None | Bridge::Messages(_) => Ok((endpoint, shape(params, endpoint)?)),
     }
 }
 
@@ -1204,7 +1222,9 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
 }
 
 /// The reasoning a Messages request asks for, as route-neutral config, and
-/// whether the client asked to see it (only then does it get thinking blocks).
+/// whether the client asked to see it. Only enabled or adaptive thinking whose
+/// `display` returns text (`summarized`, the default before `display` existed)
+/// gets thinking blocks; `omitted` and `updates` hide the reasoning text.
 ///
 /// `output_config.effort` states the level directly. Otherwise a thinking
 /// budget is bucketed as Messages-to-Chat bridges commonly bucket it (≤1024
@@ -1236,6 +1256,10 @@ pub fn messages_reasoning(
         return Ok((effort.map(effort_config), false));
     };
     let budget = thinking.get("budget_tokens").and_then(Value::as_u64);
+    let visible = !matches!(
+        thinking.get("display").and_then(Value::as_str),
+        Some("omitted" | "updates")
+    );
     match (thinking.get("type").and_then(Value::as_str), budget) {
         (Some("disabled"), _) => Ok((
             Some(ReasoningConfig {
@@ -1246,7 +1270,7 @@ pub fn messages_reasoning(
         )),
         (Some("adaptive"), _) => Ok((
             Some(effort_config(effort.unwrap_or(ReasoningEffort::High))),
-            true,
+            visible,
         )),
         (Some("enabled"), Some(budget @ 1..)) => {
             let effort = effort.unwrap_or(match budget {
@@ -1254,7 +1278,7 @@ pub fn messages_reasoning(
                 1025..=8192 => ReasoningEffort::Medium,
                 _ => ReasoningEffort::High,
             });
-            Ok((Some(effort_config(effort)), true))
+            Ok((Some(effort_config(effort)), visible))
         }
         _ => Err(TransformError::invalid_request(
             "thinking must be enabled with a positive budget_tokens, adaptive, or disabled",
@@ -2997,6 +3021,18 @@ mod tests {
                 true,
             ),
             (json!({ "type": "adaptive" }), None, Some("high"), true),
+            (
+                json!({ "type": "adaptive", "display": "omitted" }),
+                None,
+                Some("high"),
+                false,
+            ),
+            (
+                json!({ "type": "enabled", "budget_tokens": 1024, "display": "summarized" }),
+                None,
+                Some("low"),
+                true,
+            ),
             (
                 json!({ "type": "disabled" }),
                 Some("high"),

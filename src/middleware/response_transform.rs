@@ -1037,8 +1037,9 @@ pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -
 /// `error`/`*_error` reason reports that generation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ChatFinish {
+    /// Includes `tool_calls`: whether a turn called a tool is decided by the
+    /// calls it carries, not by what the upstream called its finish.
     Stop,
-    ToolCalls,
     Length,
     ContentFilter,
     Error,
@@ -1047,7 +1048,6 @@ pub(super) enum ChatFinish {
 impl ChatFinish {
     pub(super) fn parse(reason: Option<&str>) -> Self {
         match reason {
-            Some("tool_calls" | "function_call") => Self::ToolCalls,
             Some("length") => Self::Length,
             Some("content_filter") => Self::ContentFilter,
             Some(reason)
@@ -1065,8 +1065,7 @@ impl ChatFinish {
         matches!(self, Self::Length | Self::ContentFilter)
     }
 
-    /// The Anthropic stop reason. Whether the turn called a tool is decided by
-    /// the calls it carries, not by what the upstream called its finish.
+    /// The Anthropic stop reason.
     pub(super) fn stop_reason(self, has_tool_calls: bool) -> &'static str {
         match self {
             Self::Length => "max_tokens",
@@ -1243,7 +1242,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         .and_then(|choices| choices.first());
     let message = choice
         .and_then(|choice| choice.get("message"))
-        .unwrap_or(&Value::Null);
+        .filter(|message| message.is_object());
     let finish = ChatFinish::parse(
         choice
             .and_then(|choice| choice.get("finish_reason"))
@@ -1255,7 +1254,9 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         .get("error")
         .filter(|error| !error.is_null())
         .cloned()
-        .or_else(|| (finish == ChatFinish::Error).then(upstream_failed_error));
+        .or_else(|| (finish == ChatFinish::Error).then(upstream_failed_error))
+        .or_else(|| message.is_none().then(malformed_response_error));
+    let message = message.unwrap_or(&Value::Null);
     if let Some(text) = reasoning_text(message) {
         output.push(reasoning_item(
             &item_id("rs", id, output.len()),
@@ -1279,7 +1280,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
         None => None,
     };
-    if let Some(part) = part.filter(|_| choice.is_some()) {
+    if let Some(part) = part.filter(|_| !message.is_null()) {
         output.push(message_item(
             &item_id("msg", id, output.len()),
             part,
@@ -1530,6 +1531,13 @@ pub(super) fn invalid_tool_call_identity_error() -> Value {
     json!({
         "code": "server_error",
         "message": "The upstream provider returned a tool call without a valid id or name",
+    })
+}
+
+pub(super) fn malformed_response_error() -> Value {
+    json!({
+        "code": "server_error",
+        "message": "The upstream provider returned a malformed response",
     })
 }
 
@@ -2501,6 +2509,20 @@ mod identity_tests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn responses_bridge_fails_bodies_without_a_message() {
+        for body in [
+            Value::Null,
+            json!({}),
+            json!({ "choices": [] }),
+            json!({ "choices": [{ "finish_reason": "stop" }] }),
+        ] {
+            let out = openai_chat_to_responses(body.clone(), &json!({}), "resp");
+            assert_eq!(out["status"], "failed", "{body}");
+            assert_eq!(out["output"], json!([]), "{body}");
+        }
+    }
 
     #[test]
     fn openai_messages_empty_content_gets_placeholder() {

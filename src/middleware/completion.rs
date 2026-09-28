@@ -488,39 +488,25 @@ pub async fn run(
             // non-2xx body is normalized rather than transformed, but the receipt
             // is finalized either way.
             let (client_status, final_body) = if (200..300).contains(&upstream_status) {
-                let mut upstream_json: Value = match serde_json::from_slice(&forward.upstream_body)
-                {
-                    Ok(value) => value,
-                    Err(_) => {
-                        // A malformed 2xx body must not be coerced into a fabricated
-                        // success. Attribute it to the upstream (it sent an
-                        // unparseable success body) and return 502.
-                        let message = "upstream returned a malformed success body";
-                        meter.gateway_failure(
-                            502,
-                            ErrorSource::Upstream,
-                            ErrorClass::UpstreamMalformedResponse,
-                            false,
-                        );
-                        let body = errors::envelope_bytes(
-                            surface,
-                            errors::error_type(surface, 502),
-                            message,
-                            Some(&request_id),
-                        );
-                        return finalize_generated(502, body, &[], e2ee, outcome_ctx);
-                    }
-                };
-                // Excluded from the upstream body, before any conversion could
-                // re-express the reasoning in the client surface's shape.
-                if exclude_reasoning {
-                    response_transform::exclude_reasoning(&mut upstream_json);
-                }
-                let mut transformed = match response_transform::transform_response(
-                    selected_format,
-                    upstream_endpoint,
-                    upstream_json,
-                ) {
+                // A 2xx body that does not parse, or that the client surface
+                // cannot represent, must not be coerced into a fabricated
+                // success: it is the upstream's malformed answer, a 502.
+                // Reasoning is excluded from the upstream body before any
+                // conversion could re-express it in the client surface's shape.
+                let converted = serde_json::from_slice::<Value>(&forward.upstream_body)
+                    .map_err(|err| err.to_string())
+                    .and_then(|mut upstream_json| {
+                        if exclude_reasoning {
+                            response_transform::exclude_reasoning(&mut upstream_json);
+                        }
+                        response_transform::transform_response(
+                            selected_format,
+                            upstream_endpoint,
+                            upstream_json,
+                        )
+                        .map_err(|err| err.to_string())
+                    });
+                let mut transformed = match converted {
                     Ok(transformed) => transformed,
                     Err(err) => {
                         tracing::warn!(
@@ -528,8 +514,10 @@ pub async fn run(
                             error = %err,
                             "upstream success body cannot be represented on the client surface"
                         );
-                        let message = "upstream returned a malformed success body";
-                        meter.gateway_failure(
+                        meter.failed_attempts(&forward.failed_attempts, false);
+                        meter.gateway_failure_at(
+                            attempt_index,
+                            Some(&forward.selected_route),
                             502,
                             ErrorSource::Upstream,
                             ErrorClass::UpstreamMalformedResponse,
@@ -538,7 +526,7 @@ pub async fn run(
                         let body = errors::envelope_bytes(
                             surface,
                             errors::error_type(surface, 502),
-                            message,
+                            "upstream returned a malformed success body",
                             Some(&request_id),
                         );
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
@@ -1262,20 +1250,26 @@ pub(super) fn build_metered_pipeline(
         } else {
             body
         };
-    let transformed: ServiceResponseStream =
-        match stream_transform::select_stream_transform(selected_format, upstream_endpoint) {
-            Some(transform) => Box::pin(SseTransformStream::new(visible, transform)),
-            None => visible,
-        };
-    // The bridge reshapes usage for the client, so it hands the meter the
-    // upstream's own usage to report.
-    let bridge = inputs
-        .echo
-        .as_ref()
-        .filter(|_| !responses_passthrough)
-        .map(|echo| (echo.clone(), UpstreamUsage::default()));
-    let surfaced: ServiceResponseStream = match &bridge {
-        Some((echo, upstream_usage)) => Box::pin(SseTransformStream::new(
+    // A Chat bridge reshapes usage for the client and may end in an error that
+    // carries none, so it hands the meter the usage to report.
+    let upstream_usage = UpstreamUsage::default();
+    let format_transform = stream_transform::select_stream_transform(
+        selected_format,
+        upstream_endpoint,
+        &upstream_usage,
+    );
+    let responses_bridge = inputs.echo.as_ref().filter(|_| !responses_passthrough);
+    let reports_upstream_usage = responses_bridge.is_some()
+        || matches!(
+            format_transform,
+            Some(StreamTransform::OpenaiToAnthropicMessages(_))
+        );
+    let transformed: ServiceResponseStream = match format_transform {
+        Some(transform) => Box::pin(SseTransformStream::new(visible, transform)),
+        None => visible,
+    };
+    let surfaced: ServiceResponseStream = match responses_bridge {
+        Some(echo) => Box::pin(SseTransformStream::new(
             transformed,
             StreamTransform::OpenaiChatToResponses(
                 echo.clone(),
@@ -1297,9 +1291,10 @@ pub(super) fn build_metered_pipeline(
         report,
         errors::sse_protocol(inputs.endpoint_path),
     );
-    Box::pin(match bridge {
-        Some((_, upstream_usage)) => meter.with_upstream_usage(upstream_usage),
-        None => meter,
+    Box::pin(if reports_upstream_usage {
+        meter.with_upstream_usage(upstream_usage)
+    } else {
+        meter
     })
 }
 

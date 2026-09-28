@@ -1977,8 +1977,48 @@ async fn malformed_chat_success_on_messages_returns_502_upstream() {
 
     let report = wait_for_post(&posts, |report| report["status"] == json!(502)).await;
     assert_eq!(report["status"], 502);
+    assert_eq!(report["selectedRouteId"], "openai:gpt");
     assert_eq!(report["errorSource"], "upstream");
     assert_eq!(report["errorMessage"], "upstream_malformed_response");
+}
+
+// A converted stream that ends in an in-band error still reports what the
+// upstream spent, on the route that spent it.
+#[tokio::test]
+async fn messages_bridge_stream_failure_keeps_route_and_usage() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let chunk = json!({
+        "id": "u", "model": "m",
+        "choices": [{
+            "index": 0,
+            "delta": { "tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": { "name": "lookup", "arguments": "{" }
+            }] },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
+    });
+    let (service, _) = build_recording_service(
+        200,
+        format!("data: {chunk}\n\ndata: [DONE]\n\n").into_bytes(),
+        "text/event-stream",
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, messages_input(true))
+        .await;
+    assert_eq!(response.status(), 200);
+    let (_, body) = raw_body(response).await;
+    assert_eq!(sse_events(&body).last().unwrap()["type"], "error", "{body}");
+
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["selectedRouteId"], "openai:gpt");
+    assert_eq!(report["usage"]["input_tokens"], 3, "{report}");
+    assert_eq!(report["usage"]["output_tokens"], 4, "{report}");
 }
 
 #[tokio::test]
