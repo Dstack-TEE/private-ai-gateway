@@ -53,8 +53,14 @@ export PAP_E2E_API_KEY=...          # a RedPill API key
 apps/desktop/e2e/run.sh             # the newest desktop-v* release
 apps/desktop/e2e/run.sh --tag desktop-v0.2.0-beta.11
 apps/desktop/e2e/run.sh --deb path/to/private-ai-proxy-0.2.0-linux-x64.deb
+apps/desktop/e2e/run.sh --agents opencode --opencode-v2   # OpenCode 2 only
 unset PAP_E2E_API_KEY
 ```
+
+`--agents` installs and tests only the listed agent ids. `--opencode-v2`
+installs OpenCode 2 with its own installer instead of OpenCode 1; both provide
+the `opencode` command, so the workflow tests OpenCode 2 in a second job with
+`--agents opencode`.
 
 `--deb` needs the package's `SHA256SUMS` in the same directory. The key is
 piped to the test's stdin and from there only to `pap profiles add
@@ -67,7 +73,8 @@ takes about 10 minutes and sends about a dozen tiny prompts.
 ## Versions
 
 `versions.env` pins Node.js and every agent, one line each, so a bump is a
-one-line change. `npm_config_before` freezes the npm dependencies the
+one-line change. `OPENCODE_VERSION` pins OpenCode 1 and `OPENCODE_V2_VERSION`
+OpenCode 2. `npm_config_before` freezes the npm dependencies the
 installers resolve; move it forward with any bump. Codex must stay on the
 baseline the app supports (`agent-bridge/resources/codex/manifest.json`).
 Hermes is pinned to a release tag and installed with that tag's own

@@ -132,7 +132,8 @@ package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
 OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
-([E2E harness](../e2e/README.md)). It runs nightly on the newest `desktop-v*`
+([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
+with OpenCode 2. It runs nightly on the newest `desktop-v*`
 release and on demand for a given tag. Its `desktop-e2e` environment holds the
 `PAP_E2E_API_KEY` secret and allows only `main`, so the test never runs on
 pull requests. Agent versions are pinned in `e2e/versions.env`.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Runs as the test user: installs every agent with its official installer at
-# the version pinned in versions.env, then runs it once. Its first run creates
-# the configuration folder that Private AI Proxy detects the agent by.
+# Runs as the test user: installs each agent under test (PAP_E2E_AGENTS, or
+# every agent when empty) with its official installer at the version pinned in
+# versions.env, then runs it once. Its first run creates the configuration
+# folder that Private AI Proxy detects the agent by.
 set -euo pipefail
 export PATH="$AGENT_PATH:$PATH"
 
@@ -29,21 +30,12 @@ from_script() {
   logged "$name" "$logs/$name-install" "$@"
 }
 
-from_script claude-code https://claude.ai/install.sh "$CLAUDE_CODE_VERSION"
-logged codex npm install --global "@openai/codex@$CODEX_VERSION"
-from_script opencode https://opencode.ai/install --version "$OPENCODE_VERSION" --no-modify-path
-logged pi npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"
-from_script oh-my-pi https://omp.sh/install --binary --ref "v$OH_MY_PI_VERSION"
-from_script openclaw https://openclaw.ai/install.sh --no-onboard --no-prompt
-from_script hermes "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_VERSION/scripts/install.sh" \
-  --branch "$HERMES_VERSION" --non-interactive --skip-browser
-
-# Fails when an installer ignored its version pin.
+# Fails when an installer ignored its version pin. OpenCode 2 prints a v prefix.
 pinned() {
   local expected="$1" reported
   shift
   reported="$("$@" 2>&1)"
-  if ! grep -Fqw -- "$expected" <<<"$reported"; then
+  if ! grep -Eqw -- "v?${expected//./\\.}" <<<"$reported"; then
     printf '%s reports %s, not the pinned %s\n' "$1" "${reported%%$'\n'*}" "$expected" >&2
     return 1
   fi
@@ -53,13 +45,43 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-pinned "$CLAUDE_CODE_VERSION" claude --version
-pinned "$CODEX_VERSION" codex --version
-pinned "$OPENCODE_VERSION" opencode --version
-pinned "$PI_VERSION" pi --version
-pinned "$OH_MY_PI_VERSION" omp --version
-pinned "$OPENCLAW_VERSION" openclaw --version
-pinned "${HERMES_VERSION#v}" hermes --version
-pi --list-models >/dev/null
-omp config list >/dev/null
-openclaw setup --baseline >/dev/null
+for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
+  [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
+  case "$agent" in
+    claude-code)
+      from_script claude-code https://claude.ai/install.sh "$CLAUDE_CODE_VERSION"
+      pinned "$CLAUDE_CODE_VERSION" claude --version
+      ;;
+    codex)
+      logged codex npm install --global "@openai/codex@$CODEX_VERSION"
+      pinned "$CODEX_VERSION" codex --version
+      ;;
+    opencode)
+      # OpenCode 2 has its own installer; both install the opencode command.
+      installer=https://opencode.ai/install
+      [[ "$OPENCODE_VERSION" == 2.* ]] && installer=https://opencode.ai/v2/install
+      from_script opencode "$installer" --version "$OPENCODE_VERSION" --no-modify-path
+      pinned "$OPENCODE_VERSION" opencode --version
+      ;;
+    pi)
+      logged pi npm install --global --ignore-scripts "@earendil-works/pi-coding-agent@$PI_VERSION"
+      pinned "$PI_VERSION" pi --version
+      pi --list-models >/dev/null
+      ;;
+    oh-my-pi)
+      from_script oh-my-pi https://omp.sh/install --binary --ref "v$OH_MY_PI_VERSION"
+      pinned "$OH_MY_PI_VERSION" omp --version
+      omp config list >/dev/null
+      ;;
+    openclaw)
+      from_script openclaw https://openclaw.ai/install.sh --no-onboard --no-prompt
+      pinned "$OPENCLAW_VERSION" openclaw --version
+      openclaw setup --baseline >/dev/null
+      ;;
+    hermes)
+      from_script hermes "https://raw.githubusercontent.com/NousResearch/hermes-agent/$HERMES_VERSION/scripts/install.sh" \
+        --branch "$HERMES_VERSION" --non-interactive --skip-browser
+      pinned "${HERMES_VERSION#v}" hermes --version
+      ;;
+  esac
+done
