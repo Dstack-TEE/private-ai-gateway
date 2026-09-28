@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.11...desktop-v0.2.0) (2026-09-28)
+
+
+### Bug Fixes
+
+* **desktop:** accurate refusals, profile switches and agent status from live testing ([#353](https://github.com/Dstack-TEE/private-ai-gateway/issues/353)) ([d8c88c2](https://github.com/Dstack-TEE/private-ai-gateway/commit/d8c88c2042e2d8718dfe46ef850aa5461664d4ff))
+* **desktop:** full-row hover and scrollable dialogs with a stable height ([#355](https://github.com/Dstack-TEE/private-ai-gateway/issues/355)) ([70ea7b7](https://github.com/Dstack-TEE/private-ai-gateway/commit/70ea7b73392c4edf4dedf937d3af9d279f5c7e94))
+* **desktop:** say why a profile or protection change is refused while protection is busy ([#356](https://github.com/Dstack-TEE/private-ai-gateway/issues/356)) ([3dd451e](https://github.com/Dstack-TEE/private-ai-gateway/commit/3dd451e407a779bfaa7acc45b5aabaf989ecc268))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.2.0 ([#351](https://github.com/Dstack-TEE/private-ai-gateway/issues/351)) ([c59ea2d](https://github.com/Dstack-TEE/private-ai-gateway/commit/c59ea2db348e274d4253a6797433004687519eb8))
+
 ## [0.2.0-beta.11](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0-beta.10...desktop-v0.2.0-beta.11) (2026-09-27)
 
 
