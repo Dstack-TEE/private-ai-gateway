@@ -218,6 +218,8 @@ fn opencode_merge_conflicts_revoke_without_writes_and_keep_original_restore_path
         "{\"model\":\"other/override\",}",
         "{/* keep */\"provider\":{\"private-ai-proxy\":{\"options\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
         "{\"provider\":{\"private-ai-proxy\":{\"options\":{\"apiKey\":\"synthetic-never-log-me\"}}}}",
+        // OpenCode 2's native entry overlays the V1 one the app writes.
+        "{\"providers\":{\"private-ai-proxy\":{\"settings\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
         "{\"provider\":null}",
         "{/* broken",
     ] {

@@ -4,14 +4,17 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: apps/desktop/e2e/run.sh [--tag desktop-vX.Y.Z | --deb PATH]
+                               [--agents ID,...] [--opencode-v2]
 
 Installs the Linux x64 desktop package in a fresh ubuntu:24.04 container,
 connects every supported coding agent to a live RedPill profile, and checks
 replies, usage records, fail-closed behavior, restoration and token revocation.
 
-  --tag TAG   Download this release's package and SHA256SUMS. Default: the
-              newest published desktop-v* release, beta or stable.
-  --deb PATH  Test a local package; PATH's directory must hold its SHA256SUMS.
+  --tag TAG      Download this release's package and SHA256SUMS. Default: the
+                 newest published desktop-v* release, beta or stable.
+  --deb PATH     Test a local package; PATH's directory must hold its SHA256SUMS.
+  --agents IDS   Install and test only these comma-separated agent ids.
+  --opencode-v2  Install OpenCode 2 (OPENCODE_V2_VERSION) instead of OpenCode 1.
 
 Environment:
   PAP_E2E_API_KEY  RedPill API key (required). It reaches only the stdin of
@@ -24,16 +27,24 @@ EOF
 
 tag=""
 deb=""
+agents=""
+opencode_v2=false
 while (($#)); do
   case "$1" in
     --tag) tag="${2:?--tag needs a value}"; shift 2 ;;
     --deb) deb="${2:?--deb needs a value}"; shift 2 ;;
+    --agents) agents="${2:?--agents needs a value}"; shift 2 ;;
+    --opencode-v2) opencode_v2=true; shift ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
 if [[ -n "$tag" && -n "$deb" ]]; then
   echo "Pass --tag or --deb, not both" >&2
+  exit 2
+fi
+if [[ -n "$agents" && ! "$agents" =~ ^[a-z-]+(,[a-z-]+)*$ ]]; then
+  echo "--agents takes comma-separated agent ids" >&2
   exit 2
 fi
 if [[ -z "${PAP_E2E_API_KEY:-}" ]]; then
@@ -45,6 +56,10 @@ e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/pap-e2e.XXXXXX")"
 container="$(basename "$work")"
 network=bridge
+versions=(--env-file "$e2e_dir/versions.env")
+if [[ "$opencode_v2" == true ]]; then
+  versions+=(--env "OPENCODE_VERSION=$(sed -n 's/^OPENCODE_V2_VERSION=//p' "$e2e_dir/versions.env")")
+fi
 cleanup() {
   docker rm --force "$container" >/dev/null 2>&1 || true
   rm -rf "$work"
@@ -72,8 +87,8 @@ fi
 # AGENT_PATH holds the installer-writable directories the agents run from.
 # Only install-agents.sh and the agents themselves search them; processes
 # that see the key run from absolute paths with the system PATH.
-docker run --detach --init --name "$container" --network "$network" --env-file "$e2e_dir/versions.env" \
-  --env DISABLE_AUTOUPDATER=1 --env OPENCODE_DISABLE_AUTOUPDATE=1 \
+docker run --detach --init --name "$container" --network "$network" "${versions[@]}" \
+  --env PAP_E2E_AGENTS="$agents" --env DISABLE_AUTOUPDATER=1 --env OPENCODE_DISABLE_AUTOUPDATE=1 \
   --env AGENT_PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin \
   --volume "$e2e_dir:/e2e:ro" --volume "$work/pkg:/pkg:ro" ubuntu:24.04 sleep infinity >/dev/null
 docker exec "$container" /e2e/container/prepare.sh

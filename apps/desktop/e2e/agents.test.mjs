@@ -31,7 +31,7 @@ const TOKENS = path.join(HOME, ".local/share/org.dstack.private-ai-proxy/agent-t
 // agent's one-shot command, which must use the default model connect selects;
 // `sentinel` is a user setting written before connecting that must survive;
 // `selfWritten` are top-level keys the agent adds to those files by itself.
-const AGENTS = [
+const ALL_AGENTS = [
   {
     id: "claude-code",
     sentinel: { file: ".claude/settings.json", path: ["env", "PAP_E2E_SENTINEL"], value: "kept" },
@@ -83,6 +83,11 @@ const AGENTS = [
     prompt: ["hermes", "chat", "-q", PROMPT, "--oneshot", "-Q"],
   },
 ];
+
+// run.sh --agents limits the test, like the installs, to these ids.
+const SELECTED = process.env.PAP_E2E_AGENTS?.split(",").filter(Boolean) ?? [];
+const AGENTS = SELECTED.length ? ALL_AGENTS.filter(({ id }) => SELECTED.includes(id)) : ALL_AGENTS;
+assert.equal(AGENTS.length, SELECTED.length || ALL_AGENTS.length, `unknown agent in ${SELECTED.join(",")}`);
 
 const INFERENCE = {
   chat: ["/v1/chat/completions", { model: MODEL, max_tokens: 16, messages: [{ role: "user", content: PROMPT }] }],

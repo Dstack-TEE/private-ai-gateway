@@ -1,8 +1,9 @@
 name: Desktop live E2E
 
-# Connects every supported coding agent to the live RedPill service through a
-# published desktop package (apps/desktop/e2e). It needs the desktop-e2e
-# environment's API key, which only main can use, so it never runs on PRs.
+# Connects every supported coding agent, and separately OpenCode 2, to the live
+# RedPill service through a published desktop package (apps/desktop/e2e). It
+# needs the desktop-e2e environment's API key, which only main can use, so it
+# never runs on PRs.
 on:
   schedule:
     - cron: "17 11 * * *" # nightly, 4:17 AM PDT
@@ -22,10 +23,19 @@ concurrency:
 
 jobs:
   agents:
-    name: Live agents
+    name: ${{ matrix.name }}
     environment: desktop-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Live agents
+            args: ""
+          # OpenCode 2 replaces the OpenCode 1 command, so it runs alone.
+          - name: Live OpenCode 2
+            args: --agents opencode --opencode-v2
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -36,4 +46,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PAP_E2E_API_KEY: ${{ secrets.PAP_E2E_API_KEY }}
           TAG: ${{ inputs.tag }}
-        run: apps/desktop/e2e/run.sh ${TAG:+--tag "$TAG"}
+          ARGS: ${{ matrix.args }}
+        run: |
+          read -ra args <<<"$ARGS"
+          apps/desktop/e2e/run.sh ${TAG:+--tag "$TAG"} "${args[@]}"

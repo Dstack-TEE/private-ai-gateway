@@ -489,6 +489,20 @@ fn opencode_process_overrides_follow_official_merge_order() {
 }
 
 #[test]
+fn opencode_2_provider_entry_in_the_owned_file_is_refused() {
+    let sandbox = sandbox("opencode-2-provider");
+    let projected = ConfigDoc::Json(json!({
+        "provider": {"private-ai-proxy": {"name": "Gateway"}},
+        "providers": {"private-ai-proxy": {"settings": {"baseURL": "http://127.0.0.1:1/v1"}}}
+    }));
+    let error = sandbox
+        .projector
+        .check_opencode_merge(&projected, false)
+        .unwrap_err();
+    assert!(error.contains("/providers/private-ai-proxy"), "{error}");
+}
+
+#[test]
 fn unmanaged_provider_objects_are_not_captured_as_plain_backups() {
     for agent in [Agent::OpenCode, Agent::Pi] {
         for value in [
