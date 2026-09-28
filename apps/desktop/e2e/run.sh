@@ -57,21 +57,33 @@ else
   repo="${GH_REPO:-Dstack-TEE/private-ai-gateway}"
   if [[ -z "$tag" ]]; then
     tag="$(gh release list --repo "$repo" --exclude-drafts --limit 100 --json tagName \
-      --jq '[.[].tagName | select(startswith("desktop-v"))][0]')"
+      --jq '[.[].tagName | select(startswith("desktop-v"))][0] // empty')"
+    if [[ -z "$tag" ]]; then
+      echo "No published desktop-v* release in $repo; pass --tag or --deb" >&2
+      exit 1
+    fi
   fi
   gh release download "$tag" --repo "$repo" --dir "$work/pkg" \
     --pattern "private-ai-proxy-${tag#desktop-v}-linux-x64.deb" --pattern SHA256SUMS
 fi
 (cd "$work/pkg" && sha256sum --check --ignore-missing --strict SHA256SUMS)
 
+# AGENT_PATH holds the installer-writable directories the agents run from.
+# Only install-agents.sh and the agents themselves search them; processes
+# that see the key run from absolute paths with the system PATH.
 docker run --detach --init --name "$container" --env-file "$e2e_dir/versions.env" \
+  --env DISABLE_AUTOUPDATER=1 --env OPENCODE_DISABLE_AUTOUPDATE=1 \
+  --env AGENT_PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin \
   --volume "$e2e_dir:/e2e:ro" --volume "$work/pkg:/pkg:ro" ubuntu:24.04 sleep infinity >/dev/null
 docker exec "$container" /e2e/container/prepare.sh
 
-as_tester=(docker exec --user tester --workdir /home/tester
-  --env "PATH=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin:/usr/local/bin:/usr/bin:/bin")
+as_tester=(docker exec --user tester --workdir /home/tester --env PATH=/usr/local/bin:/usr/bin:/bin)
 "${as_tester[@]}" "$container" /e2e/container/install-agents.sh
 "${as_tester[@]}" "$container" bash -c \
   'cp -r /e2e ~/e2e && npm ci --prefix ~/e2e --ignore-scripts --no-audit --no-fund --silent'
+# Nothing an installer started may still run when the key arrives.
+docker exec "$container" bash -c 'pkill --signal KILL --uid tester
+  timeout 10 bash -c "while pgrep --uid tester >/dev/null; do sleep 0.2; done" ||
+    { pgrep --list-full --uid tester >&2; echo "Test user processes survived" >&2; exit 1; }'
 printf '%s' "$PAP_E2E_API_KEY" |
-  "${as_tester[@]}" --interactive "$container" node --test-reporter=spec e2e/agents.test.mjs
+  "${as_tester[@]}" --interactive "$container" /usr/local/bin/node --test-reporter=spec e2e/agents.test.mjs
