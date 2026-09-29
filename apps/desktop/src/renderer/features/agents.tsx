@@ -2,6 +2,7 @@ import React from "react";
 import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
+import deepSeekIcon from "@lobehub/icons-static-svg/icons/deepseek-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
@@ -9,7 +10,6 @@ import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
-import dshIcon from "../assets/dsh.svg";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../../shared/contracts";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
@@ -27,7 +27,7 @@ import { cn } from "../lib/utils";
 const AGENT_ICONS: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
-  dsh: dshIcon,
+  dsh: deepSeekIcon,
   opencode: openCodeIcon,
   pi: piIcon,
   "oh-my-pi": ohMyPiIcon,

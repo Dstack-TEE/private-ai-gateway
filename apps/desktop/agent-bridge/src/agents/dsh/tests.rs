@@ -402,7 +402,8 @@ fn writes_wait_for_dshs_own_lock_and_leave_none_behind() {
     let sandbox = sandbox("dsh-lock");
     let file = sandbox.home.join(CREDENTIALS_FILE);
     let lock = sandbox.home.join(format!("{CREDENTIALS_FILE}.lock"));
-    write(&lock, "1\n");
+    // Held by a live process: this one, which dsh's rule never takes over.
+    write(&lock, &format!("{}\n", std::process::id()));
     let release = {
         let lock = lock.clone();
         thread::spawn(move || {
@@ -418,22 +419,35 @@ fn writes_wait_for_dshs_own_lock_and_leave_none_behind() {
     assert!(!lock.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn a_lock_whose_holder_exited_is_taken_over_as_dsh_does_and_a_live_one_is_not() {
+    const HOLDER: &str = "PAP_DSH_LOCK_HOLDER";
+    const NAME: &str =
+        "agents::dsh::tests::a_lock_whose_holder_exited_is_taken_over_as_dsh_does_and_a_live_one_is_not";
+    if env::var_os(HOLDER).is_some() {
+        // Run as a live lock holder until the test kills it.
+        thread::sleep(Duration::from_secs(60));
+        return;
+    }
     let sandbox = sandbox("dsh-stale-lock");
     let file = sandbox.home.join(CREDENTIALS_FILE);
     let lock = sandbox.home.join(format!("{CREDENTIALS_FILE}.lock"));
-    let exited = std::process::Command::new("true").spawn().unwrap();
+    let test_binary = env::current_exe().unwrap();
+    let mut exited = std::process::Command::new(&test_binary)
+        .args(["--exact", "no-such-test"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
     let pid = exited.id();
-    let mut exited = exited;
     exited.wait().unwrap();
     write(&lock, &format!("{pid}\n"));
     assert!(with_lock(&file, || Ok(())).is_ok());
     assert!(!lock.exists());
     // An incomplete record, or a live holder, proves nothing: wait, then give up.
-    let mut live = std::process::Command::new("sleep")
-        .arg("30")
+    let mut live = std::process::Command::new(&test_binary)
+        .args(["--exact", NAME])
+        .env(HOLDER, "1")
+        .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
     for record in [format!("{}\n", live.id()), format!("{pid}")] {
