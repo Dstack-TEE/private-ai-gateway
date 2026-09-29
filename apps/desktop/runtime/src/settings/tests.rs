@@ -341,3 +341,54 @@ fn unknown_keys_warn_and_the_rest_of_the_file_applies() {
     settings.reload().unwrap();
     assert_eq!(settings.files().warnings.len(), 1);
 }
+
+#[test]
+fn the_header_stays_on_top_and_key_comments_stay_with_their_keys() {
+    let doc = |text: &str| text.parse::<DocumentMut>().unwrap();
+    let edited = |text: Option<&str>, from: &str, to: &str| {
+        edit(text, "# New file\n", &doc(from), &doc(to)).unwrap()
+    };
+    // A new file: its header, a blank line, then the keys.
+    assert_eq!(
+        edited(None, "", "appearance = \"dark\"\n"),
+        "# New file\n\nappearance = \"dark\"\n"
+    );
+    // A file of comments only is all header.
+    assert_eq!(
+        edited(Some("# Mine\n# More\n"), "", "appearance = \"dark\"\n"),
+        "# Mine\n# More\n\nappearance = \"dark\"\n"
+    );
+    // A root key added above the first table goes below the header.
+    assert_eq!(
+        edited(
+            Some("# Header\n\n# The listener\n[local-api]\nport = 4190\n"),
+            "[local-api]\nport = 4190\n",
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+        ),
+        "# Header\n\nappearance = \"dark\"\n# The listener\n[local-api]\nport = 4190\n"
+    );
+    // Removing the first key keeps the header and drops the key's own comment.
+    assert_eq!(
+        edited(
+            Some("# Header\n\n# Mine\nappearance = \"dark\"\n[local-api]\nport = 4190\n"),
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+            "[local-api]\nport = 4190\n",
+        ),
+        "# Header\n\n[local-api]\nport = 4190\n"
+    );
+    // Without a blank line, the comments belong to the first key; a dotted
+    // key's are found too.
+    assert_eq!(
+        edited(
+            Some("# Mine\nlocal-api.port = 4190\nappearance = \"dark\"\n"),
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+            "appearance = \"dark\"\n",
+        ),
+        "appearance = \"dark\"\n"
+    );
+    // Leading blank lines alone are not a header.
+    assert_eq!(
+        edited(Some("\n\nappearance = \"dark\"\n"), "", "port = 1\n"),
+        "appearance = \"dark\"\nport = 1\n"
+    );
+}
