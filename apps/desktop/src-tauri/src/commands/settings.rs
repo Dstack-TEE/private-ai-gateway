@@ -6,14 +6,13 @@ use std::{
 
 use desktop_core::{
     client::{CallError, Client},
-    contracts::CliRegistration,
     maintenance::ProfileBackup,
-    protocol::{rpc, Preference},
+    protocol::rpc,
 };
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{Manager, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FileDialogBuilder, FilePath};
 
-use crate::{distribution, run_blocking, run_cli_command, CliStartup};
+use crate::run_blocking;
 
 /// Imports a profile backup the user picks in the system open panel; `None`
 /// when they cancel.
@@ -144,60 +143,4 @@ mod tests {
             "replacement"
         );
     }
-}
-
-#[tauri::command]
-pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, CallError> {
-    distribution::require(
-        distribution::CAPABILITIES.cli_registration,
-        "Command registration is unavailable in this distribution",
-    )?;
-    let startup = app.state::<CliStartup>().inner().clone();
-    let state = startup.0.lock().await;
-    let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
-    Ok(CliRegistration {
-        registration,
-        startup_error: state.last_error.clone(),
-    })
-}
-
-#[tauri::command]
-pub(crate) async fn set_cli_registration(
-    app: AppHandle,
-    installed: bool,
-) -> Result<CliRegistration, CallError> {
-    distribution::require(
-        distribution::CAPABILITIES.cli_registration,
-        "Command registration is unavailable in this distribution",
-    )?;
-    let startup = app.state::<CliStartup>().inner().clone();
-    let mut state = startup.0.lock().await;
-    let client = app.state::<Arc<Client>>().inner().clone();
-    if !installed {
-        let writer = client.clone();
-        run_blocking(move || {
-            Ok(writer.call(rpc::SetPreference {
-                change: Preference::AutoCliRegistration(false),
-            })?)
-        })
-        .await?;
-    }
-    let registration = if installed {
-        run_cli_command(&app, vec!["cli", "install", "--json"]).await
-    } else {
-        run_cli_command(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
-    }?;
-    if installed {
-        run_blocking(move || {
-            Ok(client.call(rpc::SetPreference {
-                change: Preference::AutoCliRegistration(true),
-            })?)
-        })
-        .await?;
-    }
-    state.last_error = None;
-    Ok(CliRegistration {
-        registration,
-        startup_error: None,
-    })
 }

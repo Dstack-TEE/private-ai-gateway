@@ -12,7 +12,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{apply_appearance, autostart, notifications, run_blocking, tray, updates};
+use crate::{autostart, notifications, run_blocking, tray, updates, window};
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -20,54 +20,42 @@ static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_
 #[derive(Clone)]
 pub(crate) struct TauriHost {
     app: AppHandle,
-    window: Option<WebviewWindow>,
 }
 
 impl TauriHost {
-    pub(crate) fn new(window: WebviewWindow) -> Self {
-        Self {
-            app: window.app_handle().clone(),
-            window: Some(window),
-        }
-    }
-
-    pub(crate) fn from_app(app: AppHandle) -> Self {
-        Self { app, window: None }
-    }
-
-    fn app(&self) -> &AppHandle {
-        &self.app
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app }
     }
 }
 
 impl Host for TauriHost {
     fn emit(&self, event: Event) -> Result<(), String> {
         if event.event == shared::SETTINGS_RESET_EVENT {
-            self.app()
-                .emit_to("main", event.event, event.payload)
+            self.app
+                .emit_to(window::MAIN, event.event, event.payload)
                 .map_err(|_| "Settings reset, but the interface could not refresh".to_string())
         } else {
-            self.app()
+            self.app
                 .emit(event.event, event.payload)
                 .map_err(|_| "Could not sync the interface".to_string())
         }
     }
 
     fn apply_appearance(&self, appearance: Appearance) -> Result<(), String> {
-        apply_appearance(self.app(), appearance);
+        self.app.set_theme(window::native_theme(appearance));
         Ok(())
     }
 
     fn open_at_login(&self) -> Result<bool, String> {
-        autostart::is_enabled(self.app())
+        autostart::is_enabled(&self.app)
     }
 
     fn set_open_at_login(&self, enabled: bool) -> Result<(), String> {
-        tray::set_open_at_login(self.app(), enabled)
+        tray::set_open_at_login(&self.app, enabled)
     }
 
     fn present_account_login(&self, url: &str) {
-        if self.app().opener().open_url(url, None::<&str>).is_err() {
+        if self.app.opener().open_url(url, None::<&str>).is_err() {
             tracing::warn!(
                 "Cannot open the account connection page; use the manual connection link"
             );
@@ -78,47 +66,28 @@ impl Host for TauriHost {
         &self,
         preferences: NotificationPreferences,
     ) -> NotificationConfiguration {
-        notifications::configuration(self.app(), preferences).await
+        notifications::configuration(&self.app, preferences).await
     }
 
     fn notification_preferences_saved(
         &self,
         preferences: NotificationPreferences,
     ) -> Result<(), String> {
-        notifications::set_cached_preferences(self.app(), preferences)
+        notifications::set_cached_preferences(&self.app, preferences)
     }
 
     async fn reset_settings(&self, backend: &impl Backend) -> Result<AppStateWire, CallError> {
-        let prepared = self.app().state::<updates::PreparedUpdate>();
+        let prepared = self.app.state::<updates::PreparedUpdate>();
         let mut prepared = prepared
             .0
             .try_lock()
             .map_err(|_| "An update operation is in progress")?;
-        let worker_app = self.app().clone();
+        let worker_app = self.app.clone();
         let reset = shared::call(backend, rpc::ResetSettings).await;
         let result = run_blocking(move || {
             let state = reset?;
             tray::set_open_at_login(&worker_app, false)?;
-            if let (Some(window), Some(defaults)) = (
-                worker_app.get_webview_window("main"),
-                worker_app
-                    .config()
-                    .app
-                    .windows
-                    .iter()
-                    .find(|window| window.label == "main"),
-            ) {
-                window
-                    .set_fullscreen(false)
-                    .map_err(|_| "Could not reset the window")?;
-                window
-                    .unmaximize()
-                    .map_err(|_| "Could not reset the window")?;
-                window
-                    .set_size(tauri::LogicalSize::new(defaults.width, defaults.height))
-                    .map_err(|_| "Could not reset the window size")?;
-                window.center().map_err(|_| "Could not center the window")?;
-            }
+            window::reset(&worker_app)?;
             Ok(state)
         })
         .await;
@@ -132,22 +101,22 @@ impl Host for TauriHost {
 
     async fn request_agent_access(&self) -> Result<AgentAccessStatus, String> {
         let window = self
-            .window
-            .clone()
+            .app
+            .get_webview_window(window::MAIN)
             .ok_or_else(|| "Home access requires the main window".to_string())?;
-        let client = self.app().state::<Arc<Client>>().inner().clone();
+        let client = self.app.state::<Arc<Client>>().inner().clone();
         request_agent_access(window, client).await?;
         Ok(desktop_core::agent_access::status())
     }
 }
 
 pub(crate) async fn invoke(
-    window: WebviewWindow,
+    app: AppHandle,
     client: State<'_, Arc<Client>>,
     method: Method,
     params: Value,
 ) -> Result<Value, CallError> {
-    shared::invoke(client.inner(), &TauriHost::new(window), method, params).await
+    shared::invoke(client.inner(), &TauriHost::new(app), method, params).await
 }
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -157,9 +126,6 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
     let Ok(_request) = AGENT_ACCESS_REQUEST.try_lock() else {
         return Ok(());
     };
-    if window.label() != "main" {
-        return Ok(());
-    }
     if desktop_core::agent_access::status() != AgentAccessStatus::Authorized {
         let home = desktop_core::agent_access::expected_home()?;
         let (send, receive) = tokio::sync::oneshot::channel();

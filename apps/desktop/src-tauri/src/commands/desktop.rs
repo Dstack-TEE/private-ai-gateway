@@ -4,37 +4,26 @@ use desktop_core::{
     agents::Agent,
     brand::AboutLink,
     client::{CallError, Client},
-    contracts::ServiceProvider,
 };
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{
+    menu::{Menu, MenuBuilder},
+    AppHandle, Manager, Runtime, State, WebviewWindow,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_opener::OpenerExt;
 
-use crate::{distribution, open_account_url, run_blocking};
-
-async fn open_url(app: AppHandle, url: String, failure: &'static str) -> Result<(), CallError> {
-    Ok(run_blocking(move || {
-        app.opener()
-            .open_url(url, None::<&str>)
-            .map_err(|_| failure.to_string())
-    })
-    .await?)
-}
+use super::open_url;
+use crate::{distribution, run_blocking};
 
 #[tauri::command]
 pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), CallError> {
     let url = Agent::from_id(&agent_id)?.website();
-    open_url(app, url.into(), "Cannot open the agent website").await
+    Ok(open_url(app, url.into(), "Cannot open the agent website").await?)
 }
 
 #[tauri::command]
 pub(crate) async fn open_about_link(app: AppHandle, target: AboutLink) -> Result<(), CallError> {
-    open_url(
-        app,
-        target.url().into(),
-        "Cannot open the resource in your browser",
-    )
-    .await
+    let url = target.url().into();
+    Ok(open_url(app, url, "Cannot open the resource in your browser").await?)
 }
 
 /// Opens the listening web UI in the system browser. The address carries no
@@ -57,7 +46,7 @@ pub(crate) async fn open_web_ui(
             .ok_or_else(|| "The web UI is not listening".to_string())
     })
     .await?;
-    open_url(app, url, "Cannot open the web UI in your browser").await
+    Ok(open_url(app, url, "Cannot open the web UI in your browser").await?)
 }
 
 #[tauri::command]
@@ -75,45 +64,27 @@ pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), CallEr
 
 #[tauri::command]
 pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<(), CallError> {
-    let menu = edit_menu(window.app_handle(), editable)?;
+    let menu = edit_menu(window.app_handle(), editable).map_err(|_| "Cannot build editing menu")?;
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
 }
 
-fn edit_menu<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    editable: bool,
-) -> Result<tauri::menu::Menu<R>, &'static str> {
-    use tauri::menu::{Menu, PredefinedMenuItem};
-    let menu = Menu::new(app).map_err(|_| "Cannot create editing menu")?;
-    #[cfg(target_os = "macos")]
+/// The system editing actions a text field's context menu offers. Only macOS
+/// has native Undo and Redo items.
+fn edit_menu<R: Runtime>(app: &AppHandle<R>, editable: bool) -> tauri::Result<Menu<R>> {
+    let mut menu = MenuBuilder::new(app);
     if editable {
-        menu.append_items(&[
-            &PredefinedMenuItem::undo(app, None).map_err(|_| "Cannot create Undo action")?,
-            &PredefinedMenuItem::redo(app, None).map_err(|_| "Cannot create Redo action")?,
-            &PredefinedMenuItem::separator(app).map_err(|_| "Cannot create menu separator")?,
-        ])
-        .map_err(|_| "Cannot build editing menu")?;
+        if cfg!(target_os = "macos") {
+            menu = menu.undo().redo().separator();
+        }
+        menu = menu.cut();
     }
+    menu = menu.copy();
     if editable {
-        menu.append(&PredefinedMenuItem::cut(app, None).map_err(|_| "Cannot create Cut action")?)
-            .map_err(|_| "Cannot build editing menu")?;
+        menu = menu.paste();
     }
-    menu.append(&PredefinedMenuItem::copy(app, None).map_err(|_| "Cannot create Copy action")?)
-        .map_err(|_| "Cannot build editing menu")?;
-    if editable {
-        menu.append(
-            &PredefinedMenuItem::paste(app, None).map_err(|_| "Cannot create Paste action")?,
-        )
-        .map_err(|_| "Cannot build editing menu")?;
-    }
-    menu.append(
-        &PredefinedMenuItem::select_all(app, None)
-            .map_err(|_| "Cannot create Select All action")?,
-    )
-    .map_err(|_| "Cannot build editing menu")?;
-    Ok(menu)
+    menu.select_all().build()
 }
 
 /// Quits the app and leaves the background service running, like Quit in the
@@ -132,20 +103,6 @@ pub(crate) async fn stop_all_and_quit(
     run_blocking(move || client.shutdown()).await?;
     app.exit(0);
     Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn open_api_key_page(
-    app: AppHandle,
-    provider: ServiceProvider,
-) -> Result<(), CallError> {
-    distribution::require(
-        distribution::CAPABILITIES.account_portal_links,
-        "Account portal links are unavailable in this distribution",
-    )?;
-    let url = desktop_core::account::api_key_page(provider)
-        .ok_or("Custom providers do not have a built-in API key page")?;
-    Ok(open_account_url(app, url.to_string()).await?)
 }
 
 #[cfg(test)]

@@ -43,7 +43,7 @@ const TRAY_NOTICE_FILE: &str = "tray-notice-shown";
 /// went. The notice is recorded with the app's other local state, not in its
 /// settings.
 pub fn explain_close_to_tray(app: &AppHandle) {
-    if app.tray_by_id("gateway").is_none() {
+    if app.tray_by_id(crate::tray::TRAY_ID).is_none() {
         return;
     }
     let Ok(directory) = desktop_core::paths::app_data_dir() else {

@@ -10,18 +10,12 @@
 use desktop_core::brand::AboutLink;
 use tauri::{menu::MenuEvent, AppHandle};
 
-#[cfg(target_os = "macos")]
-pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    app.set_menu(menu_bar(app)?)?;
-    Ok(())
-}
-
+/// The menu bar, which `tauri::Builder::menu` sets on macOS.
 #[cfg(any(target_os = "macos", test))]
-fn menu_bar<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
+pub fn menu_bar<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
     use desktop_core::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
     use tauri::menu::{
-        AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
-        WINDOW_SUBMENU_ID,
+        AboutMetadata, MenuBuilder, MenuItem, SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
     };
 
     let about = AboutMetadata {
@@ -33,74 +27,44 @@ fn menu_bar<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu:
     // The accelerator sends the same navigate request as the renderer's
     // shortcut elsewhere; the window shows the page once a modal dialog closes.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
-    let application = Submenu::with_items(
-        app,
-        PRODUCT_NAME,
-        true,
-        &[
-            &PredefinedMenuItem::about(app, Some(&format!("About {PRODUCT_NAME}")), Some(about))?,
-            &PredefinedMenuItem::separator(app)?,
-            &settings,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::services(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, None)?,
-            &PredefinedMenuItem::hide_others(app, None)?,
-            &PredefinedMenuItem::show_all(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, None)?,
-        ],
-    )?;
-    let edit = Submenu::with_items(
-        app,
-        "Edit",
-        true,
-        &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::cut(app, None)?,
-            &PredefinedMenuItem::copy(app, None)?,
-            &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
-        ],
-    )?;
-    let view = Submenu::with_items(
-        app,
-        "View",
-        true,
-        &[&PredefinedMenuItem::fullscreen(app, None)?],
-    )?;
-    let window = Submenu::with_id_and_items(
-        app,
-        WINDOW_SUBMENU_ID,
-        "Window",
-        true,
-        &[
-            &PredefinedMenuItem::minimize(app, None)?,
-            &PredefinedMenuItem::maximize(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::bring_all_to_front(app, None)?,
-        ],
-    )?;
-    let documentation = MenuItem::with_id(
-        app,
-        "documentation",
-        format!("{PRODUCT_NAME} Help"),
-        true,
-        None::<&str>,
-    )?;
-    let github = MenuItem::with_id(app, "github", "GitHub", true, None::<&str>)?;
-    let help = Submenu::with_id_and_items(
-        app,
-        HELP_SUBMENU_ID,
-        "Help",
-        true,
-        &[&documentation, &github],
-    )?;
-    Menu::with_items(app, &[&application, &edit, &view, &window, &help])
+    let application = SubmenuBuilder::new(app, PRODUCT_NAME)
+        .about_with_text(format!("About {PRODUCT_NAME}"), Some(about))
+        .separator()
+        .item(&settings)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let edit = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let view = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+    let window = SubmenuBuilder::with_id(app, WINDOW_SUBMENU_ID, "Window")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .separator()
+        .bring_all_to_front()
+        .build()?;
+    let help = SubmenuBuilder::with_id(app, HELP_SUBMENU_ID, "Help")
+        .text("documentation", format!("{PRODUCT_NAME} Help"))
+        .text("github", "GitHub")
+        .build()?;
+    MenuBuilder::new(app)
+        .items(&[&application, &edit, &view, &window, &help])
+        .build()
 }
 
 /// The one handler of every native menu item. Tauri calls each global menu
@@ -124,11 +88,6 @@ fn open_link(app: &AppHandle, link: AboutLink) {
             "Your default browser did not open it.",
         );
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn setup(_app: &AppHandle) -> tauri::Result<()> {
-    Ok(())
 }
 
 /// Each item of a menu as `id: text`, check items with their state, disabled

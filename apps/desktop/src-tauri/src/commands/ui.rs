@@ -13,7 +13,7 @@ use desktop_core::{
 use serde_json::Value;
 use tauri::{
     ipc::{InvokeBody, Request},
-    State, WebviewWindow,
+    AppHandle, State,
 };
 
 macro_rules! ui_commands {
@@ -26,11 +26,11 @@ macro_rules! ui_commands {
     (@each $($command:ident => $method:ident,)+) => {$(
         #[tauri::command]
         pub(crate) async fn $command(
-            window: WebviewWindow,
+            app: AppHandle,
             client: State<'_, Arc<Client>>,
             request: Request<'_>,
         ) -> Result<Value, CallError> {
-            crate::ui_api::invoke(window, client, Method::$method, params(&request)?).await
+            crate::ui_api::invoke(app, client, Method::$method, params(&request)?).await
         }
     )+};
 }
