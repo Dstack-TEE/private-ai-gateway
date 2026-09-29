@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.1...desktop-v0.3.0-beta.1) (2026-09-29)
+
+
+### Features
+
+* **desktop:** support DeepSeek Harness ([#368](https://github.com/Dstack-TEE/private-ai-gateway/issues/368)) ([df032ed](https://github.com/Dstack-TEE/private-ai-gateway/commit/df032ed046dfdbd558d54500d3c5466de946d667))
+
 ## [0.2.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.0...desktop-v0.2.1) (2026-09-28)
 
 Private AI Proxy 0.2.1 hardens OpenCode 2 support, restores agents when the app is uninstalled, and cleans up the app's internals with no visible change.
