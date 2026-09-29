@@ -4,12 +4,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::contracts::ServiceProvider;
 
+/// [`PRODUCT_NAME`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! product_name {
+    () => {
+        "Private AI Proxy"
+    };
+}
 /// `productName` in src-tauri/tauri.conf.json.
-pub const PRODUCT_NAME: &str = "Private AI Proxy";
+pub const PRODUCT_NAME: &str = product_name!();
 /// `bundle.publisher` in src-tauri/tauri.conf.json.
 pub const ORGANIZATION_NAME: &str = "Dstack TEE";
+/// [`BYLINE`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! byline {
+    () => {
+        "by dstack TEE"
+    };
+}
 /// The renderer receives it as a generated constant.
-pub const BYLINE: &str = "by dstack TEE";
+pub const BYLINE: &str = byline!();
 pub const SERVICE_NAME: &str = ServiceProvider::DEFAULT.label();
 pub const SERVICE_DEFAULT_URL: &str = match ServiceProvider::DEFAULT.preset_url() {
     Some(url) => url,

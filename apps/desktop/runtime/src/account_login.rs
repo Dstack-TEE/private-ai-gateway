@@ -41,9 +41,9 @@ use uuid::Uuid;
 
 use crate::Error;
 
-use desktop_core::account::{account_return_url, LoginPresentation};
+use desktop_core::account::LoginPresentation;
 #[cfg(test)]
-use desktop_core::account::{organization_url, top_up_url};
+use desktop_core::account::{account_return_url, organization_url, top_up_url};
 use desktop_core::contracts::{
     AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
     ConfidentialProfileInput, ProfileAuth, ServiceProvider,

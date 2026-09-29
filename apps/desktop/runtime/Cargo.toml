@@ -27,6 +27,7 @@ base64 = "0.23"
 csv = "1"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 hex = "0.4"
+html-escape = "0.2"
 indexmap = { version = "2", features = ["serde"] }
 # Only for the one-time 0.1 import in settings/legacy.rs; remove with it.
 keyring = "4"

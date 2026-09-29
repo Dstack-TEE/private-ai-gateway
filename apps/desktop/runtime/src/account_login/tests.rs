@@ -329,6 +329,28 @@ async fn pasted_callback_is_bound_to_session_and_consumed_once() {
 }
 
 #[test]
+fn callback_pages_need_no_escaping() {
+    // The pages include these unescaped, as compile-time constants.
+    use desktop_core::brand::{APP_IDENTIFIER, BYLINE, PRODUCT_NAME};
+    for text in [APP_IDENTIFIER, BYLINE, PRODUCT_NAME] {
+        assert!(!text.contains(['&', '<', '>', '"', '\'']), "{text}");
+    }
+    for accepted in [true, false] {
+        let page = callback_page(accepted);
+        assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>\n"));
+        assert!(page.contains("<img src=\"data:image/png;base64,iVBORw0KGgo"));
+        assert!(page.contains(&format!(
+            "<title>{}",
+            if accepted {
+                "Authorization received"
+            } else {
+                "Account connection could not complete"
+            }
+        )));
+    }
+}
+
+#[test]
 fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
     let address = "127.0.0.1:50123".parse().unwrap();
     let mut headers = HeaderMap::new();
