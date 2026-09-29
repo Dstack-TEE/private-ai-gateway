@@ -58,6 +58,7 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
       ;;
     opencode)
       # OpenCode 2 has its own installer; both install the opencode command.
+      [[ "${PAP_E2E_OPENCODE_V2:-}" != 1 ]] || OPENCODE_VERSION="$OPENCODE_V2_VERSION"
       installer=https://opencode.ai/install
       [[ "$OPENCODE_VERSION" == 2.* ]] && installer=https://opencode.ai/v2/install
       from_script opencode "$installer" --version "$OPENCODE_VERSION" --no-modify-path

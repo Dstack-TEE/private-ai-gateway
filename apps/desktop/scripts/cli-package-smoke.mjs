@@ -28,6 +28,8 @@ const version = execFileSync(pap, ["--version"], {
 }).trim();
 assert.equal(version, `private-ai-proxy ${expectedVersion}`);
 for (const alias of aliases) {
+  // A .cmd shim runs only through cmd.exe, which parses its own command line
+  // and has no quoting library; Windows paths cannot contain the `"` it uses.
   const aliasVersion = process.platform === "win32"
     ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(aliasDirectory, `${alias}.cmd`)}" --version"`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true })
     : execFileSync(path.join(aliasDirectory, alias), ["--version"], { encoding: "utf8", timeout: 10_000 });

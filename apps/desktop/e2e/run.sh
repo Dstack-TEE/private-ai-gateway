@@ -58,7 +58,7 @@ container="$(basename "$work")"
 network=bridge
 versions=(--env-file "$e2e_dir/versions.env")
 if [[ "$opencode_v2" == true ]]; then
-  versions+=(--env "OPENCODE_VERSION=$(sed -n 's/^OPENCODE_V2_VERSION=//p' "$e2e_dir/versions.env")")
+  versions+=(--env PAP_E2E_OPENCODE_V2=1)
 fi
 cleanup() {
   docker rm --force "$container" >/dev/null 2>&1 || true

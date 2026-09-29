@@ -862,6 +862,11 @@ mod platform {
         }
     }
 
+    /// Splits the user's `Path` value on `;` only. `std::env::split_paths`
+    /// strips the quotes around an entry and `join_paths` adds its own, so a
+    /// round trip through them would rewrite the user's other entries; this
+    /// split and `join(";")` give every other entry back byte for byte, and a
+    /// directory containing `;` is refused before it is added.
     fn path_entries(value: &str) -> Vec<String> {
         value.split(';').map(ToOwned::to_owned).collect()
     }
