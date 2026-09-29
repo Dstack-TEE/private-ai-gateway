@@ -24,6 +24,9 @@ jobs:
   package:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    env:
+      # Every CLI archive's <platform>-<arch>; Windows archives are zip files.
+      TARGETS: macos-arm64 macos-x64 linux-arm64 linux-x64 windows-arm64 windows-x64
     outputs:
       dist_tag: ${{ steps.release.outputs.dist_tag }}
       version: ${{ steps.release.outputs.version }}
@@ -31,14 +34,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: ./.github/actions/desktop-node
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install packaging dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts
+          ignore-scripts: true
       - id: release
         name: Validate release
         env:
@@ -61,15 +59,11 @@ jobs:
             --pattern "private-ai-proxy-cli-${VERSION}-*.tar.gz" \
             --pattern "private-ai-proxy-cli-${VERSION}-*.zip"
 
-          expected=()
-          for target in macos-arm64 macos-x64 linux-arm64 linux-x64; do
-            expected+=("private-ai-proxy-cli-${VERSION}-${target}.tar.gz")
-          done
-          for target in windows-arm64 windows-x64; do
-            expected+=("private-ai-proxy-cli-${VERSION}-${target}.zip")
-          done
           : > release-downloads/npm-SHA256SUMS
-          for filename in "${expected[@]}"; do
+          for target in $TARGETS; do
+            extension=tar.gz
+            if [[ "$target" == windows-* ]]; then extension=zip; fi
+            filename="private-ai-proxy-cli-${VERSION}-${target}.${extension}"
             test -f "release-downloads/$filename"
             line="$(awk -v filename="$filename" '$2 == filename { print }' release-downloads/SHA256SUMS)"
             test "$(printf '%s\n' "$line" | grep -c .)" -eq 1
@@ -83,29 +77,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir extracted npm-packages
-          while read -r platform arch extension; do
-            base="private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
-            destination="extracted/${platform}-${arch}"
-            mkdir "$destination"
-            if [[ "$extension" == zip ]]; then
-              unzip -q "release-downloads/${base}.zip" -d "$destination"
+          for target in $TARGETS; do
+            base="private-ai-proxy-cli-${VERSION}-${target}"
+            mkdir "extracted/$target"
+            if [[ "$target" == windows-* ]]; then
+              unzip -q "release-downloads/${base}.zip" -d "extracted/$target"
             else
-              tar -xzf "release-downloads/${base}.tar.gz" -C "$destination"
+              tar -xzf "release-downloads/${base}.tar.gz" -C "extracted/$target"
             fi
             node apps/desktop/scripts/package-npm.mjs platform \
-              --platform "$platform" \
-              --arch "$arch" \
+              --platform "${target%-*}" \
+              --arch "${target#*-}" \
               --version "$VERSION" \
-              --source "$destination/$base" \
+              --source "extracted/$target/$base" \
               --output npm-packages
-          done <<'TARGETS'
-          macos arm64 tar.gz
-          macos x64 tar.gz
-          linux arm64 tar.gz
-          linux x64 tar.gz
-          windows arm64 zip
-          windows x64 zip
-          TARGETS
+          done
           node apps/desktop/scripts/package-npm.mjs wrapper \
             --version "$VERSION" \
             --output npm-packages
@@ -116,11 +102,15 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          while read -r platform npm_platform arch binary_extension; do
-            if [[ "$binary_extension" == none ]]; then binary_extension=""; fi
-            tarball="npm-packages/private-ai-proxy-${VERSION}-${npm_platform}-${arch}.tgz"
-            source="extracted/${platform}-${arch}/private-ai-proxy-cli-${VERSION}-${platform}-${arch}"
-            destination="verified/${platform}-${arch}"
+          for target in $TARGETS; do
+            npm_platform="${target%-*}" binary_extension=""
+            case "$npm_platform" in
+              macos) npm_platform=darwin ;;
+              windows) npm_platform=win32 binary_extension=.exe ;;
+            esac
+            tarball="npm-packages/private-ai-proxy-${VERSION}-${npm_platform}-${target#*-}.tgz"
+            source="extracted/${target}/private-ai-proxy-cli-${VERSION}-${target}"
+            destination="verified/${target}"
             mkdir -p "$destination"
             tar -xzf "$tarball" -C "$destination"
             diff -u \
@@ -129,15 +119,7 @@ jobs:
             for binary in private-ai-proxy private-ai-proxy-helper private-ai-proxy-service; do
               cmp "$source/${binary}${binary_extension}" "$destination/package/vendor/${binary}${binary_extension}"
             done
-          done <<'TARGETS'
-          macos darwin arm64 none
-          macos darwin x64 none
-          linux linux arm64 none
-          linux linux x64 none
-          windows win32 arm64 .exe
-          windows win32 x64 .exe
-          TARGETS
-
+          done
           wrapper="npm-packages/private-ai-proxy-${VERSION}.tgz"
           diff -u \
             <(printf '%s\n' package/LICENSE package/README.md package/bin/aci.cjs package/bin/private-ai-proxy.cjs package/package.json | sort) \
@@ -208,14 +190,7 @@ jobs:
           set -euo pipefail
           npm_version="$(npm --version)"
           node -e 'const [major, minor, patch] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1)' "$npm_version"
-          for target in \
-            darwin-arm64 \
-            darwin-x64 \
-            linux-arm64 \
-            linux-x64 \
-            win32-arm64 \
-            win32-x64
-          do
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
             platform_tag="$target"
             if [[ "$DIST_TAG" != latest ]]; then
               platform_tag="${DIST_TAG}-${target}"

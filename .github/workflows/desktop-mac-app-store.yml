@@ -13,6 +13,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -21,6 +22,7 @@ on:
       - main
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -51,16 +53,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
           components: clippy
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - &rust-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -68,13 +66,13 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/build
-          key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
-          restore-keys: pap-mas-verify-v2-${{ runner.os }}-
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: |
-          xcodebuild -version
-          npm ci
+            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/*/build
+          key: pap-mas-${{ github.job }}-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
+          restore-keys: pap-mas-${{ github.job }}-v2-${{ runner.os }}-
+      - run: xcodebuild -version
+      - uses: ./.github/actions/desktop-node
       # Desktop Tauri (desktop-native.yml) runs `npm run check`, the release
       # script tests and cargo fmt for the same changes; this job covers what
       # only compiles on macOS.
@@ -173,33 +171,15 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
-            ${{ env.CARGO_TARGET_DIR }}/*/deps
-            ${{ env.CARGO_TARGET_DIR }}/*/build
-            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
-            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
-            ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
-          restore-keys: pap-mas-package-v2-${{ runner.os }}-
-      - name: Install build targets and dependencies
-        working-directory: apps/desktop
+      - *rust-cache
+      - name: Install build targets
         run: |
           xcodebuild -version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          npm ci
+      - uses: ./.github/actions/desktop-node
       - name: Validate release request
         working-directory: apps/desktop
         env:

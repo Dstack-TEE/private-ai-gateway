@@ -1,0 +1,18 @@
+name: Desktop Node.js
+description: Sets up Node.js with the desktop npm cache and installs the desktop dependencies
+inputs:
+  ignore-scripts:
+    description: Skip dependency install scripts, which the release tooling does not need
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: 24
+        cache: npm
+        cache-dependency-path: apps/desktop/package-lock.json
+    - name: Install desktop dependencies
+      shell: bash
+      working-directory: apps/desktop
+      run: npm ci --ignore-scripts=${{ inputs.ignore-scripts }}
