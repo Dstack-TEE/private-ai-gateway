@@ -1,0 +1,390 @@
+$ pap status
+exit: Some(0)
+--- stdout
+Not protected
+Backend: running (PID [PID], version [VERSION])
+Profile: None selected
+Service credential: Not saved
+Local API: http://127.0.0.1:[PORT]
+Network access: Loopback only
+Production OS: Required
+Models: No verified catalog
+--- stderr
+
+$ pap service start
+exit: Some(0)
+--- stdout
+Backend started.
+--- stderr
+
+$ pap settings show
+exit: Some(0)
+--- stdout
+Files:
+  Config: [ROOT]/home/.private-ai-proxy/Config/config.toml
+  Credentials: [ROOT]/home/.private-ai-proxy/Config/credentials.toml
+  Warnings:
+    None
+Settings:
+  Require-production-os: Yes
+  Connect-on-launch: No
+  Appearance: system
+  Notifications:
+    Enabled: Yes
+    Gateway: Yes
+    Local-api: Yes
+    Verification: Yes
+  Local-api:
+    Listen-address: 127.0.0.1
+    Allow-network-access: No
+    Port: [PORT]
+  Web-ui:
+    Enabled: No
+    Listen-address: 127.0.0.1
+    Allow-network-access: No
+    Port: 4182
+Web ui:
+  Enabled: No
+  Listen address: 127.0.0.1
+  Allow network access: No
+  Port: 4182
+--- stderr
+
+$ pap settings show --json
+exit: Some(0)
+--- stdout
+{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"require-production-os":true,"connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
+--- stderr
+
+$ pap profiles list
+exit: Some(0)
+--- stdout
+No profiles.
+--- stderr
+
+$ pap profiles list --json
+exit: Some(0)
+--- stdout
+[]
+--- stderr
+
+$ pap profiles import [ROOT]/profiles.json
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+
+$ pap profiles import [ROOT]/profiles.json --yes
+exit: Some(0)
+--- stdout
+Imported: 1
+Skipped: 0
+--- stderr
+
+$ pap profiles list
+exit: Some(0)
+--- stdout
+Id  |  Name  |  Provider  |  Remote url
+[PROFILE]  |  Work  |  phala  |  https://inference.phala.com
+--- stderr
+
+$ pap profiles show [PROFILE]
+exit: Some(0)
+--- stdout
+Id: [PROFILE]
+Name: Work
+Provider: phala
+Remote url: https://inference.phala.com
+Auth:
+  Kind: apiKey
+Credential saved: No
+--- stderr
+
+$ pap profiles show missing
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Profile not found
+
+$ pap profiles export --output [ROOT]/exported.json
+exit: Some(0)
+--- stdout
+Exported to [ROOT]/exported.json
+--- stderr
+
+$ pap profiles export --output [ROOT]/exported.json
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Export target already exists; choose a new path.
+
+$ pap diagnostics --output [ROOT]/diagnostics.json
+exit: Some(0)
+--- stdout
+Exported to [ROOT]/diagnostics.json
+--- stderr
+
+$ pap profiles use missing --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Confidential AI profile not found
+
+$ pap profiles use missing --yes --json
+exit: Some(1)
+--- stdout
+--- stderr
+{"error":{"code":"invalid_state","message":"Confidential AI profile not found"}}
+
+$ pap profiles remove [PROFILE] --yes
+exit: Some(0)
+--- stdout
+Deleted profile: [PROFILE]
+--- stderr
+
+$ pap profiles list
+exit: Some(0)
+--- stdout
+No profiles.
+--- stderr
+
+$ pap settings set appearance dark --yes
+exit: Some(0)
+--- stdout
+Updated appearance.
+--- stderr
+
+$ pap settings set appearance purple --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Expected system, light, or dark
+
+$ pap settings set update-channel nightly --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Expected beta or stable
+
+$ pap settings set local-api.port port --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Expected a valid port number
+
+$ pap settings set web-ui.port port --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Expected a valid port number
+
+$ pap settings set connect-on-launch maybe --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Expected true or false
+
+$ pap settings set notifications [] --yes
+exit: Some(0)
+--- stdout
+Updated notifications.
+--- stderr
+warning: `notifications` is deprecated and will be removed in 0.3; use `notifications.enabled`, `notifications.gateway`, `notifications.local-api` or `notifications.verification`
+
+$ pap settings set appearance --value-stdin --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Only web-ui.password reads its value from stdin
+
+$ pap settings set autoCliRegistration false --yes
+exit: Some(0)
+--- stdout
+Updated auto-cli-registration.
+--- stderr
+warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`
+
+$ pap settings set notifications {"gateway":false} --yes
+exit: Some(0)
+--- stdout
+Updated notifications.
+--- stderr
+warning: `notifications` is deprecated and will be removed in 0.3; use `notifications.enabled`, `notifications.gateway`, `notifications.local-api` or `notifications.verification`
+
+$ pap settings set notifications.local-api false --yes
+exit: Some(0)
+--- stdout
+Updated notifications.local-api.
+--- stderr
+
+$ pap settings set web-ui.password --value-stdin --yes
+exit: Some(0)
+--- stdout
+Updated web-ui.password.
+--- stderr
+
+$ pap settings set appearance light --yes --json
+exit: Some(0)
+--- stdout
+{"require-production-os":true,"connect-on-launch":false,"appearance":"light","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":false,"local-api":false,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
+--- stderr
+
+$ pap usage list
+exit: Some(0)
+--- stdout
+No usage records.
+--- stderr
+
+$ pap usage list --json --agent codex --limit 5
+exit: Some(0)
+--- stdout
+{"items":[],"nextCursor":null,"summary":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"series":[],"modelSeries":[],"agents":[],"models":[]}
+--- stderr
+
+$ pap usage show missing
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Usage record not found
+
+$ pap usage show missing --receipt --json
+exit: Some(1)
+--- stdout
+--- stderr
+{"error":{"code":"not_found","message":"Usage record not found"}}
+
+$ pap usage export --output [ROOT]/usage.csv
+exit: Some(0)
+--- stdout
+Exported 0 usage records.
+--- stderr
+
+$ pap usage clear
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+
+$ pap usage clear --yes
+exit: Some(0)
+--- stdout
+Deleted 0 usage records.
+--- stderr
+
+$ pap usage clear --yes --json
+exit: Some(0)
+--- stdout
+{"deleted":0}
+--- stderr
+
+$ pap models list
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: No verified model catalog. Start protection and wait for verification first.
+
+$ pap models list --json
+exit: Some(1)
+--- stdout
+--- stderr
+{"error":{"code":"command_failed","message":"No verified model catalog. Start protection and wait for verification first."}}
+
+$ pap token rotate --yes
+exit: Some(0)
+--- stdout
+Client key rotated.
+--- stderr
+
+$ pap token rotate --yes --json
+exit: Some(0)
+--- stdout
+{"rotated":true}
+--- stderr
+
+$ pap token clear-credential --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: The operation could not complete. Check the protection status and supplied configuration before retrying.
+
+$ pap web-ui password rotate --yes
+exit: Some(0)
+--- stdout
+Web UI password rotated.
+--- stderr
+
+$ pap web-ui password rotate --yes --json
+exit: Some(0)
+--- stdout
+{"rotated":true}
+--- stderr
+
+$ pap agents disconnect codex --revision stale --yes
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: The agent settings changed while applying this connection. Try again.
+
+$ pap --json --yes agents disconnect codex --revision stale
+exit: Some(1)
+--- stdout
+--- stderr
+{"error":{"code":"revision_conflict","message":"The agent settings changed while applying this connection. Try again."}}
+
+$ pap agents connect no-such-agent --dry-run
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: The operation could not complete. Check the protection status and supplied configuration before retrying.
+
+$ pap stop
+exit: Some(0)
+--- stdout
+Not protected
+Profile: None selected
+Service credential: Not saved
+Local API: http://127.0.0.1:[PORT]
+Network access: Loopback only
+Production OS: Required
+Models: No verified catalog
+--- stderr
+
+$ pap stop --offline
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: The backend is running; restore the agents through it with `stop` or `service stop`.
+
+$ pap status
+exit: Some(0)
+--- stdout
+Not protected
+Backend: running (PID [PID], version [VERSION])
+Profile: None selected
+Service credential: Not saved
+Local API: http://127.0.0.1:[PORT]
+Network access: Loopback only
+Production OS: Required
+Models: No verified catalog
+--- stderr
+
+$ pap service stop
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+
+$ pap service stop --yes
+exit: Some(0)
+--- stdout
+Backend stopped.
+--- stderr
+
+$ pap service status
+exit: Some(0)
+--- stdout
+Backend not running.
+Start backend: private-ai-proxy service start
+Start protection: private-ai-proxy start
+--- stderr
+

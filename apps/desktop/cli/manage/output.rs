@@ -555,3 +555,195 @@ mod tests {
         assert!(output.contains("Error: changed "));
     }
 }
+
+/// Every human rendering over representative backend values, as a golden
+/// file beside the command-line goldens in `tests/golden`.
+#[cfg(test)]
+mod golden {
+    use super::super::Cli;
+    use clap::Parser;
+    use serde_json::{json, Value};
+
+    fn gateway() -> Value {
+        json!({
+            "status": "verified", "activeProfileId": "work", "apiKeySaved": true,
+            "profiles": [{"id": "work", "name": "Work", "provider": "redpill", "remoteUrl": "https://tee.redpill.ai"}],
+            "proxyUrl": "http://127.0.0.1:4180", "localApi": {"allowNetworkAccess": true},
+            "webUi": {"enabled": true, "url": "http://127.0.0.1:4182", "allowNetworkAccess": false},
+            "configFiles": {"error": "bad\u{001b}[31m value", "warnings": ["unknown key `x`"]},
+            "config": {"requireProductionOs": false},
+            "identity": {"teeType": "tdx", "trustLevel": "hardware_verified"},
+            "checks": [
+                {"title": "Quote", "status": "pass"}, {"title": "Binding", "status": "fail"},
+                {"title": "Custody", "status": "skip"}, {"title": "Channel", "status": "fail"},
+            ],
+            "catalog": {"models": [{"id": "a"}, {"id": "b"}]}, "sessionId": "session-1",
+            "sessionUsage": {"requests": 12, "protected": 10, "blockedLocally": 1, "failedProof": 1, "inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 5, "cacheWriteTokens": 0, "costUsd": 0.0012},
+            "progress": "Checking", "error": "", "endpointError": "Port in use",
+            "wakeMonitorAvailable": false, "activity": [{"detail": "never shown"}],
+        })
+    }
+
+    fn agents() -> Value {
+        json!([
+            {"id": "codex", "name": "Codex", "installed": true, "connected": true, "authorized": true},
+            {"id": "claude", "name": "Claude Code", "installed": true, "connected": true, "authorized": false, "attention": "Restart it", "error": "changed\u{001b}"},
+            {"id": "saved", "name": "Saved", "installed": true, "recorded": true},
+            {"id": "gone", "name": "Gone", "installed": false},
+            {"id": "idle", "name": "Idle", "installed": true, "connected": false},
+        ])
+    }
+
+    fn cases() -> Vec<(&'static str, Value)> {
+        let state = gateway();
+        let mut disconnected = state.clone();
+        disconnected["backendConnected"] = json!(false);
+        let mut configuring = state.clone();
+        configuring["configurationVerification"] = json!(true);
+        let mut reconnecting = state.clone();
+        reconnecting["reconnecting"] = json!(true);
+        let mut failed_web_ui = state.clone();
+        failed_web_ui["webUi"] = json!({"enabled": true, "error": "Address in use"});
+        let mut stopped = json!({"status": "stopped", "activeProfileId": "gone", "config": {}, "proxyUrl": "http://127.0.0.1:4180"});
+        stopped["catalog"] = json!({"models": []});
+        vec![
+            (
+                "status",
+                json!({"backend": {"processId": 42, "version": "0.2.1"}, "gateway": state}),
+            ),
+            ("status", json!({"backend": null, "status": "not_running"})),
+            ("status", disconnected),
+            ("status", configuring),
+            ("status", reconnecting),
+            ("status", failed_web_ui),
+            ("status", stopped),
+            (
+                "status",
+                json!({"status": "blocked", "profiles": [], "error": "Blocked"}),
+            ),
+            ("status", json!({"status": "error", "activeProfileId": ""})),
+            ("status", json!({"status": "verifying"})),
+            (
+                "service status",
+                json!({"backend": null, "status": "not_running"}),
+            ),
+            ("start", gateway()),
+            ("stop", gateway()),
+            ("stop --offline", agents()),
+            (
+                "stop --offline",
+                json!({"id": "codex", "name": "Codex", "installed": true}),
+            ),
+            ("service start", json!({"version": "0.2.1"})),
+            ("service stop", json!({"status": "stopped"})),
+            (
+                "app open",
+                json!({"url": "http://127.0.0.1:4182", "browserOpened": true}),
+            ),
+            (
+                "app open --web",
+                json!({"url": "http://127.0.0.1:4182", "browserOpened": false}),
+            ),
+            ("app open", json!({"opened": true})),
+            (
+                "profiles list",
+                json!([{"id": "work", "name": "Work", "provider": "redpill", "remoteUrl": null}]),
+            ),
+            ("profiles list", json!([])),
+            (
+                "profiles show work",
+                json!({"id": "work", "name": "Work", "auth": {"kind": "apiKey"}, "tags": [], "credentialSaved": false}),
+            ),
+            (
+                "profiles import backup.json",
+                json!({"imported": 1, "skipped": 0}),
+            ),
+            (
+                "profiles export --output out.json",
+                json!({"exported": "/tmp/out.json"}),
+            ),
+            ("profiles use work", gateway()),
+            ("profiles login work", gateway()),
+            ("profiles add --id w --name W --url https://x", gateway()),
+            ("profiles verify work", gateway()),
+            ("profiles edit work", gateway()),
+            ("profiles remove work", json!({})),
+            ("agents list", agents()),
+            ("agents list", json!([])),
+            ("agents connect codex", agents()[0].clone()),
+            (
+                "agents connect codex --dry-run",
+                json!({"revision": "r1", "changes": [{"path": "~/.codex/config.toml", "action": "update"}], "warnings": []}),
+            ),
+            ("agents disconnect codex", agents()[2].clone()),
+            (
+                "agents disconnect codex --dry-run",
+                json!({"revision": "r2", "changes": []}),
+            ),
+            ("agents disconnect-all", agents()),
+            (
+                "models list",
+                json!({"models": [{"id": "m1", "name": "Model One"}, {"id": "m2"}]}),
+            ),
+            ("models list", json!({"models": []})),
+            (
+                "usage list",
+                json!({"items": [
+                {"id": "a", "model": "m", "status": 200, "leftDevice": true, "verified": true, "inputTokens": 1, "outputTokens": 2},
+                {"id": "b", "model": "m", "status": 200, "leftDevice": true, "verified": false},
+                {"id": "c", "status": 0, "leftDevice": false, "verified": null},
+                {"id": "d", "status": 500, "leftDevice": true},
+            ], "nextCursor": "next\u{0007}"}),
+            ),
+            ("usage list", json!({"items": [], "nextCursor": null})),
+            (
+                "usage show a",
+                json!({"id": "a", "model": "m", "costUsd": 0.5, "receipt": {"verified": true}}),
+            ),
+            ("usage export --output u.csv", json!({"rows": 3})),
+            ("usage clear", json!({"deleted": 7})),
+            ("settings reset", gateway()),
+            (
+                "settings show",
+                json!({"files": {"config": "/c.toml", "error": null}, "settings": {"appearance": "dark"}}),
+            ),
+            ("settings set appearance dark", gateway()),
+            ("settings set webUiPort 1", gateway()),
+            ("token rotate", json!({"rotated": true})),
+            ("token show", json!({"token": "sk-pap-example"})),
+            ("token clear-credential", gateway()),
+            ("web-ui password show", json!({"password": "pass word"})),
+            ("web-ui password rotate", json!({"rotated": true})),
+            (
+                "cli status",
+                json!({"registered": false, "directory": "/home/u/.local/bin", "onPath": true}),
+            ),
+            ("cli install", json!({"registered": true})),
+            ("cli uninstall", json!({"registered": false})),
+            (
+                "doctor",
+                json!({"version": "0.2.1", "update": {"error": "offline"}, "backendRunning": false, "errors": {}, "warnings": {"credentials": "readable"}}),
+            ),
+            (
+                "diagnostics --output d.json",
+                json!({"exported": "/tmp/d.json"}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn human_output() {
+        let mut transcript = String::new();
+        for (args, value) in cases() {
+            let cli = Cli::try_parse_from(std::iter::once("pap").chain(args.split(' '))).unwrap();
+            transcript.push_str(&format!(
+                "$ pap {args}\n{value}\n---\n{}\n\n",
+                super::render(&cli.command, &value)
+            ));
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/human.txt");
+        snapbox::Assert::new()
+            .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+            .eq(transcript, snapbox::Data::read_from(&path, None).raw());
+    }
+}

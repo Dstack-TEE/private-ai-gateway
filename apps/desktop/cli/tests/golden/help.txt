@@ -1,0 +1,1315 @@
+$ pap -h
+exit: Some(0)
+--- stdout
+Private AI Proxy: manage local protection and verify confidential AI services
+
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
+
+Commands:
+  status       Show backend and protection state. This does not start the backend
+  start        Start protection and wait for a verified connection
+  stop         Stop protection and restore managed agent configurations. The backend keeps running; with --offline, no backend is needed
+  service      Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on
+  profiles     Sign in, list, inspect, verify, import, export, select, or delete service profiles
+  agents       Inspect or change supported coding-agent configurations
+  models       Inspect models from the last verified catalog
+  usage        Query or export local usage records
+  settings     Inspect or change settings (config.toml; API keys and passwords are in credentials.toml)
+  token        Manage the Local API token and active profile credential
+  web-ui       Manage the browser UI hosted by the backend
+  cli          Manage installation of the private-ai-proxy command
+  app          Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
+  doctor       Report independent local installation and backend diagnostics without starting services
+  diagnostics  Export a redacted diagnostics report to a new file
+  completions  Generate shell completions from the current command definition
+  verify       Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks under the dstack tdx verifier policy (spec 1.3), and print a verification transcript. Exits 0 only if the verdict is VERIFIED.
+  audit        Offline verification of saved artifacts using the same transcript engine as verify.
+  sessions     Verify the service (fail closed), list its current attested sessions, and run the spec 9.2 audit on each — the ids that pass are what a client pins (spec 5.3).
+  send         Verify the service (fail closed), send one chat completion over an SPKI-pinned connection, then fetch and verify its receipt. The API key is read from stdin with --api-key-stdin or from the ACI_API_KEY environment variable.
+  curl         Verify the target's ACI service (fail closed), then run the system curl with the attested TLS key pinned. Exits 125 when pap refuses the request, otherwise with curl's exit code.
+  serve        Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). Verifies the service on startup and refuses to start unless VERIFIED, accepts plaintext API requests only, forwards them over the pinned attested TLS channel, and verifies each POST response's receipt after the fact.
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help (see more with '--help')
+  -V, --version                Print version
+--- stderr
+
+$ pap --version
+exit: Some(0)
+--- stdout
+private-ai-proxy [VERSION]
+--- stderr
+
+$ pap --help
+exit: Some(0)
+--- stdout
+Manage profiles, coding agents and local protection, or verify and audit ACI services without starting the managed backend.
+
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
+
+Commands:
+  status       Show backend and protection state. This does not start the backend
+  start        Start protection and wait for a verified connection
+  stop         Stop protection and restore managed agent configurations. The backend keeps running; with --offline, no backend is needed
+  service      Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on
+  profiles     Sign in, list, inspect, verify, import, export, select, or delete service profiles
+  agents       Inspect or change supported coding-agent configurations
+  models       Inspect models from the last verified catalog
+  usage        Query or export local usage records
+  settings     Inspect or change settings (config.toml; API keys and passwords are in credentials.toml)
+  token        Manage the Local API token and active profile credential
+  web-ui       Manage the browser UI hosted by the backend
+  cli          Manage installation of the private-ai-proxy command
+  app          Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
+  doctor       Report independent local installation and backend diagnostics without starting services
+  diagnostics  Export a redacted diagnostics report to a new file
+  completions  Generate shell completions from the current command definition
+  verify       Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks under the dstack tdx verifier policy (spec 1.3), and print a verification transcript. Exits 0 only if the verdict is VERIFIED.
+  audit        Offline verification of saved artifacts using the same transcript engine as verify.
+  sessions     Verify the service (fail closed), list its current attested sessions, and run the spec 9.2 audit on each — the ids that pass are what a client pins (spec 5.3).
+  send         Verify the service (fail closed), send one chat completion over an SPKI-pinned connection, then fetch and verify its receipt. The API key is read from stdin with --api-key-stdin or from the ACI_API_KEY environment variable.
+  curl         Verify the target's ACI service (fail closed), then run the system curl with the attested TLS key pinned. Exits 125 when pap refuses the request, otherwise with curl's exit code.
+  serve        Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). Verifies the service on startup and refuses to start unless VERIFIED, accepts plaintext API requests only, forwards them over the pinned attested TLS channel, and verifies each POST response's receipt after the fact.
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --json
+          Emit compact JSON instead of human-readable output
+
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags
+          
+          [alias: --no-interactive]
+
+      --yes
+          Approve a command's documented mutation without prompting
+
+      --require-production-os
+          Require an attested production OS image
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+--- stderr
+
+$ pap status --help
+exit: Some(0)
+--- stdout
+Show backend and protection state. This does not start the backend
+
+Usage: private-ai-proxy status [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --watch                  Stream state changes: the current state, then each change. JSON is one snapshot per line
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap start --help
+exit: Some(0)
+--- stdout
+Start the local backend if needed, optionally select a profile, then start protection and wait for verification. This may change the active profile and starts network activity toward the configured service.
+
+Usage: private-ai-proxy start [OPTIONS]
+
+Options:
+      --json
+          Emit compact JSON instead of human-readable output
+
+      --profile <PROFILE>
+          Select this saved profile before starting protection
+
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags
+          
+          [alias: --no-interactive]
+
+      --timeout <TIMEOUT>
+          Maximum verification wait in seconds. The backend may continue verifying after timeout
+          
+          [default: 90]
+
+      --yes
+          Approve a command's documented mutation without prompting
+
+      --require-production-os
+          Require an attested production OS image
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr
+
+$ pap stop --help
+exit: Some(0)
+--- stdout
+Stop protection and restore managed agent configurations. The backend keeps running; with --offline, no backend is needed
+
+Usage: private-ai-proxy stop [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --offline                End the protection session and restore the agents while no backend is running, for example before uninstalling after an update that was never relaunched. Refused while a backend is running; use `stop` or `service stop` instead
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap service --help
+exit: Some(0)
+--- stdout
+Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on
+
+Usage: private-ai-proxy service [OPTIONS] <COMMAND>
+
+Commands:
+  start   Start the local backend. Protect on launch (`connect-on-launch`) may start protection afterward
+  stop    Stop the backend and restore managed agent configurations
+  status  Show backend and protection state without starting the backend
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap service start --help
+exit: Some(0)
+--- stdout
+Start the local backend. Protect on launch (`connect-on-launch`) may start protection afterward
+
+Usage: private-ai-proxy service start [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap service stop --help
+exit: Some(0)
+--- stdout
+Stop the backend and restore managed agent configurations
+
+Usage: private-ai-proxy service stop [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap service status --help
+exit: Some(0)
+--- stdout
+Show backend and protection state without starting the backend
+
+Usage: private-ai-proxy service status [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles --help
+exit: Some(0)
+--- stdout
+Sign in, list, inspect, verify, import, export, select, or delete service profiles
+
+Usage: private-ai-proxy profiles [OPTIONS] <COMMAND>
+
+Commands:
+  list    List saved profile metadata. Credentials are never returned
+  show    Show one saved profile. Credentials are never returned
+  import  Import unverified profile metadata without credentials
+  export  Export profile metadata without credentials or verification evidence
+  login   Sign in to Phala or RedPill and save an account profile. Protection starts separately
+  add     Save a new profile and credential; protection verifies it when started
+  verify  Validate and save a profile, optionally replacing its credential
+  edit    Edit and save an existing profile
+  use     Make a saved profile active
+  remove  Delete a profile and its stored credential
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles list --help
+exit: Some(0)
+--- stdout
+List saved profile metadata. Credentials are never returned
+
+Usage: private-ai-proxy profiles list [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles show --help
+exit: Some(0)
+--- stdout
+Show one saved profile. Credentials are never returned
+
+Usage: private-ai-proxy profiles show [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Saved profile ID
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles import --help
+exit: Some(0)
+--- stdout
+Import unverified profile metadata without credentials
+
+Usage: private-ai-proxy profiles import [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>  Versioned profile backup JSON file
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles export --help
+exit: Some(0)
+--- stdout
+Export profile metadata without credentials or verification evidence
+
+Usage: private-ai-proxy profiles export [OPTIONS] --output <OUTPUT>
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --output <OUTPUT>        New destination path. Existing files are never overwritten
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles login --help
+exit: Some(0)
+--- stdout
+Sign in to Phala or RedPill and save an account profile. Protection starts separately
+
+Usage: private-ai-proxy profiles login [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Existing or new profile ID
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --provider <PROVIDER>    Provider for a new profile (defaults to RedPill) [possible values: phala, redpill, custom]
+      --name <NAME>            
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --workspace <WORKSPACE>  Workspace ID; required if the organization has several workspaces
+      --yes                    Approve a command's documented mutation without prompting
+      --callback-stdin         Read a pasted loopback callback URL from stdin (RedPill only)
+      --no-browser             Print the authorization URL without launching a browser
+      --timeout <TIMEOUT>      [default: 900]
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles add --help
+exit: Some(0)
+--- stdout
+Save a new profile and credential; protection verifies it when started
+
+Usage: private-ai-proxy profiles add [OPTIONS] --id <ID> --name <NAME> --url <URL>
+
+Options:
+      --id <ID>                Unique profile ID
+      --json                   Emit compact JSON instead of human-readable output
+      --name <NAME>            Display name
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --url <URL>              ACI service endpoint URL
+      --yes                    Approve a command's documented mutation without prompting
+      --provider <PROVIDER>    [default: custom] [possible values: phala, redpill, custom]
+      --key-stdin              Read the credential from stdin instead of a hidden terminal prompt
+      --allow-development-os   Permit a verified development OS image for this profile
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles verify --help
+exit: Some(0)
+--- stdout
+Validate and save a profile, optionally replacing its credential
+
+Usage: private-ai-proxy profiles verify [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Saved profile ID
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --key-stdin              Read a replacement credential from stdin
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap profiles edit --help
+exit: Some(0)
+--- stdout
+Edit and save an existing profile. Protection verifies the configuration when started. Changing provider or endpoint requires a new credential via --key-stdin or a hidden terminal prompt; the old credential is never sent to a new target.
+
+Usage: private-ai-proxy profiles edit [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Saved profile ID
+
+Options:
+      --json
+          Emit compact JSON instead of human-readable output
+
+      --name <NAME>
+          New display name
+
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags
+          
+          [alias: --no-interactive]
+
+      --url <URL>
+          New ACI service endpoint URL
+
+      --provider <PROVIDER>
+          New service provider type
+          
+          [possible values: phala, redpill, custom]
+
+      --yes
+          Approve a command's documented mutation without prompting
+
+      --key-stdin
+          Read a replacement credential from stdin
+
+      --allow-development-os
+          Permit a verified development OS image; otherwise retain the current global policy
+
+      --require-production-os
+          Require a production OS image; otherwise retain the current global policy
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr
+
+$ pap profiles use --help
+exit: Some(0)
+--- stdout
+Make a saved profile active. While protection is on, it restarts on that profile: the command exits 0 once the switch is applied and prints the resulting status, which may still be reconnecting or show why protection could not start or verify. A profile without a credential is refused while protection is on, and nothing changes.
+
+Usage: private-ai-proxy profiles use [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Saved profile ID
+
+Options:
+      --json
+          Emit compact JSON instead of human-readable output
+
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags
+          
+          [alias: --no-interactive]
+
+      --yes
+          Approve a command's documented mutation without prompting
+
+      --require-production-os
+          Require an attested production OS image
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr
+
+$ pap profiles remove --help
+exit: Some(0)
+--- stdout
+Delete a profile and its stored credential
+
+Usage: private-ai-proxy profiles remove [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap agents --help
+exit: Some(0)
+--- stdout
+Inspect or change supported coding-agent configurations
+
+Usage: private-ai-proxy agents [OPTIONS] <COMMAND>
+
+Commands:
+  list            List supported agents and their actual configuration state
+  connect         Connect an agent to the Local API
+  disconnect      Disconnect an agent and restore its managed configuration
+  disconnect-all  Disconnect all managed agents and restore their configurations
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap agents list --help
+exit: Some(0)
+--- stdout
+List supported agents and their actual configuration state
+
+Usage: private-ai-proxy agents list [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap agents connect --help
+exit: Some(0)
+--- stdout
+Connect an agent to the Local API
+
+Usage: private-ai-proxy agents connect [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent ID reported by `private-ai-proxy agents list`
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --model <MODEL>          Optional default model from the verified catalog
+      --dry-run                Preview changes and return a revision without applying them
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --revision <REVISION>    Apply exactly this previously previewed revision without previewing again
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap agents disconnect --help
+exit: Some(0)
+--- stdout
+Disconnect an agent and restore its managed configuration
+
+Usage: private-ai-proxy agents disconnect [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent ID reported by `private-ai-proxy agents list`
+
+Options:
+      --dry-run                Preview changes and return a revision without applying them
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --revision <REVISION>    Apply exactly this previously previewed revision without previewing again
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap agents disconnect-all --help
+exit: Some(0)
+--- stdout
+Disconnect all managed agents and restore their configurations
+
+Usage: private-ai-proxy agents disconnect-all [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap models --help
+exit: Some(0)
+--- stdout
+Inspect models from the last verified catalog
+
+Usage: private-ai-proxy models [OPTIONS] <COMMAND>
+
+Commands:
+  list  List models from the verified catalog
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap models list --help
+exit: Some(0)
+--- stdout
+List models from the verified catalog
+
+Usage: private-ai-proxy models list [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --refresh                Re-fetch the catalog from the verified service before listing it
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap usage --help
+exit: Some(0)
+--- stdout
+Query or export local usage records
+
+Usage: private-ai-proxy usage [OPTIONS] <COMMAND>
+
+Commands:
+  list    List a page of usage records
+  show    Show one usage record by ID
+  export  Export every matching record to a new CSV file; pagination does not apply
+  clear   Permanently delete all local usage history
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap usage list --help
+exit: Some(0)
+--- stdout
+List a page of usage records
+
+Usage: private-ai-proxy usage list [OPTIONS]
+
+Options:
+      --agent <AGENT>          Match an agent ID
+      --json                   Emit compact JSON instead of human-readable output
+      --model <MODEL>          Match a model ID
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --session <SESSION>      Match a session ID
+      --yes                    Approve a command's documented mutation without prompting
+      --since <SINCE>          Include records at or after this Unix timestamp in seconds
+      --until <UNTIL>          Include records at or before this Unix timestamp in seconds
+      --cursor <CURSOR>        Continue after a nextCursor returned by an earlier list response
+      --limit <LIMIT>          Maximum records to return [default: 20]
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap usage show --help
+exit: Some(0)
+--- stdout
+Show one usage record by ID
+
+Usage: private-ai-proxy usage show [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --receipt                Print the signed receipt document its audit checked, exactly as the service returned it
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap usage export --help
+exit: Some(0)
+--- stdout
+Export every matching record to a new CSV file; pagination does not apply
+
+Usage: private-ai-proxy usage export [OPTIONS] --output <OUTPUT>
+
+Options:
+      --agent <AGENT>          Match an agent ID
+      --json                   Emit compact JSON instead of human-readable output
+      --model <MODEL>          Match a model ID
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --session <SESSION>      Match a session ID
+      --yes                    Approve a command's documented mutation without prompting
+      --since <SINCE>          Include records at or after this Unix timestamp in seconds
+      --until <UNTIL>          Include records at or before this Unix timestamp in seconds
+      --output <OUTPUT>        New destination path. Existing files are never overwritten
+      --format <FORMAT>        [default: csv] [possible values: csv]
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap usage clear --help
+exit: Some(0)
+--- stdout
+Permanently delete all local usage history
+
+Usage: private-ai-proxy usage clear [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap settings --help
+exit: Some(0)
+--- stdout
+Inspect or change settings (config.toml; API keys and passwords are in credentials.toml)
+
+Usage: private-ai-proxy settings [OPTIONS] <COMMAND>
+
+Commands:
+  reset   Stop protection and reset backend settings, preserving profiles, keys and usage
+  show    Show the settings in effect, the settings file paths and web UI status. Never shows secrets
+  schema  Print the JSON Schema of config.toml for editors and validators
+  set     Change one setting. This may restart the Local API or protection
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap settings reset --help
+exit: Some(0)
+--- stdout
+Stop protection and reset backend settings, preserving profiles, keys and usage
+
+Usage: private-ai-proxy settings reset [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap settings show --help
+exit: Some(0)
+--- stdout
+Show the settings in effect, the settings file paths and web UI status. Never shows secrets
+
+Usage: private-ai-proxy settings show [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap settings schema --help
+exit: Some(0)
+--- stdout
+Print the JSON Schema of config.toml for editors and validators
+
+Usage: private-ai-proxy settings schema [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap settings set --help
+exit: Some(0)
+--- stdout
+Change one setting. This may restart the Local API or protection
+
+Usage: private-ai-proxy settings set [OPTIONS] <KEY> [VALUE]
+
+Arguments:
+  <KEY>    The setting's dotted path in config.toml, for example web-ui.enabled [possible values: auto-cli-registration, notifications.enabled, notifications.gateway, notifications.local-api, notifications.verification, connect-on-launch, appearance, update-channel, local-api.listen-address, local-api.allow-network-access, local-api.port, local-api.client-host, web-ui.enabled, web-ui.port, web-ui.listen-address, web-ui.allow-network-access, web-ui.client-host, web-ui.password]
+  [VALUE]  Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --value-stdin            Read the web-ui.password value from stdin instead of a hidden terminal prompt
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap token --help
+exit: Some(0)
+--- stdout
+Manage the Local API token and active profile credential
+
+Usage: private-ai-proxy token [OPTIONS] <COMMAND>
+
+Commands:
+  rotate            Rotate the Local API token, immediately revoking the previous token
+  show              Print the Local API token to stdout. Treat output as a secret
+  clear-credential  Remove the active profile's stored service credential
+  help              Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap token rotate --help
+exit: Some(0)
+--- stdout
+Rotate the Local API token, immediately revoking the previous token
+
+Usage: private-ai-proxy token rotate [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap token show --help
+exit: Some(0)
+--- stdout
+Print the Local API token to stdout. Treat output as a secret
+
+Usage: private-ai-proxy token show [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap token clear-credential --help
+exit: Some(0)
+--- stdout
+Remove the active profile's stored service credential
+
+Usage: private-ai-proxy token clear-credential [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap web-ui --help
+exit: Some(0)
+--- stdout
+Manage the browser UI hosted by the backend
+
+Usage: private-ai-proxy web-ui [OPTIONS] <COMMAND>
+
+Commands:
+  password  Show or rotate the sign-in password. Set your own with `settings set web-ui.password`
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap web-ui password --help
+exit: Some(0)
+--- stdout
+Show or rotate the sign-in password. Set your own with `settings set web-ui.password`
+
+Usage: private-ai-proxy web-ui password [OPTIONS] <COMMAND>
+
+Commands:
+  show    Print the web UI password to stdout. Treat output as a secret
+  rotate  Replace the web UI password with a generated one, signing out every browser
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap web-ui password show --help
+exit: Some(0)
+--- stdout
+Print the web UI password to stdout. Treat output as a secret
+
+Usage: private-ai-proxy web-ui password show [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap web-ui password rotate --help
+exit: Some(0)
+--- stdout
+Replace the web UI password with a generated one, signing out every browser
+
+Usage: private-ai-proxy web-ui password rotate [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap cli --help
+exit: Some(0)
+--- stdout
+Manage installation of the private-ai-proxy command
+
+Usage: private-ai-proxy cli [OPTIONS] <COMMAND>
+
+Commands:
+  status     Show whether private-ai-proxy is registered on PATH
+  install    Register private-ai-proxy in a user-writable directory
+  uninstall  Remove a private-ai-proxy registration previously installed by this app
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap cli status --help
+exit: Some(0)
+--- stdout
+Show whether private-ai-proxy is registered on PATH
+
+Usage: private-ai-proxy cli status [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap cli install --help
+exit: Some(0)
+--- stdout
+Register private-ai-proxy in a user-writable directory
+
+Usage: private-ai-proxy cli install [OPTIONS]
+
+Options:
+      --directory <DIRECTORY>  Installation directory; omit to use the platform default
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap cli uninstall --help
+exit: Some(0)
+--- stdout
+Remove a private-ai-proxy registration previously installed by this app
+
+Usage: private-ai-proxy cli uninstall [OPTIONS]
+
+Options:
+      --directory <DIRECTORY>  Registration directory; omit to use the platform default
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap app --help
+exit: Some(0)
+--- stdout
+Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
+
+Usage: private-ai-proxy app [OPTIONS] <COMMAND>
+
+Commands:
+  open  Open the installed desktop UI; its backend may start protection when Protect on launch (`connect-on-launch`) is on. Without a desktop app or graphical session, or with --web, open or print the service-hosted web UI address (offering to enable it)
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap app open --help
+exit: Some(0)
+--- stdout
+Open the installed desktop UI; its backend may start protection when Protect on launch (`connect-on-launch`) is on. Without a desktop app or graphical session, or with --web, open or print the service-hosted web UI address (offering to enable it)
+
+Usage: private-ai-proxy app open [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --web                    Open or print the web UI address instead of opening the desktop app
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap doctor --help
+exit: Some(0)
+--- stdout
+Report independent local installation and backend diagnostics without starting services
+
+Usage: private-ai-proxy doctor [OPTIONS]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap diagnostics --help
+exit: Some(0)
+--- stdout
+Export a redacted diagnostics report to a new file
+
+Usage: private-ai-proxy diagnostics [OPTIONS] --output <OUTPUT>
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --output <OUTPUT>        New destination path. Existing files are never overwritten
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap completions --help
+exit: Some(0)
+--- stdout
+Generate shell completions from the current command definition
+
+Usage: private-ai-proxy completions [OPTIONS] <SHELL>
+
+Arguments:
+  <SHELL>  Shell whose completion script should be written to stdout [possible values: bash, elvish, fish, powershell, zsh]
+
+Options:
+      --json                   Emit compact JSON instead of human-readable output
+      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes                    Approve a command's documented mutation without prompting
+      --require-production-os  Require an attested production OS image
+  -h, --help                   Print help
+--- stderr
+
+$ pap verify --help
+exit: Some(0)
+--- stdout
+Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks under the dstack tdx verifier policy (spec 1.3), and print a verification transcript. Exits 0 only if the verdict is VERIFIED.
+
+Usage: private-ai-proxy verify [OPTIONS] <BASE_URL>
+
+Arguments:
+  <BASE_URL>  Base URL of the ACI service to verify.
+
+Options:
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --yes
+          Approve a command's documented mutation without prompting
+      --nonce <NONCE>
+          Nonce to send with the attestation request; a fresh random one is generated when omitted.
+      --json
+          Print the verification transcript as JSON instead of the human-readable form.
+      --explain
+          Print a one-line explanation for every check, not just failures.
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+
+$ pap audit --help
+exit: Some(0)
+--- stdout
+Offline verification of saved artifacts using the same transcript engine as verify.
+
+Usage: private-ai-proxy audit [OPTIONS] --report <FILE>
+
+Options:
+      --report <FILE>
+          Path to the saved spec 9.1 attestation report JSON.
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --yes
+          Approve a command's documented mutation without prompting
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --receipt <FILE>
+          Path to the saved receipt document (spec 7.2) to verify alongside the report.
+      --nonce <NONCE>
+          Nonce the report was originally fetched with, to check the id-3 freshness check (spec 9.1).
+      --request-body <FILE>
+          Path to the saved raw request bytes, checked against the receipt (spec 9.3).
+      --response-body <FILE>
+          Path to the saved raw response bytes, checked against the receipt (spec 9.3).
+      --session <FILE>
+          Path to the saved session document (spec 8) the receipt cites.
+      --require-claim <NAME[=SOURCE]>
+          Claim the audited session must assert (spec 9.2(3)), as NAME or NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable.
+      --pin <SESSION_ID>
+          Session id (spec 5.3) the cited session must match (spec 9.3(6)); repeatable.
+      --require-verified
+          Apply the spec 9.3(5)-(6) strict failures offline.
+      --skip-expiry
+          Skip the report expiry check (id-3).
+      --json
+          Print the verification transcript as JSON instead of the human-readable form.
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+
+$ pap sessions --help
+exit: Some(0)
+--- stdout
+Verify the service (fail closed), list its current attested sessions, and run the spec 9.2 audit on each — the ids that pass are what a client pins (spec 5.3).
+
+Usage: private-ai-proxy sessions [OPTIONS] <BASE_URL>
+
+Arguments:
+  <BASE_URL>  Base URL of the ACI service whose attested sessions to audit.
+
+Options:
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --yes
+          Approve a command's documented mutation without prompting
+      --model <MODEL>
+          Only list sessions for upstreams serving this model.
+      --require-claim <NAME[=SOURCE]>
+          Claim an accepted session must assert (spec 9.2(3)), as NAME or NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable.
+      --json
+          Print the audited sessions as JSON.
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+
+$ pap send --help
+exit: Some(0)
+--- stdout
+Verify the service (fail closed), send one chat completion over an SPKI-pinned connection, then fetch and verify its receipt. The API key is read from stdin with --api-key-stdin or from the ACI_API_KEY environment variable.
+
+Usage: private-ai-proxy send [OPTIONS] <BASE_URL>
+
+Arguments:
+  <BASE_URL>  Base URL of the ACI service to send the request to.
+
+Options:
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --yes
+          Approve a command's documented mutation without prompting
+      --model <MODEL>
+          Model id to request; defaults to the first model the service advertises.
+      --prompt <TEXT>
+          Prompt text to send; defaults to a canned greeting.
+      --api-key-stdin
+          Read the bearer API key from stdin; otherwise it is read from the ACI_API_KEY environment variable.
+      --no-stream
+          Request a non-streaming chat completion.
+      --json
+          Print the verification transcript and result as JSON.
+      --allow-unverified
+          Drop the default provider.aci_verified demand (spec 5.3). Cannot be combined with --session, which implies verified serving.
+      --require-claim <NAME[=SOURCE]>
+          Claim the audited session must assert (spec 9.2(3)), as NAME or NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable.
+      --session <SESSION_ID>
+          Session id (spec 5.3) to pin via provider.aci_session_ids; the receipt's cited session is checked against this list (spec 9.3(6)); repeatable. Implies verified serving.
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+
+$ pap curl --help
+exit: Some(0)
+--- stdout
+Verify the target's ACI service (fail closed), then run the system curl with the attested TLS key pinned. Exits 125 when pap refuses the request, otherwise with curl's exit code.
+
+Usage: private-ai-proxy curl [OPTIONS] <URL> [-- <CURL_ARG>...]
+
+Arguments:
+  <URL>          HTTPS URL to request after its ACI service has been verified.
+  [CURL_ARG]...  Supported request options passed to system curl. Put them after `--`; pap owns the URL and transport-security options.
+
+Options:
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --yes
+          Approve a command's documented mutation without prompting
+      --json
+          Print the verification transcript as JSON on stderr; stdout stays curl's.
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+
+$ pap serve --help
+exit: Some(0)
+--- stdout
+Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). Verifies the service on startup and refuses to start unless VERIFIED, accepts plaintext API requests only, forwards them over the pinned attested TLS channel, and verifies each POST response's receipt after the fact.
+
+Usage: private-ai-proxy serve [OPTIONS] <BASE_URL>
+
+Arguments:
+  <BASE_URL>  Base URL of the ACI service to proxy to.
+
+Options:
+      --accept-compose <HEX>
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+      --json
+          Emit compact JSON instead of human-readable output
+      --accept-subject <app-id:0xHEX>
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
+      --non-interactive
+          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --accept-dstack-kms-root-public-key <HEX>
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+      --yes
+          Approve a command's documented mutation without prompting
+      --listen <ADDR:PORT>
+          Local address to listen on (default 127.0.0.1:4180).
+      --control <ADDR:PORT>
+          Local control endpoint for on-demand receipt verification (default 127.0.0.1:4183).
+      --json-events
+          Emit the serve lifecycle and request activity as JSON Lines on stdout. Human-readable diagnostics remain on stderr.
+      --allow-unverified
+          Drop the default provider.aci_verified demand (spec 5.3).
+      --session <SESSION_ID>
+          Session id (spec 5.3) accepted by the local policy; repeatable. Each POST uses the intersection with its own pins, or this set when it supplies none. A disjoint request is rejected locally. Implies verified serving.
+      --require-claim <NAME[=SOURCE]>
+          Derive the pinned session set from the service's current attested sessions: only sessions asserting this claim are pinned (spec 9.2(3)); repeatable. The set refreshes when the service refuses a pin (HTTP 412).
+      --require-production-os
+          Require an attested production OS image
+  -h, --help
+          Print help
+--- stderr
+

@@ -1,0 +1,632 @@
+$ pap status
+{"backend":{"processId":42,"version":"0.2.1"},"gateway":{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}}
+---
+Protected
+Backend: running (PID 42, version 0.2.1)
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap status
+{"backend":null,"status":"not_running"}
+---
+Backend not running.
+Start backend: private-ai-proxy service start
+Start protection: private-ai-proxy start
+
+$ pap status
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}],"backendConnected":false}
+---
+Backend disconnected (protection unknown)
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Cached models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap status
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}],"configurationVerification":true}
+---
+Verifying profile (not protecting traffic)
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Cached models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap status
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}],"reconnecting":true}
+---
+Reconnecting (requests paused)
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap status
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"error":"Address in use"},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: Not listening (Address in use)
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap status
+{"status":"stopped","activeProfileId":"gone","config":{},"proxyUrl":"http://127.0.0.1:4180","catalog":{"models":[]}}
+---
+Not protected
+Profile: gone
+Local API: http://127.0.0.1:4180
+Cached models: 0
+
+$ pap status
+{"status":"blocked","profiles":[],"error":"Blocked"}
+---
+Not protected (blocked)
+Profile: None selected
+Error: Blocked
+
+$ pap status
+{"status":"error","activeProfileId":""}
+---
+Not protected (error)
+
+$ pap status
+{"status":"verifying"}
+---
+Verifying
+
+$ pap service status
+{"backend":null,"status":"not_running"}
+---
+Backend not running.
+Start backend: private-ai-proxy service start
+Start protection: private-ai-proxy start
+
+$ pap start
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap stop
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap stop --offline
+[{"id":"codex","name":"Codex","installed":true,"connected":true,"authorized":true},{"id":"claude","name":"Claude Code","installed":true,"connected":true,"authorized":false,"attention":"Restart it","error":"changed\u001b"},{"id":"saved","name":"Saved","installed":true,"recorded":true},{"id":"gone","name":"Gone","installed":false},{"id":"idle","name":"Idle","installed":true,"connected":false}]
+---
+codex  Codex  Connected (authorized)
+claude  Claude Code  Configured (not authorized)
+  Restart it
+  Error: changed 
+saved  Saved  Saved connection (inactive)
+gone  Gone  Not detected
+idle  Idle  Not connected
+
+$ pap stop --offline
+{"id":"codex","name":"Codex","installed":true}
+---
+codex  Codex  Not connected
+
+$ pap service start
+{"version":"0.2.1"}
+---
+Backend started.
+
+$ pap service stop
+{"status":"stopped"}
+---
+Backend stopped.
+
+$ pap app open
+{"url":"http://127.0.0.1:4182","browserOpened":true}
+---
+Web UI (sign in with `pap web-ui password show`):
+http://127.0.0.1:4182
+Opened in your browser.
+
+$ pap app open --web
+{"url":"http://127.0.0.1:4182","browserOpened":false}
+---
+Web UI (sign in with `pap web-ui password show`):
+http://127.0.0.1:4182
+
+$ pap app open
+{"opened":true}
+---
+Desktop app opened.
+
+$ pap profiles list
+[{"id":"work","name":"Work","provider":"redpill","remoteUrl":null}]
+---
+Id  |  Name  |  Provider  |  Remote url
+work  |  Work  |  redpill  |  -
+
+$ pap profiles list
+[]
+---
+No profiles.
+
+$ pap profiles show work
+{"id":"work","name":"Work","auth":{"kind":"apiKey"},"tags":[],"credentialSaved":false}
+---
+Id: work
+Name: Work
+Auth:
+  Kind: apiKey
+Tags:
+  None
+Credential saved: No
+
+$ pap profiles import backup.json
+{"imported":1,"skipped":0}
+---
+Imported: 1
+Skipped: 0
+
+$ pap profiles export --output out.json
+{"exported":"/tmp/out.json"}
+---
+Exported to /tmp/out.json
+
+$ pap profiles use work
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Selected profile: work
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap profiles login work
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Account saved. Use private-ai-proxy start to enable protection.
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap profiles add --id w --name W --url https://x
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Profile verified and saved.
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap profiles verify work
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Profile verified and saved.
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap profiles edit work
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Profile verified and saved.
+Protected
+Profile: Work (work)
+Service: redpill | https://tee.redpill.ai
+Service credential: Saved (credentials.toml)
+Local API: http://127.0.0.1:4180
+Network access: Allowed
+Web UI: http://127.0.0.1:4182
+Web UI network access: Loopback only
+Settings file not applied (previous settings in effect): bad [31m value
+Settings warning: unknown key `x`
+Production OS: Development images allowed
+Identity: tdx | hardware_verified
+Checks: 1 passed, 2 failed, 1 skipped
+  Failed: Binding
+  Failed: Channel
+Models: 2
+Session: session-1
+Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof
+Tokens: 100 input | 20 output | 5 cache read | 0 cache write
+Reported cost: $0.001200 USD
+Progress: Checking
+Warning: Port in use
+Warning: Wake monitoring unavailable; reconnect protection after sleep.
+
+$ pap profiles remove work
+{}
+---
+Deleted profile: work
+
+$ pap agents list
+[{"id":"codex","name":"Codex","installed":true,"connected":true,"authorized":true},{"id":"claude","name":"Claude Code","installed":true,"connected":true,"authorized":false,"attention":"Restart it","error":"changed\u001b"},{"id":"saved","name":"Saved","installed":true,"recorded":true},{"id":"gone","name":"Gone","installed":false},{"id":"idle","name":"Idle","installed":true,"connected":false}]
+---
+codex  Codex  Connected (authorized)
+claude  Claude Code  Configured (not authorized)
+  Restart it
+  Error: changed 
+saved  Saved  Saved connection (inactive)
+gone  Gone  Not detected
+idle  Idle  Not connected
+
+$ pap agents list
+[]
+---
+No agents.
+
+$ pap agents connect codex
+{"id":"codex","name":"Codex","installed":true,"connected":true,"authorized":true}
+---
+codex  Codex  Connected (authorized)
+
+$ pap agents connect codex --dry-run
+{"revision":"r1","changes":[{"path":"~/.codex/config.toml","action":"update"}],"warnings":[]}
+---
+Revision: r1
+Changes:
+  Path: ~/.codex/config.toml
+  Action: update
+Warnings:
+  None
+
+$ pap agents disconnect codex
+{"id":"saved","name":"Saved","installed":true,"recorded":true}
+---
+saved  Saved  Saved connection (inactive)
+
+$ pap agents disconnect codex --dry-run
+{"revision":"r2","changes":[]}
+---
+Revision: r2
+Changes:
+  None
+
+$ pap agents disconnect-all
+[{"id":"codex","name":"Codex","installed":true,"connected":true,"authorized":true},{"id":"claude","name":"Claude Code","installed":true,"connected":true,"authorized":false,"attention":"Restart it","error":"changed\u001b"},{"id":"saved","name":"Saved","installed":true,"recorded":true},{"id":"gone","name":"Gone","installed":false},{"id":"idle","name":"Idle","installed":true,"connected":false}]
+---
+codex  Codex  Connected (authorized)
+claude  Claude Code  Configured (not authorized)
+  Restart it
+  Error: changed 
+saved  Saved  Saved connection (inactive)
+gone  Gone  Not detected
+idle  Idle  Not connected
+
+$ pap models list
+{"models":[{"id":"m1","name":"Model One"},{"id":"m2"}]}
+---
+Id  |  Name
+m1  |  Model One
+m2  |  -
+
+$ pap models list
+{"models":[]}
+---
+No models.
+
+$ pap usage list
+{"items":[{"id":"a","model":"m","status":200,"leftDevice":true,"verified":true,"inputTokens":1,"outputTokens":2},{"id":"b","model":"m","status":200,"leftDevice":true,"verified":false},{"id":"c","status":0,"leftDevice":false,"verified":null},{"id":"d","status":500,"leftDevice":true}],"nextCursor":"next\u0007"}
+---
+Id  |  Model  |  HTTP  |  Verification  |  Input tokens  |  Output tokens
+a  |  m  |  200  |  Verified  |  1  |  2
+b  |  m  |  200  |  Failed  |  -  |  -
+c  |  -  |  0  |  Blocked locally  |  -  |  -
+d  |  -  |  500  |  Unverified  |  -  |  -
+Next cursor: next 
+
+$ pap usage list
+{"items":[],"nextCursor":null}
+---
+No usage records.
+
+$ pap usage show a
+{"id":"a","model":"m","costUsd":0.5,"receipt":{"verified":true}}
+---
+Id: a
+Model: m
+Cost usd: 0.5
+Receipt:
+  Verified: Yes
+
+$ pap usage export --output u.csv
+{"rows":3}
+---
+Exported 3 usage records.
+
+$ pap usage clear
+{"deleted":7}
+---
+Deleted 7 usage records.
+
+$ pap settings reset
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Backend settings reset. Profiles, keys and usage kept; protection is off.
+
+$ pap settings show
+{"files":{"config":"/c.toml","error":null},"settings":{"appearance":"dark"}}
+---
+Files:
+  Config: /c.toml
+Settings:
+  Appearance: dark
+
+$ pap settings set appearance dark
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Updated appearance.
+
+$ pap settings set webUiPort 1
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Updated web-ui.port.
+
+$ pap token rotate
+{"rotated":true}
+---
+Client key rotated.
+
+$ pap token show
+{"token":"sk-pap-example"}
+---
+sk-pap-example
+
+$ pap token clear-credential
+{"status":"verified","activeProfileId":"work","apiKeySaved":true,"profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],"proxyUrl":"http://127.0.0.1:4180","localApi":{"allowNetworkAccess":true},"webUi":{"enabled":true,"url":"http://127.0.0.1:4182","allowNetworkAccess":false},"configFiles":{"error":"bad\u001b[31m value","warnings":["unknown key `x`"]},"config":{"requireProductionOs":false},"identity":{"teeType":"tdx","trustLevel":"hardware_verified"},"checks":[{"title":"Quote","status":"pass"},{"title":"Binding","status":"fail"},{"title":"Custody","status":"skip"},{"title":"Channel","status":"fail"}],"catalog":{"models":[{"id":"a"},{"id":"b"}]},"sessionId":"session-1","sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},"progress":"Checking","error":"","endpointError":"Port in use","wakeMonitorAvailable":false,"activity":[{"detail":"never shown"}]}
+---
+Profile credential removed.
+
+$ pap web-ui password show
+{"password":"pass word"}
+---
+pass word
+
+$ pap web-ui password rotate
+{"rotated":true}
+---
+Web UI password rotated.
+
+$ pap cli status
+{"registered":false,"directory":"/home/u/.local/bin","onPath":true}
+---
+Registered: No
+Directory: /home/u/.local/bin
+On path: Yes
+
+$ pap cli install
+{"registered":true}
+---
+Registered: Yes
+
+$ pap cli uninstall
+{"registered":false}
+---
+Registered: No
+
+$ pap doctor
+{"version":"0.2.1","update":{"error":"offline"},"backendRunning":false,"errors":{},"warnings":{"credentials":"readable"}}
+---
+Version: 0.2.1
+Update:
+  Error: offline
+Backend running: No
+Errors:
+
+Warnings:
+  Credentials: readable
+
+$ pap diagnostics --output d.json
+{"exported":"/tmp/d.json"}
+---
+Exported to /tmp/d.json
+
