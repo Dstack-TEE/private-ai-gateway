@@ -11,7 +11,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -25,8 +25,9 @@ use desktop_core::{
     agents::Agent,
     config::{self as settings_config, Config},
     contracts::{
-        AgentPreview, AgentStatus, AppState, ConfidentialProfileInput, ConnectOptions,
-        ListenConfig, RequestActivity, ServiceProvider, StartConfig, VerificationStatus,
+        AgentPreview, AgentStatus, AppState, ConfidentialProfile, ConfidentialProfileInput,
+        ConnectOptions, ListenConfig, ProfileAuth, RequestActivity, ServiceProvider, StartConfig,
+        VerificationStatus,
     },
     listen::ResolvedListen,
     lock,
@@ -118,29 +119,37 @@ impl ClientCredentials {
         }))
     }
 
+    fn lock(&self) -> Result<MutexGuard<'_, ClientCredentialState>, Error> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "Client credential store unavailable")?)
+    }
+
     fn token(&self) -> Result<String, Error> {
-        Ok(self.active_token()?.ok_or_else(|| {
-            "Client key rotation failed; generate a new client key before using the Local API"
-                .to_string()
-        })?)
+        Ok(self.active_token()?.ok_or(
+            "Client key rotation failed; generate a new client key before using the Local API",
+        )?)
     }
 
     fn active_token(&self) -> Result<Option<String>, Error> {
-        let state = self
-            .0
-            .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?;
+        let state = self.lock()?;
         if state.rotation_failed {
             return Ok(None);
         }
         Ok(state.files.ensure(LOCAL_TOOLS_AGENT).map(Some)?)
     }
 
+    /// `tokens` with the client key the Local API accepts from local tools.
+    fn with_token(&self, mut tokens: TokenSet) -> Result<TokenSet, Error> {
+        if let Some(token) = self.active_token()? {
+            tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
+        }
+        Ok(tokens)
+    }
+
     fn rotate(&self) -> Result<String, Error> {
-        let mut state = self
-            .0
-            .lock()
-            .map_err(|_| "Client credential store unavailable".to_string())?;
+        let mut state = self.lock()?;
         state.rotation_failed = true;
         let token = state.files.rotate(LOCAL_TOOLS_AGENT)?;
         state.rotation_failed = false;
@@ -228,7 +237,16 @@ impl From<&str> for LaunchError {
 
 impl DesktopRuntime {
     pub fn launch(options: RuntimeOptions) -> Result<Arc<Self>, LaunchError> {
-        if !options.helper_path.is_absolute() {
+        let RuntimeOptions {
+            launcher,
+            helper_path,
+            task_runtime,
+            agent_configuration,
+            agent_access_error,
+            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+            agent_home,
+        } = options;
+        if !helper_path.is_absolute() {
             return Err("The credential helper path must be absolute".into());
         }
         // Establish ownership before settings, storage, or listeners.
@@ -236,11 +254,6 @@ impl DesktopRuntime {
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
             .ok_or(LaunchError::AlreadyRunning)?;
-        let agent_configuration = options.agent_configuration;
-        let agent_access_error = options.agent_access_error;
-        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-        let agent_home = options.agent_home;
-        let helper_path = options.helper_path;
         #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
         if agent_configuration {
             if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
@@ -269,29 +282,21 @@ impl DesktopRuntime {
         });
         let local = settings_config::resolve_local_api(snapshot.config.local_api.clone())
             .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
-        let (listener, launch_error) = match proxy::bind_std(local.bind) {
-            Ok(listener) => (Some(listener), None),
-            Err(error) => (None, Some(error)),
-        };
-        let (proxy_events_tx, mut proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
+        let listener = proxy::bind_std(local.bind);
+        let (proxy_events_tx, proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
         let proxy = ProxyState::new(proxy_events_tx)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join(USAGE_DATABASE)) {
-            Ok(store) => (Arc::new(store), None),
-            Err(error) => match UsageStore::memory() {
-                Ok(store) => (
-                    Arc::new(store),
-                    Some(format!(
-                        "Usage history is unavailable for this launch: {error}"
-                    )),
-                ),
-                Err(fallback) => {
-                    return Err(
-                        format!("Cannot initialize usage storage: {error}; {fallback}").into(),
-                    );
-                }
-            },
+            Ok(store) => (store, None),
+            Err(error) => (
+                UsageStore::memory().map_err(|fallback| {
+                    format!("Cannot initialize usage storage: {error}; {fallback}")
+                })?,
+                Some(format!(
+                    "Usage history is unavailable for this launch: {error}"
+                )),
+            ),
         };
-        let task_runtime = options.task_runtime;
+        let usage = Arc::new(usage);
         let initial_state = AppState {
             local_api: local.config.clone(),
             config: runtime_config,
@@ -304,7 +309,7 @@ impl DesktopRuntime {
             SessionManager::new(
                 proxy.clone(),
                 usage.clone(),
-                options.launcher,
+                launcher,
                 task_runtime.clone(),
                 initial_state,
             )
@@ -341,8 +346,8 @@ impl DesktopRuntime {
             admission: Arc::default(),
         });
 
-        match (listener, launch_error) {
-            (Some(listener), _) => {
+        match listener {
+            Ok(listener) => {
                 manager.set_endpoint(local.config.clone(), Ok(local.endpoint.clone()));
                 runtime
                     .endpoint
@@ -354,11 +359,7 @@ impl DesktopRuntime {
                     )
                     .map_err(|error| error.to_string())?;
             }
-            (None, Some(error)) => manager.set_endpoint(local.config.clone(), Err(error)),
-            (None, None) => manager.set_endpoint(
-                local.config.clone(),
-                Err("The Local API listener was not created".into()),
-            ),
+            Err(error) => manager.set_endpoint(local.config.clone(), Err(error)),
         }
         // The active key is loaded only when verification or protection uses it.
         manager.set_api_key_saved(credential_saved);
@@ -366,32 +367,41 @@ impl DesktopRuntime {
         for error in usage_error.into_iter().chain(settings_problems) {
             manager.report_error(error);
         }
-        if runtime.instance.is_some() {
-            runtime
-                .web_ui
-                .set_password(snapshot.credentials.web_ui.secret());
-            runtime.open_web_ui(&snapshot.config.web_ui);
-            match crate::settings::spawn_watcher(
-                &runtime.settings,
-                Arc::downgrade(&runtime),
-                &task_runtime,
-            ) {
-                Ok(watcher) => {
-                    if let Ok(mut slot) = runtime.settings_watcher.lock() {
-                        *slot = Some(watcher);
-                    }
+        runtime
+            .web_ui
+            .set_password(snapshot.credentials.web_ui.secret());
+        runtime.open_web_ui(&snapshot.config.web_ui);
+        match crate::settings::spawn_watcher(
+            &runtime.settings,
+            Arc::downgrade(&runtime),
+            &task_runtime,
+        ) {
+            Ok(watcher) => {
+                if let Ok(mut slot) = runtime.settings_watcher.lock() {
+                    *slot = Some(watcher);
                 }
-                Err(error) => runtime.report_error(error),
             }
-            runtime.initialize_startup_tokens();
-            if let Err(error) = runtime.recovery.start() {
-                runtime.report_error(error);
-            }
+            Err(error) => runtime.report_error(error),
         }
+        runtime.initialize_startup_tokens();
+        if let Err(error) = runtime.recovery.start() {
+            runtime.report_error(error);
+        }
+        runtime.spawn_background_tasks(&task_runtime, proxy_events);
+        Ok(runtime)
+    }
 
-        let weak = Arc::downgrade(&runtime);
-        let mut states = runtime.subscribe();
-        let network_changed = runtime.recovery.changed.clone();
+    /// What keeps the backend current while it lives: network recovery and
+    /// agent reconciliation, request activity, and the retry of queued
+    /// account key cleanups.
+    fn spawn_background_tasks(
+        self: &Arc<Self>,
+        task_runtime: &Handle,
+        mut proxy_events: tokio::sync::mpsc::Receiver<ProxyEvent>,
+    ) {
+        let weak = Arc::downgrade(self);
+        let mut states = self.subscribe();
+        let network_changed = self.recovery.changed.clone();
         task_runtime.spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -411,14 +421,7 @@ impl DesktopRuntime {
                 let Some(runtime) = weak.upgrade() else { break };
                 let result = tokio::task::spawn_blocking(move || {
                     if let Err(error) = runtime.recover_network() { runtime.report_error(error); }
-                    if let Err(error) = runtime.reconcile_agents() {
-                        if runtime
-                            .state()
-                            .is_ok_and(|state| state.error != Some(error.to_string()))
-                        {
-                            runtime.report_error(error);
-                        }
-                    }
+                    if let Err(error) = runtime.reconcile_agents() { runtime.report_once(error); }
                 })
                 .await;
                 if result.is_err() {
@@ -429,20 +432,20 @@ impl DesktopRuntime {
             }
         });
 
-        let events_runtime = runtime.clone();
+        let events_runtime = self.clone();
         task_runtime.spawn(async move {
             while let Some(event) = proxy_events.recv().await {
                 events_runtime.manager.record_proxy_event(event);
             }
         });
-        let weak = Arc::downgrade(&runtime);
+        let weak = Arc::downgrade(self);
         task_runtime.spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let Some(runtime) = weak.upgrade() else {
                     break;
                 };
-                if runtime.exiting.load(Ordering::Acquire) {
+                if runtime.closing() {
                     break;
                 }
                 if runtime
@@ -452,13 +455,12 @@ impl DesktopRuntime {
                 {
                     if let Ok(_operation) = runtime.lifecycle.try_lock() {
                         if let Err(error) = runtime.cleanup_retired().await {
-                            runtime.manager.report_error(error.to_string());
+                            runtime.report_error(error);
                         }
                     }
                 }
             }
         });
-        Ok(runtime)
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppState> {
@@ -479,11 +481,33 @@ impl DesktopRuntime {
     }
 
     pub fn state(&self) -> Result<AppState, Error> {
-        Ok(self.manager.snapshot()?)
+        Ok(self.manager.snapshot())
+    }
+
+    /// Whether the app is closing and accepts no further changes.
+    fn closing(&self) -> bool {
+        self.exiting.load(Ordering::Acquire)
+    }
+
+    /// Serializes changes of the agents' configuration and of the tokens the
+    /// Local API accepts, so an older scan cannot restore revoked ones.
+    fn lock_agents(&self) -> Result<MutexGuard<'_, ()>, Error> {
+        Ok(self
+            .agent_policy
+            .lock()
+            .map_err(|_| "Agent state unavailable")?)
     }
 
     pub fn report_error(&self, error: impl std::fmt::Display) {
         self.manager.report_error(error.to_string());
+    }
+
+    /// Reports `error` unless the state shows it already, so a failure that
+    /// repeats on every attempt publishes no new state.
+    fn report_once(&self, error: Error) {
+        if self.manager.snapshot().error != Some(error.to_string()) {
+            self.report_error(error);
+        }
     }
 
     pub fn query_usage(&self, query: UsageQuery) -> Result<UsagePage, Error> {
@@ -567,30 +591,32 @@ pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentSt
     local_state.set_importing(crate::settings::legacy::secrets_pending(&data_dir));
     // Restoring never depends on the Local API endpoint.
     let projector = Projector::new(helper_path, "", Arc::new(local_state))?;
-    let failures = projector.reconcile(None)?;
-    if !failures.is_empty() {
-        return Err(agent_failures(failures));
-    }
+    all_applied(projector.reconcile(None)?)?;
     session?;
     Ok(Some(projector.scan(None)?.0))
 }
 
-fn agent_failures(failures: Vec<(String, String)>) -> String {
-    failures
+/// Succeeds when no agent failed; otherwise names each failure.
+fn all_applied(failures: Vec<(String, String)>) -> Result<(), String> {
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(failures
         .into_iter()
         .map(|(agent, error)| format!("{agent}: {error}"))
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; "))
 }
 
-fn with_client_token(
-    mut tokens: TokenSet,
-    credentials: &ClientCredentials,
-) -> Result<TokenSet, Error> {
-    if let Some(token) = credentials.active_token()? {
-        tokens.insert(token, LOCAL_TOOLS_AGENT.to_string());
-    }
-    Ok(tokens)
+/// A saved profile, by ID.
+fn find_profile<'a>(state: &'a AppState, id: &str) -> Option<&'a ConfidentialProfile> {
+    state.profiles.iter().find(|profile| profile.id == id)
+}
+
+/// Whether a profile's key was issued for an account the app signed in to,
+/// which the provider revokes when it is replaced or removed.
+fn account_key(provider: ServiceProvider, auth: &ProfileAuth) -> bool {
+    provider == ServiceProvider::Redpill && matches!(auth, ProfileAuth::OAuth { .. })
 }
 
 #[cfg(test)]

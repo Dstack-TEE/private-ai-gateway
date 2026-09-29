@@ -4,20 +4,35 @@ use desktop_core::protocol::ShutdownMode;
 impl DesktopRuntime {
     pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, Error> {
         let operation = self.lifecycle.try_lock().map_err(|_| Error::busy())?;
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return Err(Error::closing());
         }
         Ok(operation)
+    }
+
+    /// Whether protection runs, or would run but for a pending reconnect, so
+    /// that a change of the service configuration must restart it.
+    pub(super) fn restart_needed(&self, state: &AppState) -> Result<bool, Error> {
+        Ok(state.session_active
+            || (self.manager.is_running()? && !state.configuration_verification))
+    }
+
+    /// Stops the verifier for a configuration change that restarts it
+    /// itself, without the automatic reconnect.
+    pub(super) fn pause_protection(&self) -> Result<(), Error> {
+        self.stop_with_reconnect(true)?;
+        self.manager.cancel_reconnection();
+        Ok(())
     }
 
     pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), Error> {
         let Ok(_operation) = self.lifecycle.try_lock() else {
             return Ok(());
         };
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return Ok(());
         }
-        let state = self.manager.snapshot()?;
+        let state = self.manager.snapshot();
         if state.is_protected() && self.proxy.session().verified {
             self.recovery.reset_retry();
         }
@@ -43,12 +58,7 @@ impl DesktopRuntime {
         }
         let remote = url::Url::parse(&state.config.remote_url)
             .map_err(|_| "The active service URL is invalid")?;
-        let local_service = match remote.host() {
-            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            None => false,
-        };
+        let local_service = settings_config::is_loopback(&remote);
         if local_service && !retry {
             return Ok(());
         }
@@ -56,19 +66,10 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.clear_wait();
-        let paused = (|| {
-            let _guard = self
-                .agent_policy
-                .lock()
-                .map_err(|_| "Agent state unavailable")?;
-            let result = self.manager.stop_with_reconnect(true);
-            self.proxy.set_api_key(None);
-            result
-        })();
-        if let Err(error) = paused {
+        if let Err(error) = self.stop_with_reconnect(true) {
             self.manager.cancel_reconnection();
             self.recovery.cancel();
-            return Err(error.into());
+            return Err(error);
         }
         if !local_service && !self.recovery.online() {
             self.recovery.wait();
@@ -94,15 +95,11 @@ impl DesktopRuntime {
     /// Called only by the server's blocking startup worker, after IPC is bound.
     pub fn start_on_launch(self: &Arc<Self>) -> Result<(), Error> {
         let _operation = self.lifecycle.blocking_lock();
-        if self.exiting.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let state = self.manager.snapshot()?;
-        if self.manager.is_running()? {
+        if self.closing() || self.manager.is_running()? {
             return Ok(());
         }
         self.recovery.cancel();
-        self.start_inner(state.config).map(|_| ())
+        self.start_inner(self.manager.snapshot().config).map(|_| ())
     }
 
     pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
@@ -112,24 +109,17 @@ impl DesktopRuntime {
     }
 
     pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         let config = settings_config::resolve_runtime_config(config)?;
-        let state = self.manager.snapshot()?;
+        let state = self.manager.snapshot();
         if config.remote_url != state.config.remote_url {
             return Err(Error::invalid_state(
                 "Select or verify the Confidential AI profile before starting",
             ));
         }
-        let profile = state
-            .profiles
-            .iter()
-            .find(|profile| profile.id == state.active_profile_id)
-            .ok_or_else(|| {
-                Error::invalid_state("Create a Confidential AI profile before starting")
-            })?;
+        let profile = find_profile(&state, &state.active_profile_id).ok_or_else(|| {
+            Error::invalid_state("Create a Confidential AI profile before starting")
+        })?;
         let key = self.load_profile_key(&profile.id)?.ok_or_else(|| {
             Error::invalid_state("Add a credential to the active Confidential AI profile")
         })?;
@@ -147,7 +137,7 @@ impl DesktopRuntime {
     pub fn set_require_production_os(&self, required: bool) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
-        self.stop_inner()?;
+        self.stop_with_reconnect(false)?;
         self.update_config(|saved| {
             saved.require_production_os = required;
             Ok(())
@@ -159,10 +149,6 @@ impl DesktopRuntime {
     pub fn stop(&self) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
-        self.stop_inner()
-    }
-
-    pub(super) fn stop_inner(&self) -> Result<AppState, Error> {
         self.stop_with_reconnect(false)
     }
 
@@ -179,23 +165,13 @@ impl DesktopRuntime {
         reconnecting: bool,
         restore_agents: bool,
     ) -> Result<AppState, Error> {
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         let result = self.manager.stop_with_reconnect(reconnecting);
         self.proxy.set_api_key(None);
-        if self.instance.is_none() {
-            return Ok(result?);
-        }
-        if restore_agents {
-            self.proxy
-                .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-            if self.agent_configuration_enabled() {
-                let failures = self.current_projector()?.reconcile(None)?;
-                if !failures.is_empty() {
-                    return Err(agent_failures(failures).into());
-                }
+        if self.instance.is_some() && restore_agents {
+            self.withdraw_agent_tokens()?;
+            if self.agent_configuration {
+                all_applied(self.current_projector()?.reconcile(None)?)?;
             }
         }
         Ok(result?)
@@ -210,12 +186,12 @@ impl DesktopRuntime {
         // the server's shutdown watchdog bounds the wait.
         tracing::info!("Shutdown: waiting for configuration changes to finish");
         let _operation = self.lifecycle.lock().await;
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return Ok(());
         }
         self.recovery.cancel();
         let preserve_session =
-            mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
+            mode == ShutdownMode::UpdateRestart && self.manager.snapshot().session_active;
         tracing::info!("Shutdown: stopping protection");
         let restored = self.stop_with_reconnect(preserve_session);
         // Outside the Mac App Store, a client's shutdown that ends the session

@@ -218,7 +218,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         }
         release.notify_one();
         pending.await.unwrap().unwrap();
-        let state = manager.snapshot().unwrap();
+        let state = manager.snapshot();
         assert!(state.error.is_none());
         assert_eq!(proxy.session().verified, !stop);
         assert_eq!(
@@ -391,7 +391,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
         .unwrap_err();
     assert_eq!(protocol::Error::from(error), failure);
     assert_eq!(
-        manager.snapshot().unwrap().error.as_deref(),
+        manager.snapshot().error.as_deref(),
         Some(failure.message.as_str())
     );
     manager.stop().unwrap();
@@ -424,7 +424,7 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
             },
         )
         .unwrap();
-    let state = manager.snapshot().unwrap();
+    let state = manager.snapshot();
     assert_eq!(state.status, VerificationStatus::Error);
     assert_eq!(
         state.error.as_deref(),
@@ -482,21 +482,15 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(46)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verifying
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
     tokio::time::advance(Duration::from_secs(75)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Error
-    );
-    assert!(crate::recovery::should_retry(&manager.snapshot().unwrap()));
+    assert_eq!(manager.snapshot().status, VerificationStatus::Error);
+    assert!(crate::recovery::should_retry(&manager.snapshot()));
     assert!(!proxy.session().verified);
     manager.start(config).unwrap();
     let generation = proxy.session().generation;
-    let mut complete = manager.snapshot().unwrap();
+    let mut complete = manager.snapshot();
     complete.status = VerificationStatus::Verified;
     manager.restore_snapshot(complete);
     manager
@@ -508,10 +502,7 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
         .unwrap();
     tokio::time::advance(Duration::from_secs(121)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verified
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verified);
     manager.stop().unwrap();
 }
 
@@ -543,7 +534,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
             },
         )
         .unwrap();
-    let state = manager.snapshot().unwrap();
+    let state = manager.snapshot();
     assert_eq!(state.status, VerificationStatus::Error);
     assert!(state.reconnecting && crate::recovery::should_retry(&state));
     assert!(!manager.is_running().unwrap());
@@ -595,10 +586,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 },
             )
             .unwrap();
-        assert_eq!(
-            manager.snapshot().unwrap().status,
-            VerificationStatus::Blocked
-        );
+        assert_eq!(manager.snapshot().status, VerificationStatus::Blocked);
         assert!(usage.active_session().unwrap().is_some());
         assert_eq!(manager.is_running().unwrap(), running);
         manager
@@ -613,7 +601,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         manager
             .fail(generation, "event sink failed".into())
             .unwrap();
-        let state = manager.snapshot().unwrap();
+        let state = manager.snapshot();
         assert_eq!(state.status, VerificationStatus::Blocked);
         assert_eq!(state.configuration_verification, verification_only);
         assert!(!crate::recovery::should_retry(&state));
@@ -664,10 +652,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert!(!proxy.session().verified);
     assert!(proxy.session().generation > retired_generation);
     manager.terminated(retired_generation, None).unwrap();
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verifying
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
     manager
         .fail(proxy.session().generation, "Transport interrupted".into())
         .unwrap();
@@ -678,8 +663,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         executor.handle().clone(),
         AppState::default(),
     )
-    .snapshot()
-    .unwrap();
+    .snapshot();
     assert_eq!(recovered.session_id, resumed.session_id);
     assert_eq!(recovered.protected_since, Some(123));
     assert!(recovered.session_active && recovered.identity.is_none());
@@ -761,7 +745,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
         cost_usd: None,
     });
 
-    assert!(manager.snapshot().unwrap().activity.is_empty());
+    assert!(manager.snapshot().activity.is_empty());
     assert_eq!(
         manager
             .usage
@@ -998,7 +982,7 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     ));
     let published = manager.subscribe();
     let instance = Some(crate::api::version().instance_id.clone());
-    let initial = manager.snapshot().unwrap();
+    let initial = manager.snapshot();
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
@@ -1007,7 +991,7 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
         .unwrap();
     let stopped = manager.stop().unwrap();
     manager.restore_snapshot(initial.clone());
-    let restored = manager.snapshot().unwrap();
+    let restored = manager.snapshot();
     let states = [&initial, &started, &stopped, &restored];
     for state in states {
         assert_eq!(state.backend_instance, instance);

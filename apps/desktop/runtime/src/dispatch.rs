@@ -104,22 +104,12 @@ pub(crate) async fn dispatch(
             runtime.export_diagnostics_content(BUILD_VERSION),
         ),
         Command::QueryUsage { query } => respond::<rpc::QueryUsage, _>(runtime.query_usage(query)),
-        Command::GetUsageRecord { record_id } => match runtime.usage_record(&record_id) {
-            Ok(Some(record)) => encode::<rpc::GetUsageRecord>(record),
-            Ok(None) => Err(protocol::Error::new(
-                ErrorCode::NotFound,
-                "Usage record not found",
-            )),
-            Err(error) => Err(error.into()),
-        },
-        Command::GetUsageReceipt { record_id } => match runtime.usage_receipt(&record_id) {
-            Ok(Some(receipt)) => encode::<rpc::GetUsageReceipt>(receipt),
-            Ok(None) => Err(protocol::Error::new(
-                ErrorCode::NotFound,
-                "Usage record not found",
-            )),
-            Err(error) => Err(error.into()),
-        },
+        Command::GetUsageRecord { record_id } => {
+            respond_found::<rpc::GetUsageRecord>(runtime.usage_record(&record_id))
+        }
+        Command::GetUsageReceipt { record_id } => {
+            respond_found::<rpc::GetUsageReceipt>(runtime.usage_receipt(&record_id))
+        }
         Command::ExportUsage { query, path } => {
             respond::<rpc::ExportUsage, _>(runtime.export_usage_csv(query, absolute(path)?))
         }
@@ -201,6 +191,16 @@ fn respond<C: Call, E: Into<crate::Error>>(
         let error: crate::Error = error.into();
         protocol::Error::from(error)
     })?)
+}
+
+/// A usage record's answer; an unknown record is `not_found`.
+fn respond_found<C: Call>(
+    result: Result<Option<C::Response>, crate::Error>,
+) -> Result<Value, protocol::Error> {
+    respond::<C, _>(result?.ok_or(protocol::Error::new(
+        ErrorCode::NotFound,
+        "Usage record not found",
+    )))
 }
 
 fn absolute(path: String) -> Result<PathBuf, String> {

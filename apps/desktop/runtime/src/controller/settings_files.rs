@@ -30,7 +30,7 @@ impl DesktopRuntime {
         // Under the lifecycle lock, so switching the settings in effect and
         // applying them is one step for every other operation.
         let _operation = self.lifecycle.lock().await;
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return;
         }
         let Some((previous, current)) = self.settings.reload() else {
@@ -103,12 +103,9 @@ impl DesktopRuntime {
             // settings in effect, and protection must not keep running on a
             // profile they no longer name. The start then fails with its
             // reason, and the session, still active, offers Stop.
-            let state = self.manager.snapshot()?;
-            let reconnect = state.session_active
-                || (self.manager.is_running()? && !state.configuration_verification);
+            let reconnect = self.restart_needed(&self.manager.snapshot())?;
             if reconnect {
-                self.stop_with_reconnect(true)?;
-                self.manager.cancel_reconnection();
+                self.pause_protection()?;
             }
             self.proxy.set_api_key(None);
             self.recovery.cancel();

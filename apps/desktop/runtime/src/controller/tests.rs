@@ -1067,7 +1067,6 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
             AppState::default(),
         )
         .snapshot()
-        .unwrap()
         .reconnecting
     };
     assert!(resumes());
@@ -1268,7 +1267,10 @@ fn client_key_rotation_preserves_agent_tokens_and_fails_closed() {
     std::fs::remove_dir(&token_path).unwrap();
     std::fs::write(&token_path, &rotated).unwrap();
     assert!(runtime.client_key().is_err());
-    let active = with_client_token(runtime.proxy.tokens(), &runtime.credentials).unwrap();
+    let active = runtime
+        .credentials
+        .with_token(runtime.proxy.tokens())
+        .unwrap();
     assert_eq!(active.agent_for(&rotated), None);
     assert_eq!(active.agent_for("agent-token"), Some("codex"));
     let replacement = runtime.rotate_client_key().unwrap();

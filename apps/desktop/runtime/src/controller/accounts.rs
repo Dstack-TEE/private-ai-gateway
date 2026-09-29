@@ -166,16 +166,9 @@ impl DesktopRuntime {
         &self,
         profile_id: String,
     ) -> Result<desktop_core::contracts::AccountLoginDetails, Error> {
-        use desktop_core::contracts::{ProfileAuth, ServiceProvider};
-        let state = self.manager.snapshot()?;
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .ok_or("Profile not found")?;
-        if profile.provider != ServiceProvider::Redpill
-            || !matches!(profile.auth, ProfileAuth::OAuth { .. })
-        {
+        let state = self.manager.snapshot();
+        let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
+        if !account_key(profile.provider, &profile.auth) {
             return Err("Connect RedPill to select a workspace".into());
         }
         let key = self
@@ -188,7 +181,7 @@ impl DesktopRuntime {
         &self,
         target: desktop_core::contracts::AccountBalanceTarget,
     ) -> Result<Option<desktop_core::contracts::AccountBalance>, Error> {
-        use desktop_core::contracts::{AccountBalanceTarget, ProfileAuth};
+        use desktop_core::contracts::AccountBalanceTarget;
         match target {
             AccountBalanceTarget::Login { id } => {
                 self.balances
@@ -206,12 +199,8 @@ impl DesktopRuntime {
                     .await
             }
             AccountBalanceTarget::Profile { profile_id } => {
-                let state = self.manager.snapshot()?;
-                let profile = state
-                    .profiles
-                    .iter()
-                    .find(|p| p.id == profile_id)
-                    .ok_or("Profile not found")?;
+                let state = self.manager.snapshot();
+                let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
                     return Err("Connect the account to view its balance".into());
                 }

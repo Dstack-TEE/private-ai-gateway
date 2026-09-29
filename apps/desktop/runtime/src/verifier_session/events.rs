@@ -14,65 +14,36 @@ impl SessionManager {
         let mut load_catalog = false;
         let mut retired_task = None;
         match event {
-            // Identity in (or rotated): a new epoch; the session stays closed
-            // until the catalog read through this identity is in too.
             VerifierEvent::Ready {
                 identity,
                 remote_url,
                 service,
             } => {
-                apply_identity_event(&mut runtime.state, &identity);
                 runtime.state.remote_url = Some(remote_url);
                 runtime.service = Some(service);
-                runtime.identity_ready = true;
-                runtime.epoch += 1;
-                runtime.state.status = VerificationStatus::Verifying;
-                runtime.state.progress = Some("Reading the verified model list".to_string());
-                runtime.state.catalog = None;
+                runtime.identify(&identity);
                 load_catalog = true;
             }
             VerifierEvent::IdentityUpdated { identity } => {
-                apply_identity_event(&mut runtime.state, &identity);
-                runtime.identity_ready = true;
-                runtime.epoch += 1;
-                runtime.state.status = VerificationStatus::Verifying;
-                runtime.state.progress = Some("Reading the verified model list".to_string());
-                runtime.state.catalog = None;
+                runtime.identify(&identity);
                 load_catalog = true;
             }
-            // Verification lost: one atomic barrier. The epoch moves so a
-            // read still in flight can neither publish nor clear this error,
-            // and the identity must be reported again before anything opens.
+            // Verification lost: one atomic barrier (`lose_verification`).
             // The session goes on, also across a restart, until the user
-            // stops it: agents stay pointed at the refusing Local API.
+            // stops it: agents stay pointed at the refusing Local API. A key
+            // set change retires the verifier for a fresh verification.
             VerifierEvent::Blocked { code, reason } => {
                 let rotating = code.as_deref() == Some("keyset_changed")
                     && runtime.state.status != VerificationStatus::Blocked;
-                runtime.epoch += 1;
-                runtime.identity_ready = false;
-                runtime.state.status = if rotating {
-                    VerificationStatus::Error
-                } else {
-                    VerificationStatus::Blocked
-                };
-                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
+                runtime.lose_verification(!rotating);
                 if rotating {
                     retired_task = runtime.task.take();
                 }
-                runtime.state.progress = None;
-                runtime.state.catalog = None;
                 runtime.state.error = Some(reason);
                 runtime.failure = None;
             }
             VerifierEvent::Fatal { error } => {
-                runtime.epoch += 1;
-                runtime.identity_ready = false;
-                if runtime.state.status != VerificationStatus::Blocked {
-                    runtime.state.status = VerificationStatus::Error;
-                }
-                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
-                runtime.state.progress = None;
-                runtime.state.catalog = None;
+                runtime.lose_verification(false);
                 runtime.state.error = Some(error.to_string());
                 runtime.failure = Some(error);
             }
