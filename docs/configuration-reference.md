@@ -36,12 +36,10 @@ Minimal container configuration:
 | `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
 | `admin_token_sha256` | hex string | unset | SHA-256 the admin token must match, whether it comes from `admin_token`, `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`, or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. Startup fails on a missing or mismatched token. |
-| `inference_token_sha256` | hex string | unset | Direct mode only. SHA-256 of the bearer every inference request must present; missing or mismatched bearers are rejected before the body is read. The bearer itself stays with clients. Required with `privatemode_proxy` in direct mode; a startup error with `middleware`, which authorizes each client bearer through the control plane. |
 | `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
 | `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |
 | `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report carries `supported_e2ee_versions: []` and v2 requests fail with `400 e2ee_invalid_version`. The legacy `X-Signing-Algo` E2EE path is not affected. |
-| `require_client_e2ee` | boolean | `false` | Direct mode only. Reject inference requests without E2EE v2 (`400 e2ee_required`) before the body is read. Set it when public TLS terminates outside the attested workload, such as Phala's default app URL; a deployment that terminates TLS inside the workload, such as behind dstack-ingress with a [downstream TLS binding](#downstream-tls-binding), does not need it. Requires `enable_e2ee`. |
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
@@ -395,7 +393,7 @@ The repository entrypoint and deployment manifest also use:
 | `RUSTUP_HOME` | Rustup state override used by `entrypoint.sh`. Defaults to `$PRIVATE_AI_GATEWAY_CACHE_DIR/rustup`. |
 | `CARGO_TARGET_DIR` | Cargo output override used by `entrypoint.sh`. Defaults to `$PRIVATE_AI_GATEWAY_CACHE_DIR/target`. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Compose interpolation for the static config's admin token in `compose.yaml`. `compose.privatemode.yaml` instead mounts it as a Compose secret read through `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. |
-| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256`, `PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256` | Non-secret digests rendered into `compose.privatemode.yaml` as `admin_token_sha256` and `inference_token_sha256`. |
+| `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256` | Non-secret digest rendered into `compose.privatemode.yaml` as `admin_token_sha256`. |
 | `PRIVATEMODE_API_KEY` | Encrypted deployment input mounted as one Compose secret into the gateway and proxy. The renderer derives `PRIVATEMODE_CREDENTIAL_SHA256` from it. |
 
 Provider credentials belong in the upstream config or the deployment mechanism

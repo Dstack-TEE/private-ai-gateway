@@ -14,6 +14,11 @@ traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
 > into a [published extension](../../../spec/proxy-image-binding.md). A fresh
 > production-OS Phala deployment passed `pap verify` with `--accept-compose` and
 > served E2EE v2 chat and streaming with passing receipt and session audits.
+>
+> **Status (2026-09-30):** Privatemode now places no requirement on the client
+> hop, like every other provider. The `require_client_e2ee` and
+> `inference_token_sha256` settings were removed, so the deployment condition
+> above about setting `require_client_e2ee` no longer applies.
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).

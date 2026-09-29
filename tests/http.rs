@@ -3,11 +3,7 @@
 //! Uses `tower::ServiceExt::oneshot` to drive the router directly,
 //! avoiding a TCP listener.
 
-use std::convert::Infallible;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 mod common;
 
@@ -35,9 +31,8 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::http::{build_router, build_router_with_admin, InferenceAccess};
+use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
 use common::{verified_event, StaticKeyProvider, StubQuoter};
@@ -462,136 +457,6 @@ async fn chat_default_required_fails_closed_without_verifier() {
         payload_event(&receipt, "response.returned")["body_hash"],
         private_ai_gateway::aci::digest::sha256_hex(&body)
     );
-}
-
-/// A request body that records whether any handler polled it, to prove that
-/// admission checks reject before the body is read.
-fn body_with_poll_probe() -> (Body, Arc<AtomicBool>) {
-    let polled = Arc::new(AtomicBool::new(false));
-    let polled_by_stream = polled.clone();
-    let body = Body::from_stream(futures_util::stream::once(async move {
-        polled_by_stream.store(true, Ordering::SeqCst);
-        Ok::<_, Infallible>(br#"{"model":"x","messages":[]}"#.to_vec())
-    }));
-    (body, polled)
-}
-
-#[tokio::test]
-async fn required_client_e2ee_rejects_plaintext_before_reading_the_body() {
-    let h = make_harness();
-    let manager = load_manager("[]");
-    let app = build_router_with_admin(
-        h.service,
-        manager,
-        None,
-        InferenceAccess {
-            require_client_e2ee: true,
-            ..InferenceAccess::default()
-        },
-    );
-    let (body, body_polled) = body_with_poll_probe();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .body(body)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()["error"]
-            ["type"],
-        "e2ee_required"
-    );
-    assert!(!body_polled.load(Ordering::SeqCst));
-
-    // The legacy signing header selects the pre-ACI path, not E2EE v2.
-    for (headers, expected) in [
-        (
-            &[("x-e2ee-version", "2"), ("x-signing-algo", "ecdsa")][..],
-            "e2ee_required",
-        ),
-        (&[("x-e2ee-version", "2")][..], "e2ee_invalid_version"),
-    ] {
-        let mut request = Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions");
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        let response = app
-            .clone()
-            .oneshot(request.body(Body::from("{}")).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()
-                ["error"]["type"],
-            expected
-        );
-    }
-}
-
-#[tokio::test]
-async fn configured_inference_token_blocks_unauthenticated_paid_forwarding() {
-    let h = make_harness();
-    let manager = load_manager("[]");
-    let expected: [u8; 32] = Sha256::digest(b"client-inference-token").into();
-    let app = build_router_with_admin(
-        h.service.clone(),
-        manager,
-        None,
-        InferenceAccess {
-            token_sha256: Some(expected),
-            ..InferenceAccess::default()
-        },
-    );
-
-    let (body, body_polled) = body_with_poll_probe();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(body)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(
-        !body_polled.load(Ordering::SeqCst),
-        "authentication must reject the request before polling its body"
-    );
-
-    for (token, expected_status) in [
-        ("wrong-token", StatusCode::FORBIDDEN),
-        ("client-inference-token", StatusCode::OK),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::from(br#"{"model":"x","messages":[]}"#.to_vec()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected_status);
-    }
-
-    assert!(h.received.lock().unwrap().is_some());
 }
 
 #[tokio::test]
@@ -1021,7 +886,7 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
     }
 }
 
-fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
+fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
     // Unique per call: a coarse system clock can hand concurrent tests the same
     // nanos, so an atomic counter guarantees distinct temp paths.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1031,11 +896,7 @@ fn load_manager(config_json: &str) -> Arc<UpstreamConfigManager> {
         SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&path, config_json).unwrap();
-    Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap())
-}
-
-fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
-    let manager = load_manager(config_json);
+    let manager = Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap());
     let keys = Arc::new(StaticKeyProvider::default());
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -1049,7 +910,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         )
         .unwrap(),
     );
-    let app = build_router_with_admin(service.clone(), manager, None, InferenceAccess::default());
+    let app = build_router_with_admin(service.clone(), manager, None);
     (service, app)
 }
 

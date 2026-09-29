@@ -14,7 +14,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::http::{build_router_with_admin, InferenceAccess};
+use private_ai_gateway::http::build_router_with_admin;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -87,12 +87,7 @@ async fn admin_can_replace_single_upstream_config_file_at_runtime() {
         )
         .unwrap(),
     );
-    let app = build_router_with_admin(
-        service,
-        manager,
-        Some("admin-secret".to_string()),
-        InferenceAccess::default(),
-    );
+    let app = build_router_with_admin(service, manager, Some("admin-secret".to_string()));
 
     let (status, models) = call(app.clone(), "GET", "/v1/models", Vec::new(), None).await;
     assert_eq!(status, StatusCode::OK);

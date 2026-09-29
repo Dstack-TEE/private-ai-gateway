@@ -28,21 +28,9 @@ needs a Mesh CA and verifies the Coordinator against those exact bytes before
 using the CA. It calls `LatestSecret` before each encrypted inference attempt.
 An expired secret that cannot be refreshed fails the request.
 
-Phala's public HTTPS ingress terminates TLS outside the attested workload.
-The sample deployment therefore sets `require_client_e2ee`: plaintext and
-legacy E2EE inference requests fail before the body is read. This is a property
-of the ingress, not of Privatemode, and applies to every route on that gateway.
-A deployment whose TLS terminates inside the workload, such as one behind
-dstack-ingress with an attested TLS binding, serves plaintext clients as it
-does for other providers.
-
-Clients of the sample deployment must verify the quoted E2EE key, encrypt every content-bearing field,
-and decrypt the response. `pap verify` correctly fails its TLS-channel check
-(`id-6`) against the public ingress; passing quote/keyset checks alone does not
-establish prompt privacy.
-V2 encrypts defined fields, not the entire JSON body: model identifiers,
-headers, and unsupported fields (including tool schemas) remain visible to
-the ingress. The header gate cannot make a partially encrypted client safe.
+Clients reach Privatemode routes as they reach any other provider. The
+gateway's client-facing channel, including any E2EE v2 support, is the same for
+every route.
 
 ## What the manifest observation proves
 

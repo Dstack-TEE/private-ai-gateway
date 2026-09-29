@@ -7,11 +7,7 @@ exchange, and E2EE; the gateway pins the proxy image, credential digest, and
 internal origin. Everything else follows the
 [git-launcher deployment](README.md).
 
-This Compose publishes the gateway on Phala's default app URL, whose TLS
-terminates outside the workload, so it sets `require_client_e2ee`. A deployment
-that terminates TLS inside the workload, such as one behind dstack-ingress with
-a [downstream TLS binding](README.md#bind-public-tls-identities), can leave it
-unset and serve plaintext clients like any other provider.
+Clients call the gateway exactly as they would with any other provider.
 
 ## Deploy
 
@@ -29,8 +25,6 @@ command -v sha256sum
 export PRIVATE_AI_GATEWAY_REPO_COMMIT=<full-40-hex-sha>
 export PRIVATE_AI_GATEWAY_ADMIN_TOKEN=<long-random-admin-token>
 export PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" | sha256sum | cut -d' ' -f1)"
-export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN=<long-random-client-token>
-export PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256="$(printf %s "$PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" | sha256sum | cut -d' ' -f1)"
 export PRIVATEMODE_API_KEY=<privatemode-api-key>
 
 ./render-privatemode-compose.sh /tmp/private-ai-gateway-privatemode.json
@@ -48,12 +42,11 @@ and its default production image may be newer than the reviewed allowlist.
 image that `pap verify --require-production-os` accepts.
 
 Rendering puts the git commit, image digest, and the digests of the admin
-token, inference token, and Privatemode API key into the measured Compose; the
-secrets themselves are not in it. The admin token and API key travel through
-Phala's encrypted environment and reach the containers as Compose secrets,
-which the rendered Compose names without their values. The inference token
-stays with clients, who send it as the Bearer credential. The gateway reads the
-admin token through `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. The API key is
+token and Privatemode API key into the measured Compose; the secrets themselves
+are not in it. Both travel through Phala's encrypted environment and reach the
+containers as Compose secrets, which the rendered Compose names without their
+values. The gateway reads the admin token through
+`PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. The API key is
 mounted into both services: the proxy reads it through `--apiKey @<file>`, and
 the gateway only checks it against the measured digest at startup and never
 forwards it.
@@ -65,12 +58,8 @@ API; `bearer_token` is forbidden for Privatemode. To rotate the API key,
 rerender with the new `PRIVATEMODE_API_KEY` and redeploy both services; a
 mismatched secret fails closed.
 
-After deployment, the gateway listens on port `8086`. The Privatemode variant
-rejects inference requests unless `Authorization: Bearer
-$PRIVATE_AI_GATEWAY_INFERENCE_TOKEN` hashes to the digest measured in its
-static config. Health, attestation, transparency, and model-catalog endpoints
-remain public. The admin API uses its separate admin token, and receipts owned
-by an authenticated inference request require that same inference bearer.
+After deployment, the gateway listens on port `8086` and serves inference like
+any other deployment. The admin API uses the admin token.
 
 ## Verify the deployment
 
@@ -148,9 +137,10 @@ if pap verify "$GATEWAY_URL" --nonce "$nonce" --require-production-os \
 else
   test "$?" -eq 1
 fi
-# Phala's public TLS terminates outside this workload: id-6 must fail. The
-# quote, nonce/keyset binding, expiry, measured Compose, and production OS
-# image must still pass.
+# Phala's default app URL terminates TLS outside this workload, so id-6 fails
+# as for any gateway deployment there; bind TLS inside the workload to pass it
+# (README.md#bind-public-tls-identities). The quote, nonce/keyset binding,
+# expiry, measured Compose, and production OS image must pass.
 jq -e --slurpfile report "$artifact_dir/report.json" '
   .verdict.failed == 1 and
   .verdict.workload_keyset_digest == $report[0].workload_keyset_digest and
@@ -158,31 +148,28 @@ jq -e --slurpfile report "$artifact_dir/report.json" '
     [.checks[] | select(.status == "pass") | .id] | length == 0) and
   ([.checks[] | select(.status == "fail") | .id] == ["id-6"])
 ' "$artifact_dir/live-verification.json"
-jq -e '
-  .service_capabilities.supported_e2ee_versions | index("2")
-' "$artifact_dir/report.json"
 ```
 
-Do **not** send a plaintext inference request to this public URL. Its TLS
-terminates outside the attested workload, so this Compose sets
-`require_client_e2ee` and the gateway rejects such requests with
-`e2ee_required`. Use a client implementing
-[ACI E2EE v2](../spec/e2ee-v2.md) to verify the quoted keyset, encrypt every
-content-bearing request field, and decrypt the response. Include
-`"provider": {"aci_verified": true}` in the request body so the gateway must
-serve through a verified session; otherwise the receipt records
-`required: false` and the audit's `--require-verified` fails `upstream-1`.
-
-For the receipt audit, save the request body as reconstructed by the gateway
-after E2EE decryption in `$artifact_dir/request.json`, the **exact encrypted response bytes received** in
-`$artifact_dir/inference.json`, and the response's `x-receipt-id` as `receipt_id`.
-The client can keep its locally decrypted response separately. Do not use
-`pap serve` here: it requires an attested TLS binding that Phala ingress does
-not provide. Then fetch and audit the receipt:
+Send one chat request that requires a verified upstream session, then fetch
+and audit its receipt:
 
 ```bash
+printf %s '{
+  "model":"gpt-oss-120b-private",
+  "messages":[{"role":"user","content":"Reply with exactly: ok"}],
+  "provider":{"aci_verified":true}
+}' >"$artifact_dir/request.json"
+curl -fsS "$GATEWAY_URL/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  --data-binary "@$artifact_dir/request.json" \
+  -D "$artifact_dir/inference.headers" \
+  -o "$artifact_dir/inference.json"
+receipt_id="$(
+  awk -F': ' 'tolower($1) == "x-receipt-id" { print $2 }' \
+    "$artifact_dir/inference.headers" | tr -d '\r'
+)"
+test -n "$receipt_id"
 curl -fsS "$GATEWAY_URL/v1/aci/receipts/$receipt_id" \
-  -H "Authorization: Bearer $PRIVATE_AI_GATEWAY_INFERENCE_TOKEN" \
   -o "$artifact_dir/receipt.json"
 
 session_id="$(jq -er '
@@ -235,7 +222,7 @@ jq -e \
   ' "$artifact_dir/session.json"
 ```
 
-The E2EE inference must return HTTP 2xx and a non-empty `x-receipt-id`.
+The request must return HTTP 2xx and a non-empty `x-receipt-id`.
 The verifier checks report binding, the attested keyset, receipt signature,
 the gateway-side request hash, and the exact response wire-byte hash. Before
 that, the deployment check requires the complete attested Compose to equal the

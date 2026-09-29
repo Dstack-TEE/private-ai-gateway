@@ -65,16 +65,16 @@ fn privatemode_deployment_contract_is_pinned() {
                 r#""credential_path": "/run/secrets/privatemode-api-key""#,
                 "PRIVATEMODE_CREDENTIAL_SHA256:?",
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
-                "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?",
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/private-ai-gateway-admin-token",
                 "environment: PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
                 "environment: PRIVATEMODE_API_KEY",
-                r#""require_client_e2ee": true"#,
             ],
             &[
                 r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#,
                 "--apiKey=${PRIVATEMODE_API_KEY}",
                 "/dstack/.host-shared",
+                "require_client_e2ee",
+                "inference_token_sha256",
             ],
         ),
         (
@@ -82,7 +82,6 @@ fn privatemode_deployment_contract_is_pinned() {
             gateway,
             &[
                 "ai.private-gateway.source-commit", "ai.private-gateway.admin-token-sha256",
-                "ai.private-gateway.inference-token-sha256",
                 "ai.private-gateway.privatemode-credential-sha256",
                 "privatemode-manifests:/run/privatemode-manifests:ro",
             ],

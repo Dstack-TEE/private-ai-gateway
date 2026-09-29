@@ -15,7 +15,6 @@ services:
     labels:
       ai.private-gateway.source-commit: ${PRIVATE_AI_GATEWAY_REPO_COMMIT:?set PRIVATE_AI_GATEWAY_REPO_COMMIT to the audited full commit SHA}
       ai.private-gateway.admin-token-sha256: ${PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256}
-      ai.private-gateway.inference-token-sha256: ${PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256}
       ai.private-gateway.privatemode-credential-sha256: ${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}
     ports:
       - "8086:8086"
@@ -80,9 +79,7 @@ configs:
         "state_dir": "/var/lib/private-ai-gateway",
         "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
         "admin_token_sha256": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256}",
-        "inference_token_sha256": "${PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?set measured PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256}",
         "dstack_endpoint": "unix:/var/run/dstack.sock",
-        "require_client_e2ee": true,
         "privatemode_proxy": {
           "base_url": "http://privatemode-proxy:8080",
           "manifest_log_path": "/run/privatemode-manifests/log.txt",

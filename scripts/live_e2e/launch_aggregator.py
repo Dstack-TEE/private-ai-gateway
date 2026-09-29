@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import secrets
 import signal
 import subprocess
 import tempfile
@@ -39,9 +38,6 @@ class AggregatorProcess:
         self.dstack_endpoint = dstack_endpoint
         self.env = {**os.environ, **(env or {})}
         self.artifact_dir = artifact_dir
-        # A per-run bearer owns this run's receipts; Privatemode runs also
-        # require it for inference.
-        self.inference_token = secrets.token_urlsafe(32)
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self.gateway_config_path: Path | None = None
@@ -71,7 +67,6 @@ class AggregatorProcess:
             state_dir=self.state_dir,
             upstream_seed_path=self.upstream_seed_path,
             dstack_endpoint=self.dstack_endpoint,
-            inference_token=self.inference_token,
             privatemode_credential_path=privatemode_credential_path,
         )
         write_json(self.gateway_config_path, gateway_config, mode=0o600)
@@ -164,7 +159,6 @@ def build_gateway_config(
     state_dir: Path,
     upstream_seed_path: Path,
     dstack_endpoint: str,
-    inference_token: str,
     privatemode_credential_path: Path,
 ) -> dict[str, Any]:
     gateway_config: dict[str, Any] = {
@@ -199,7 +193,6 @@ def build_gateway_config(
 
     if any(deployment(provider) != deployment(first) for provider in privatemode[1:]):
         raise RuntimeError("all Privatemode routes must share one static proxy deployment")
-    gateway_config["inference_token_sha256"] = sha256_hex(inference_token)
     gateway_config["privatemode_proxy"] = {
         "base_url": first.base_url,
         "manifest_log_path": first.privatemode_manifest_log_path,

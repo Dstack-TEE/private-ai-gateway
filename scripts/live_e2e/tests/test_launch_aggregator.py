@@ -30,8 +30,7 @@ def privatemode_provider() -> Provider:
 
 
 class LaunchAggregatorTests(unittest.TestCase):
-    def test_privatemode_config_binds_generated_client_auth_digest(self) -> None:
-        token = "per-run-client-token"
+    def test_privatemode_config_pins_the_credential_without_a_bearer(self) -> None:
         config = build_gateway_config(
             [privatemode_provider()],
             {"PRIVATEMODE_API_KEY": "provider-credential"},
@@ -39,15 +38,9 @@ class LaunchAggregatorTests(unittest.TestCase):
             state_dir=Path("/tmp/state"),
             upstream_seed_path=Path("/tmp/upstreams.json"),
             dstack_endpoint="unix:/tmp/dstack.sock",
-            inference_token=token,
             privatemode_credential_path=Path("/run/secrets/privatemode-api-key"),
         )
 
-        self.assertEqual(
-            config["inference_token_sha256"],
-            hashlib.sha256(token.encode("utf-8")).hexdigest(),
-        )
-        self.assertNotIn(token, json.dumps(config, sort_keys=True))
         self.assertEqual(
             config["privatemode_proxy"]["credential_sha256"],
             hashlib.sha256(b"provider-credential").hexdigest(),
@@ -56,6 +49,7 @@ class LaunchAggregatorTests(unittest.TestCase):
             config["privatemode_proxy"]["credential_path"],
             "/run/secrets/privatemode-api-key",
         )
+        self.assertNotIn("provider-credential", json.dumps(config, sort_keys=True))
         upstream = build_upstream_config(
             [privatemode_provider()],
             {"PRIVATEMODE_API_KEY": "provider-credential"},

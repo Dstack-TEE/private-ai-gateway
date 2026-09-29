@@ -9,6 +9,7 @@ from .attested_sessions import assert_upstream_attested_sessions
 from .lifecycle import assert_receipt_log
 
 
+REQUESTER_TOKEN = "live-e2e-requester"
 PROBE_INPUT = "Reply with exactly one short sentence confirming ACI embeddings lifecycle."
 
 
@@ -17,7 +18,6 @@ def run_embeddings_case(
     base_url: str,
     provider: Provider,
     artifact_dir: Path,
-    inference_token: str,
 ) -> dict[str, Any]:
     provider_dir = artifact_dir / provider.name / "embeddings"
     body = {
@@ -31,7 +31,7 @@ def run_embeddings_case(
         "POST",
         f"{base_url}/v1/embeddings",
         headers={
-            "Authorization": f"Bearer {inference_token}",
+            "Authorization": f"Bearer {REQUESTER_TOKEN}",
             "Content-Type": "application/json",
         },
         body=request_body,
@@ -68,7 +68,7 @@ def run_embeddings_case(
     receipt_status, _, receipt_body, receipt = request_json(
         "GET",
         f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {inference_token}"},
+        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"

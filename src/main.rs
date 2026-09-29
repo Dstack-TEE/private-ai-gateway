@@ -45,9 +45,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{
-    build_router_with_admin, build_router_with_admin_and_middleware, InferenceAccess,
-};
+use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
 use rand::Rng;
 use serde::Deserialize;
@@ -101,47 +99,6 @@ fn parse_sha256_policy(name: &str, expected: Option<&str>) -> Result<Option<[u8;
         .transpose()
 }
 
-fn validate_inference_auth_policy(
-    privatemode_configured: bool,
-    middleware_configured: bool,
-    inference_token_sha256: Option<[u8; 32]>,
-    admin_token: Option<&str>,
-) -> Result<(), String> {
-    // Clients hold the inference token, so it must not also unlock the admin API.
-    if let (Some(expected), Some(admin_token)) = (inference_token_sha256, admin_token) {
-        if <[u8; 32]>::from(Sha256::digest(admin_token.as_bytes())) == expected {
-            return Err("inference token must be distinct from admin_token".to_string());
-        }
-    }
-    if middleware_configured && inference_token_sha256.is_some() {
-        return Err(
-            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
-                .to_string(),
-        );
-    }
-    if privatemode_configured && !middleware_configured && inference_token_sha256.is_none() {
-        return Err("privatemode_proxy requires inference_token_sha256".to_string());
-    }
-    Ok(())
-}
-
-fn validate_client_e2ee_policy(
-    require_client_e2ee: bool,
-    enable_e2ee: bool,
-    middleware_configured: bool,
-) -> Result<(), String> {
-    if !require_client_e2ee {
-        return Ok(());
-    }
-    if !enable_e2ee {
-        return Err("require_client_e2ee requires enable_e2ee".to_string());
-    }
-    if middleware_configured {
-        return Err("require_client_e2ee applies only to direct mode".to_string());
-    }
-    Ok(())
-}
-
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
@@ -155,9 +112,6 @@ struct GatewayConfigFile {
     upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
     admin_token_sha256: Option<String>,
-    /// Measured digest of the direct-mode inference bearer. Middleware mode
-    /// preserves each client's bearer for control-plane authorization.
-    inference_token_sha256: Option<String>,
     /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
     /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
     keyset_not_after_seconds: Option<u64>,
@@ -173,9 +127,6 @@ struct GatewayConfigFile {
     /// default to preserve the deployed v2 contract. Operators may disable it
     /// explicitly for a plaintext/TLS-only deployment.
     enable_e2ee: bool,
-    /// Reject direct-mode inference requests without E2EE v2. Set it when the
-    /// public TLS endpoint terminates outside the attested workload.
-    require_client_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
     /// Deployment-owned Privatemode sidecar policy. Unlike upstream routes,
@@ -203,13 +154,11 @@ impl Default for GatewayConfigFile {
             upstream_pull: None,
             admin_token: None,
             admin_token_sha256: None,
-            inference_token_sha256: None,
             keyset_not_after_seconds: None,
             subject: None,
             tls: GatewayTlsConfig::default(),
             direct_serving: false,
             enable_e2ee: true,
-            require_client_e2ee: false,
             dstack_endpoint: None,
             middleware: None,
             privatemode_proxy: None,
@@ -517,28 +466,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway_config.admin_token_sha256.as_deref(),
     )
     .map_err(invalid_input)?;
-    let inference_token_sha256 = parse_sha256_policy(
-        "inference_token",
-        gateway_config.inference_token_sha256.as_deref(),
-    )
-    .map_err(invalid_input)?;
-    validate_inference_auth_policy(
-        gateway_config.privatemode_proxy.is_some(),
-        gateway_config.middleware.is_some(),
-        inference_token_sha256,
-        admin_token.as_deref(),
-    )
-    .map_err(invalid_input)?;
-    validate_client_e2ee_policy(
-        gateway_config.require_client_e2ee,
-        gateway_config.enable_e2ee,
-        gateway_config.middleware.is_some(),
-    )
-    .map_err(invalid_input)?;
-    let inference_access = InferenceAccess {
-        token_sha256: inference_token_sha256,
-        require_client_e2ee: gateway_config.require_client_e2ee,
-    };
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -746,7 +673,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
     } else {
-        build_router_with_admin(service, upstream_config, admin_token, inference_access)
+        build_router_with_admin(service, upstream_config, admin_token)
     };
 
     tracing::info!(%bind, "private-ai-gateway listening");
@@ -959,7 +886,6 @@ mod tests {
         load_gateway_config, parse_sha256_policy, resolve_state_dir, resolve_tls_public_keys,
         secret_file_non_empty, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
-        validate_client_e2ee_policy, validate_inference_auth_policy,
         validate_pull_token_separation, validate_sha256_secret_policy,
     };
 
@@ -1015,41 +941,20 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn inference_token_digest_policy_is_validated_without_loading_the_secret() {
-        let prefixed = private_ai_gateway::aci::digest::sha256_hex(b"client token");
+    fn sha256_policy_accepts_bare_and_prefixed_digests() {
+        let prefixed = private_ai_gateway::aci::digest::sha256_hex(b"admin token");
         let digest = prefixed.strip_prefix("sha256:").unwrap();
-        let parsed = parse_sha256_policy("inference_token", Some(digest))
+        let parsed = parse_sha256_policy("admin_token", Some(digest))
             .unwrap()
             .unwrap();
         assert_eq!(parsed.as_slice(), hex::decode(digest).unwrap());
 
         assert_eq!(
-            parse_sha256_policy("inference_token", Some(&prefixed)).unwrap(),
+            parse_sha256_policy("admin_token", Some(&prefixed)).unwrap(),
             Some(parsed)
         );
-        let err = parse_sha256_policy("inference_token", Some("00")).unwrap_err();
+        let err = parse_sha256_policy("admin_token", Some("00")).unwrap_err();
         assert!(err.contains("expected 32 bytes"));
-    }
-
-    #[test]
-    fn privatemode_static_policy_requires_downstream_inference_auth() {
-        assert!(validate_inference_auth_policy(false, false, None, None).is_ok());
-        assert!(validate_inference_auth_policy(false, false, Some([7; 32]), None).is_ok());
-        assert!(validate_inference_auth_policy(true, false, Some([7; 32]), Some("admin")).is_ok());
-        let err = validate_inference_auth_policy(true, false, None, None).unwrap_err();
-        assert_eq!(err, "privatemode_proxy requires inference_token_sha256");
-
-        let shared: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"shared").into();
-        let err =
-            validate_inference_auth_policy(true, false, Some(shared), Some("shared")).unwrap_err();
-        assert_eq!(err, "inference token must be distinct from admin_token");
-
-        assert!(validate_inference_auth_policy(true, true, None, None).is_ok());
-        let err = validate_inference_auth_policy(true, true, Some([7; 32]), None).unwrap_err();
-        assert_eq!(
-            err,
-            "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
-        );
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -1103,20 +1008,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("pull-secret"));
         let _ = std::fs::remove_file(config_path);
-    }
-
-    #[test]
-    fn required_client_e2ee_needs_direct_mode_with_e2ee_enabled() {
-        assert!(validate_client_e2ee_policy(false, false, true).is_ok());
-        assert!(validate_client_e2ee_policy(true, true, false).is_ok());
-        assert_eq!(
-            validate_client_e2ee_policy(true, false, false).unwrap_err(),
-            "require_client_e2ee requires enable_e2ee"
-        );
-        assert_eq!(
-            validate_client_e2ee_policy(true, true, true).unwrap_err(),
-            "require_client_e2ee applies only to direct mode"
-        );
     }
 
     #[test]
