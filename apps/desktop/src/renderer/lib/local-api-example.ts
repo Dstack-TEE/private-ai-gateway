@@ -1,4 +1,4 @@
-import { quote } from "shell-quote";
+import { join } from "shlex";
 
 export type ExampleLanguage = "curl" | "python" | "javascript";
 
@@ -9,10 +9,10 @@ export function localApiExample(language: ExampleLanguage, endpoint: string, mod
   const baseUrl = JSON.stringify(new URL("/v1", endpoint).toString());
   if (language === "curl") {
     return [
-      `${quote(["curl", "--fail-with-body", "--max-time", "60", "--request", "POST", url.toString()])} \\`,
+      `${join(["curl", "--fail-with-body", "--max-time", "60", "--request", "POST", url.toString()])} \\`,
       // Without a key, the shell supplies it from PAP_API_KEY or stops with the hint.
-      apiKey ? `  ${quote(["--header", `Authorization: Bearer ${apiKey}`])} \\` : '  --header "Authorization: Bearer ${PAP_API_KEY:?Set PAP_API_KEY to your local client key}" \\',
-      `  ${quote(["--header", "Content-Type: application/json"])} \\`,
+      apiKey ? `  ${join(["--header", `Authorization: Bearer ${apiKey}`])} \\` : '  --header "Authorization: Bearer ${PAP_API_KEY:?Set PAP_API_KEY to your local client key}" \\',
+      `  ${join(["--header", "Content-Type: application/json"])} \\`,
       "  --data @- <<'JSON'",
       payload,
       "JSON",

@@ -23,6 +23,15 @@ test("the curl example passes the URL and the key to curl as single words", { sk
   assert.ok(example.endsWith(`<<'JSON'\n${payload}\nJSON`));
 });
 
+test("a typical curl example leaves the URL bare and single-quotes the headers", () => {
+  const example = localApiExample("curl", "http://127.0.0.1:4190", "model", "sk-pap-AbC123_-xyz");
+  assert.deepEqual(example.split("\n").slice(0, 3), [
+    "curl --fail-with-body --max-time 60 --request POST http://127.0.0.1:4190/v1/chat/completions \\",
+    "  --header 'Authorization: Bearer sk-pap-AbC123_-xyz' \\",
+    "  --header 'Content-Type: application/json' \\",
+  ]);
+});
+
 test("without a key, the curl example reads it from PAP_API_KEY", { skip: process.platform === "win32" }, () => {
   const example = localApiExample("curl", "http://127.0.0.1:4190", "model");
   assert.ok(curlArguments(example).includes("Authorization: Bearer sk-env"));

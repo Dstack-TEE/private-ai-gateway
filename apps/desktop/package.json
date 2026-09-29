@@ -52,7 +52,7 @@
     "react-day-picker": "^10.0.1",
     "react-dom": "19.3.0",
     "recharts": "^3.10.1",
-    "shell-quote": "1.10.0"
+    "shlex": "3.0.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -60,7 +60,6 @@
     "@types/node": "26.6.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@types/shell-quote": "1.7.5",
     "@vitejs/plugin-react": "6.1.1",
     "eventsource-parser": "^4.1.1",
     "js-yaml": "5.4.2",
