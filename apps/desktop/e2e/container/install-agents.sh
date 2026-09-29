@@ -45,7 +45,7 @@ pinned() {
 # The first --version runs of Claude Code, Codex and OpenCode, and the other
 # commands below, create the folders detection looks for; all exit 0 without
 # a provider.
-for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
+for agent in claude-code codex dsh opencode pi oh-my-pi openclaw hermes; do
   [[ -z "${PAP_E2E_AGENTS:-}" || ",$PAP_E2E_AGENTS," == *",$agent,"* ]] || continue
   case "$agent" in
     claude-code)
@@ -55,6 +55,11 @@ for agent in claude-code codex opencode pi oh-my-pi openclaw hermes; do
     codex)
       logged codex npm install --global "@openai/codex@$CODEX_VERSION"
       pinned "$CODEX_VERSION" codex --version
+      ;;
+    dsh)
+      logged dsh npm install --global --ignore-scripts "@deepseek-ai/dsh@$DSH_VERSION"
+      pinned "$DSH_VERSION" dsh --version
+      dsh headless --help >/dev/null
       ;;
     opencode)
       # OpenCode 2 has its own installer; both install the opencode command.

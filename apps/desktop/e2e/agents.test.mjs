@@ -30,8 +30,9 @@ const TOKENS = path.join(HOME, ".local/share/org.dstack.private-ai-proxy/agent-t
 
 // `files` are the configuration files a connection edits; `prompt` is the
 // agent's one-shot command, which must use the default model connect selects;
-// `sentinel` is a user setting written before connecting that must survive;
-// `selfWritten` are top-level keys the agent adds to those files by itself.
+// `sentinel` is a user setting written before connecting that must survive,
+// into the file `seed` creates first if given; `selfWritten` are top-level
+// keys the agent adds to those files by itself.
 const ALL_AGENTS = [
   {
     id: "claude-code",
@@ -46,6 +47,15 @@ const ALL_AGENTS = [
     surface: "responses",
     files: [".codex/config.toml"],
     prompt: ["codex", "exec", "--skip-git-repo-check", PROMPT],
+  },
+  {
+    id: "dsh",
+    // dsh's owner-only credential store, holding a key the user saved.
+    seed: { file: ".dsh/.credentials.yaml", text: "version: 1\n", mode: 0o600 },
+    sentinel: { file: ".dsh/.credentials.yaml", path: ["refs", "PAP_E2E_SENTINEL"], value: "kept" },
+    surface: "chat",
+    files: [".dsh/cordis.patch.yml", ".dsh/.credentials.yaml"],
+    prompt: ["dsh", "headless", PROMPT],
   },
   {
     id: "opencode",
@@ -369,6 +379,7 @@ for (const agent of AGENTS) {
   test(agent.id, async () => {
     const row = results.get(agent.id);
     await step(row, "detected", () => assert.ok(listed(agent)?.installed, `${agent.id} is not detected`));
+    if (agent.seed) writeFileSync(path.join(HOME, agent.seed.file), agent.seed.text, { mode: agent.seed.mode });
     writeSetting(agent.sentinel);
     const original = routing(agent);
     connect(agent);

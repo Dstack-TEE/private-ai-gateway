@@ -1,8 +1,8 @@
 # Live end-to-end test
 
 Tests a published Linux x64 desktop package against the live RedPill service
-with every supported coding agent: Claude Code, Codex, OpenCode, Pi, Oh My Pi,
-OpenClaw and Hermes. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
+with every supported coding agent: Claude Code, Codex, DeepSeek Harness,
+OpenCode, Pi, Oh My Pi, OpenClaw and Hermes. `Desktop live E2E` (`.github/workflows/desktop-e2e.yml`)
 runs it nightly and before a stable release
 ([Live end-to-end test](../docs/distribution.md#live-end-to-end-test)).
 
@@ -86,7 +86,9 @@ Hermes is pinned to a release tag and installed with that tag's own
 `scripts/install.sh`, since the current installer expects the current source
 tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
 Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
-`OPENCODE_DISABLE_AUTOUPDATE`).
+`OPENCODE_DISABLE_AUTOUPDATE`), and so is DeepSeek Harness telemetry
+(`DSH_TELEMETRY_DISABLED`). DeepSeek Harness is installed from npm without its
+install scripts; its one-shot command is `dsh headless`.
 
 The installer scripts are not checksummed. Apart from Hermes', they are
 served from unversioned URLs and change independently of the agent release
