@@ -93,8 +93,9 @@ also checks the composed configuration with `--dump-config`: `acp` and the
 default model point at the Local API, DeepSeek web search is disabled, and the
 shipped `acp` row still has only `provider` and `model`, the fields the
 connection replaces. It also replays the connected provider through a
-`--patch` overlay against a local recorder, which must receive `max_tokens` and
-no `developer` message.
+`--patch` overlay against a local recorder. That must receive no
+`max_completion_tokens` and no `developer` message, and `max_tokens` when the
+model declares an output limit.
 
 The installer scripts are not checksummed. Apart from Hermes', they are
 served from unversioned URLs and change independently of the agent release

@@ -501,10 +501,14 @@ The connection adds four keyed items there:
   own model instead of the default (the pinned acp-app bundle ships its config
   as just `provider` and `model`, and the live test fails if that changes);
 - `disabled: true` on `web-search-deepseek`. That row would otherwise send
-  search queries to DeepSeek with the user's own key. Another row of that
-  package under a different id is refused, since it registers the same
-  `deepseek-official` search provider. Search providers the user installs
-  (Exa, Perplexity) keep using their own keys.
+  search queries to DeepSeek with the user's own key. Search providers the
+  user installs (Exa, Perplexity) keep using their own keys.
+
+A layer that disables the `acp` row, or that inserts a row of
+`@deepseek-ai/dsh-web-search-deepseek` or `@deepseek-ai/dsh-acp` under another
+id, is refused. Those packages act under any id: one registers the same
+`deepseek-official` search provider, and the other serves ACP with its own
+model.
 
 Profiles without an `acp` row log the loader's "entry not found" note for that
 item, as dsh documents for a home patch that is shared across profiles.
@@ -514,8 +518,12 @@ which the connection stores in dsh's `.credentials.yaml`:
 - The store is owner-only, reloads live and is never exported to the processes
   dsh starts.
 - Writes hold dsh's own `<file>.lock` writer lock. A lock whose holder has
-  exited is taken over by dsh's own `takeOverExitedLock` rule; a live holder is
-  waited for, never taken over.
+  exited is taken over by dsh's own `takeOverExitedLock` rule, with the same
+  process probe Node uses on Unix and Windows; a live holder is waited for,
+  never taken over.
+- The token is one key under `refs`. If `refs` has to be created, it is
+  recorded separately and removed on disconnect only if it is empty, so keys
+  dsh saves there meanwhile stay and never block reconnecting.
 - The connection record keeps only SHA-256 digests of the token and of any
   store text it wrote, never the token.
 
@@ -526,8 +534,10 @@ its original bytes back.
 Keyed items are a general `ConfigDoc` capability. yaml-edit restores lists byte
 for byte only through appending and removing whole items, adding and removing
 keys, and replacing scalars. So in the user's own items the connection only
-adds keys or replaces scalars, journaling each scalar's source text. Anything
-else is refused as a configuration conflict that names the file:
+adds keys or replaces scalars, journaling each scalar's source text. A missing
+parent is created as its own empty block mapping and removed only while it is
+still empty. Anything else is refused as a configuration conflict that names
+the file:
 - replacing a structured value;
 - removing an existing key (such as a `reasoningEffort`);
 - non-empty flow-style lists or items;
@@ -552,8 +562,10 @@ Not protected, and named in the connect note:
 - a `DSH_HOME` exported in the user's shell. The app reads `DSH_HOME` only from
   its own environment, and the MAS build never does.
 
-dsh web and the dsh desktop app reload both files live, for new sessions;
-`dsh headless` and acp read them at start.
+Only new sessions go through the proxy: existing sessions, resumed acp sessions
+included, keep the provider and model they were recorded with. dsh web and the
+dsh desktop app reload both files live; `dsh headless` and acp read them at
+start.
 
 ## Removed duplication and retained boundaries
 

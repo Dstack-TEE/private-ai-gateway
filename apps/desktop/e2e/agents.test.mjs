@@ -405,9 +405,12 @@ async function verifyDsh() {
     rmSync(directory, { recursive: true, force: true });
   }
   assert.ok(bodies.length > 0, "dsh sent nothing to the recorder");
+  // dsh caps output with max_tokens only for a model that declares a limit.
+  const limited = provider.models.find(({ id }) => id === MODEL)?.maxTokens !== undefined;
   for (const body of bodies) {
     assert.equal(body.model, MODEL);
-    assert.ok(Number.isInteger(body.max_tokens) && !("max_completion_tokens" in body), "dsh did not send max_tokens");
+    assert.ok(!("max_completion_tokens" in body), "dsh sent max_completion_tokens");
+    if (limited) assert.ok(Number.isInteger(body.max_tokens), "dsh did not send max_tokens");
     assert.ok(!body.messages.some(({ role }) => role === "developer"), "dsh sent a developer message");
   }
 }

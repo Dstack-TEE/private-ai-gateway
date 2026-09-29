@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct Field {
     pub(super) path: Vec<String>,
     /// `None` makes the key absent.
@@ -10,6 +11,8 @@ pub(super) struct Field {
     pub(super) entry: Option<EntryKey>,
     /// See [`OwnedField::exact`].
     pub(super) exact: bool,
+    /// See [`OwnedField::container`].
+    pub(super) container: bool,
 }
 
 impl Field {
@@ -41,6 +44,7 @@ fn field(path: &[&str], value: Option<ConfigValue>, preview: Option<String>) -> 
         preview,
         entry: None,
         exact: false,
+        container: false,
     }
 }
 
@@ -412,6 +416,7 @@ pub(super) fn project(
             exact: false,
             source: None,
             hashed: false,
+            container: false,
         });
     }
     Ok(edit)
@@ -506,6 +511,7 @@ fn project_entry(
             exact: true,
             source: None,
             hashed: false,
+            container: false,
         });
     }
     Ok(())
@@ -527,11 +533,12 @@ fn appended_intact(item: &ConfigDoc, key: &EntryKey, fields: &[&OwnedField]) -> 
     item.get_value(&[]) == Some(ConfigValue::Json(serde_json::Value::Object(expected)))
 }
 
-/// Exact fields only add keys or replace scalars: a field whose parents are
-/// missing becomes one new key at its shallowest missing parent, merged with
-/// its siblings there. A key a prior connection added that still holds its
-/// value is reused, so reconnecting keeps the same journal. Without a target
-/// every field is anchored at its first key.
+/// Exact fields only add keys or replace scalars. In an item the connection
+/// appends, each field is written under its first key and the item leaves
+/// whole. Elsewhere a missing parent is created as an empty block mapping of
+/// its own (a container field, also one a prior connection created), which
+/// restoring removes only while it is empty, so keys others add later neither
+/// keep the connection's own keys in place nor block reconnecting.
 fn anchor(
     target: Option<&ConfigDoc>,
     fields: &[&Field],
@@ -549,41 +556,47 @@ fn anchor(
             }
             continue;
         };
-        let depth = match target {
-            None => 1,
-            Some(target) => prior
-                .iter()
-                .find(|owned| {
-                    field.path.starts_with(&owned.path)
-                        && owned.holds(target.get_value(&refs(&owned.path)).as_ref())
-                })
-                .map(|owned| owned.path.len())
-                .or_else(|| (1..path.len()).find(|&depth| !target.contains(&path[..depth])))
-                .unwrap_or(path.len()),
-        };
-        let nested = field.path[depth..].iter().rev().fold(
-            value.to_json(),
-            |value, key| serde_json::json!({ key.as_str(): value }),
-        );
-        match anchored
-            .iter_mut()
-            .find(|other| other.path == field.path[..depth])
-        {
-            Some(other) => {
-                let mut merged = other.value.as_ref().map(ConfigValue::to_json);
-                merge_json(merged.as_mut(), nested)
-                    .ok_or_else(|| format!("sets `{}` twice", path.join(".")))?;
-                other.value = merged.and_then(|merged| ConfigValue::from_json(&merged));
-                other.preview = other.preview.take().or_else(|| field.preview.clone());
+        let Some(target) = target else {
+            let nested = field.path[1..].iter().rev().fold(
+                value.to_json(),
+                |value, key| serde_json::json!({ key.as_str(): value }),
+            );
+            match anchored
+                .iter_mut()
+                .find(|other| other.path[..] == field.path[..1])
+            {
+                Some(other) => {
+                    let mut merged = other.value.as_ref().map(ConfigValue::to_json);
+                    merge_json(merged.as_mut(), nested)
+                        .ok_or_else(|| format!("sets `{}` twice", path.join(".")))?;
+                    other.value = merged.and_then(|merged| ConfigValue::from_json(&merged));
+                    other.preview = other.preview.take().or_else(|| field.preview.clone());
+                }
+                None => anchored.push(Field {
+                    path: field.path[..1].to_vec(),
+                    value: ConfigValue::from_json(&nested),
+                    ..(*field).clone()
+                }),
             }
-            None => anchored.push(Field {
-                path: field.path[..depth].to_vec(),
-                value: ConfigValue::from_json(&nested),
-                preview: field.preview.clone(),
-                entry: field.entry.clone(),
-                exact: true,
-            }),
+            continue;
+        };
+        for depth in 1..path.len() {
+            let parent = &field.path[..depth];
+            let created = prior
+                .iter()
+                .any(|owned| owned.container && owned.path == parent)
+                || !target.contains(&path[..depth]);
+            if created && !anchored.iter().any(|other| other.path == parent) {
+                anchored.push(Field {
+                    path: parent.to_vec(),
+                    value: None,
+                    preview: None,
+                    container: true,
+                    ..(*field).clone()
+                });
+            }
         }
+        anchored.push((*field).clone());
     }
     Ok(anchored)
 }
@@ -614,6 +627,27 @@ fn project_exact(
 ) -> Result<(), String> {
     let path = refs(&field.path);
     let name = path.join(".");
+    if field.container {
+        if !target.contains(&path) {
+            if target.is_flow(&path[..path.len() - 1]) {
+                return Err(format!(
+                    "writes `{name}` in flow style ({{...}}); write it as a block mapping"
+                ));
+            }
+            target.create_mapping(&path)?;
+        }
+        owned_fields(edit).push(OwnedField {
+            path: field.path,
+            value: None,
+            previous: None,
+            entry,
+            exact: true,
+            source: None,
+            hashed: false,
+            container: true,
+        });
+        return Ok(());
+    }
     let current = target.get_value(&path);
     if current.is_none() && target.contains(&path) {
         return Err(format!(
@@ -682,6 +716,7 @@ fn project_exact(
         exact: true,
         source,
         hashed: false,
+        container: false,
     });
     Ok(())
 }
@@ -779,7 +814,7 @@ pub(super) fn restore(
         });
     }
     for field in &record.fields {
-        if field.entry.as_ref().is_some_and(|entry| entry.created) {
+        if field.container || field.entry.as_ref().is_some_and(|entry| entry.created) {
             continue;
         }
         if field.exact {
@@ -860,6 +895,26 @@ pub(super) fn restore(
         } else {
             change(&path, current, restored)
         });
+    }
+    // Containers go last, innermost first, and only while nothing is left in them.
+    for field in record.fields.iter().rev().filter(|field| field.container) {
+        let empty = Some(ConfigValue::Json(serde_json::json!({})));
+        let path = refs(&field.path);
+        let removed = match &field.entry {
+            Some(entry) => match doc
+                .entry(&entry.key)
+                .map_err(AgentError::ConfigurationConflict)?
+            {
+                Some(mut item) if item.get_value(&path) == empty => Some(item.remove_exact(&path)),
+                _ => None,
+            },
+            None if doc.get_value(&path) == empty => Some(doc.remove_exact(&path)),
+            None => None,
+        };
+        if let Some(removed) = removed {
+            removed.map_err(|_| AgentError::RestorationFailed)?;
+            changes.push(change(&path, empty, None));
+        }
     }
     Ok(Edit {
         selection: None,

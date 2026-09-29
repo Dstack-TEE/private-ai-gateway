@@ -30,6 +30,9 @@ const ACP: &str = "acp";
 /// DeepSeek's own search API, reached with the user's key outside the proxy.
 const WEB_SEARCH: &str = "web-search-deepseek";
 const WEB_SEARCH_PACKAGE: &str = "@deepseek-ai/dsh-web-search-deepseek";
+/// Packages that act under any row id: the search provider registers
+/// `deepseek-official`, and the ACP server serves with its own model choice.
+const GUARDED_PACKAGES: [&str; 2] = [WEB_SEARCH_PACKAGE, "@deepseek-ai/dsh-acp"];
 const CREDENTIALS: &str = "credentials";
 /// Rows another layer could disable, shadow or move to reroute the connection.
 const GUARDED: [&str; 5] = [PI_AI, DEFAULT_MODEL, ACP, WEB_SEARCH, CREDENTIALS];
@@ -246,7 +249,7 @@ fn check_layer(path: &Path, layer: &ConfigDoc) -> Result<(), String> {
             )));
         }
     }
-    for id in [PI_AI, DEFAULT_MODEL, CREDENTIALS] {
+    for id in [PI_AI, DEFAULT_MODEL, ACP, CREDENTIALS] {
         let Some(item) = layer.entry(&key(id)).map_err(at)? else {
             continue;
         };
@@ -268,8 +271,7 @@ fn check_layer(path: &Path, layer: &ConfigDoc) -> Result<(), String> {
 }
 
 /// A guarded row anywhere in inserted rows, including group children: one
-/// with a guarded id, or another row of DeepSeek's search package, which
-/// registers the `deepseek-official` search provider under any id.
+/// with a guarded id, or a row of a guarded package under any other id.
 fn inserted_id(value: &Value) -> Option<&str> {
     match value {
         Value::Array(rows) => rows.iter().find_map(inserted_id),
@@ -280,7 +282,7 @@ fn inserted_id(value: &Value) -> Option<&str> {
             .or_else(|| {
                 row.get("name")
                     .and_then(Value::as_str)
-                    .filter(|name| *name == WEB_SEARCH_PACKAGE)
+                    .filter(|name| GUARDED_PACKAGES.contains(name))
             })
             .or_else(|| row.get("config").and_then(inserted_id)),
         _ => None,
@@ -411,7 +413,12 @@ fn take_over_exited_lock(lock: &Path) -> io::Result<bool> {
     let digest = hex::encode(Sha256::digest(&record));
     let claim = sibling(lock, &format!(".takeover-{}", &digest[..16]));
     match create_exclusive(&claim) {
-        Ok(mut handle) => writeln!(handle, "{}", std::process::id())?,
+        Ok(mut handle) => {
+            if let Err(error) = writeln!(handle, "{}", std::process::id()) {
+                let _ = fs::remove_file(&claim);
+                return Err(error);
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
         Err(error) => return Err(error),
     }
@@ -441,9 +448,35 @@ fn holder_exited(record: &str) -> bool {
         let probe = unsafe { libc::kill(pid as libc::pid_t, 0) };
         probe != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    // Node's `process.kill(pid, 0)` on Windows is libuv's `uv_kill`: ESRCH when
+    // OpenProcess reports ERROR_INVALID_PARAMETER, or the process has an exit
+    // code or a signaled handle.
+    #[cfg(windows)]
     {
-        // Without a signal probe, no holder is proven gone.
+        use windows_sys::Win32::{
+            Foundation::{
+                CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE, WAIT_OBJECT_0,
+            },
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, WaitForSingleObject, PROCESS_QUERY_INFORMATION,
+                PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            },
+        };
+        let access = PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION | PROCESS_SYNCHRONIZE;
+        let handle = unsafe { OpenProcess(access, 0, pid) };
+        if handle.is_null() {
+            return unsafe { GetLastError() } == ERROR_INVALID_PARAMETER;
+        }
+        let mut status = 0;
+        let exited = unsafe { GetExitCodeProcess(handle, &mut status) } != 0
+            && (status != STILL_ACTIVE as u32
+                || unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0);
+        unsafe { CloseHandle(handle) };
+        exited
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // Without a process probe, no holder is proven gone.
         false
     }
 }

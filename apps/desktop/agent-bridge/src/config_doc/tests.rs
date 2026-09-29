@@ -284,3 +284,33 @@ fn yaml_list_edits_refuse_what_cannot_be_restored() {
     let item = block.entry(&key("a")).unwrap().unwrap();
     assert!(!item.is_flow(&[]) && !item.is_flow(&["config"]));
 }
+
+/// A missing parent is created as its own empty block mapping: keys added to
+/// it and removed again, and the container removed while empty, restore every
+/// byte, and a key someone else adds keeps it block style.
+#[test]
+fn created_yaml_containers_stay_block_style_and_round_trip() {
+    for source in [
+        "version: 1\n",
+        "version: 1\n# keep\nrecords:\n  a/b: {kind: api-key}\n",
+        "version: 1\r\n",
+    ] {
+        let mut doc = ConfigDoc::parse(Format::Yaml, source).unwrap();
+        doc.create_mapping(&["refs"]).unwrap();
+        doc.set_str(&["refs", "TOKEN"], "x").unwrap();
+        doc.set_str(&["refs", "OTHER"], "y").unwrap();
+        assert!(!doc.is_flow(&["refs"]), "{source:?}");
+        doc.remove_exact(&["refs", "TOKEN"]).unwrap();
+        doc.remove_exact(&["refs", "OTHER"]).unwrap();
+        assert_eq!(
+            doc.get_value(&["refs"]),
+            Some(ConfigValue::Json(serde_json::json!({})))
+        );
+        doc.remove_exact(&["refs"]).unwrap();
+        assert_eq!(doc.render().unwrap(), source);
+    }
+    let mut doc = ConfigDoc::new_yaml_mapping();
+    doc.set_value(&["version"], &ConfigValue::Number(1))
+        .unwrap();
+    assert_eq!(doc.render().unwrap(), "version: 1\n");
+}

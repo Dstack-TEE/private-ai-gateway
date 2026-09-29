@@ -404,6 +404,30 @@ impl ConfigDoc {
         }
     }
 
+    /// Create an empty mapping at `path`. In YAML it is written as a block
+    /// mapping once it has entries, so keys added to it and removed again
+    /// restore it byte for byte.
+    pub fn create_mapping(&mut self, path: &[&str]) -> Result<(), String> {
+        let path_text = path.join(".");
+        match self {
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .ok_or_else(|| "YAML document is empty".to_string())?
+                .try_set_path(&path_text, Mapping::new_pending_block()),
+            Self::YamlItem(item) => item.try_set_path(&path_text, Mapping::new_pending_block()),
+            _ => return self.set_value(path, &ConfigValue::Json(Value::Object(Map::new()))),
+        }
+        .map_err(|_| format!("cannot edit YAML path {path_text}"))
+    }
+
+    /// A new, empty YAML mapping document written in block style.
+    pub fn new_yaml_mapping() -> Self {
+        let file = YamlFile::new();
+        file.ensure_document();
+        Self::Yaml(file)
+    }
+
     /// The source text of the YAML scalar at `path`, quoting included.
     pub fn scalar_source(&self, path: &[&str]) -> Option<String> {
         match self.yaml_node(path)? {

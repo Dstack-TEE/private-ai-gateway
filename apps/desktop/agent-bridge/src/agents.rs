@@ -187,12 +187,18 @@ struct OwnedField {
     /// credential the connection writes is never kept in the record.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hashed: bool,
+    /// An empty mapping an exact field needed as its parent: kept while it
+    /// is a mapping, and removed on restore only while it is still empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    container: bool,
 }
 
 impl OwnedField {
     /// Whether `current` is what the connection wrote.
     fn holds(&self, current: Option<&ConfigValue>) -> bool {
-        if self.hashed {
+        if self.container {
+            matches!(current, Some(ConfigValue::Json(value)) if value.is_object())
+        } else if self.hashed {
             current.is_some_and(|current| {
                 self.value.as_ref() == Some(&ConfigValue::Str(value_digest(current)))
             })

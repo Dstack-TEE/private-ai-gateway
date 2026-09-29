@@ -323,6 +323,21 @@ fn configurations_that_cannot_be_restored_or_would_reroute_are_refused_untouched
         "inserts another `@deepseek-ai/dsh-web-search-deepseek` row",
     );
     refuse(
+        "acp-disabled",
+        &|files| profile(files, "- id: acp\n  disabled: true\n"),
+        "disables the `acp` row",
+    );
+    refuse(
+        "acp-under-another-id",
+        &|files| {
+            profile(
+                files,
+                "- insert:\n    - {id: my-acp, name: '@deepseek-ai/dsh-acp', config: {provider: deepseek-official, model: m}}\n",
+            )
+        },
+        "inserts another `@deepseek-ai/dsh-acp` row",
+    );
+    refuse(
         "acp-shadow",
         &|files| {
             write(
@@ -429,4 +444,60 @@ fn a_lock_whose_holder_exited_is_taken_over_as_dsh_does_and_a_live_one_is_not() 
     }
     live.kill().unwrap();
     live.wait().unwrap();
+}
+
+/// dsh saving its own key after the connection neither leaves the token
+/// behind on disconnect nor blocks connecting again.
+#[test]
+fn keys_dsh_adds_later_keep_the_store_and_leave_no_token_behind() {
+    for (name, original) in [
+        ("created", None),
+        ("existing", Some("version: 1\n# my records\nrecords: {}\n")),
+    ] {
+        let sandbox = sandbox(&format!("dsh-refs-{name}"));
+        let files = files(&sandbox);
+        if let Some(original) = original {
+            private(&files.credentials, original);
+        }
+        assert!(connect(&sandbox, "phala/qwen").unwrap().authorized);
+        let token = sandbox.projector.tokens.read("dsh").unwrap().unwrap();
+        // dsh writes through the same YAML document model.
+        let text = fs::read_to_string(&files.credentials).unwrap();
+        let mut store = ConfigDoc::parse(Format::Yaml, &text).unwrap();
+        assert!(!store.is_flow(&["refs"]), "{name}: {text}");
+        store
+            .set_str(&["refs", "DEEPSEEK_API_KEY"], "sk-user")
+            .unwrap();
+        let with_user_key = store.render().unwrap();
+        private(&files.credentials, &with_user_key);
+        assert!(status(&sandbox).authorized, "{name}");
+
+        disconnect(&sandbox, Agent::Dsh);
+        let left = fs::read_to_string(&files.credentials).unwrap();
+        assert!(
+            !left.contains(&token) && !left.contains(TOKEN_REF),
+            "{name}: {left}"
+        );
+        let left = ConfigDoc::parse(Format::Yaml, &left).unwrap();
+        assert_eq!(
+            left.get_str(&["refs", "DEEPSEEK_API_KEY"]).as_deref(),
+            Some("sk-user")
+        );
+
+        assert!(
+            connect(&sandbox, "phala/qwen").unwrap().authorized,
+            "{name}"
+        );
+        disconnect(&sandbox, Agent::Dsh);
+        // Removing dsh's key too leaves exactly what was there before.
+        let mut store = ConfigDoc::parse(
+            Format::Yaml,
+            &fs::read_to_string(&files.credentials).unwrap(),
+        )
+        .unwrap();
+        store.remove_exact(&["refs", "DEEPSEEK_API_KEY"]).unwrap();
+        store.remove_exact(&["refs"]).unwrap();
+        let expected = original.map_or_else(|| "version: 1\n".to_string(), str::to_string);
+        assert_eq!(store.render().unwrap(), expected, "{name}");
+    }
 }
