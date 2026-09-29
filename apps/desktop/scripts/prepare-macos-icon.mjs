@@ -29,53 +29,20 @@ async function prepareMacosIcon() {
     // Tauri accepts a precompiled CAR. Compile it here because Tauri 2.11.4
     // unconditionally requests an AccentColor set that this icon-only catalog
     // intentionally does not contain.
-    execFileSync(
-      "xcrun",
-      [
-        "actool",
-        compilerIcon,
-        "--compile",
-        outputDir,
-        "--output-format",
-        "human-readable-text",
-        "--notices",
-        "--warnings",
-        "--output-partial-info-plist",
-        path.join(outputDir, "assetcatalog_generated_info.plist"),
-        "--app-icon",
-        "Icon",
-        "--include-all-app-icons",
-        "--enable-on-demand-resources",
-        "NO",
-        "--development-region",
-        "en",
-        "--target-device",
-        "mac",
-        "--minimum-deployment-target",
-        "26.0",
-        "--platform",
-        "macosx",
-      ],
-      { stdio: "inherit" },
-    );
+    execFileSync("xcrun", [
+      "actool", compilerIcon, "--compile", outputDir,
+      "--output-format", "human-readable-text", "--notices", "--warnings",
+      "--output-partial-info-plist", path.join(outputDir, "assetcatalog_generated_info.plist"),
+      "--app-icon", "Icon", "--include-all-app-icons", "--enable-on-demand-resources", "NO",
+      "--development-region", "en", "--target-device", "mac", "--minimum-deployment-target", "26.0", "--platform", "macosx",
+    ], { stdio: "inherit" });
 
     const compiledAssets = path.join(outputDir, "Assets.car");
-    const info = JSON.parse(
-      execFileSync("xcrun", ["assetutil", "--info", compiledAssets], {
-        encoding: "utf8",
-      }),
-    );
+    const info = JSON.parse(execFileSync("xcrun", ["assetutil", "--info", compiledAssets], { encoding: "utf8" }));
     const appIcon = Array.isArray(info)
-      ? info.find(
-          (asset) =>
-            asset?.AssetType === "Icon Image" &&
-            typeof asset.Name === "string" &&
-            asset.Name.trim().length > 0,
-        )
+      ? info.find((asset) => asset?.AssetType === "Icon Image" && typeof asset.Name === "string" && asset.Name.trim().length > 0)
       : undefined;
-    if (!appIcon) {
-      throw new Error("actool output does not contain a named macOS app icon");
-    }
+    if (!appIcon) throw new Error("actool output does not contain a named macOS app icon");
 
     await copyFile(compiledAssets, bundledAssets);
     console.log(`Prepared native macOS icon: ${appIcon.Name}`);
@@ -87,11 +54,7 @@ async function prepareMacosIcon() {
 function requireActool26() {
   let output;
   try {
-    output = execFileSync(
-      "xcrun",
-      ["actool", "--version", "--output-format=human-readable-text"],
-      { encoding: "utf8" },
-    );
+    output = execFileSync("xcrun", ["actool", "--version", "--output-format=human-readable-text"], { encoding: "utf8" });
   } catch (error) {
     throw new Error("Adaptive macOS app icons require Xcode 26 or newer", { cause: error });
   }

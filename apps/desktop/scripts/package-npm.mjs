@@ -1,17 +1,9 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import semver from "semver";
 
 import { binaries } from "./package-cli.mjs";
@@ -116,10 +108,9 @@ export function platformManifest({ platform, arch, version }) {
 
 export async function buildPlatformPackage({ platform, arch, version, source, output }) {
   const manifest = platformManifest({ platform, arch, version });
-  await mkdir(output, { recursive: true });
-  const scratch = await mkdtemp(path.join(output, ".pap-npm-platform-"));
-  try {
-    const vendor = path.join(scratch, "vendor");
+  const readme = `# private-ai-proxy ${manifest.version}\n\nThe native ${platformTarget(platform, arch)} binaries of [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy). Install \`private-ai-proxy\` instead of this version.\n`;
+  return pack(output, manifest, readme, async (directory) => {
+    const vendor = path.join(directory, "vendor");
     await mkdir(vendor);
     const extension = platform === "windows" ? ".exe" : "";
     for (const binary of binaries) {
@@ -130,43 +121,35 @@ export async function buildPlatformPackage({ platform, arch, version, source, ou
       await copyFile(sourceFile, destination);
       if (platform !== "windows") await chmod(destination, 0o755);
     }
-    await writePackageFiles(
-      scratch,
-      manifest,
-      `# private-ai-proxy ${manifest.version}\n\nThe native ${platformTarget(platform, arch)} binaries of [private-ai-proxy](https://www.npmjs.com/package/private-ai-proxy). Install \`private-ai-proxy\` instead of this version.\n`,
-    );
-    return packDirectory(scratch, output);
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
-  }
+  });
 }
 
 export async function buildWrapperPackage({ version, output }) {
-  const manifest = wrapperManifest(version);
-  await mkdir(output, { recursive: true });
-  const scratch = await mkdtemp(path.join(output, ".pap-npm-wrapper-"));
-  try {
-    const bin = path.join(scratch, "bin");
+  const readme = await readFile(path.join(wrapperTemplate, "README.md"), "utf8");
+  return pack(output, wrapperManifest(version), readme, async (directory) => {
+    const bin = path.join(directory, "bin");
     await mkdir(bin);
     for (const name of ["private-ai-proxy.cjs", "aci.cjs"]) {
       await copyFile(path.join(wrapperTemplate, "bin", name), path.join(bin, name));
       await chmod(path.join(bin, name), 0o755);
     }
-    await writePackageFiles(
-      scratch,
-      manifest,
-      await readFile(path.join(wrapperTemplate, "README.md"), "utf8"),
-    );
-    return packDirectory(scratch, output);
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
-  }
+  });
 }
 
-async function writePackageFiles(directory, manifest, readme) {
-  await writeFile(path.join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  await writeFile(path.join(directory, "README.md"), readme);
-  await copyFile(path.join(repositoryRoot, "LICENSE"), path.join(directory, "LICENSE"));
+// Packs a package directory that `addFiles` fills besides its manifest,
+// README and LICENSE into a tarball under `output`.
+async function pack(output, manifest, readme, addFiles) {
+  await mkdir(output, { recursive: true });
+  const directory = await mkdtemp(path.join(output, ".pap-npm-"));
+  try {
+    await addFiles(directory);
+    await writeFile(path.join(directory, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(path.join(directory, "README.md"), readme);
+    await copyFile(path.join(repositoryRoot, "LICENSE"), path.join(directory, "LICENSE"));
+    return packDirectory(directory, output);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 function packDirectory(directory, output) {
@@ -183,42 +166,22 @@ function packDirectory(directory, output) {
   return path.resolve(output, entries[0].filename);
 }
 
-function parseArguments(arguments_) {
-  const [command, ...rest] = arguments_;
-  if (!["platform", "wrapper"].includes(command) || rest.length % 2 !== 0) {
+function parseArguments([command, ...args]) {
+  if (!["platform", "wrapper"].includes(command)) {
     throw new Error("Usage: package-npm.mjs <platform|wrapper> --version <semver> --output <dir> [--platform <macos|linux|windows> --arch <arm64|x64> --source <dir>]");
   }
-  const values = new Map();
-  for (let index = 0; index < rest.length; index += 2) {
-    const key = rest[index];
-    const value = rest[index + 1];
-    if (!key.startsWith("--") || value === undefined || values.has(key.slice(2))) {
-      throw new Error(`Invalid or duplicate argument ${JSON.stringify(key)}`);
-    }
-    values.set(key.slice(2), value);
-  }
-  const allowed = command === "platform"
-    ? new Set(["platform", "arch", "version", "source", "output"])
-    : new Set(["version", "output"]);
-  const unknown = [...values.keys()].filter((key) => !allowed.has(key));
-  if (unknown.length > 0) throw new Error(`Unknown argument --${unknown[0]}`);
-  const version = validateNpmVersion(values.get("version"));
-  const output = values.get("output");
-  if (!output) throw new Error("--output is required");
-  if (command === "wrapper") return { command, version, output: path.resolve(output) };
-  const platform = values.get("platform");
-  const arch = values.get("arch");
-  platformTarget(platform, arch);
-  const source = values.get("source");
-  if (!source) throw new Error("--source is required for a platform package");
-  return {
-    command,
-    platform,
-    arch,
-    version,
-    source: path.resolve(source),
-    output: path.resolve(output),
-  };
+  const option = { type: "string" };
+  const options = { version: option, output: option, ...(command === "platform" ? { platform: option, arch: option, source: option } : {}) };
+  const { values, tokens } = parseArgs({ args, options, tokens: true });
+  const names = tokens.map((token) => token.name);
+  if (new Set(names).size !== names.length) throw new Error("Duplicate argument");
+  const version = validateNpmVersion(values.version);
+  if (!values.output) throw new Error("--output is required");
+  const output = path.resolve(values.output);
+  if (command === "wrapper") return { command, version, output };
+  platformTarget(values.platform, values.arch);
+  if (!values.source) throw new Error("--source is required for a platform package");
+  return { command, platform: values.platform, arch: values.arch, version, source: path.resolve(values.source), output };
 }
 
 async function main() {

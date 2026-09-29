@@ -4,6 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, open, rm, lstat, wr
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { MAC_APP_STORE_SIDECARS, validateAppStoreBuildNumber } from "./distribution.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -95,16 +96,11 @@ async function validateBundledCode(app, names) {
   }
 }
 
-function argumentsFrom(argv) {
-  const values = new Map();
-  for (let index = 0; index < argv.length; index += 2) {
-    const key = argv[index];
-    const value = argv[index + 1];
-    if (!key?.startsWith("--") || !value) throw new Error(`Invalid argument ${key ?? ""}`.trim());
-    values.set(key.slice(2), value);
-  }
+function argumentsFrom(args) {
+  const names = ["app", "profile", "application-identity", "installer-identity", "output"];
+  const { values } = parseArgs({ args, options: Object.fromEntries(names.map((name) => [name, { type: "string" }])) });
   const required = (name) => {
-    const value = values.get(name)?.trim();
+    const value = values[name]?.trim();
     if (!value) throw new Error(`--${name} is required`);
     return value;
   };
