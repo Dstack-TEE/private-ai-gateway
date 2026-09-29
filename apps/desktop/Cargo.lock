@@ -5032,7 +5032,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sha3",
- "shlex",
  "snapbox",
  "tempfile",
  "thiserror 2.0.20",
@@ -6527,10 +6526,14 @@ checksum = "8de56eb4784a2c5c1efede55a0f06fbf481bc12b42b355b9525c15db1e3581a8"
 dependencies = [
  "anstream",
  "anstyle",
+ "libc",
  "normalize-line-endings",
+ "os_pipe",
  "regex",
  "similar",
  "snapbox-macros",
+ "wait-timeout",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8015,6 +8018,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb067e4cbd1ff067d1df46c9194b5de0e98efd2810bbc95c5d5e5f25a3231150"
 dependencies = [
  "cc",
+ "libc",
+]
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
  "libc",
 ]
 

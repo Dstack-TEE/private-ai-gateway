@@ -73,8 +73,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1"
-shlex = "2"
-snapbox = { version = "1", features = ["regex"] }
+snapbox = { version = "1", features = ["cmd", "regex"] }
 tempfile = "3"
 
 [lints.rust]

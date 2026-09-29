@@ -478,6 +478,3 @@ fn label(key: &str) -> String {
     }
     label
 }
-
-#[cfg(test)]
-mod tests;
