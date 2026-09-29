@@ -20,7 +20,7 @@ mod windows_window;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use desktop_core::{
@@ -84,14 +84,18 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(updates::PreparedUpdate::default())
         .manage(cli_registration::CliStartup::default())
-        .manage(window::Presentation::default())
-        .manage(window::PendingNavigation::default())
+        .manage(Mutex::new(window::WindowState::default()))
         .manage(notifications::Settings::default())
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .on_menu_event(menu::handle_event)
         .setup(setup);
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(menu::menu_bar);
+    let builder = builder.menu(|app| {
+        menu::menu_bar(app).or_else(|error| {
+            tracing::warn!("The application menu is unavailable: {error}");
+            tauri::menu::Menu::default(app)
+        })
+    });
     builder
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")

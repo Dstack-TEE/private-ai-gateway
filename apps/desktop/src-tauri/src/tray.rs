@@ -158,64 +158,100 @@ fn build_menu<R: Runtime>(
     Ok((tray_menu, menu))
 }
 
-/// Runs a tray menu item, or the menu bar's Settings… item, which shares its
-/// id; `menu::handle_event` is the one menu event handler.
-pub fn handle_menu_event(app: &AppHandle, id: &str) {
-    match id {
-        "toggle" => toggle_or_set_up(app),
-        "open" => window::show(app),
-        "settings" => window::navigate(app, NavigationTarget::Settings),
-        "agents" => window::navigate(app, NavigationTarget::Agents),
-        "profiles" => window::navigate(app, NavigationTarget::Profiles),
-        "autostart" => sync_autostart(app),
-        "quit" => app.exit(0),
-        "stop-all-quit" => window::navigate(app, NavigationTarget::ConfirmStopAll),
-        "copy-endpoint" => in_background(
-            app,
-            "Could not copy the Local API endpoint",
-            |app, client| {
+/// What a tray item, or the menu bar's Settings… item, which shares its id,
+/// does.
+#[derive(Debug, PartialEq)]
+enum Action {
+    Toggle,
+    Open,
+    Navigate(NavigationTarget),
+    OpenAtLogin,
+    Quit,
+    Background(Task),
+}
+
+/// An action that runs off the main thread and reports its failure in a
+/// notification.
+#[derive(Debug, PartialEq)]
+enum Task {
+    CopyEndpoint,
+    CopyKey,
+    ActivateProfile(String),
+    ToggleAgent(String),
+}
+
+impl Action {
+    fn of(id: &str) -> Option<Self> {
+        Some(match id {
+            "toggle" => Self::Toggle,
+            "open" => Self::Open,
+            "settings" => Self::Navigate(NavigationTarget::Settings),
+            "agents" => Self::Navigate(NavigationTarget::Agents),
+            "profiles" => Self::Navigate(NavigationTarget::Profiles),
+            "stop-all-quit" => Self::Navigate(NavigationTarget::ConfirmStopAll),
+            "autostart" => Self::OpenAtLogin,
+            "quit" => Self::Quit,
+            "copy-endpoint" => Self::Background(Task::CopyEndpoint),
+            "copy-key" => Self::Background(Task::CopyKey),
+            _ => Self::Background(match id.strip_prefix("profile:") {
+                Some(profile_id) => Task::ActivateProfile(profile_id.into()),
+                None => Task::ToggleAgent(id.strip_prefix("agent:")?.into()),
+            }),
+        })
+    }
+}
+
+impl Task {
+    fn failure(&self) -> &'static str {
+        match self {
+            Self::CopyEndpoint => "Could not copy the Local API endpoint",
+            Self::CopyKey => "Could not copy the Local API key",
+            Self::ActivateProfile(_) => "Could not switch profiles",
+            Self::ToggleAgent(_) => "Could not change the agent connection",
+        }
+    }
+
+    fn run(self, app: &AppHandle, client: &Client) -> Result<(), String> {
+        match self {
+            Self::CopyEndpoint => {
                 let endpoint = client.state()?.proxy_url;
                 copy(app, endpoint.ok_or("The Local API is unavailable")?)
-            },
-        ),
-        "copy-key" => in_background(app, "Could not copy the Local API key", |app, client| {
-            copy(app, client.call(rpc::GetClientKey)?)
-        }),
-        _ => {
-            if let Some(profile_id) = id.strip_prefix("profile:") {
-                let profile_id = profile_id.to_string();
-                in_background(app, "Could not switch profiles", move |_, client| {
-                    client.call(rpc::ActivateProfile { profile_id })?;
-                    Ok(())
-                });
-            } else if let Some(agent_id) = id.strip_prefix("agent:") {
-                let agent_id = agent_id.to_string();
-                in_background(
-                    app,
-                    "Could not change the agent connection",
-                    move |app, client| {
-                        let result = set_agent_connection(app, client, &agent_id);
-                        // A check item flips when clicked; show what actually applies.
-                        refresh_agents(app);
-                        result
-                    },
-                );
+            }
+            Self::CopyKey => copy(app, client.call(rpc::GetClientKey)?),
+            Self::ActivateProfile(profile_id) => {
+                client.call(rpc::ActivateProfile { profile_id })?;
+                Ok(())
+            }
+            Self::ToggleAgent(agent_id) => {
+                let result = set_agent_connection(app, client, &agent_id);
+                // A check item flips when clicked; show what actually applies.
+                refresh_agents(app);
+                result
             }
         }
     }
 }
 
-/// Runs a menu action off the main thread, reports its failure under
-/// `failure`, and then shows the state that applies.
-fn in_background(
-    app: &AppHandle,
-    failure: &'static str,
-    action: impl FnOnce(&AppHandle, &Client) -> Result<(), String> + Send + 'static,
-) {
+/// `menu::handle_event` is the one menu event handler.
+pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    match Action::of(id) {
+        Some(Action::Toggle) => toggle_or_set_up(app),
+        Some(Action::Open) => window::show(app),
+        Some(Action::Navigate(target)) => window::navigate(app, target),
+        Some(Action::OpenAtLogin) => sync_autostart(app),
+        Some(Action::Quit) => app.exit(0),
+        Some(Action::Background(task)) => in_background(app, task),
+        None => {}
+    }
+}
+
+/// Runs `task`, reports its failure, and then shows the state that applies.
+fn in_background(app: &AppHandle, task: Task) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let client = app.state::<Arc<Client>>().inner().clone();
-        if let Err(error) = action(&app, &client) {
+        let failure = task.failure();
+        if let Err(error) = task.run(&app, &client) {
             show_failure(&app, failure, &error);
         }
         sync(
@@ -512,6 +548,19 @@ mod tests {
     use super::*;
     use desktop_core::contracts::ConfidentialProfile;
 
+    fn item_ids<R: Runtime>(items: Vec<tauri::menu::MenuItemKind<R>>) -> Vec<String> {
+        use tauri::menu::MenuItemKind;
+        items
+            .into_iter()
+            .flat_map(|item| match item {
+                MenuItemKind::MenuItem(item) => vec![item.id().0.clone()],
+                MenuItemKind::Check(item) => vec![item.id().0.clone()],
+                MenuItemKind::Submenu(submenu) => item_ids(submenu.items().unwrap()),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
     fn describe_tray<R: Runtime>(menu: &Menu<R>) -> Vec<String> {
         crate::menu::describe(menu.items().unwrap())
     }
@@ -574,6 +623,56 @@ mod tests {
     }
 
     #[test]
+    fn menu_items_route_to_their_actions() {
+        let background = |task: Task| Some(Action::Background(task));
+        for (id, action) in [
+            ("toggle", Some(Action::Toggle)),
+            ("open", Some(Action::Open)),
+            (
+                "settings",
+                Some(Action::Navigate(NavigationTarget::Settings)),
+            ),
+            ("agents", Some(Action::Navigate(NavigationTarget::Agents))),
+            (
+                "profiles",
+                Some(Action::Navigate(NavigationTarget::Profiles)),
+            ),
+            (
+                "stop-all-quit",
+                Some(Action::Navigate(NavigationTarget::ConfirmStopAll)),
+            ),
+            ("autostart", Some(Action::OpenAtLogin)),
+            ("quit", Some(Action::Quit)),
+            ("copy-endpoint", background(Task::CopyEndpoint)),
+            ("copy-key", background(Task::CopyKey)),
+            (
+                "profile:work",
+                background(Task::ActivateProfile("work".into())),
+            ),
+            ("agent:codex", background(Task::ToggleAgent("codex".into()))),
+            ("status", None),
+            ("documentation", None),
+        ] {
+            assert_eq!(Action::of(id), action, "{id}");
+        }
+        for (task, failure) in [
+            (Task::CopyEndpoint, "Could not copy the Local API endpoint"),
+            (Task::CopyKey, "Could not copy the Local API key"),
+            (
+                Task::ActivateProfile("work".into()),
+                "Could not switch profiles",
+            ),
+            (
+                Task::ToggleAgent("codex".into()),
+                "Could not change the agent connection",
+            ),
+        ] {
+            assert_eq!(task.failure(), failure);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(target_os = "macos", ignore = "muda menus need the main thread")]
     fn the_tray_menu_follows_the_backend_state() {
         let app = tauri::test::mock_app();
         let app = app.handle();
@@ -596,6 +695,10 @@ mod tests {
                 "x"
             )
         );
+        // Every item but the status line does something.
+        for id in item_ids(menu.items().unwrap()) {
+            assert_eq!(Action::of(&id).is_none(), id == "status", "{id}");
+        }
 
         let mut state = AppState {
             backend_connected: Some(true),
@@ -670,6 +773,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "muda menus need the main thread")]
     fn tray_agents_show_what_the_backend_reports() {
         let app = tauri::test::mock_app();
         let app = app.handle();

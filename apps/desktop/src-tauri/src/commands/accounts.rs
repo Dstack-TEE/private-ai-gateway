@@ -31,7 +31,7 @@ async fn open_account_page(
 ) -> Result<(), CallError> {
     let value = crate::ui_api::invoke(app.clone(), client, method, params).await?;
     let url = serde_json::from_value(value).map_err(|_| "Management response failed")?;
-    Ok(open_url(app, url, ACCOUNT_PAGE_FAILURE).await?)
+    open_url(app, url, ACCOUNT_PAGE_FAILURE).await
 }
 
 #[tauri::command]
@@ -74,5 +74,5 @@ pub(crate) async fn open_api_key_page(
     require_portal_links()?;
     let url = desktop_core::account::api_key_page(provider)
         .ok_or("Custom providers do not have a built-in API key page")?;
-    Ok(open_url(app, url.to_string(), ACCOUNT_PAGE_FAILURE).await?)
+    open_url(app, url.to_string(), ACCOUNT_PAGE_FAILURE).await
 }

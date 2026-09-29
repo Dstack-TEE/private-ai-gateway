@@ -93,6 +93,9 @@ fn open_link(app: &AppHandle, link: AboutLink) {
 /// Each item of a menu as `id: text`, check items with their state, disabled
 /// items marked, and predefined items by their label; submenu items follow
 /// their submenu, indented.
+///
+/// On macOS muda builds menus only on the main thread, which a test thread is
+/// not, so the tests that build menus run on the Linux and Windows jobs.
 #[cfg(test)]
 pub(crate) fn describe<R: tauri::Runtime>(items: Vec<tauri::menu::MenuItemKind<R>>) -> Vec<String> {
     use tauri::menu::MenuItemKind;
@@ -139,6 +142,7 @@ mod tests {
     use tauri::menu::{HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
 
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "muda menus need the main thread")]
     fn the_menu_bar_keeps_the_standard_layout() {
         let app = tauri::test::mock_app();
         let menu = super::menu_bar(app.handle()).unwrap();

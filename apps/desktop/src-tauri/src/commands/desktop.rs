@@ -17,13 +17,13 @@ use crate::{distribution, run_blocking};
 #[tauri::command]
 pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), CallError> {
     let url = Agent::from_id(&agent_id)?.website();
-    Ok(open_url(app, url.into(), "Cannot open the agent website").await?)
+    open_url(app, url.into(), "Cannot open the agent website").await
 }
 
 #[tauri::command]
 pub(crate) async fn open_about_link(app: AppHandle, target: AboutLink) -> Result<(), CallError> {
     let url = target.url().into();
-    Ok(open_url(app, url, "Cannot open the resource in your browser").await?)
+    open_url(app, url, "Cannot open the resource in your browser").await
 }
 
 /// Opens the listening web UI in the system browser. The address carries no
@@ -46,7 +46,7 @@ pub(crate) async fn open_web_ui(
             .ok_or_else(|| "The web UI is not listening".to_string())
     })
     .await?;
-    Ok(open_url(app, url, "Cannot open the web UI in your browser").await?)
+    open_url(app, url, "Cannot open the web UI in your browser").await
 }
 
 #[tauri::command]
@@ -108,6 +108,7 @@ pub(crate) async fn stop_all_and_quit(
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg_attr(target_os = "macos", ignore = "muda menus need the main thread")]
     fn the_edit_menu_offers_what_the_field_allows() {
         let app = tauri::test::mock_app();
         let describe = |editable| {

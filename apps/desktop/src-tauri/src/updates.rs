@@ -136,10 +136,13 @@ pub async fn prepare_update(
     let endpoint = updates::feed_url(&feed, channel)?;
     let update = match feed_update(&app, endpoint, channel).await {
         Ok(Some(update)) => update,
-        other => {
+        Ok(None) => {
             *prepared = None;
-            other?;
             return Ok(info);
+        }
+        Err(error) => {
+            *prepared = None;
+            return Err(error.into());
         }
     };
     info.version = Some(update.version.clone());
