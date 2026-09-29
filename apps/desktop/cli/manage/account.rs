@@ -101,47 +101,7 @@ pub(super) fn login(
         }
         std::thread::sleep(Duration::from_millis(500));
     };
-    let workspace_id = if details.workspaces.is_empty() {
-        None
-    } else if let Some(id) = options.workspace {
-        if !details
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == id)
-        {
-            return Err("The requested workspace is not available to this account.".into());
-        }
-        Some(id)
-    } else if details.workspaces.len() == 1 {
-        Some(details.workspaces[0].id)
-    } else {
-        for workspace in &details.workspaces {
-            eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
-        }
-        if !global.interactive() {
-            return Err("Choose a workspace with --workspace <id> and retry login.".into());
-        }
-        eprint!("Workspace ID: ");
-        io::stderr()
-            .flush()
-            .map_err(|_| "Cannot show workspace prompt")?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|_| "Cannot read workspace selection")?;
-        let id = input
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| "Invalid workspace ID")?;
-        if !details
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == id)
-        {
-            return Err("Choose a listed workspace.".into());
-        }
-        Some(id)
-    };
+    let workspace_id = workspace(&details, options.workspace, global)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let initial = client.call(rpc::BeginAccountSave {
         operation_id: operation_id.clone(),
@@ -170,6 +130,54 @@ pub(super) fn login(
                 })?;
             }
         }
+    }
+}
+
+/// The account workspace to save: the requested one, the only one, or one
+/// the user picks from the listed workspaces.
+fn workspace(
+    details: &AccountLoginDetails,
+    requested: Option<i64>,
+    global: &Global,
+) -> Result<Option<i64>, String> {
+    let listed = |id| {
+        details
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == id)
+    };
+    match (requested, details.workspaces.as_slice()) {
+        (_, []) => return Ok(None),
+        (Some(id), _) if !listed(id) => {
+            return Err("The requested workspace is not available to this account.".into())
+        }
+        (Some(id), _) => return Ok(Some(id)),
+        (None, [only]) => return Ok(Some(only.id)),
+        (None, workspaces) => {
+            for workspace in workspaces {
+                eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
+            }
+        }
+    }
+    if !global.interactive() {
+        return Err("Choose a workspace with --workspace <id> and retry login.".into());
+    }
+    eprint!("Workspace ID: ");
+    io::stderr()
+        .flush()
+        .map_err(|_| "Cannot show workspace prompt")?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| "Cannot read workspace selection")?;
+    let id = input
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "Invalid workspace ID")?;
+    if listed(id) {
+        Ok(Some(id))
+    } else {
+        Err("Choose a listed workspace.".into())
     }
 }
 
