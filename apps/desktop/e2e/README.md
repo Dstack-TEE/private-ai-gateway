@@ -88,7 +88,13 @@ tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
 Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
 `OPENCODE_DISABLE_AUTOUPDATE`), and so is DeepSeek Harness telemetry
 (`DSH_TELEMETRY_DISABLED`). DeepSeek Harness is installed from npm without its
-install scripts; its one-shot command is `dsh headless`.
+install scripts; its one-shot command is `dsh headless`. For dsh the reply step
+also checks the composed configuration with `--dump-config`: `acp` and the
+default model point at the Local API, DeepSeek web search is disabled, and the
+shipped `acp` row still has only `provider` and `model`, the fields the
+connection replaces. It also replays the connected provider through a
+`--patch` overlay against a local recorder, which must receive `max_tokens` and
+no `developer` message.
 
 The installer scripts are not checksummed. Apart from Hermes', they are
 served from unversioned URLs and change independently of the agent release

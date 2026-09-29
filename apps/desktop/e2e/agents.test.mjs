@@ -2,14 +2,15 @@
 // coding agent. run.sh runs it as the test user inside the prepared container
 // and passes the RedPill API key on stdin, which only `pap profiles add` reads.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, parseDocument } from "yaml";
@@ -56,6 +57,7 @@ const ALL_AGENTS = [
     surface: "chat",
     files: [".dsh/cordis.patch.yml", ".dsh/.credentials.yaml"],
     prompt: ["dsh", "headless", PROMPT],
+    verify: verifyDsh,
   },
   {
     id: "opencode",
@@ -352,6 +354,64 @@ async function settledUsage(agent, since) {
   }
 }
 
+// dsh prints the tree a profile would compose; `!!js` values stay strings.
+function dshTree(...args) {
+  const { status, stdout, stderr } = run("dsh", args, { env: AGENT_ENV });
+  assert.equal(status, 0, `dsh ${args.join(" ")}: ${stderr}`);
+  const rows = parseYaml(stdout, { customTags: [{ tag: "tag:yaml.org,2002:js", resolve: (value) => value }] });
+  return (id) => rows.find((row) => row.id === id);
+}
+
+// The acp profile picks its own model, so the connection replaces its config
+// with the two fields the pinned acp-app bundle ships. dsh also sends requests
+// shaped by the provider's compat switches, which the Local API does not
+// record: replaying the connected provider against a local recorder through
+// dsh's own --patch overlay shows exactly what it sends.
+async function verifyDsh() {
+  const shipped = dshTree("--profile", "acp", "--dump-default-config")("acp");
+  assert.deepEqual(
+    { name: shipped?.name, keys: Object.keys(shipped?.config ?? {}).sort() },
+    { name: "@deepseek-ai/dsh-acp", keys: ["model", "provider"] },
+    "dsh's shipped acp row changed shape; review what the connection replaces",
+  );
+  const connected = { provider: "private-ai-proxy", model: MODEL };
+  assert.deepEqual(dshTree("--profile", "acp", "--dump-config")("acp").config, connected);
+  const headless = dshTree("--profile", "headless", "--dump-config");
+  assert.deepEqual(headless("agent-default-model").config, connected);
+  assert.equal(headless("web-search-deepseek").disabled, true, "DeepSeek web search is still enabled");
+  const provider = headless("llm-pi-ai").config.providers["private-ai-proxy"];
+
+  const bodies = [];
+  const recorder = http.createServer((request, response) => {
+    let text = "";
+    request.on("data", (chunk) => (text += chunk));
+    request.on("end", () => {
+      bodies.push(JSON.parse(text));
+      const chunk = (delta, reason) =>
+        `data: ${JSON.stringify({ id: "r", object: "chat.completion.chunk", created: 0, model: MODEL, choices: [{ index: 0, delta, finish_reason: reason }] })}\n\n`;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(`${chunk({ role: "assistant", content: REPLY }, null)}${chunk({}, "stop")}data: [DONE]\n\n`);
+    });
+  });
+  await new Promise((resolve) => recorder.listen(0, "127.0.0.1", resolve));
+  const directory = mkdtempSync(path.join(os.tmpdir(), "pap-e2e-dsh-"));
+  try {
+    const overlay = path.join(directory, "recorder.yml");
+    const baseURL = `http://127.0.0.1:${recorder.address().port}/v1`;
+    writeFileSync(overlay, JSON.stringify([{ id: "llm-pi-ai", config: { providers: { "private-ai-proxy": { ...provider, baseURL } } } }]));
+    await promisify(execFile)("dsh", ["headless", "--patch", overlay, PROMPT], { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  } finally {
+    recorder.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+  assert.ok(bodies.length > 0, "dsh sent nothing to the recorder");
+  for (const body of bodies) {
+    assert.equal(body.model, MODEL);
+    assert.ok(Number.isInteger(body.max_tokens) && !("max_completion_tokens" in body), "dsh did not send max_tokens");
+    assert.ok(!body.messages.some(({ role }) => role === "developer"), "dsh sent a developer message");
+  }
+}
+
 const addProfile = (id, name) =>
   pap(["profiles", "add", "--id", id, "--name", name, "--provider", "redpill", "--url", SERVICE_URL, "--key-stdin", "--yes"], {
     input: apiKey,
@@ -387,7 +447,10 @@ for (const agent of AGENTS) {
     assert.equal((await localApi(token, "/v1/models")).status, 200, "the new agent token is not accepted");
 
     const since = nowSeconds();
-    await step(row, "reply", () => assertReply(agent));
+    await step(row, "reply", async () => {
+      assertReply(agent);
+      await agent.verify?.();
+    });
     await step(row, "usage", async () => {
       const records = await settledUsage(agent, since);
       assert.ok(records.length > 0, `no usage record for ${agent.id}`);

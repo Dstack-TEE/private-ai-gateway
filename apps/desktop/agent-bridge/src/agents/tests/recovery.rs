@@ -681,6 +681,7 @@ fn disconnect_all_restores_every_agent() {
                 entry: None,
                 exact: false,
                 source: None,
+                hashed: false,
             }],
             disabled: true,
             cleanup_pending: false,

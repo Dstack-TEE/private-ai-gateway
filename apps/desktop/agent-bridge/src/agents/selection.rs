@@ -33,8 +33,9 @@ impl File {
 pub(super) struct Journal {
     file: File,
     fields: Vec<OwnedField>,
-    /// The connection created the file with this text; while the file still
-    /// holds exactly that, restoring removes it.
+    /// The connection created the file: the SHA-256 of the text it wrote,
+    /// which may hold a credential. While the file still holds exactly that
+    /// text, restoring removes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created: Option<String>,
 }
@@ -46,18 +47,11 @@ impl Journal {
             let valid = match self.file {
                 File::Pi => path == ["defaultProvider"] || path == ["defaultModel"],
                 File::OmpYml | File::OmpYaml => path == ["modelRoles", "default"],
+                // Only digests of the token are journaled.
                 File::DshCredentials => {
-                    field.previous.is_none()
-                        && match &field.value {
-                            Some(ConfigValue::Str(_)) => path == ["refs", dsh::TOKEN_REF],
-                            Some(ConfigValue::Json(refs)) => {
-                                path == ["refs"]
-                                    && refs.as_object().is_some_and(|refs| {
-                                        refs.len() == 1 && refs[dsh::TOKEN_REF].is_string()
-                                    })
-                            }
-                            _ => false,
-                        }
+                    field.hashed
+                        && field.previous.is_none()
+                        && (path == ["refs", dsh::TOKEN_REF] || path == ["refs"])
                 }
             };
             !valid
@@ -65,24 +59,22 @@ impl Journal {
                     field.previous,
                     None | Some(Previous::Plain(ConfigValue::Str(_)))
                 )
-                || (self.file != File::DshCredentials
-                    && !matches!(field.value, Some(ConfigValue::Str(_))))
+                || !matches!(field.value, Some(ConfigValue::Str(_)))
         }) {
             return Err("Invalid companion file journal".into());
         }
         Ok(())
     }
 
-    /// The token a dsh credential journal wrote.
-    pub(super) fn token(&self) -> Option<String> {
-        if self.file != File::DshCredentials {
-            return None;
-        }
-        self.fields.iter().find_map(|field| match &field.value {
-            Some(ConfigValue::Str(token)) => Some(token.clone()),
-            Some(ConfigValue::Json(refs)) => refs[dsh::TOKEN_REF].as_str().map(str::to_string),
-            _ => None,
-        })
+    /// Whether a dsh credential journal wrote `token`.
+    pub(super) fn wrote_token(&self, token: &str) -> bool {
+        let token = ConfigValue::Str(token.to_string());
+        let refs = ConfigValue::Json(serde_json::json!({ dsh::TOKEN_REF: token.to_json() }));
+        self.file == File::DshCredentials
+            && self
+                .fields
+                .iter()
+                .any(|field| field.holds(Some(&token)) || field.holds(Some(&refs)))
     }
 }
 
@@ -232,6 +224,10 @@ pub(super) fn prepare(
 /// Store the connection's token in dsh's credential store. A store the
 /// connection creates is owned whole; in the user's store the token is an
 /// exact field.
+fn text_digest(text: &str) -> String {
+    hex::encode(Sha256::digest(text))
+}
+
 pub(super) fn prepare_token(
     config: &Path,
     prior: Option<&Journal>,
@@ -246,7 +242,7 @@ pub(super) fn prepare_token(
             doc.set_value(&["version"], &ConfigValue::Number(1))?;
             true
         }
-        Some(text) => prior.is_some_and(|journal| journal.created.as_ref() == Some(text)),
+        Some(text) => prior.is_some_and(|journal| journal.created == Some(text_digest(text))),
     };
     // A store the connection created stays owned whole, even once dsh adds to it.
     let owned = before.is_none()
@@ -259,10 +255,18 @@ pub(super) fn prepare_token(
     });
     let edit = project(&mut doc, &[field], prior.as_ref(), Agent::Dsh)?;
     let after = doc.render()?;
+    let mut fields = edit.record.ok_or("Missing credential journal")?.fields;
+    for field in fields.iter_mut().filter(|field| !field.hashed) {
+        field.value = field
+            .value
+            .as_ref()
+            .map(|value| ConfigValue::Str(value_digest(value)));
+        field.hashed = true;
+    }
     let journal = Journal {
         file,
-        fields: edit.record.ok_or("Missing credential journal")?.fields,
-        created: created.then(|| after.clone()),
+        fields,
+        created: created.then(|| text_digest(&after)),
     };
     journal.validate()?;
     Ok(Edit {
@@ -286,7 +290,7 @@ pub(super) fn restoration(
     let Some(text) = read(&path)? else {
         return Ok(None);
     };
-    if journal.created.as_ref() == Some(&text) {
+    if journal.created == Some(text_digest(&text)) {
         return Ok(Some(Edit {
             path,
             before: Some(text),

@@ -23,11 +23,16 @@ const PROVIDER: &str = "private-ai-proxy";
 pub(super) const TOKEN_REF: &str = "PRIVATE_AI_PROXY_DSH_TOKEN";
 const PI_AI: &str = "llm-pi-ai";
 const DEFAULT_MODEL: &str = "agent-default-model";
+/// The acp profile's row, which selects its own model instead of the default:
+/// the acp-app bundle ships it as `{provider: deepseek-official, model:
+/// deepseek-v4-flash}`, so an item replacing that config names only those two.
+const ACP: &str = "acp";
 /// DeepSeek's own search API, reached with the user's key outside the proxy.
 const WEB_SEARCH: &str = "web-search-deepseek";
+const WEB_SEARCH_PACKAGE: &str = "@deepseek-ai/dsh-web-search-deepseek";
 const CREDENTIALS: &str = "credentials";
 /// Rows another layer could disable, shadow or move to reroute the connection.
-const GUARDED: [&str; 4] = [PI_AI, DEFAULT_MODEL, WEB_SEARCH, CREDENTIALS];
+const GUARDED: [&str; 5] = [PI_AI, DEFAULT_MODEL, ACP, WEB_SEARCH, CREDENTIALS];
 pub(super) const CREDENTIALS_FILE: &str = ".credentials.yaml";
 
 fn key(id: &str) -> EntryKey {
@@ -126,6 +131,8 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         set(&["config", "model"], model).in_entry(DEFAULT_MODEL),
         // An effort chosen for another provider does not apply to these models.
         absent(&["config", "reasoningEffort"]).in_entry(DEFAULT_MODEL),
+        set(&["config", "provider"], PROVIDER).in_entry(ACP),
+        set(&["config", "model"], model).in_entry(ACP),
         boolean(&["disabled"], true).in_entry(WEB_SEARCH),
     ])
 }
@@ -168,8 +175,14 @@ pub(super) fn validate_config(
         });
     let profiles = dsh_home.join("profiles");
     let mut layers = match fs::read_dir(&profiles) {
+        // Only directories are profiles; files such as .DS_Store are not.
         Ok(entries) => entries
-            .map(|entry| entry.map(|entry| entry.path().join("cordis.patch.yml")))
+            .filter_map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map(|path| path.is_dir().then(|| path.join("cordis.patch.yml")))
+                    .transpose()
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| format!("Cannot read dsh profiles in {}", profiles.display()))?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -211,10 +224,8 @@ pub(super) fn validate_config(
             ));
         }
     }
-    let expected = prior
-        .and_then(|record| record.selection.as_ref())
-        .and_then(selection::Journal::token);
-    check_credentials(&dsh_home.join(CREDENTIALS_FILE), expected.as_deref())
+    let journal = prior.and_then(|record| record.selection.as_ref());
+    check_credentials(&dsh_home.join(CREDENTIALS_FILE), journal)
 }
 
 fn check_layer(path: &Path, layer: &ConfigDoc) -> Result<(), String> {
@@ -256,7 +267,9 @@ fn check_layer(path: &Path, layer: &ConfigDoc) -> Result<(), String> {
     Ok(())
 }
 
-/// A guarded row id anywhere in inserted rows, including group children.
+/// A guarded row anywhere in inserted rows, including group children: one
+/// with a guarded id, or another row of DeepSeek's search package, which
+/// registers the `deepseek-official` search provider under any id.
 fn inserted_id(value: &Value) -> Option<&str> {
     match value {
         Value::Array(rows) => rows.iter().find_map(inserted_id),
@@ -264,6 +277,11 @@ fn inserted_id(value: &Value) -> Option<&str> {
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| GUARDED.contains(id))
+            .or_else(|| {
+                row.get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| *name == WEB_SEARCH_PACKAGE)
+            })
             .or_else(|| row.get("config").and_then(inserted_id)),
         _ => None,
     }
@@ -271,7 +289,7 @@ fn inserted_id(value: &Value) -> Option<&str> {
 
 /// dsh refuses a store that is not version 1, readable beyond its owner, or
 /// holding unknown sections; the token name must be absent or ours.
-fn check_credentials(path: &Path, expected: Option<&str>) -> Result<(), String> {
+fn check_credentials(path: &Path, journal: Option<&selection::Journal>) -> Result<(), String> {
     let at = |reason: &str| format!("dsh's credential store {} {reason}", path.display());
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -311,7 +329,9 @@ fn check_credentials(path: &Path, expected: Option<&str>) -> Result<(), String> 
     }
     match root.get("refs").and_then(|refs| refs.get(TOKEN_REF)) {
         None => Ok(()),
-        Some(value) if expected.is_some() && value.as_str() == expected => Ok(()),
+        Some(Value::String(value)) if journal.is_some_and(|journal| journal.wrote_token(value)) => {
+            Ok(())
+        }
         Some(_) => Err(at(&format!(
             "already holds {TOKEN_REF}; remove it there before connecting"
         ))),
@@ -330,21 +350,19 @@ pub(super) fn credential_holds(dsh_home: &Path, token: &str) -> bool {
 /// Run `write` under dsh's writer lock on `file` (`withFileLock` in
 /// @deepseek-ai/dsh-atomic-write): `<file>.lock`, created exclusively with the
 /// writer's PID and removed afterwards. Waits as dsh does, backing off from
-/// 20 ms to 200 ms, but never takes over another writer's lock.
+/// 20 ms to 200 ms, and takes over only a lock whose holder has exited, by
+/// dsh's own rule ([`take_over_exited_lock`]).
 pub(super) fn with_lock<T>(file: &Path, write: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-    let mut lock_name = file.as_os_str().to_owned();
-    lock_name.push(".lock");
-    let lock = PathBuf::from(lock_name);
+    let lock = sibling(file, ".lock");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut delay = Duration::from_millis(20);
     let mut handle = loop {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        match options.open(&lock) {
+        match create_exclusive(&lock) {
             Ok(handle) => break handle,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if take_over_exited_lock(&lock)? {
+                    continue;
+                }
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
@@ -363,6 +381,71 @@ pub(super) fn with_lock<T>(file: &Path, write: impl FnOnce() -> io::Result<T>) -
     let value = result?;
     released?;
     Ok(value)
+}
+
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn create_exclusive(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)
+}
+
+/// dsh's `takeOverExitedLock`: remove the lock only when its `<pid>\n`
+/// record names a process that has exited. Contenders that read the same
+/// record serialize on `<lock>.takeover-<sha256(record)[..16]>`, and under it
+/// re-read the record and probe the PID again before removing the lock.
+fn take_over_exited_lock(lock: &Path) -> io::Result<bool> {
+    let Some(record) = fs::read_to_string(lock)
+        .ok()
+        .filter(|record| holder_exited(record))
+    else {
+        return Ok(false);
+    };
+    let digest = hex::encode(Sha256::digest(&record));
+    let claim = sibling(lock, &format!(".takeover-{}", &digest[..16]));
+    match create_exclusive(&claim) {
+        Ok(mut handle) => writeln!(handle, "{}", std::process::id())?,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let still =
+        fs::read_to_string(lock).ok().as_deref() == Some(record.as_str()) && holder_exited(&record);
+    let removed = still && fs::remove_file(lock).is_ok();
+    let _ = fs::remove_file(&claim);
+    Ok(removed)
+}
+
+/// dsh's `holderExited`: a complete `<pid>\n` record whose process a signal
+/// probe cannot find. Anything else, our own PID, or a process that exists
+/// under another user proves nothing.
+fn holder_exited(record: &str) -> bool {
+    let Some(pid) = record
+        .strip_suffix('\n')
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|digits| digits.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    if pid == 0 || pid > 0x7fff_ffff || pid == std::process::id() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let probe = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        probe != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        // Without a signal probe, no holder is proven gone.
+        false
+    }
 }
 
 #[cfg(test)]

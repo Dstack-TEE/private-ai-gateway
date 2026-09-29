@@ -493,27 +493,50 @@ row's whole config. Every profile, the dsh desktop app's included, reads the hom
 layer, and dsh never writes it, so a connection edits only that file. Profiles
 created later are covered too.
 
-The connection adds three keyed items there: a `private-ai-proxy` provider in
-`llm-pi-ai` (Chat Completions, `[TEE]` model names, and the compatibility
-switches the Local API needs), the default model in `agent-default-model`, and
-`disabled: true` on `web-search-deepseek`. That row would otherwise send search
-queries to DeepSeek with the user's own key; search providers the user installs
-(Exa, Perplexity) keep using their own keys. The provider reads its token through
-`apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`, which the connection stores in dsh's
-`.credentials.yaml` under dsh's own `<file>.lock` writer lock. That store is
-owner-only, reloads live and is never exported to the processes dsh starts. A
-store or patch list the connection created is removed on disconnect while it
-still holds exactly what was written.
+The connection adds four keyed items there:
+- a `private-ai-proxy` provider in `llm-pi-ai` (Chat Completions, `[TEE]` model
+  names, and the compatibility switches the Local API needs);
+- the default model in `agent-default-model`;
+- the same provider and model in `acp`, the acp profile's row, which picks its
+  own model instead of the default (the pinned acp-app bundle ships its config
+  as just `provider` and `model`, and the live test fails if that changes);
+- `disabled: true` on `web-search-deepseek`. That row would otherwise send
+  search queries to DeepSeek with the user's own key. Another row of that
+  package under a different id is refused, since it registers the same
+  `deepseek-official` search provider. Search providers the user installs
+  (Exa, Perplexity) keep using their own keys.
+
+Profiles without an `acp` row log the loader's "entry not found" note for that
+item, as dsh documents for a home patch that is shared across profiles.
+
+The provider reads its token through `apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`,
+which the connection stores in dsh's `.credentials.yaml`:
+- The store is owner-only, reloads live and is never exported to the processes
+  dsh starts.
+- Writes hold dsh's own `<file>.lock` writer lock. A lock whose holder has
+  exited is taken over by dsh's own `takeOverExitedLock` rule; a live holder is
+  waited for, never taken over.
+- The connection record keeps only SHA-256 digests of the token and of any
+  store text it wrote, never the token.
+
+A patch list or store the connection created is removed on disconnect while it
+still holds exactly what was written. A list file that was empty or blank gets
+its original bytes back.
 
 Keyed items are a general `ConfigDoc` capability. yaml-edit restores lists byte
 for byte only through appending and removing whole items, adding and removing
 keys, and replacing scalars. So in the user's own items the connection only
-adds keys or replaces scalars, journaling each scalar's source text. It refuses,
-as a configuration conflict naming the file, anything else: replacing a
-structured value, removing an existing key (such as a `reasoningEffort`),
-non-empty flow-style lists or items, a file without a final newline, and
-duplicate ids. The same checks deauthorize a connection when the configuration
-changes afterwards:
+adds keys or replaces scalars, journaling each scalar's source text. Anything
+else is refused as a configuration conflict that names the file:
+- replacing a structured value;
+- removing an existing key (such as a `reasoningEffort`);
+- non-empty flow-style lists or items;
+- an indented list;
+- a file without a final newline;
+- duplicate ids.
+
+The same checks deauthorize a connection when the configuration changes
+afterwards:
 - a profile's own `llm-pi-ai` config, which the home item would hide (move it
   to the home layer);
 - a layer that disables or re-inserts these rows, or moves the credential store;
@@ -521,9 +544,16 @@ changes afterwards:
 - a relative `DSH_HOME`;
 - a legacy `settings.yaml` not yet imported.
 
-`--patch` overlays and variables exported in the user's shell cannot be seen and
-are named in the connect note. dsh web and the dsh desktop app reload both files
-live, for new sessions; `dsh headless`, acp and sdk read them at start.
+Not protected, and named in the connect note:
+- the `sdk` and `sdk-minimal` profiles, for developers embedding dsh, which
+  choose their provider in code;
+- runs started with `--patch` overlays;
+- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell;
+- a `DSH_HOME` exported in the user's shell. The app reads `DSH_HOME` only from
+  its own environment, and the MAS build never does.
+
+dsh web and the dsh desktop app reload both files live, for new sessions;
+`dsh headless` and acp read them at start.
 
 ## Removed duplication and retained boundaries
 

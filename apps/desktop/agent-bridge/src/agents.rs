@@ -118,10 +118,10 @@ struct Connection {
     /// a record from before this field is taken to match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
-    /// The connection created the config file, a YAML list that restoring
-    /// empties: it is removed again rather than left as `[]`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    created_file: bool,
+    /// A YAML list config that was empty before the connection: restoring
+    /// the list to empty puts back exactly this rather than `[]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_original: Option<EmptyOriginal>,
     /// The agent is not authorized (disconnect in progress).
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,
@@ -183,6 +183,37 @@ struct OwnedField {
     /// The previous scalar's YAML source text, quoting included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    /// `value` is the SHA-256 of what was written ([`value_digest`]): a
+    /// credential the connection writes is never kept in the record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hashed: bool,
+}
+
+impl OwnedField {
+    /// Whether `current` is what the connection wrote.
+    fn holds(&self, current: Option<&ConfigValue>) -> bool {
+        if self.hashed {
+            current.is_some_and(|current| {
+                self.value.as_ref() == Some(&ConfigValue::Str(value_digest(current)))
+            })
+        } else {
+            current == self.value.as_ref()
+        }
+    }
+}
+
+/// The SHA-256 a hashed field journals in place of the value it wrote.
+fn value_digest(value: &ConfigValue) -> String {
+    hex::encode(Sha256::digest(value.to_json().to_string()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum EmptyOriginal {
+    /// The file did not exist.
+    Absent,
+    /// The file held only this whitespace.
+    Blank(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

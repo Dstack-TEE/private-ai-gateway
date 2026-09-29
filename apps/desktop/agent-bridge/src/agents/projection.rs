@@ -353,7 +353,7 @@ pub(super) fn project(
         let current = doc.get_value(&path);
         let still_ours = prior
             .iter()
-            .find(|owned| owned.path == field.path && current == owned.value);
+            .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
         // App-owned structured providers must never absorb an unmanaged object:
         // it may contain nested credentials that a field-name check cannot see.
         if matches!(field.value, Some(ConfigValue::Json(_)))
@@ -411,6 +411,7 @@ pub(super) fn project(
             entry: None,
             exact: false,
             source: None,
+            hashed: false,
         });
     }
     Ok(edit)
@@ -504,6 +505,7 @@ fn project_entry(
             }),
             exact: true,
             source: None,
+            hashed: false,
         });
     }
     Ok(())
@@ -553,7 +555,7 @@ fn anchor(
                 .iter()
                 .find(|owned| {
                     field.path.starts_with(&owned.path)
-                        && target.get_value(&refs(&owned.path)) == owned.value
+                        && owned.holds(target.get_value(&refs(&owned.path)).as_ref())
                 })
                 .map(|owned| owned.path.len())
                 .or_else(|| (1..path.len()).find(|&depth| !target.contains(&path[..depth])))
@@ -625,7 +627,7 @@ fn project_exact(
     }
     let still_ours = prior
         .iter()
-        .find(|owned| owned.path == field.path && current == owned.value);
+        .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
     let (previous, source) = match (still_ours, &current) {
         (Some(owned), _) => (owned.previous.clone(), owned.source.clone()),
         (None, None) => (None, None),
@@ -679,6 +681,7 @@ fn project_exact(
         entry,
         exact: true,
         source,
+        hashed: false,
     });
     Ok(())
 }
@@ -819,7 +822,7 @@ pub(super) fn restore(
         if let Some(Previous::Secret { secret_ref }) = &field.previous {
             consumed_secrets.push(secret_ref.clone());
         }
-        if current != field.value {
+        if !field.holds(current.as_ref()) {
             continue;
         }
         let sensitive = is_sensitive(&field.path);
@@ -875,7 +878,7 @@ fn restore_exact(
 ) -> Result<Option<ConfigChange>, AgentError> {
     let path = refs(&field.path);
     let current = target.get_value(&path);
-    if current != field.value {
+    if !field.holds(current.as_ref()) {
         return Ok(None);
     }
     let restored = match &field.previous {

@@ -308,17 +308,20 @@ impl Projector {
         };
         if !edit.changes.is_empty() {
             let restored = doc.render().map_err(|_| AgentError::RestorationFailed)?;
-            // A list the connection created goes away again rather than stay `[]`.
+            // A list that was empty returns to exactly what it held, not `[]`.
             let empty = ConfigDoc::parse(Format::YamlList, "")
                 .and_then(|empty| empty.render())
                 .map_err(|_| AgentError::Internal)?;
-            if record.created_file && agent.format() == Format::YamlList && restored == empty {
-                remove_unchanged(path, text.as_deref())
-                    .map_err(|_| AgentError::RestorationFailed)?;
-            } else {
-                write_atomic(path, &restored, Some(text.as_deref()))
-                    .map_err(|_| AgentError::RestorationFailed)?;
+            match &record.empty_original {
+                Some(EmptyOriginal::Absent) if restored == empty => {
+                    remove_unchanged(path, text.as_deref())
+                }
+                Some(EmptyOriginal::Blank(original)) if restored == empty => {
+                    write_atomic(path, original, Some(text.as_deref()))
+                }
+                _ => write_atomic(path, &restored, Some(text.as_deref())),
             }
+            .map_err(|_| AgentError::RestorationFailed)?;
         }
         for entry in &edit.consumed_secrets {
             self.secrets
@@ -386,11 +389,14 @@ impl Projector {
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         next_record.endpoint = Some(self.endpoint.clone());
-        next_record.created_file = agent.format() == Format::YamlList
-            && (text.is_none()
-                || self
-                    .current_record(agent, previous_record.as_ref())
-                    .is_some_and(|record| record.created_file));
+        next_record.empty_original = match &text {
+            _ if agent.format() != Format::YamlList => None,
+            None => Some(EmptyOriginal::Absent),
+            Some(text) if text.trim().is_empty() => Some(EmptyOriginal::Blank(text.clone())),
+            Some(_) => self
+                .current_record(agent, previous_record.as_ref())
+                .and_then(|record| record.empty_original.clone()),
+        };
         let mut selection = edit.selection.clone();
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {

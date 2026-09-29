@@ -533,6 +533,8 @@ impl ConfigDoc {
     //     `[{id: a}, ]`, and appending after `[\n  {id: a},\n]` gives `,\n,`.
     // G4: appending to a list without a trailing newline adds one to the
     //     previous item that removing the new item does not take back.
+    // G5: an appended item starts at column 1 even when the list is indented,
+    //     so `    - id: a\n` gains `- id: b`, which YAML parsers reject.
     pub fn list_editable(&self) -> Result<(), String> {
         let list = self.yaml_list()?;
         let text = self.render()?;
@@ -542,6 +544,12 @@ impl ConfigDoc {
         if list.is_flow_style() && !list.is_empty() {
             return Err(
                 "its list is written in flow style ([...]); write it as a block list (- item)"
+                    .to_string(),
+            );
+        }
+        if !list.is_flow_style() && list.start_position(&text).column != 1 {
+            return Err(
+                "its list is indented; start each `- ` item at the beginning of the line"
                     .to_string(),
             );
         }

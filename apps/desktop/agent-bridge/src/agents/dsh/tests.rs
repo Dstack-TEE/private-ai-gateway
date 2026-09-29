@@ -65,7 +65,8 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
     let patch = "# machine-wide dsh patches\n\
                  - id: llm-pi-ai\n  config:\n    providers:\n      openrouter: {apiKeyEnv: OPENROUTER_KEY} # mine\n\
                  - id: agent-default-model # chosen in the web app\n  config:\n    provider: 'deepseek-official'\n    model: \"deepseek-flash\"\n\
-                 - id: web-search-deepseek\n  disabled: false # keep search\n";
+                 - id: web-search-deepseek\n  disabled: false # keep search\n\
+                 - id: acp\n  config:\n    sessionListPageSize: 20\n";
     let credentials = "version: 1\n# my keys\nrefs:\n  DEEPSEEK_API_KEY: sk-user\n";
     write(&files.patch, patch);
     private(&files.credentials, credentials);
@@ -74,6 +75,7 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
     let profile_text =
         "- id: agent-default-model\n  config: {provider: deepseek-official, model: deepseek-pro}\n";
     write(&profile, profile_text);
+    write(&files.profiles.join(".DS_Store"), "not a profile");
 
     let status = connect(&sandbox, "phala/qwen").unwrap();
     assert!(status.authorized, "{:?}", status.attention);
@@ -100,8 +102,18 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
         item(&files.patch, "web-search-deepseek").get_value(&["disabled"]),
         Some(ConfigValue::Bool(true))
     );
+    let acp = item(&files.patch, "acp");
+    assert_eq!(
+        acp.get_value(&["config"]),
+        Some(ConfigValue::Json(serde_json::json!({
+            "sessionListPageSize": 20, "provider": "private-ai-proxy", "model": "phala/qwen",
+        })))
+    );
     let token = sandbox.projector.tokens.read("dsh").unwrap().unwrap();
     assert!(credential_holds(&home_dir(&sandbox.home, false), &token));
+    // The connection record keeps digests, never the token.
+    let record = fs::read_to_string(sandbox.projector.store_path()).unwrap();
+    assert!(!record.contains(&token));
     assert!(fs::read_to_string(&files.credentials)
         .unwrap()
         .contains("DEEPSEEK_API_KEY: sk-user"));
@@ -128,6 +140,15 @@ fn files_the_connection_creates_are_removed_and_reconnecting_keeps_the_journal()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+    assert_eq!(
+        item(&files.patch, "acp").get_value(&[]),
+        Some(ConfigValue::Json(serde_json::json!({
+            "id": "acp", "config": {"provider": "private-ai-proxy", "model": "phala/qwen"},
+        })))
+    );
+    let token = sandbox.projector.tokens.read("dsh").unwrap().unwrap();
+    let record = fs::read_to_string(sandbox.projector.store_path()).unwrap();
+    assert!(!record.contains(&token));
     // Choosing another model rewrites the connection's own items in place.
     assert!(connect(&sandbox, "openai/gpt-oss-20b").unwrap().authorized);
     assert_eq!(
@@ -157,8 +178,14 @@ fn files_the_connection_creates_are_removed_and_reconnecting_keeps_the_journal()
     assert!(kept.entry(&key("llm-pi-ai")).unwrap().is_none());
     fs::remove_file(&files.patch).unwrap();
 
-    // An empty list the user wrote stays, and so does a block list.
-    for original in ["[]\n", "# mine\n- id: tools\n  config: {mode: native}\n"] {
+    // Whatever the user's file held comes back byte for byte, even when
+    // it was empty or blank and so could not be parsed as a list.
+    for original in [
+        "",
+        "  \n\n",
+        "[]\n",
+        "# mine\n- id: tools\n  config: {mode: native}\n",
+    ] {
         write(&files.patch, original);
         assert!(connect(&sandbox, "phala/qwen").unwrap().authorized);
         assert!(connect(&sandbox, "openai/gpt-oss-20b").unwrap().authorized);
@@ -281,6 +308,31 @@ fn configurations_that_cannot_be_restored_or_would_reroute_are_refused_untouched
         "already holds",
     );
     refuse(
+        "indented-list",
+        &|files| write(&files.patch, "    - id: tools\n"),
+        "indented",
+    );
+    refuse(
+        "search-under-another-id",
+        &|files| {
+            profile(
+                files,
+                "- insert:\n    - {id: my-search, name: '@deepseek-ai/dsh-web-search-deepseek'}\n",
+            )
+        },
+        "inserts another `@deepseek-ai/dsh-web-search-deepseek` row",
+    );
+    refuse(
+        "acp-shadow",
+        &|files| {
+            write(
+                &files.patch,
+                "- insert:\n    - {id: acp, name: '@deepseek-ai/dsh-acp'}\n",
+            )
+        },
+        "inserts another `acp` row",
+    );
+    refuse(
         "legacy-settings",
         &|files| {
             write(
@@ -349,4 +401,32 @@ fn writes_wait_for_dshs_own_lock_and_leave_none_behind() {
     assert!(!lock.exists());
     assert!(with_lock(&file, || Err::<(), _>(io::Error::other("failed"))).is_err());
     assert!(!lock.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lock_whose_holder_exited_is_taken_over_as_dsh_does_and_a_live_one_is_not() {
+    let sandbox = sandbox("dsh-stale-lock");
+    let file = sandbox.home.join(CREDENTIALS_FILE);
+    let lock = sandbox.home.join(format!("{CREDENTIALS_FILE}.lock"));
+    let exited = std::process::Command::new("true").spawn().unwrap();
+    let pid = exited.id();
+    let mut exited = exited;
+    exited.wait().unwrap();
+    write(&lock, &format!("{pid}\n"));
+    assert!(with_lock(&file, || Ok(())).is_ok());
+    assert!(!lock.exists());
+    // An incomplete record, or a live holder, proves nothing: wait, then give up.
+    let mut live = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    for record in [format!("{}\n", live.id()), format!("{pid}")] {
+        write(&lock, &record);
+        let error = with_lock(&file, || Ok(())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&lock).unwrap(), record);
+    }
+    live.kill().unwrap();
+    live.wait().unwrap();
 }

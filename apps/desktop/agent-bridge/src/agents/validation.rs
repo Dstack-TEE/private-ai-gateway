@@ -468,7 +468,7 @@ impl Projector {
         let managed = doc.as_ref().is_some_and(|doc| {
             record.fields.iter().all(|field| {
                 (agent == Agent::Codex && field.path == ["model"])
-                    || owned_value(doc, field) == field.value
+                    || field.holds(owned_value(doc, field).as_ref())
             })
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
