@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use desktop_core::{
     agent_access::AgentAccessStatus,
@@ -17,45 +17,38 @@ use crate::{autostart, notifications, run_blocking, tray, updates, window};
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The desktop shell's `Host`: the app's window, tray and native services.
 #[derive(Clone)]
-pub(crate) struct TauriHost {
-    app: AppHandle,
-}
-
-impl TauriHost {
-    pub(crate) fn new(app: AppHandle) -> Self {
-        Self { app }
-    }
-}
+pub(crate) struct TauriHost(pub(crate) AppHandle);
 
 impl Host for TauriHost {
     fn emit(&self, event: Event) -> Result<(), String> {
         if event.event == shared::SETTINGS_RESET_EVENT {
-            self.app
+            self.0
                 .emit_to(window::MAIN, event.event, event.payload)
                 .map_err(|_| "Settings reset, but the interface could not refresh".to_string())
         } else {
-            self.app
+            self.0
                 .emit(event.event, event.payload)
                 .map_err(|_| "Could not sync the interface".to_string())
         }
     }
 
     fn apply_appearance(&self, appearance: Appearance) -> Result<(), String> {
-        self.app.set_theme(window::native_theme(appearance));
+        self.0.set_theme(window::native_theme(appearance));
         Ok(())
     }
 
     fn open_at_login(&self) -> Result<bool, String> {
-        autostart::is_enabled(&self.app)
+        autostart::is_enabled(&self.0)
     }
 
     fn set_open_at_login(&self, enabled: bool) -> Result<(), String> {
-        tray::set_open_at_login(&self.app, enabled)
+        tray::set_open_at_login(&self.0, enabled)
     }
 
     fn present_account_login(&self, url: &str) {
-        if self.app.opener().open_url(url, None::<&str>).is_err() {
+        if self.0.opener().open_url(url, None::<&str>).is_err() {
             tracing::warn!(
                 "Cannot open the account connection page; use the manual connection link"
             );
@@ -66,23 +59,29 @@ impl Host for TauriHost {
         &self,
         preferences: NotificationPreferences,
     ) -> NotificationConfiguration {
-        notifications::configuration(&self.app, preferences).await
+        NotificationConfiguration {
+            preferences,
+            system: notifications::permission::query(&self.0).await,
+        }
     }
 
     fn notification_preferences_saved(
         &self,
         preferences: NotificationPreferences,
     ) -> Result<(), String> {
-        notifications::set_cached_preferences(&self.app, preferences)
+        let cached = self.0.state::<Mutex<NotificationPreferences>>();
+        *cached
+            .lock()
+            .map_err(|_| "Notification settings are unavailable")? = preferences;
+        Ok(())
     }
 
     async fn reset_settings(&self, backend: &impl Backend) -> Result<AppStateWire, CallError> {
-        let prepared = self.app.state::<updates::PreparedUpdate>();
+        let prepared = self.0.state::<updates::PreparedUpdate>();
         let mut prepared = prepared
-            .0
             .try_lock()
             .map_err(|_| "An update operation is in progress")?;
-        let worker_app = self.app.clone();
+        let worker_app = self.0.clone();
         let reset = shared::call(backend, rpc::ResetSettings).await;
         let result = run_blocking(move || {
             let state = reset?;
@@ -101,10 +100,10 @@ impl Host for TauriHost {
 
     async fn request_agent_access(&self) -> Result<AgentAccessStatus, String> {
         let window = self
-            .app
+            .0
             .get_webview_window(window::MAIN)
             .ok_or_else(|| "Home access requires the main window".to_string())?;
-        let client = self.app.state::<Arc<Client>>().inner().clone();
+        let client = self.0.state::<Arc<Client>>().inner().clone();
         request_agent_access(window, client).await?;
         Ok(desktop_core::agent_access::status())
     }
@@ -116,7 +115,7 @@ pub(crate) async fn invoke(
     method: Method,
     params: Value,
 ) -> Result<Value, CallError> {
-    shared::invoke(client.inner(), &TauriHost::new(app), method, params).await
+    shared::invoke(client.inner(), &TauriHost(app), method, params).await
 }
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -128,21 +127,14 @@ async fn request_agent_access(window: WebviewWindow, client: Arc<Client>) -> Res
     };
     if desktop_core::agent_access::status() != AgentAccessStatus::Authorized {
         let home = desktop_core::agent_access::expected_home()?;
-        let (send, receive) = tokio::sync::oneshot::channel();
-        window
+        let dialog = window
             .dialog()
             .file()
             .set_parent(&window)
             .set_title("Choose Home Folder")
             .set_directory(&home)
-            .set_can_create_directories(false)
-            .pick_folder(move |selection| {
-                let _ = send.send(selection);
-            });
-        let Some(selection) = receive
-            .await
-            .map_err(|_| "The Home folder picker could not complete".to_string())?
-        else {
+            .set_can_create_directories(false);
+        let Some(selection) = run_blocking(move || Ok(dialog.blocking_pick_folder())).await? else {
             return Ok(());
         };
         let path = selection

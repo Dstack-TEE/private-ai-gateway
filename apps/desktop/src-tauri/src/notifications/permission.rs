@@ -48,13 +48,14 @@ mod macos {
         UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
         UNNotificationSettings, UNUserNotificationCenter,
     };
-    use std::{ptr::NonNull, sync::Mutex, time::Duration};
+    use std::{ptr::NonNull, time::Duration};
+    use tokio::sync::mpsc::unbounded_channel;
 
     pub async fn query(app: &AppHandle) -> PermissionStatus {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // The completion handler is a `Fn` block; an unbounded sender sends from it.
+        let (sender, mut receiver) = unbounded_channel();
         if app
             .run_on_main_thread(move || {
-                let sender = Mutex::new(Some(sender));
                 let callback = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
                     // Apple guarantees the settings object is valid during this callback.
                     let settings = unsafe { settings.as_ref() };
@@ -71,14 +72,10 @@ mod macos {
                         UNNotificationSetting::Disabled => Some(false),
                         _ => None,
                     };
-                    if let Ok(mut sender) = sender.lock() {
-                        if let Some(sender) = sender.take() {
-                            let _ = sender.send(PermissionStatus {
-                                permission,
-                                alerts_enabled,
-                            });
-                        }
-                    }
+                    let _ = sender.send(PermissionStatus {
+                        permission,
+                        alerts_enabled,
+                    });
                 });
                 UNUserNotificationCenter::currentNotificationCenter()
                     .getNotificationSettingsWithCompletionHandler(&callback);
@@ -87,22 +84,17 @@ mod macos {
         {
             return Permission::Unknown.into();
         }
-        match tokio::time::timeout(Duration::from_secs(10), receiver).await {
-            Ok(Ok(permission)) => permission,
+        match tokio::time::timeout(Duration::from_secs(10), receiver.recv()).await {
+            Ok(Some(permission)) => permission,
             _ => Permission::Unknown.into(),
         }
     }
 
     pub async fn request(app: &AppHandle) -> Result<(), String> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (sender, mut receiver) = unbounded_channel();
         app.run_on_main_thread(move || {
-            let sender = Mutex::new(Some(sender));
             let callback = RcBlock::new(move |_granted: Bool, error: *mut NSError| {
-                if let Ok(mut sender) = sender.lock() {
-                    if let Some(sender) = sender.take() {
-                        let _ = sender.send(error.is_null());
-                    }
-                }
+                let _ = sender.send(error.is_null());
             });
             UNUserNotificationCenter::currentNotificationCenter()
                 .requestAuthorizationWithOptions_completionHandler(
@@ -112,8 +104,8 @@ mod macos {
         })
         .map_err(|_| "Could not request notification permission")?;
         // Bounded like `query`, but long enough to answer the system prompt.
-        match tokio::time::timeout(Duration::from_secs(120), receiver).await {
-            Ok(Ok(true)) => Ok(()),
+        match tokio::time::timeout(Duration::from_secs(120), receiver.recv()).await {
+            Ok(Some(true)) => Ok(()),
             _ => Err("Could not request notification permission".into()),
         }
     }

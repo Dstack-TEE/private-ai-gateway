@@ -25,10 +25,11 @@ use std::sync::{
 
 use desktop_core::{
     client::Client,
+    config::NotificationPreferences,
     contracts::AppState,
     ui_api::{Host, StateEventProjection},
 };
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_window_state::StateFlags;
 
@@ -85,7 +86,7 @@ pub fn run() {
         .manage(updates::PreparedUpdate::default())
         .manage(cli_registration::CliStartup::default())
         .manage(Mutex::new(window::WindowState::default()))
-        .manage(notifications::Settings::default())
+        .manage(Mutex::new(NotificationPreferences::default()))
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .on_menu_event(menu::handle_event)
         .setup(setup);
@@ -99,11 +100,10 @@ pub fn run() {
     builder
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
-        .run(|app, event| match event {
-            #[cfg(any(feature = "mac-app-store", target_os = "windows", target_os = "linux"))]
-            RunEvent::Exit => {
-                #[cfg(feature = "mac-app-store")]
-                if let Some(client) = app.try_state::<Arc<Client>>() {
+        .run(|_app, event| match event {
+            #[cfg(feature = "mac-app-store")]
+            tauri::RunEvent::Exit => {
+                if let Some(client) = _app.try_state::<Arc<Client>>() {
                     if client.is_running().unwrap_or(false) {
                         if let Err(error) = client.shutdown() {
                             tracing::warn!(
@@ -112,11 +112,9 @@ pub fn run() {
                         }
                     }
                 }
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
-                tray_theme::shutdown(app);
             }
             #[cfg(target_os = "macos")]
-            RunEvent::Reopen { .. } => window::show(app),
+            tauri::RunEvent::Reopen { .. } => window::show(_app),
             _ => {}
         });
 }
@@ -185,7 +183,7 @@ fn configure_account_return(app: &tauri::App) {
 /// applies the preferences to a backend that connected.
 fn follow_backend(app: &AppHandle, client: Arc<Client>) {
     let app = app.clone();
-    let host = ui_api::TauriHost::new(app.clone());
+    let host = ui_api::TauriHost(app.clone());
     let mut states = client.subscribe();
     let initial = states.borrow().clone();
     let mut projection = StateEventProjection::new(&initial);

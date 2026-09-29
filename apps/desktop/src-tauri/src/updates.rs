@@ -8,6 +8,7 @@ use desktop_core::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
+use tokio::sync::MutexGuard;
 
 use crate::{distribution, run_blocking};
 
@@ -17,15 +18,13 @@ pub(crate) struct DownloadedUpdate {
     bytes: Vec<u8>,
 }
 
-#[derive(Default)]
-pub struct PreparedUpdate(pub(crate) tokio::sync::Mutex<Option<DownloadedUpdate>>);
+/// The downloaded release that Restart to Update installs.
+pub(crate) type PreparedUpdate = tokio::sync::Mutex<Option<DownloadedUpdate>>;
 
-impl PreparedUpdate {
-    fn lock(&self) -> Result<tokio::sync::MutexGuard<'_, Option<DownloadedUpdate>>, &'static str> {
-        self.0
-            .try_lock()
-            .map_err(|_| "An update operation is already in progress")
-    }
+fn begin(prepared: &PreparedUpdate) -> Result<MutexGuard<'_, Option<DownloadedUpdate>>, &str> {
+    prepared
+        .try_lock()
+        .map_err(|_| "An update operation is already in progress")
 }
 
 /// Whether this build installs its own updates: the distribution does, and
@@ -61,7 +60,7 @@ pub async fn set_update_channel(
     client: State<'_, Arc<Client>>,
 ) -> Result<UpdateChannel, CallError> {
     require_native_updates()?;
-    let mut prepared = prepared.lock()?;
+    let mut prepared = begin(&prepared)?;
     let client = client.inner().clone();
     run_blocking(move || {
         client
@@ -82,7 +81,7 @@ pub async fn prepare_update(
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, CallError> {
     let configured = configured(&app);
-    let mut prepared = prepared.lock()?;
+    let mut prepared = begin(&prepared)?;
     let current_version = app.package_info().version.to_string();
     let default = updates::build_channel(&current_version);
     // The backend's settings, like every other preference the app reads, so
@@ -200,7 +199,7 @@ pub async fn restart_to_update(
     client: State<'_, Arc<Client>>,
 ) -> Result<(), CallError> {
     require_native_updates()?;
-    let mut prepared = prepared.lock()?;
+    let mut prepared = begin(&prepared)?;
     let download = prepared.take().ok_or("The update is not ready yet")?;
     drop(prepared);
     let client = client.inner().clone();

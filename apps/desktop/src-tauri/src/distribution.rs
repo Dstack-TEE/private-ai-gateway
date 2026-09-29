@@ -19,21 +19,12 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     web_ui: !APP_STORE,
 };
 
-/// The operating system, for the renderer's platform behaviour.
-const PLATFORM: &str = if cfg!(target_os = "macos") {
-    "macos"
-} else if cfg!(target_os = "windows") {
-    "windows"
-} else {
-    "linux"
-};
-
-/// The distribution's capabilities, and the platform that `appearance-init.js`
-/// puts on the root element.
+/// The distribution's capabilities, and the platform (`macos`, `windows` or
+/// `linux`) that `appearance-init.js` puts on the root element.
 pub(crate) fn initialization_script() -> String {
     let capabilities = serde_json::to_string(&CAPABILITIES)
         .expect("distribution capabilities must be serializable");
-    let window = serde_json::json!({ "platform": PLATFORM });
+    let window = serde_json::json!({ "platform": std::env::consts::OS });
     format!("window.__PAP_DISTRIBUTION__ = {capabilities};\nwindow.__PAP_WINDOW__ = {window};")
 }
 

@@ -212,17 +212,12 @@ mod platform {
     use objc2_service_management::{SMAppService, SMAppServiceStatus};
     use tauri::AppHandle;
 
-    fn status() -> SMAppServiceStatus {
-        let service = unsafe { SMAppService::mainAppService() };
-        unsafe { service.status() }
-    }
-
     pub fn is_enabled(_app: &AppHandle) -> Result<bool, String> {
         #[cfg(not(feature = "mac-app-store"))]
         if LegacyBackend(_app).legacy_enabled()? {
             return Ok(true);
         }
-        match status() {
+        match unsafe { SMAppService::mainAppService().status() } {
             SMAppServiceStatus::Enabled => Ok(true),
             SMAppServiceStatus::NotRegistered | SMAppServiceStatus::RequiresApproval => Ok(false),
             SMAppServiceStatus::NotFound => {

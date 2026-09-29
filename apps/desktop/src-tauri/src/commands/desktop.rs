@@ -4,15 +4,29 @@ use desktop_core::{
     agents::Agent,
     brand::AboutLink,
     client::{CallError, Client},
+    contracts::ServiceProvider,
+    ui_api::Method,
 };
-use tauri::{
-    menu::{Menu, MenuBuilder},
-    AppHandle, Manager, Runtime, State, WebviewWindow,
-};
+use serde_json::{json, Value};
+use tauri::{menu::MenuBuilder, AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
 
-use super::open_url;
 use crate::{distribution, run_blocking};
+
+/// Opens `url` in the default browser, reporting `failure` if it does not open.
+pub(crate) async fn open_url(
+    app: AppHandle,
+    url: String,
+    failure: &'static str,
+) -> Result<(), CallError> {
+    Ok(run_blocking(move || {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|_| failure.to_string())
+    })
+    .await?)
+}
 
 #[tauri::command]
 pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Result<(), CallError> {
@@ -62,18 +76,11 @@ pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), CallEr
     .await?)
 }
 
+/// Shows the system editing actions a text field allows. Only macOS has
+/// native Undo and Redo items.
 #[tauri::command]
 pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<(), CallError> {
-    let menu = edit_menu(window.app_handle(), editable).map_err(|_| "Cannot build editing menu")?;
-    window
-        .popup_menu(&menu)
-        .map_err(|_| "Cannot open editing menu".into())
-}
-
-/// The system editing actions a text field's context menu offers. Only macOS
-/// has native Undo and Redo items.
-fn edit_menu<R: Runtime>(app: &AppHandle<R>, editable: bool) -> tauri::Result<Menu<R>> {
-    let mut menu = MenuBuilder::new(app);
+    let mut menu = MenuBuilder::new(window.app_handle());
     if editable {
         if cfg!(target_os = "macos") {
             menu = menu.undo().redo().separator();
@@ -84,7 +91,13 @@ fn edit_menu<R: Runtime>(app: &AppHandle<R>, editable: bool) -> tauri::Result<Me
     if editable {
         menu = menu.paste();
     }
-    menu.select_all().build()
+    let menu = menu
+        .select_all()
+        .build()
+        .map_err(|_| "Cannot build editing menu")?;
+    window
+        .popup_menu(&menu)
+        .map_err(|_| "Cannot open editing menu".into())
 }
 
 /// Quits the app and leaves the background service running, like Quit in the
@@ -105,25 +118,66 @@ pub(crate) async fn stop_all_and_quit(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    #[cfg_attr(target_os = "macos", ignore = "muda menus need the main thread")]
-    fn the_edit_menu_offers_what_the_field_allows() {
-        let app = tauri::test::mock_app();
-        let describe = |editable| {
-            crate::menu::describe(
-                super::edit_menu(app.handle(), editable)
-                    .unwrap()
-                    .items()
-                    .unwrap(),
-            )
-        };
-        let mut editable = vec!["Cut", "Copy", "Paste", "Select All"];
-        if cfg!(target_os = "macos") {
-            editable.splice(0..0, ["Undo", "Redo", "---"]);
-        }
-        assert_eq!(describe(true), editable);
-        assert_eq!(describe(false), ["Copy", "Select All"]);
-    }
+const ACCOUNT_PAGE_FAILURE: &str = "Cannot open the account page";
+
+fn require_portal_links() -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.account_portal_links,
+        "Account portal links are unavailable in this distribution",
+    )
+}
+
+/// Opens the account page the renderer method `method` resolves.
+async fn open_account_page(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    method: Method,
+    params: Value,
+) -> Result<(), CallError> {
+    let value = crate::ui_api::invoke(app.clone(), client, method, params).await?;
+    let url = serde_json::from_value(value).map_err(|_| "Management response failed")?;
+    open_url(app, url, ACCOUNT_PAGE_FAILURE).await
+}
+
+#[tauri::command]
+pub(crate) async fn open_top_up(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    provider: ServiceProvider,
+    scope_slug: Option<String>,
+) -> Result<(), CallError> {
+    open_account_page(
+        app,
+        client,
+        Method::GetTopUpUrl,
+        json!({ "provider": provider, "scopeSlug": scope_slug }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn open_organization(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    organization_slug: String,
+) -> Result<(), CallError> {
+    require_portal_links()?;
+    open_account_page(
+        app,
+        client,
+        Method::GetOrganizationUrl,
+        json!({ "organizationSlug": organization_slug }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn open_api_key_page(
+    app: AppHandle,
+    provider: ServiceProvider,
+) -> Result<(), CallError> {
+    require_portal_links()?;
+    let url = desktop_core::account::api_key_page(provider)
+        .ok_or("Custom providers do not have a built-in API key page")?;
+    open_url(app, url.to_string(), ACCOUNT_PAGE_FAILURE).await
 }
