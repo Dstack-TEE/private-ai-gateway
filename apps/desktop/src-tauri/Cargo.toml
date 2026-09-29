@@ -58,4 +58,5 @@ objc2-service-management = "0.3"
 block2 = "0.6"
 
 [dev-dependencies]
+tauri = { version = "2.11.6", features = ["test"] }
 tempfile = "3"

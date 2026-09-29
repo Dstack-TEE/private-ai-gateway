@@ -75,8 +75,17 @@ pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), CallEr
 
 #[tauri::command]
 pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<(), CallError> {
+    let menu = edit_menu(window.app_handle(), editable)?;
+    window
+        .popup_menu(&menu)
+        .map_err(|_| "Cannot open editing menu".into())
+}
+
+fn edit_menu<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    editable: bool,
+) -> Result<tauri::menu::Menu<R>, &'static str> {
     use tauri::menu::{Menu, PredefinedMenuItem};
-    let app = window.app_handle();
     let menu = Menu::new(app).map_err(|_| "Cannot create editing menu")?;
     #[cfg(target_os = "macos")]
     if editable {
@@ -104,9 +113,7 @@ pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<()
             .map_err(|_| "Cannot create Select All action")?,
     )
     .map_err(|_| "Cannot build editing menu")?;
-    window
-        .popup_menu(&menu)
-        .map_err(|_| "Cannot open editing menu".into())
+    Ok(menu)
 }
 
 /// Quits the app and leaves the background service running, like Quit in the
@@ -139,4 +146,26 @@ pub(crate) async fn open_api_key_page(
     let url = desktop_core::account::api_key_page(provider)
         .ok_or("Custom providers do not have a built-in API key page")?;
     Ok(open_account_url(app, url.to_string()).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_edit_menu_offers_what_the_field_allows() {
+        let app = tauri::test::mock_app();
+        let describe = |editable| {
+            crate::menu::describe(
+                super::edit_menu(app.handle(), editable)
+                    .unwrap()
+                    .items()
+                    .unwrap(),
+            )
+        };
+        let mut editable = vec!["Cut", "Copy", "Paste", "Select All"];
+        if cfg!(target_os = "macos") {
+            editable.splice(0..0, ["Undo", "Redo", "---"]);
+        }
+        assert_eq!(describe(true), editable);
+        assert_eq!(describe(false), ["Copy", "Select All"]);
+    }
 }

@@ -12,6 +12,12 @@ use tauri::{menu::MenuEvent, AppHandle};
 
 #[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    app.set_menu(menu_bar(app)?)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<tauri::menu::Menu<R>> {
     use desktop_core::brand::{ORGANIZATION_NAME, PRODUCT_NAME};
     use tauri::menu::{
         AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
@@ -94,11 +100,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         true,
         &[&documentation, &github],
     )?;
-    app.set_menu(Menu::with_items(
-        app,
-        &[&application, &edit, &view, &window, &help],
-    )?)?;
-    Ok(())
+    Menu::with_items(app, &[&application, &edit, &view, &window, &help])
 }
 
 /// The one handler of every native menu item. Tauri calls each global menu
@@ -127,4 +129,111 @@ fn open_link(app: &AppHandle, link: AboutLink) {
 #[cfg(not(target_os = "macos"))]
 pub fn setup(_app: &AppHandle) -> tauri::Result<()> {
     Ok(())
+}
+
+/// Each item of a menu as `id: text`, check items with their state, disabled
+/// items marked, and predefined items by their label; submenu items follow
+/// their submenu, indented.
+#[cfg(test)]
+pub(crate) fn describe<R: tauri::Runtime>(items: Vec<tauri::menu::MenuItemKind<R>>) -> Vec<String> {
+    use tauri::menu::MenuItemKind;
+    let disabled = |enabled: tauri::Result<bool>| if enabled.unwrap() { "" } else { " (disabled)" };
+    let mut lines = Vec::new();
+    for item in items {
+        match item {
+            MenuItemKind::MenuItem(item) => lines.push(format!(
+                "{}: {}{}",
+                item.id().0,
+                item.text().unwrap(),
+                disabled(item.is_enabled())
+            )),
+            MenuItemKind::Check(item) => lines.push(format!(
+                "{}: [{}] {}{}",
+                item.id().0,
+                if item.is_checked().unwrap() { "x" } else { " " },
+                item.text().unwrap(),
+                disabled(item.is_enabled())
+            )),
+            MenuItemKind::Predefined(item) => {
+                let text = item.text().unwrap().replace('&', "");
+                lines.push(if text.is_empty() { "---".into() } else { text });
+            }
+            MenuItemKind::Submenu(submenu) => {
+                lines.push(format!(
+                    "{}:{}",
+                    submenu.text().unwrap(),
+                    disabled(submenu.is_enabled())
+                ));
+                let items = describe(submenu.items().unwrap());
+                lines.extend(items.into_iter().map(|line| format!("  {line}")));
+            }
+            MenuItemKind::Icon(item) => {
+                lines.push(format!("{}: {}", item.id().0, item.text().unwrap()))
+            }
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use tauri::menu::{HELP_SUBMENU_ID, WINDOW_SUBMENU_ID};
+
+    #[test]
+    fn the_menu_bar_keeps_the_standard_layout() {
+        let app = tauri::test::mock_app();
+        let menu = super::menu_bar(app.handle()).unwrap();
+        let (maximize, close, quit) = if cfg!(target_os = "macos") {
+            ("Zoom", "Close Window", "Quit")
+        } else if cfg!(windows) {
+            ("Maximize", "Close", "Exit")
+        } else {
+            ("Maximize", "Close Window", "Quit")
+        };
+        assert_eq!(
+            super::describe(menu.items().unwrap()),
+            [
+                "Private AI Proxy:",
+                "  About Private AI Proxy",
+                "  ---",
+                "  settings: Settings…",
+                "  ---",
+                "  Services",
+                "  ---",
+                "  Hide",
+                "  Hide Others",
+                "  Show All",
+                "  ---",
+                &format!("  {quit}"),
+                "Edit:",
+                "  Undo",
+                "  Redo",
+                "  ---",
+                "  Cut",
+                "  Copy",
+                "  Paste",
+                "  Select All",
+                "View:",
+                "  Toggle Full Screen",
+                "Window:",
+                "  Minimize",
+                &format!("  {maximize}"),
+                "  ---",
+                &format!("  {close}"),
+                "  ---",
+                "  Bring All to Front",
+                "Help:",
+                "  documentation: Private AI Proxy Help",
+                "  github: GitHub",
+            ]
+        );
+        let ids: Vec<_> = menu
+            .items()
+            .unwrap()
+            .iter()
+            .map(|item| item.id().0.clone())
+            .collect();
+        assert_eq!(ids[3], WINDOW_SUBMENU_ID);
+        assert_eq!(ids[4], HELP_SUBMENU_ID);
+    }
 }
