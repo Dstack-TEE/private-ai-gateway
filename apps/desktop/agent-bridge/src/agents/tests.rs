@@ -1,6 +1,8 @@
 mod catalogs;
 mod contracts;
 mod discovery;
+#[cfg(target_os = "linux")]
+mod golden;
 mod recovery;
 
 use super::*;
