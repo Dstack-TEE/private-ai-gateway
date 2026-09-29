@@ -57,8 +57,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - &rust-cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -66,11 +65,8 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
             ${{ env.CARGO_TARGET_DIR }}/*/deps
             ${{ env.CARGO_TARGET_DIR }}/*/build
-            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
-            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
-            ${{ env.CARGO_TARGET_DIR }}/*/*/build
-          key: pap-mas-${{ github.job }}-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
-          restore-keys: pap-mas-${{ github.job }}-v2-${{ runner.os }}-
+          key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
+          restore-keys: pap-mas-verify-v2-${{ runner.os }}-
       - run: xcodebuild -version
       - uses: ./.github/actions/desktop-node
       # Desktop Tauri (desktop-native.yml) runs `npm run check`, the release
@@ -174,7 +170,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - *rust-cache
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/build
+            ${{ env.CARGO_TARGET_DIR }}/*/*/.fingerprint
+            ${{ env.CARGO_TARGET_DIR }}/*/*/deps
+            ${{ env.CARGO_TARGET_DIR }}/*/*/build
+          key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
+          restore-keys: pap-mas-package-v2-${{ runner.os }}-
       - name: Install build targets
         run: |
           xcodebuild -version

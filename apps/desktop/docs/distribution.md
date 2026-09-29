@@ -49,12 +49,12 @@ GitHub release with that changelog section as its notes.
   beta number: `0.2.1-beta.3` becomes `0.3.0-beta.3`. That is release-please's
   prerelease strategy, not a skipped release.
 - **Stable**: the prerelease strategy only ever proposes another beta, so
-  going from `0.2.0-beta.N` to `0.2.0` needs a commit on `main` whose message
-  has the footer `Release-As: 0.2.0`
+  going from `<version>-beta.N` to `<version>` needs a commit on `main` whose
+  message has the footer `Release-As: <version>`
   ([release-please: Release-As](https://github.com/googleapis/release-please#how-do-i-change-the-version-number)).
   An empty commit, as in the release-please README example, pushes nothing
   under `apps/desktop/`, so run `Desktop release PR` from the Actions tab
-  (`workflow_dispatch`) afterwards. The next release PR then proposes `0.2.0`.
+  (`workflow_dispatch`) afterwards. The next release PR then proposes `<version>`.
   Afterwards, betas continue from the next version. The
   [Release runbook](#release-runbook) lists every step.
 - **Correcting the changelog**: edit the merged PR's body with a
@@ -170,6 +170,10 @@ expires.
 
 ### Release runbook
 
+In these steps, `<version>` is the stable version being released,
+`<previous>` the stable version before it, `<latest-beta>` the newest beta
+version, and `<next-patch>` the patch version after `<version>`.
+
 #### Promoting a beta to stable
 
 release-please does not aggregate prereleases: the stable section it writes
@@ -179,7 +183,7 @@ lists only the commits since the last beta, so curate the notes before merging.
    promoted and wait for it to pass:
 
    ```sh
-   gh workflow run desktop-e2e.yml --ref main -f tag=desktop-v0.2.0-beta.N
+   gh workflow run desktop-e2e.yml --ref main -f tag=desktop-v<latest-beta>
    gh run watch --exit-status   # choose the Desktop live E2E run
    ```
 
@@ -195,7 +199,7 @@ lists only the commits since the last beta, so curate the notes before merging.
 
    ```sh
    git switch main && git pull --ff-only
-   git commit --allow-empty -m "chore(desktop): release 0.2.0" -m "Release-As: 0.2.0"
+   git commit --allow-empty -m "chore(desktop): release <version>" -m "Release-As: <version>"
    git push origin main
    gh workflow run desktop-release-please.yml --ref main
    ```
@@ -203,7 +207,7 @@ lists only the commits since the last beta, so curate the notes before merging.
 4. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
    it covers every change since the previous stable release, using the beta sections of
    `CHANGELOG.md`:
-   - its body becomes the release notes. Keep the header, the `## [0.2.0]`
+   - its body becomes the release notes. Keep the header, the `## [<version>]`
      heading and the footer, and replace the sections below the heading:
      `gh pr edit <number> --body-file notes.md`;
    - commit the same sections to the top of `apps/desktop/CHANGELOG.md` on
@@ -227,10 +231,10 @@ lists only the commits since the last beta, so curate the notes before merging.
      ([Submit and rollback](mac-app-store.md#submit-and-rollback));
    - run the tap's `update.yml`
      (`gh workflow run update.yml --repo Dstack-TEE/homebrew-private-ai`) or
-     wait for its daily schedule, then merge its `private-ai-proxy 0.2.0` pull
+     wait for its daily schedule, then merge its `private-ai-proxy <version>` pull
      request;
    - optionally, from a maintainer's npm login (OIDC cannot move dist-tags),
-     `npm dist-tag add private-ai-proxy@0.2.0 beta`
+     `npm dist-tag add private-ai-proxy@<version> beta`
      ([Dist-tags](../npm/README.md#dist-tags-and-version-ranges)).
 
 #### If the App Store job fails on the tag
@@ -244,13 +248,14 @@ release, the feeds and npm are unchanged.
   again.
 - Otherwise, or if App Store Connect already lists the build, keep the notes,
   delete the draft release and its tag, land the fix on `main` and release
-  `0.2.1` with the steps above. release-please has already recorded `0.2.0` on
-  `main` and does not tag it again. Its empty commit needs the footer `Release-As: 0.2.1`;
-  without it, prerelease versioning proposes `0.2.1-beta.1`.
+  `<next-patch>` with the steps above. release-please has already recorded
+  `<version>` on `main` and does not tag it again. Its empty commit needs the
+  footer `Release-As: <next-patch>`; without it, prerelease versioning proposes
+  `<next-patch>-beta.1`.
 
   ```sh
-  gh release view desktop-v0.2.0 --json body --jq .body > notes.md
-  gh release delete desktop-v0.2.0 --cleanup-tag --yes
+  gh release view desktop-v<version> --json body --jq .body > notes.md
+  gh release delete desktop-v<version> --cleanup-tag --yes
   ```
 
 #### Stopping a bad stable release
@@ -281,16 +286,16 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
    `gh release edit desktop-v<previous> --latest`.
 3. From a maintainer's npm login, since OIDC cannot move dist-tags:
    `npm dist-tag add private-ai-proxy@<previous> latest`. If `beta` was moved to
-   `0.2.0`, move it back with
-   `npm dist-tag add private-ai-proxy@<latest beta version> beta`.
-4. Do not merge the tap's `private-ai-proxy 0.2.0` pull request
+   `<version>`, move it back with
+   `npm dist-tag add private-ai-proxy@<latest-beta> beta`.
+4. Do not merge the tap's `private-ai-proxy <version>` pull request
    (`gh pr close <number> --repo Dstack-TEE/homebrew-private-ai`); if it is
    already merged, revert it
    (`gh pr revert <number> --repo Dstack-TEE/homebrew-private-ai`) and merge
    the revert. The tap reads the stable feed, so it then proposes nothing
    newer. Do not submit the App Store build, or withdraw it
    ([Submit and rollback](mac-app-store.md#submit-and-rollback)).
-5. Ship the fix as `0.2.1` with the promotion steps above.
+5. Ship the fix as `<next-patch>` with the promotion steps above.
 
 ## Updates by installation
 

@@ -781,6 +781,10 @@ jobs:
                 status=1
               fi
             fi
+            if pgrep -f -- "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >&2; then
+              echo 'A packaged app process survived the registration smoke.' >&2
+              status=1
+            fi
             if isolated "$app_bundle/Contents/MacOS/private-ai-proxy" --yes service stop >"$registration_stop_log" 2>&1; then
               rm -rf "$registration_home"
             else
@@ -794,7 +798,9 @@ jobs:
           }
           trap cleanup_registration EXIT
           isolated "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status | jq -e '.installed == false'
-          isolated "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >"$registration_log" 2>&1 &
+          # A simple command, not a function, so that $! is the app itself.
+          HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
+            "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >"$registration_log" 2>&1 &
           registration_pid=$!
           for _ in {1..100}; do
             [[ -L "$registration_home/.local/bin/private-ai-proxy" ]] && break
