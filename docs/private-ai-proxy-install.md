@@ -10,9 +10,7 @@ The CLI runs on macOS, Windows, and Linux, on arm64 and x64. Linux needs glibc
 
 The steps below install the stable release. `pap curl` and the key-custody
 flags (`--accept-subject` with `--accept-dstack-kms-root-public-key`) need
-0.2.0-beta.6 or later. Install that with
-`npm install --global private-ai-proxy@beta` or the install script's beta
-channel (`--channel beta`, or `-Channel beta` on Windows).
+0.2.0 or later.
 
 ## npm
 

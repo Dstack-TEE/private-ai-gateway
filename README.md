@@ -18,11 +18,11 @@ developer preview.
 Install the Private AI Proxy CLI (macOS, Linux, or Windows):
 
 ```bash
-npm install --global private-ai-proxy@beta
+npm install --global private-ai-proxy
 ```
 
-`pap curl` is in the 0.2 beta. The [install guide](docs/private-ai-proxy-install.md)
-covers the desktop app and the install scripts, which take `--channel beta`.
+The [install guide](docs/private-ai-proxy-install.md) covers Homebrew, the
+desktop app, and the install scripts.
 You also need system `curl`.
 
 Then call Chat Completions as usual. Replace `YOUR_API_KEY` and `MODEL_ID`
