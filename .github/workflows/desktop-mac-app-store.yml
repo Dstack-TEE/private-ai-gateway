@@ -13,6 +13,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -21,6 +22,7 @@ on:
       - main
     paths:
       - '.github/workflows/desktop-mac-app-store.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -51,11 +53,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
@@ -70,11 +67,8 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/build
           key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
           restore-keys: pap-mas-verify-v2-${{ runner.os }}-
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: |
-          xcodebuild -version
-          npm ci
+      - run: xcodebuild -version
+      - uses: ./.github/actions/desktop-node
       # Desktop Tauri (desktop-native.yml) runs `npm run check`, the release
       # script tests and cargo fmt for the same changes; this job covers what
       # only compiles on macOS.
@@ -173,11 +167,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
@@ -194,38 +183,16 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/*/*/build
           key: pap-mas-package-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
           restore-keys: pap-mas-package-v2-${{ runner.os }}-
-      - name: Install build targets and dependencies
-        working-directory: apps/desktop
+      - name: Install build targets
         run: |
           xcodebuild -version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          npm ci
-      # App Store versions are x.y.z, so a manual run packages its ref as the
-      # stable version it leads to, e.g. 0.2.0-beta.10 as 0.2.0.
+      - uses: ./.github/actions/desktop-node
       - name: Validate release request
         working-directory: apps/desktop
         env:
           UPLOAD: ${{ inputs.build_number != '' }}
-        run: |
-          node --input-type=module -e '
-            import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-            import semver from "semver";
-            import { validateAppStoreBuildNumber } from "./scripts/distribution.mjs";
-            import { appVersion, releaseChannel } from "./scripts/release-channel.mjs";
-            const upload = process.env.UPLOAD === "true";
-            const committed = appVersion();
-            const version = upload ? committed : [semver.major(committed), semver.minor(committed), semver.patch(committed)].join(".");
-            releaseChannel(version, "stable");
-            validateAppStoreBuildNumber(process.env.APPLE_APP_STORE_BUILD_NUMBER);
-            if (upload && process.env.GITHUB_REF !== "refs/tags/desktop-v" + version) {
-              throw new Error("App Store uploads run only from the release tag of the committed version");
-            }
-            if (version !== committed) {
-              const config = "src-tauri/tauri.conf.json";
-              writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), version }, null, 2) + "\n");
-            }
-            appendFileSync(process.env.GITHUB_ENV, "APP_VERSION=" + version + "\n");
-          '
+        run: node scripts/release-request.mjs app-store
       - name: Import App Store signing material
         shell: bash
         env: *app-store-signing

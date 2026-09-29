@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
+import { publishedRelease, releaseChannel } from "./release-channel.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -110,4 +111,28 @@ test("npm publishes the channel wrapper after its platform versions", async () =
   assert.doesNotMatch(JSON.stringify(publish.steps), /dist-tag add/);
 
   assert.ok(direct.jobs["publish-npm"]["timeout-minutes"] > npm.jobs.package["timeout-minutes"] + publish["timeout-minutes"]);
+});
+
+test("release-please drafts and tags the releases the release workflows build", async () => {
+  const config = JSON.parse(await readFile(path.join(repositoryRoot, "apps/desktop/release-please-config.json"), "utf8")).packages["apps/desktop"];
+  // Tags are <component>-v<version>, drafted for the release job to publish;
+  // prereleases are x.y.z-beta.n, the only form the beta channel accepts.
+  assert.equal(publishedRelease(`${config.component}-v0.3.0`, false).tag, "desktop-v0.3.0");
+  assert.deepEqual([config["include-component-in-tag"], config.draft, config["force-tag-creation"], config.versioning], [true, true, true, "prerelease"]);
+  assert.equal(releaseChannel(`0.3.0-${config["prerelease-type"]}`).channel, "beta");
+});
+
+test("desktop workflows keep their artifact names", async () => {
+  const uploads = [];
+  for (const workflow of ["desktop-native.yml", "desktop-mac-app-store.yml", "private-ai-proxy-npm.yml"]) {
+    for (const job of Object.values((await readWorkflow(workflow)).jobs)) {
+      uploads.push(...(job.steps ?? []).filter((step) => step.uses?.startsWith("actions/upload-artifact@")).map((step) => step.with.name));
+    }
+  }
+  assert.deepEqual(uploads, [
+    "desktop-sbom",
+    "desktop-package-${{ matrix.platform }}",
+    "private-ai-proxy-mac-app-store-${{ inputs.build_number || format('validate-only-{0}', github.run_number) }}",
+    "private-ai-proxy-npm-${{ steps.release.outputs.version }}",
+  ]);
 });

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { artifactName } from "./release-artifacts.mjs";
-import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
-import { aliases, aliasLinks, buildLinuxPackages, releaseVersionParts } from "./package-linux.mjs";
 import { chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { UNIVERSAL_MACOS_TARGET } from "./distribution.mjs";
+import { aliases, aliasLinks, buildLinuxPackages, releaseVersionParts } from "./package-linux.mjs";
+import { artifactName } from "./release-artifacts.mjs";
 
 export const binaries = ["private-ai-proxy", "private-ai-proxy-service", "private-ai-proxy-helper"];
 
@@ -100,20 +101,10 @@ async function main() {
   }
 }
 
-function parseArguments(arguments_) {
-  const values = new Map();
-  for (let index = 0; index < arguments_.length; index += 2) {
-    const key = arguments_[index];
-    const value = arguments_[index + 1];
-    if (!key?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: package-cli.mjs --platform <windows|macos|linux> --arch <x64|arm64|universal> --version <semver> --target-triple <triple> [--source <dir>] [--output <dir>]");
-    }
-    values.set(key.slice(2), value);
-  }
-  const platform = values.get("platform");
-  const arch = values.get("arch");
-  const version = values.get("version");
-  const targetTriple = values.get("target-triple");
+function parseArguments(args) {
+  const option = { type: "string" };
+  const { values } = parseArgs({ args, options: { platform: option, arch: option, version: option, "target-triple": option, source: option, output: option } });
+  const { platform, arch, version, "target-triple": targetTriple } = values;
   if (!["windows", "macos", "linux"].includes(platform)) {
     throw new Error(`Unsupported CLI package platform ${JSON.stringify(platform)}`);
   }
@@ -134,8 +125,8 @@ function parseArguments(arguments_) {
     arch,
     version,
     targetTriple,
-    source: path.resolve(values.get("source") ?? path.join(appRoot, "src-tauri/binaries")),
-    output: path.resolve(values.get("output") ?? path.join(appRoot, "release")),
+    source: path.resolve(values.source ?? path.join(appRoot, "src-tauri/binaries")),
+    output: path.resolve(values.output ?? path.join(appRoot, "release")),
   };
 }
 

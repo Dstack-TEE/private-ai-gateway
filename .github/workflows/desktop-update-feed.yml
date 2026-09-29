@@ -35,14 +35,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: ./.github/actions/desktop-node
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install release tooling
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts
+          ignore-scripts: true
       # The script is idempotent: it re-reads both feeds and uploads only what
       # is still behind. After a transient GitHub API or asset upload failure,
       # use "Re-run failed jobs" on the release run, which also runs the npm

@@ -5,6 +5,9 @@ export const MAC_APP_STORE_DISTRIBUTION = "mac-app-store";
 export const MAC_APP_STORE_SIDECARS = Object.freeze([
   "private-ai-proxy-service",
 ]);
+// Mac App Store builds, and the CLI packaged from them, are Universal.
+export const UNIVERSAL_MACOS_TARGET = "universal-apple-darwin";
+export const MACOS_TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 export function distribution(value = process.env.PAP_DISTRIBUTION) {
   const channel = value?.trim() || DIRECT_DISTRIBUTION;

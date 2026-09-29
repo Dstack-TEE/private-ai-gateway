@@ -17,6 +17,7 @@ on:
       - '.github/workflows/desktop-mac-app-store.yml'
       - '.github/workflows/desktop-update-feed.yml'
       - '.github/workflows/private-ai-proxy-npm.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -27,6 +28,7 @@ on:
       - '.github/workflows/desktop-native.yml'
       - '.github/workflows/desktop-update-feed.yml'
       - '.github/workflows/private-ai-proxy-npm.yml'
+      - '.github/actions/desktop-node/**'
       - 'apps/desktop/**'
       - 'crates/aci-protocol/**'
       - 'crates/aci-verify/**'
@@ -52,11 +54,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: rust
         with:
@@ -105,9 +102,7 @@ jobs:
           tar -xzf "$directory/$asset" -C "$directory" nfpm
           rm "$directory/$asset"
           echo "$directory" >> "$GITHUB_PATH"
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci
+      - uses: ./.github/actions/desktop-node
       - name: Verify renderer
         working-directory: apps/desktop
         run: |
@@ -223,45 +218,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: ./.github/actions/desktop-node
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install release tooling
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts
+          ignore-scripts: true
       - id: version
         name: Resolve the committed version and release channel
         working-directory: apps/desktop
         env:
           GH_TOKEN: ${{ github.token }}
           PACKAGE_ONLY: ${{ inputs.package_only }}
-        run: |
-          set -euo pipefail
-          version="$(node --input-type=module -e 'import { appVersion } from "./scripts/release-channel.mjs"; process.stdout.write(appVersion())')"
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          # Tag pushes (through desktop-release.yml) are releases: release-please
-          # creates them on main at the commit that sets their version. A
-          # manual run at a tag builds test packages.
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
-            if [[ "$GITHUB_REF_NAME" != "desktop-v$version" || "$PACKAGE_ONLY" == true ]]; then
-              echo "$GITHUB_REF_NAME must fully verify the committed version $version" >&2
-              exit 1
-            fi
-            comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_REF_NAME...main" --jq .status)"
-            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
-              echo "$GITHUB_REF_NAME is not contained in main" >&2
-              exit 1
-            fi
-            channel="$(node --input-type=module -e 'import { versionRelease } from "./scripts/release-channel.mjs"; process.stdout.write(versionRelease(process.argv[1]).channel)' "$version")"
-            printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
-            # macOS build numbers must increase across every upload (TN2420).
-            # Desktop release runs once per release tag; like Xcode Cloud's
-            # next build number, its count starts above the hand-numbered
-            # builds 1-17. Re-runs keep the number.
-            printf 'app_store_build_number=%s\n' "$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_OUTPUT"
-          fi
+        run: node scripts/release-request.mjs desktop
 
   # Stable releases also upload the App Store build, in parallel with the
   # Direct packages; the release job publishes only after both succeed. The
@@ -308,11 +274,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: rust
         with:
@@ -327,9 +288,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils
       - *install-nfpm
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci
+      - uses: ./.github/actions/desktop-node
       - name: Import optional Windows code-signing certificate
         if: runner.os == 'Windows' && env.RELEASE_CHANNEL != ''
         shell: pwsh
@@ -376,7 +335,7 @@ jobs:
         if: env.RELEASE_CHANNEL != ''
         working-directory: apps/desktop
         shell: bash
-        env:
+        env: &updater-signing
           TAURI_SIGNING_PRIVATE_KEY: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
@@ -438,9 +397,7 @@ jobs:
       - name: Build non-macOS package
         if: runner.os != 'macOS'
         working-directory: apps/desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        env: *updater-signing
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
@@ -449,9 +406,7 @@ jobs:
       - name: Package Linux desktop
         if: runner.os == 'Linux'
         working-directory: apps/desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        env: *updater-signing
         run: node scripts/package-linux.mjs "$PAP_BUNDLE_DIR" "$VERSION" '${{ matrix.cli_arch }}' release
 
       - name: Verify Windows Authenticode signatures
@@ -527,7 +482,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$VERSION"
           target_triple="$(rustc -vV | sed -n 's/^host: //p')"
           test -n "$target_triple"
           source_args=()
@@ -540,7 +494,7 @@ jobs:
           node scripts/package-cli.mjs \
             --platform '${{ matrix.cli_platform }}' \
             --arch '${{ matrix.cli_arch }}' \
-            --version "$version" \
+            --version "$VERSION" \
             --target-triple "$target_triple" \
             --output release "${source_args[@]}"
 
@@ -549,8 +503,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$VERSION"
-          base="private-ai-proxy-cli-${version}-${{ matrix.cli_platform }}-${{ matrix.cli_arch }}"
+          base="private-ai-proxy-cli-${VERSION}-${{ matrix.cli_platform }}-${{ matrix.cli_arch }}"
           scratch="$(mktemp -d "$RUNNER_TEMP/cli-archive.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           if [[ '${{ matrix.cli_platform }}' == windows ]]; then
@@ -559,7 +512,7 @@ jobs:
           else
             tar -x -z -f "release/${base}.tar.gz" -C "$scratch"
           fi
-          node scripts/cli-package-smoke.mjs "$scratch/$base" "$version"
+          node scripts/cli-package-smoke.mjs "$scratch/$base" "$VERSION"
 
       - name: Verify Windows installer startup gate
         if: runner.os == 'Windows'
@@ -578,7 +531,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="$VERSION"
           scratch="$(mktemp -d "$RUNNER_TEMP/linux-native.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
           extract() {
@@ -589,13 +541,13 @@ jobs:
             esac
           }
           for suffix in deb rpm pkg.tar.zst; do
-            extract "release/private-ai-proxy-cli-${version}-linux-${{ matrix.cli_arch }}.$suffix" "cli-$suffix"
-            node scripts/cli-package-smoke.mjs "$scratch/cli-$suffix/usr/libexec/private-ai-proxy" "$version" "$scratch/cli-$suffix/usr/bin"
+            extract "release/private-ai-proxy-cli-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "cli-$suffix"
+            node scripts/cli-package-smoke.mjs "$scratch/cli-$suffix/usr/libexec/private-ai-proxy" "$VERSION" "$scratch/cli-$suffix/usr/bin"
             test "$(readlink "$scratch/cli-$suffix/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
             test -f "$scratch/cli-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
           done
-          extract "release/private-ai-proxy-${version}-linux-${{ matrix.cli_arch }}.pkg.tar.zst" desktop-arch
-          expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-linux.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$version")"
+          extract "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.pkg.tar.zst" desktop-arch
+          expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-linux.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$VERSION")"
           grep -Fx "pkgver = $expected_pkgver" "$scratch/cli-pkg.tar.zst/.PKGINFO"
           grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop-arch/.PKGINFO"
           grep -Fx "pkgver = $expected_pkgver" "$scratch/desktop-arch/.PKGINFO"
@@ -631,9 +583,10 @@ jobs:
         if: runner.os == 'macOS'
         working-directory: apps/desktop
         run: |
-          cargo test --release --locked --package private-ai-proxy-core --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
-          cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib
-          cargo test --release --locked --package private-ai-proxy-runtime --target "$(rustc -vV | sed -n 's/^host: //p')" --lib -- --ignored legacy_keychain_import_round_trip
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo test --release --locked --package private-ai-proxy-core --target "$host" --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --target "$host" --lib
+          cargo test --release --locked --package private-ai-proxy-runtime --target "$host" --lib -- --ignored legacy_keychain_import_round_trip
 
       # verify-windows-x64 already tested these libraries on x64.
       - name: Test Windows desktop libraries
@@ -733,8 +686,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          packages=("release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.deb")
-          package=$(dpkg-deb -f "${packages[0]}" Package)
+          deb="release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.deb"
+          package=$(dpkg-deb -f "$deb" Package)
           if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
             echo 'Refusing to replace an existing installation'
             exit 1
@@ -758,8 +711,8 @@ jobs:
           stable_url="$(curl -fsSL https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-stable/latest.json | jq -er --arg target "linux-$(uname -m)-deb" '.platforms[$target].url')"
           curl -fsSL -o "$scratch/stable.deb" "$stable_url"
           sudo apt-get install -y "$scratch/stable.deb"
-          sudo dpkg -i "${packages[0]}"
-          test "$(dpkg-query -W -f='${Version}' "$package")" = "$(dpkg-deb -f "${packages[0]}" Version)"
+          sudo dpkg -i "$deb"
+          test "$(dpkg-query -W -f='${Version}' "$package")" = "$(dpkg-deb -f "$deb" Version)"
           node scripts/packaged-sidecars-smoke.mjs /usr/bin
           export TAURI_CHECK_KEYRING_HOME="$scratch"
           export XDG_RUNTIME_DIR="$scratch/runtime"
@@ -772,7 +725,7 @@ jobs:
             cargo test --release --locked --package private-ai-proxy-runtime --lib -- --ignored legacy_keychain_import_round_trip
           '
           # Install again over the running app and backend, as later in-app updates do.
-          xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin sudo dpkg -i "${packages[0]}"
+          xvfb-run -a dbus-run-session -- node scripts/native-backend-smoke.mjs /usr/bin sudo dpkg -i "$deb"
       - name: Stage and inspect macOS package
         if: runner.os == 'macOS'
         working-directory: apps/desktop
@@ -784,9 +737,6 @@ jobs:
           dmg="$(find "$PAP_BUNDLE_DIR/dmg" -type f -name '*.dmg' -print -quit)"
           test -d "$app_bundle"
           test -f "$dmg"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-service"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-helper"
           test -f "$app_bundle/Contents/Resources/Assets.car"
           test -f "$app_bundle/Contents/Resources/icon.icns"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
@@ -809,33 +759,33 @@ jobs:
           registration_log="$RUNNER_TEMP/private-ai-proxy-registration.log"
           registration_stop_log="$RUNNER_TEMP/private-ai-proxy-registration-stop.log"
           registration_pid=
+          isolated() { HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" "$@"; }
+          # Waits up to five seconds for the packaged app to exit.
+          registration_exited() {
+            for _ in {1..50}; do
+              kill -0 "$registration_pid" 2>/dev/null || return 0
+              sleep 0.1
+            done
+            return 1
+          }
           cleanup_registration() {
             local status=$?
             trap - EXIT
-            if [[ -n "$registration_pid" ]] && kill -0 "$registration_pid" 2>/dev/null; then
-              kill -TERM "$registration_pid" 2>/dev/null || true
-              for _ in {1..50}; do
-                kill -0 "$registration_pid" 2>/dev/null || break
-                sleep 0.1
-              done
-              if kill -0 "$registration_pid" 2>/dev/null; then
-                kill -KILL "$registration_pid" 2>/dev/null || true
-                for _ in {1..50}; do
-                  kill -0 "$registration_pid" 2>/dev/null || break
-                  sleep 0.1
-                done
-              fi
-            fi
             if [[ -n "$registration_pid" ]]; then
-              if kill -0 "$registration_pid" 2>/dev/null; then
+              kill -TERM "$registration_pid" 2>/dev/null || true
+              registration_exited || kill -KILL "$registration_pid" 2>/dev/null || true
+              if registration_exited; then
+                wait "$registration_pid" 2>/dev/null || true
+              else
                 echo 'Packaged app did not exit during registration smoke cleanup.' >&2
                 status=1
-              else
-                wait "$registration_pid" 2>/dev/null || true
               fi
             fi
-            if HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-              "$app_bundle/Contents/MacOS/private-ai-proxy" --yes service stop >"$registration_stop_log" 2>&1; then
+            if pgrep -f -- "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >&2; then
+              echo 'A packaged app process survived the registration smoke.' >&2
+              status=1
+            fi
+            if isolated "$app_bundle/Contents/MacOS/private-ai-proxy" --yes service stop >"$registration_stop_log" 2>&1; then
               rm -rf "$registration_home"
             else
               echo "Packaged backend cleanup failed; isolated state retained at $registration_home" >&2
@@ -847,10 +797,8 @@ jobs:
             return "$status"
           }
           trap cleanup_registration EXIT
-          registration_before="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
-          node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== false) process.exit(1)' \
-            <<<"$registration_before"
+          isolated "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status | jq -e '.installed == false'
+          # A simple command, not a function, so that $! is the app itself.
           HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
             "$app_bundle/Contents/MacOS/private-ai-proxy-desktop" >"$registration_log" 2>&1 &
           registration_pid=$!
@@ -862,16 +810,12 @@ jobs:
             fi
             sleep 0.1
           done
-          test -L "$registration_home/.local/bin/pap"
-          test "$(readlink "$registration_home/.local/bin/pap")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
-          test -L "$registration_home/.local/bin/aci"
-          test "$(readlink "$registration_home/.local/bin/aci")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
-          test -L "$registration_home/.local/bin/private-ai-proxy"
-          test "$(readlink "$registration_home/.local/bin/private-ai-proxy")" = "$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
-          registration_after="$(HOME="$registration_home" PRIVATE_AI_PROXY_HOME="$registration_home" \
-            "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status)"
-          node -e 'const value = JSON.parse(require("node:fs").readFileSync(0, "utf8")); if (value.installed !== true) process.exit(1)' \
-            <<<"$registration_after"
+          cli="$(realpath "$app_bundle/Contents/MacOS/private-ai-proxy")"
+          for command in pap aci private-ai-proxy; do
+            test -L "$registration_home/.local/bin/$command"
+            test "$(readlink "$registration_home/.local/bin/$command")" = "$cli"
+          done
+          isolated "$app_bundle/Contents/MacOS/private-ai-proxy" --json cli status | jq -e '.installed == true'
           kill -0 "$registration_pid"
           cleanup_registration
           hdiutil verify "$dmg"

@@ -76,11 +76,8 @@ increase with every upload, across versions
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
 Releases number it `100 + <Desktop release run number>` (see
 [Release orchestration](distribution.md#release-orchestration)).
-`Desktop release` runs only for `desktop-v*` tags, so its run number counts
-beta and stable release tags alike; the `0.2.0-beta.1` and `0.2.0-beta.2` tags
-used runs 4 and 5. Only stable tags upload, so the first upload is `100 +` the
-run number of the first stable tag, at least 106, and builds skip the numbers
-of beta tags. There is no manual upload path; a new
+`Desktop release` runs only for `desktop-v*` tags and only stable tags upload,
+so builds skip the numbers of beta tags. There is no manual upload path; a new
 build number needs a new release tag. ASC confirms uniqueness and ordering; the
 repository validates syntax only. For a local unsigned build of a stable
 version on macOS:
@@ -224,8 +221,9 @@ the Direct updater or install replacement code as a MAS rollback mechanism.
 
 Run from `apps/desktop`: focused Agent contract tests; `cargo test --locked
 --workspace`; workspace fmt/clippy; core, runtime and desktop shell clippy and tests
-with the `mac-app-store` feature; `npm run check` (TypeScript and Agent
-Integrations tests); `npm run test:release` (includes MAS package tests); and
+with the `mac-app-store` feature; `npm run check` (TypeScript and the
+renderer's Node tests, Agent Integrations among them); `npm run test:release`
+(includes MAS package tests); and
 `git diff --check`. In CI, `Desktop Tauri` (`desktop-native.yml`) runs fmt, the
 workspace clippy and tests, `npm run check` and `npm run test:release` on
 Linux; `Desktop Mac App Store` runs the `mac-app-store` feature clippy and
