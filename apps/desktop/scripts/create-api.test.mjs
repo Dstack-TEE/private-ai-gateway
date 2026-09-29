@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDesktopApi } from "./create-api.ts";
+import { createDesktopApi } from "../src/renderer/backends/create-api.ts";
 
 test("the API takes the platform's own capabilities and presents a sign-in the backend began", async () => {
   const calls = [];

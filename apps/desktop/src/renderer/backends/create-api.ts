@@ -1,4 +1,4 @@
-// Node runs `npm run test:renderer` on this file as is, so a value import names its file.
+// Node runs `npm run test:state` on this file as is, so a value import names its file.
 import { AGENTS_CHANGED_EVENT, APPEARANCE_EVENT, CLIENT_KEY_CHANGED_EVENT, LAUNCH_PREFERENCES_EVENT, SETTINGS_RESET_EVENT, STATE_EVENT } from "../../shared/contracts.generated.ts";
 import type { DesktopApi, DistributionCapabilities, LoginPresentation, UiEvent, UiEventPayloads, UiMethod, UiRequests, UiResponses } from "../../shared/contracts";
 
@@ -47,7 +47,6 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
   const call = transport.call.bind(transport);
   const subscribe = transport.subscribe.bind(transport);
   return {
-    ...platform,
     startBackendService: () => call("start_backend_service"),
     getAppearance: () => call("get_appearance"),
     setAppearance: (appearance) => call("set_appearance", { appearance }),
@@ -98,5 +97,6 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
     setAgentConnection: (agentId, connect) => call("set_agent_connection", { agentId, connect }),
     agentServiceRunning: (agentId) => call("agent_service_running", { agentId }),
     stopAgentService: (agentId) => call("stop_agent_service", { agentId }),
+    ...platform,
   };
 }
