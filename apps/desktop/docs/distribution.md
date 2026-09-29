@@ -87,12 +87,8 @@ The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
 is at most three integers and 18 characters
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
-The run number increases only on release tags, and a re-run keeps it. Runs
-1–3 were manual runs of the workflow file, and the `0.2.0-beta.1` and
-`0.2.0-beta.2` tags used runs 4 and 5. Beta tags use a run number but upload
-nothing, so the first App Store upload is `100 +` the run number of the first
-stable tag, at least 106. The offset
-starts above the hand-numbered builds 1–17, as Xcode Cloud's
+The run number increases only on release tags, and a re-run keeps it. Beta
+tags use a run number but upload nothing. The offset starts above the hand-numbered builds 1–17, as Xcode Cloud's
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
 
@@ -205,7 +201,7 @@ lists only the commits since the last beta, so curate the notes before merging.
    ```
 
 4. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
-   it covers every change since 0.1.6, using the beta sections of
+   it covers every change since the previous stable release, using the beta sections of
    `CHANGELOG.md`:
    - its body becomes the release notes. Keep the header, the `## [0.2.0]`
      heading and the footer, and replace the sections below the heading:
@@ -271,8 +267,8 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
    gh release upload desktop-updates-beta feeds/beta/latest.json --clobber
    ```
 
-   Without the saved copy, the `latest.json` assets of `desktop-v0.1.6` and
-   of the latest beta tag are the previous `latest.json` files, but the
+   Without the saved copy, the `latest.json` assets of the previous stable
+   tag and of the latest beta tag are the previous `latest.json` files, but the
    per-platform files existed only in the stable feed. To find the latest
    beta tag:
 
@@ -281,9 +277,10 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
      --jq '[.[] | select(.isPrerelease and (.tagName | startswith("desktop-v")))][0].tagName'
    ```
 
-2. Make 0.1.6 the Latest release again: `gh release edit desktop-v0.1.6 --latest`.
+2. Make the previous stable release Latest again:
+   `gh release edit desktop-v<previous> --latest`.
 3. From a maintainer's npm login, since OIDC cannot move dist-tags:
-   `npm dist-tag add private-ai-proxy@0.1.6 latest`. If `beta` was moved to
+   `npm dist-tag add private-ai-proxy@<previous> latest`. If `beta` was moved to
    `0.2.0`, move it back with
    `npm dist-tag add private-ai-proxy@<latest beta version> beta`.
 4. Do not merge the tap's `private-ai-proxy 0.2.0` pull request
