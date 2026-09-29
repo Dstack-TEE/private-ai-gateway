@@ -136,4 +136,26 @@ mod tests {
         assert_eq!(url_host("[::1]"), "[::1]");
         assert_eq!(url_host("studio.local"), "studio.local");
     }
+
+    /// Unusual addresses are written in `url`'s canonical form: the default
+    /// port is left out and IPv6 literals are compressed and lowercased.
+    #[test]
+    fn endpoints_are_canonical_urls() {
+        let endpoint = |address: &str, port, client_host: Option<&str>| {
+            let mut config = config(address, true, client_host);
+            config.port = port;
+            resolve(config).unwrap().endpoint
+        };
+        assert_eq!(endpoint("127.0.0.1", 4190, None), "http://127.0.0.1:4190");
+        assert_eq!(endpoint("127.0.0.1", 80, None), "http://127.0.0.1");
+        assert_eq!(endpoint("0:0:0:0:0:0:0:1", 4190, None), "http://[::1]:4190");
+        assert_eq!(
+            endpoint("::", 4190, Some("FD00:0:0:0:0:0:0:2")),
+            "http://[fd00::2]:4190"
+        );
+        assert_eq!(
+            endpoint("0.0.0.0", 8080, Some("Studio.Local")),
+            "http://studio.local:8080"
+        );
+    }
 }
