@@ -5,9 +5,10 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { releaseAssetNames } from "./release-artifacts.mjs";
-import { downloadSection, withDownloads } from "./release-notes.mjs";
+import { releaseSections, withReleaseSections } from "./release-notes.mjs";
 
 const repository = "Dstack-TEE/private-ai-gateway";
+const changelog = "## [0.3.0](https://example.test/compare) (2026-09-29)\n\n### Features\n\n* **desktop:** example\n";
 
 async function withRelease(version, channel, run) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pap-release-notes-"));
@@ -20,12 +21,12 @@ async function withRelease(version, channel, run) {
   }
 }
 
-test("download links follow the changelog in build-matrix order", async () => {
+test("download links lead the notes and integrity details close them", async () => {
   await withRelease("0.3.0", "stable", async (directory) => {
-    const changelog = "## [0.3.0](https://example.test/compare) (2026-09-29)\n\n### Features\n\n* **desktop:** example\n";
-    const notes = withDownloads(changelog, await downloadSection(directory, repository, "a".repeat(40)));
-    assert.ok(notes.startsWith(changelog.trimEnd()));
-    assert.ok(notes.indexOf("### Features") < notes.indexOf("## Downloads"));
+    const notes = withReleaseSections(changelog, await releaseSections(directory, repository, "a".repeat(40)));
+    assert.ok(notes.startsWith("<!-- desktop-downloads -->\n\n## Downloads\n"));
+    assert.ok(notes.indexOf("</details>") < notes.indexOf(changelog.trim()));
+    assert.ok(notes.indexOf(changelog.trim()) < notes.indexOf("## Integrity and updates"));
     for (const [earlier, later] of [["macOS Apple Silicon", "macOS Intel"], ["macOS Intel", "Windows x64"], ["Windows ARM64", "Linux x64"], ["Linux x64", "Linux ARM64"]]) {
       assert.ok(notes.indexOf(`| ${earlier} |`) < notes.indexOf(`| ${later} |`), `${earlier} before ${later}`);
     }
@@ -43,27 +44,31 @@ test("download links follow the changelog in build-matrix order", async () => {
   });
 });
 
-test("a rerun replaces the section it added", async () => {
+test("a rerun replaces the sections, including one appended by an earlier layout", async () => {
   await withRelease("0.3.0", "stable", async (directory) => {
-    const once = withDownloads("Changelog\n", await downloadSection(directory, repository, "a".repeat(40)));
-    const again = withDownloads(once, await downloadSection(directory, repository, "b".repeat(40)));
+    const once = withReleaseSections(changelog, await releaseSections(directory, repository, "a".repeat(40)));
+    const again = withReleaseSections(once, await releaseSections(directory, repository, "b".repeat(40)));
     assert.equal(again.match(/## Downloads/g)?.length, 1);
+    assert.equal(again.match(/## Integrity and updates/g)?.length, 1);
+    assert.equal(again.split(changelog.trim()).length, 2);
     assert.match(again, /Build commit: \[`bbbbbbb`\]/);
-    assert.ok(again.startsWith("Changelog\n\n"));
+    // v0.3.0's first edit appended both parts in one block after the changelog.
+    const appended = `${changelog}\n<!-- desktop-downloads -->\n\n## Downloads\n\n## Integrity and updates\n\n<!-- /desktop-downloads -->\n`;
+    assert.equal(withReleaseSections(appended, await releaseSections(directory, repository, "a".repeat(40))), once);
   });
 });
 
 test("beta releases, which skip the App Store, do not link it", async () => {
   await withRelease("0.3.0-beta.1", "beta", async (directory) => {
-    const section = await downloadSection(directory, repository, "c".repeat(40));
-    assert.match(section, /desktop-v0\.3\.0-beta\.1\/private-ai-proxy-0\.3\.0-beta\.1-macos-x64\.dmg/);
-    assert.doesNotMatch(section, /Mac App Store/);
+    const { downloads } = await releaseSections(directory, repository, "c".repeat(40));
+    assert.match(downloads, /desktop-v0\.3\.0-beta\.1\/private-ai-proxy-0\.3\.0-beta\.1-macos-x64\.dmg/);
+    assert.doesNotMatch(downloads, /Mac App Store/);
   });
 });
 
-test("the section needs a repository and the full build commit", async () => {
+test("the sections need a repository and the full build commit", async () => {
   await withRelease("0.3.0", "stable", async (directory) => {
-    await assert.rejects(downloadSection(directory, "not a repository", "a".repeat(40)), /repository/);
-    await assert.rejects(downloadSection(directory, repository, "abc1234"), /40-character/);
+    await assert.rejects(releaseSections(directory, "not a repository", "a".repeat(40)), /repository/);
+    await assert.rejects(releaseSections(directory, repository, "abc1234"), /40-character/);
   });
 });

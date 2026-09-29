@@ -939,8 +939,8 @@ jobs:
           set -euo pipefail
           test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
           gh release upload "$TAG" release/* --clobber
-      # Download links, the App Store link for stable versions, and integrity
-      # details follow the changelog; a rerun replaces them.
+      # Download links (and the App Store for stable versions) go above the
+      # changelog and integrity details below it; a rerun replaces both.
       - name: Add download links to the release notes
         env:
           GH_TOKEN: ${{ github.token }}
