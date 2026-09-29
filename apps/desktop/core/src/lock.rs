@@ -8,7 +8,7 @@
 //! rename and manifest update.
 
 use std::{
-    fmt, fs, io,
+    fs, io,
     path::Path,
     time::{Duration, Instant},
 };
@@ -81,16 +81,9 @@ pub fn instance_within(data_dir: &Path, wait: Duration) -> io::Result<Option<Ins
 }
 
 /// Failure to open or acquire the transaction lock, separate from operation errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("Cannot lock the agent configurations: {0}")]
 pub struct ApplyLockError(io::Error);
-
-impl fmt::Display for ApplyLockError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cannot lock the agent configurations: {}", self.0)
-    }
-}
-
-impl std::error::Error for ApplyLockError {}
 
 impl From<ApplyLockError> for String {
     fn from(error: ApplyLockError) -> Self {

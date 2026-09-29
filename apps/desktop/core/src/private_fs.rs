@@ -230,16 +230,9 @@ fn replace(
 }
 
 /// [`write_atomic`] found other content than expected: someone else wrote the file.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("the file changed on disk since it was read")]
 pub struct ChangedOnDisk;
-
-impl std::fmt::Display for ChangedOnDisk {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the file changed on disk since it was read")
-    }
-}
-
-impl std::error::Error for ChangedOnDisk {}
 
 impl ChangedOnDisk {
     pub fn is(error: &io::Error) -> bool {

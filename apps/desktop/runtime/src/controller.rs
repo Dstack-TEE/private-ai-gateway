@@ -207,20 +207,13 @@ impl EndpointRuntime {
 }
 
 /// Why the backend did not launch.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, thiserror::Error)]
 pub enum LaunchError {
     /// Another backend owns the instance lock.
+    #[error("Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying.")]
     AlreadyRunning,
+    #[error("{0}")]
     Failed(String),
-}
-
-impl std::fmt::Display for LaunchError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::AlreadyRunning => "Another Private AI Proxy instance is already running. Stop the existing private-ai-proxy-service process before retrying.",
-            Self::Failed(message) => message,
-        })
-    }
 }
 
 impl From<String> for LaunchError {

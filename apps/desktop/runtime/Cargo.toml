@@ -37,6 +37,7 @@ mime = { version = "0.3", optional = true }
 rust-embed = { version = "8", features = ["mime-guess"], optional = true }
 sha2 = "0.11"
 subtle = "2.6"
+thiserror = "2"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["limit"] }

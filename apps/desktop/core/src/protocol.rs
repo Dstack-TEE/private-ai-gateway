@@ -9,7 +9,7 @@
 //!   `{"error": Error}` with the status of its [`ErrorCode`].
 //! - `GET /api/events` streams server-sent `ui_api::Event`s, starting with a
 //!   full state snapshot.
-use std::{fmt, path::Path};
+use std::path::Path;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -414,8 +414,10 @@ const BUSY: &str = "Another operation is in progress. Retry after it completes."
 
 /// An API error: a stable code and a message authored for the user. Other
 /// failures convert from their text into [`ErrorCode::OperationFailed`], which
-/// never carries OS, SQL or provider details.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// never carries OS, SQL or provider details. It displays as the message; the
+/// code travels beside it in every serialized error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
@@ -454,15 +456,6 @@ impl Error {
         Self::new(ErrorCode::OperationFailed, OPERATION_FAILED)
     }
 }
-
-/// The message; the code travels beside it in every serialized error.
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl From<String> for Error {
     fn from(_: String) -> Self {
