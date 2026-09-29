@@ -237,31 +237,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PACKAGE_ONLY: ${{ inputs.package_only }}
-        run: |
-          set -euo pipefail
-          version="$(node --input-type=module -e 'import { appVersion } from "./scripts/release-channel.mjs"; process.stdout.write(appVersion())')"
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          # Tag pushes (through desktop-release.yml) are releases: release-please
-          # creates them on main at the commit that sets their version. A
-          # manual run at a tag builds test packages.
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
-            if [[ "$GITHUB_REF_NAME" != "desktop-v$version" || "$PACKAGE_ONLY" == true ]]; then
-              echo "$GITHUB_REF_NAME must fully verify the committed version $version" >&2
-              exit 1
-            fi
-            comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_REF_NAME...main" --jq .status)"
-            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
-              echo "$GITHUB_REF_NAME is not contained in main" >&2
-              exit 1
-            fi
-            channel="$(node --input-type=module -e 'import { versionRelease } from "./scripts/release-channel.mjs"; process.stdout.write(versionRelease(process.argv[1]).channel)' "$version")"
-            printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
-            # macOS build numbers must increase across every upload (TN2420).
-            # Desktop release runs once per release tag; like Xcode Cloud's
-            # next build number, its count starts above the hand-numbered
-            # builds 1-17. Re-runs keep the number.
-            printf 'app_store_build_number=%s\n' "$((GITHUB_RUN_NUMBER + 100))" >> "$GITHUB_OUTPUT"
-          fi
+        run: node scripts/release-request.mjs desktop
 
   # Stable releases also upload the App Store build, in parallel with the
   # Direct packages; the release job publishes only after both succeed. The

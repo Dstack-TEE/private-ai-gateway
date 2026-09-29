@@ -45,34 +45,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PUBLISH: ${{ inputs.publish }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main && "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]]; then
-            echo "npm publication must run from main or the matching release tag" >&2
-            exit 1
-          fi
-          metadata="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName)"
-          node --input-type=module - "$metadata" "$RELEASE_TAG" "$GITHUB_OUTPUT" <<'NODE'
-          import { appendFileSync } from "node:fs";
-          import semver from "./apps/desktop/node_modules/semver/index.js";
-          import { validateNpmVersion } from "./apps/desktop/scripts/package-npm.mjs";
-
-          const [metadataJson, requestedTag, output] = process.argv.slice(2);
-          const metadata = JSON.parse(metadataJson);
-          if (metadata.isDraft || metadata.tagName !== requestedTag || !requestedTag.startsWith("desktop-v")) {
-            throw new Error("release_tag must name a published desktop-v* GitHub release");
-          }
-          const version = validateNpmVersion(requestedTag.slice("desktop-v".length));
-          const distTag = semver.prerelease(version) ? "beta" : "latest";
-          appendFileSync(output, `version=${version}\ndist_tag=${distTag}\n`);
-          NODE
-          if [[ "$PUBLISH" == true ]]; then
-            comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$RELEASE_TAG...main" --jq .status)"
-            if [[ "$comparison" != ahead && "$comparison" != identical ]]; then
-              echo "$RELEASE_TAG is not contained in main" >&2
-              exit 1
-            fi
-          fi
+        run: node apps/desktop/scripts/release-request.mjs npm
       - name: Download and verify CLI release assets
         env:
           GH_TOKEN: ${{ github.token }}
