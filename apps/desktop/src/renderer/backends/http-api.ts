@@ -52,7 +52,7 @@ const unavailable = async (): Promise<never> => {
 
 const platform: UiPlatform = {
   showEditMenu: async () => undefined,
-  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap", { method: "GET" })).version,
+  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap")).version,
   setUpdateChannel: async (channel) => channel,
   // The backend's own installation owns updates; the browser only announces them.
   prepareUpdate: async (): Promise<UpdateInfo> => {
@@ -116,7 +116,7 @@ const platform: UiPlatform = {
 async function check(): Promise<boolean> {
   // Confirmed sessions are remembered until they end, so navigating costs no request.
   if (signedIn) return true;
-  const response = await fetch("/api/bootstrap", { cache: "no-store", credentials: "same-origin" });
+  const response = await send("/api/bootstrap");
   // Signed-in requests are never throttled, so 429 also means there is no session.
   if (response.status === 401 || response.status === 429) return false;
   await read<WebBootstrap>(response);
@@ -126,21 +126,13 @@ async function check(): Promise<boolean> {
 }
 
 async function signIn(password: string): Promise<void> {
-  const response = await fetch("/api/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-  if (response.ok) return;
-  const payload: unknown = await response.json().catch(() => undefined);
-  throw errorFrom(payload);
+  const response = await send("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
 }
 
 /** Ends this browser's session on the server. */
 async function signOut(): Promise<void> {
-  await answer(await fetch("/api/session", { method: "DELETE", cache: "no-store", credentials: "same-origin" }));
+  await answer(await send("/api/session", { method: "DELETE" }));
   endSession(signedOut);
 }
 
@@ -153,20 +145,20 @@ function endSession(notice: string): void {
 }
 
 async function rpc<M extends UiMethod>(method: M, ...[params]: UiParams<M>): Promise<UiResponses[M]> {
-  const response = await request<{ result: UiResponses[M] }>(
-    `/api/rpc/${encodeURIComponent(method)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params ?? {}),
-    },
-  );
-  return response.result;
+  const { result } = await request<{ result: UiResponses[M] }>(`/api/rpc/${encodeURIComponent(method)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params ?? {}),
+  });
+  return result;
 }
 
 /** Answers are `{"result": …}` in the shapes the generated contracts declare. */
-async function request<T>(path: string, init: RequestInit): Promise<T> {
-  return read(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return read(await send(path, init));
+}
+
+/** Requests carry the session cookie and are never cached. */
+function send(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(path, { ...init, cache: "no-store", credentials: "same-origin" });
 }
 
 async function read<T>(response: Response): Promise<T> {
@@ -231,7 +223,7 @@ function readEvents(): EventSource {
 async function resumeEvents(closed: EventSource): Promise<void> {
   if (events !== closed) return;
   try {
-    await request("/api/bootstrap", { method: "GET" });
+    await request("/api/bootstrap");
   } catch {
     if (events === closed) window.setTimeout(() => void resumeEvents(closed), 5_000);
     return;
