@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0-beta.1...desktop-v0.3.0) (2026-09-29)
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.3.0 ([#377](https://github.com/Dstack-TEE/private-ai-gateway/issues/377)) ([928e628](https://github.com/Dstack-TEE/private-ai-gateway/commit/928e6288d389959bae0026015765fde5b51b479c))
+
 ## [0.3.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.1...desktop-v0.3.0-beta.1) (2026-09-29)
 
 
