@@ -1,27 +1,22 @@
 use desktop_core::contracts::{DistributionCapabilities, DistributionChannel};
 
-#[cfg(feature = "mac-app-store")]
-pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabilities {
-    channel: DistributionChannel::MacAppStore,
-    native_updates: false,
-    cli_registration: false,
-    account_portal_links: false,
-    sandbox_home_access: cfg!(target_os = "macos"),
-    launch_at_login: true,
-    notifications: true,
-    web_ui: false,
-};
+const APP_STORE: bool = cfg!(feature = "mac-app-store");
 
-#[cfg(not(feature = "mac-app-store"))]
+/// The App Store updates the app and sandboxes it: no updater, `pap` command,
+/// account portal links or web UI.
 pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabilities {
-    channel: DistributionChannel::Direct,
-    native_updates: true,
-    cli_registration: true,
-    account_portal_links: true,
-    sandbox_home_access: false,
+    channel: if APP_STORE {
+        DistributionChannel::MacAppStore
+    } else {
+        DistributionChannel::Direct
+    },
+    native_updates: !APP_STORE,
+    cli_registration: !APP_STORE,
+    account_portal_links: !APP_STORE,
+    sandbox_home_access: APP_STORE && cfg!(target_os = "macos"),
     launch_at_login: true,
     notifications: true,
-    web_ui: true,
+    web_ui: !APP_STORE,
 };
 
 /// The operating system, for the renderer's platform behaviour.

@@ -3,14 +3,34 @@
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
-pub use platform::{setup, shutdown};
+/// The running observer; dropping it stops observing.
+struct Observer(Mutex<Option<platform::Watcher>>);
+
+pub fn setup(app: &AppHandle) -> Result<(), String> {
+    let watcher = platform::watch(app)?;
+    if !app.manage(Observer(Mutex::new(Some(watcher)))) {
+        return Err("System appearance observer is already running".into());
+    }
+    Ok(())
+}
+
+pub fn shutdown(app: &AppHandle) {
+    if let Some(observer) = app.try_state::<Observer>() {
+        match observer.0.lock() {
+            Ok(mut watcher) => {
+                watcher.take();
+            }
+            Err(error) => tracing::warn!("Cannot stop system appearance observer: {error}"),
+        }
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod platform {
     use super::*;
     use windows::{Foundation::TypedEventHandler, UI::ViewManagement::UISettings};
 
-    struct Watcher {
+    pub struct Watcher {
         settings: UISettings,
         token: i64,
     }
@@ -23,7 +43,7 @@ mod platform {
         }
     }
 
-    pub fn setup(app: &AppHandle) -> Result<(), String> {
+    pub fn watch(app: &AppHandle) -> Result<Watcher, String> {
         let settings = UISettings::new().map_err(|e| e.to_string())?;
         let handle = app.clone();
         let handler =
@@ -46,10 +66,7 @@ mod platform {
         let watcher = Watcher { settings, token };
         // Subscribe before reading to avoid missing a change during startup.
         apply(app)?;
-        if !app.manage(Mutex::new(Some(watcher))) {
-            return Err("System appearance observer is already running".into());
-        }
-        Ok(())
+        Ok(watcher)
     }
 
     fn apply(app: &AppHandle) -> Result<(), String> {
@@ -61,19 +78,6 @@ mod platform {
             .get_u32("SystemUsesLightTheme")
             .map_err(|e| e.to_string())?;
         crate::tray::set_dark(app, light == 0).map_err(|e| e.to_string())
-    }
-
-    pub fn shutdown(app: &AppHandle) {
-        if let Some(watcher) = app.try_state::<Mutex<Option<Watcher>>>() {
-            match watcher.lock() {
-                Ok(mut guard) => {
-                    guard.take();
-                }
-                Err(error) => {
-                    tracing::warn!("Cannot stop system appearance observer: {error}")
-                }
-            }
-        }
     }
 }
 
@@ -107,7 +111,7 @@ mod platform {
         ) -> zbus::Result<()>;
     }
 
-    struct Watcher(tauri::async_runtime::JoinHandle<()>);
+    pub struct Watcher(tauri::async_runtime::JoinHandle<()>);
 
     impl Drop for Watcher {
         fn drop(&mut self) {
@@ -115,17 +119,13 @@ mod platform {
         }
     }
 
-    pub fn setup(app: &AppHandle) -> Result<(), String> {
+    pub fn watch(app: &AppHandle) -> Result<Watcher, String> {
         let handle = app.clone();
-        let task = tauri::async_runtime::spawn(async move {
+        Ok(Watcher(tauri::async_runtime::spawn(async move {
             if let Err(error) = observe(&handle).await {
                 tracing::warn!("System tray appearance observer stopped: {error}");
             }
-        });
-        if !app.manage(Mutex::new(Some(Watcher(task)))) {
-            return Err("System appearance observer is already running".into());
-        }
-        Ok(())
+        })))
     }
 
     async fn observe(app: &AppHandle) -> Result<(), String> {
@@ -167,18 +167,5 @@ mod platform {
         let preference = u32::try_from(value).map_err(|e| e.to_string())?;
         // XDG: 0 = no preference, 1 = dark, 2 = light; unknown means no preference.
         crate::tray::set_dark(app, preference == 1).map_err(|e| e.to_string())
-    }
-
-    pub fn shutdown(app: &AppHandle) {
-        if let Some(watcher) = app.try_state::<Mutex<Option<Watcher>>>() {
-            match watcher.lock() {
-                Ok(mut guard) => {
-                    guard.take();
-                }
-                Err(error) => {
-                    tracing::warn!("Cannot stop system appearance observer: {error}")
-                }
-            }
-        }
     }
 }
