@@ -50,10 +50,12 @@ image that `pap verify --require-production-os` accepts.
 Rendering puts the git commit, image digest, and the digests of the admin
 token, inference token, and Privatemode API key into the measured Compose; the
 secrets themselves are not in it. The admin token and API key travel through
-Phala's encrypted environment. The inference token stays with clients, who send
-it as the Bearer credential. The API key becomes one Compose secret mounted
-into both services: the proxy reads it through `--apiKey @<file>`, and the
-gateway only checks it against the measured digest at startup and never
+Phala's encrypted environment and reach the containers as Compose secrets,
+which the rendered Compose names without their values. The inference token
+stays with clients, who send it as the Bearer credential. The gateway reads the
+admin token through `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. The API key is
+mounted into both services: the proxy reads it through `--apiKey @<file>`, and
+the gateway only checks it against the measured digest at startup and never
 forwards it.
 
 The Compose pins the official proxy image by digest, runs it in dynamic
@@ -124,7 +126,23 @@ nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 artifact_dir="$(mktemp -d)"
 curl -fsS "$GATEWAY_URL/v1/aci/attestation?nonce=$nonce" \
   -o "$artifact_dir/report.json"
-if pap verify "$GATEWAY_URL" --nonce "$nonce" --require-production-os --json \
+
+# Treat the locally reviewed render as policy. Structural JSON equality checks
+# every service image, command, environment value, mount, config, secret wiring,
+# port, and restart policy in one operation.
+jq -e \
+  --slurpfile expected /tmp/private-ai-gateway-privatemode.json '
+    (.attestation.evidence.app_compose | fromjson |
+      .docker_compose_file | fromjson) == $expected[0]
+  ' "$artifact_dir/report.json"
+# Then make the live verifier accept only that app-compose: it checks the
+# hash against the RTMR3 measurement in a quote verified to the vendor root.
+compose_hash="$(
+  jq -j '.attestation.evidence.app_compose' "$artifact_dir/report.json" |
+    sha256sum | cut -d' ' -f1
+)"
+if pap verify "$GATEWAY_URL" --nonce "$nonce" --require-production-os \
+  --accept-compose "$compose_hash" --json \
   >"$artifact_dir/live-verification.json"; then
   :
 else
@@ -201,15 +219,6 @@ credential_sha256="$(
 )"
 proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
 
-# Treat the locally reviewed render as policy. Structural JSON equality checks
-# every service image, command, environment value, mount, config, secret wiring,
-# port, and restart policy in one operation.
-jq -e \
-  --slurpfile expected /tmp/private-ai-gateway-privatemode.json '
-    (.attestation.evidence.app_compose | fromjson |
-      .docker_compose_file | fromjson) == $expected[0]
-  ' "$artifact_dir/report.json"
-
 # Require the signed receipt's cited session to describe the measured
 # Privatemode deployment that handled this request.
 jq -e \
@@ -228,11 +237,13 @@ jq -e \
 
 The E2EE inference must return HTTP 2xx and a non-empty `x-receipt-id`.
 The verifier checks report binding, the attested keyset, receipt signature,
-the gateway-side request hash, and the exact response wire-byte hash. The first `jq`
-assertion requires the complete attested Compose to equal the locally reviewed
-render; workload-owned labels are not treated as proof. The second independently
-applies local policy to the signed session binding and confirms that the session
-labels its manifest digest as an unbound observation. Do not treat that digest
+the gateway-side request hash, and the exact response wire-byte hash. Before
+that, the deployment check requires the complete attested Compose to equal the
+locally reviewed render, and `--accept-compose` makes `pap verify` accept only
+that app-compose; workload-owned labels are not treated as proof. The final
+`jq` assertion independently applies local policy to the signed session binding
+and confirms that the session labels its manifest digest as an unbound
+observation. Do not treat that digest
 as the manifest used by this request's inference secret. See
 [Audit the receipt](../docs/attested-confidential-inference.md#audit-the-receipt) for the verification model.
 

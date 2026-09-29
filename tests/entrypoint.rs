@@ -66,14 +66,15 @@ fn privatemode_deployment_contract_is_pinned() {
                 "PRIVATEMODE_CREDENTIAL_SHA256:?",
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
                 "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN_SHA256:?",
-                "/dstack/.host-shared/.decrypted-env",
-                "PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env",
+                "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/private-ai-gateway-admin-token",
+                "environment: PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
                 "environment: PRIVATEMODE_API_KEY",
                 r#""require_client_e2ee": true"#,
             ],
             &[
                 r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#,
                 "--apiKey=${PRIVATEMODE_API_KEY}",
+                "/dstack/.host-shared",
             ],
         ),
         (

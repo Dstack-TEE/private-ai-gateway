@@ -63,37 +63,16 @@ fn env_non_empty(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Describe a dotenv error without echoing file content: a `LineParse` error
-/// carries the offending line, which may hold a secret.
-fn describe_env_file_error(err: &dotenvy::Error) -> String {
-    match err {
-        dotenvy::Error::LineParse(_, index) => format!("invalid syntax at line index {index}"),
-        other => other.to_string(),
+/// Read a secret mounted as a file, such as a Compose secret. Errors name the
+/// path only.
+fn secret_file_non_empty(path: &str) -> Result<String, String> {
+    let value = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read secret file {path}: {}", err.kind()))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("secret file {path} is empty"));
     }
-}
-
-fn env_file_non_empty(path: &str, name: &str) -> Result<Option<String>, String> {
-    let entries = dotenvy::from_path_iter(path).map_err(|err| {
-        format!(
-            "failed to read encrypted environment file {path}: {}",
-            describe_env_file_error(&err)
-        )
-    })?;
-    let mut value = None;
-    for entry in entries {
-        let (key, candidate) = entry.map_err(|err| {
-            format!(
-                "failed to parse encrypted environment file {path}: {}",
-                describe_env_file_error(&err)
-            )
-        })?;
-        if key == name {
-            value = Some(candidate);
-        }
-    }
-    Ok(value
-        .map(|candidate| candidate.trim().to_string())
-        .filter(|candidate| !candidate.is_empty()))
+    Ok(value.to_string())
 }
 
 fn validate_sha256_secret_policy(
@@ -527,10 +506,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upstream_pull_config = gateway_config.upstream_pull.clone();
     let admin_token = match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN") {
         Some(token) => Some(token),
-        None => match env_non_empty("PRIVATE_AI_GATEWAY_ENV_FILE") {
-            Some(path) => env_file_non_empty(&path, "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
-                .map_err(invalid_input)?
-                .or_else(|| gateway_config.admin_token.clone()),
+        None => match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE") {
+            Some(path) => Some(secret_file_non_empty(&path).map_err(invalid_input)?),
             None => gateway_config.admin_token.clone(),
         },
     };
@@ -979,8 +956,8 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        env_file_non_empty, load_gateway_config, parse_sha256_policy, resolve_state_dir,
-        resolve_tls_public_keys, seed_upstream_config_if_empty, session_log_path,
+        load_gateway_config, parse_sha256_policy, resolve_state_dir, resolve_tls_public_keys,
+        secret_file_non_empty, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
         validate_client_e2ee_policy, validate_inference_auth_policy,
         validate_pull_token_separation, validate_sha256_secret_policy,
@@ -1021,32 +998,19 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn encrypted_env_admin_token_is_parsed_and_digest_bound() {
-        let path = temp_path("gateway-encrypted-env");
-        std::fs::write(
-            &path,
-            "IGNORED=value\nPRIVATE_AI_GATEWAY_ADMIN_TOKEN='admin token'\n",
-        )
-        .unwrap();
-        let token =
-            env_file_non_empty(path.to_str().unwrap(), "PRIVATE_AI_GATEWAY_ADMIN_TOKEN").unwrap();
-        assert_eq!(token.as_deref(), Some("admin token"));
+    fn admin_token_file_is_trimmed_and_digest_bound() {
+        let path = temp_path("gateway-admin-token");
+        std::fs::write(&path, "admin token\n").unwrap();
+        let token = secret_file_non_empty(path.to_str().unwrap()).unwrap();
+        assert_eq!(token, "admin token");
         let digest = private_ai_gateway::aci::digest::sha256_hex(b"admin token");
-        validate_sha256_secret_policy("admin_token", token.as_deref(), Some(&digest)).unwrap();
+        validate_sha256_secret_policy("admin_token", Some(&token), Some(&digest)).unwrap();
         let err = validate_sha256_secret_policy("admin_token", Some("different"), Some(&digest))
             .unwrap_err();
         assert!(err.contains("does not match static admin_token_sha256"));
-        let _ = std::fs::remove_file(path);
-    }
 
-    #[test]
-    fn encrypted_env_parse_errors_do_not_echo_secret_lines() {
-        let path = temp_path("gateway-encrypted-env-invalid");
-        std::fs::write(&path, "PRIVATEMODE_API_KEY='unterminated-secret\n").unwrap();
-        let err = env_file_non_empty(path.to_str().unwrap(), "PRIVATE_AI_GATEWAY_ADMIN_TOKEN")
-            .unwrap_err();
-        assert!(err.contains("invalid syntax"), "{err}");
-        assert!(!err.contains("unterminated-secret"), "{err}");
+        std::fs::write(&path, " \n").unwrap();
+        assert!(secret_file_non_empty(path.to_str().unwrap()).is_err());
         let _ = std::fs::remove_file(path);
     }
 

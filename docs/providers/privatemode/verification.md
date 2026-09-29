@@ -46,8 +46,13 @@ the ingress. The header gate cannot make a partially encrypted client safe.
 ## What the manifest observation proves
 
 Privatemode v1.48 writes every fetched manifest to
-`<workspace>/manifests/log.txt`. The gateway reads the latest version from the
-shared read-only manifest-history volume and reports:
+`<workspace>/manifests/log.txt`, the manifest history its documentation
+describes for audit. The documentation does not specify the line format; the
+gateway parses the v1.48 format (`<RFC 3339 time> <path>/<N>.json`, from
+`internal/manifestlog` in the tagged source) and resolves `<N>.json` next to
+the log. Recheck that format whenever the pinned proxy image changes. The
+gateway reads the latest version from the shared read-only manifest-history
+volume and reports:
 
 - `observed_manifest_sha256`
 - `manifest_observed_at`
@@ -72,18 +77,21 @@ The measured proxy image is pinned by OCI digest.
 
 For route verification, the gateway:
 
-1. Sends an unauthenticated `GET /v1/models` to the pinned internal proxy
-   origin.
-2. Rejects redirects, ambient HTTP proxies, non-success status, non-JSON
-   responses, and bodies larger than 1 MiB.
-3. Reads and validates the latest manifest-history entry.
-4. Emits the measured proxy binding and the explicitly unbound manifest
+1. Sends `GET /readyz`, the proxy's readiness endpoint, to the pinned internal
+   proxy origin, and rejects redirects, ambient HTTP proxies, and non-success
+   status.
+2. Reads and validates the latest manifest-history entry.
+3. Emits the measured proxy binding and the explicitly unbound manifest
    observation.
 
-The model-list probe corroborates proxy startup and liveness. It does not use or
-identify the current inference secret.
+With `--apiKey` set, the proxy starts listening only after its initial Contrast
+verification and secret exchange succeed, so a readiness answer corroborates
+startup and liveness. It does not use or identify the current inference secret.
 
-For inference, the gateway permits only the encrypted v1.48 handlers:
+For inference, the gateway permits only these v1.48 handlers, all of which the
+proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
+unstructured handlers, which the gateway does not expose; it forwards
+`/v1/models` unencrypted.
 
 - `/v1/chat/completions`
 - `/v1/completions`
@@ -137,7 +145,7 @@ The route fails closed when:
 - the credential is missing, malformed, or has the wrong digest;
 - the proxy image digest is malformed;
 - mutable configuration supplies a Bearer token or path;
-- the model-list probe fails;
+- the readiness probe fails;
 - the manifest log is malformed or its latest file is missing or unreadable;
 - forwarding targets a handler outside the encrypted allowlist; or
 - the verified proxy-image binding differs from the active deployment.

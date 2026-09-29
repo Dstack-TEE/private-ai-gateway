@@ -6,7 +6,6 @@
 //! struct.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{
@@ -163,11 +162,11 @@ async fn models_handler() -> impl IntoResponse {
     }))
 }
 
-async fn privatemode_models_handler(headers: HeaderMap) -> axum::response::Response {
+async fn privatemode_readiness_handler(headers: HeaderMap) -> StatusCode {
     if headers.contains_key("authorization") {
-        return StatusCode::BAD_REQUEST.into_response();
+        return StatusCode::BAD_REQUEST;
     }
-    models_handler().await.into_response()
+    StatusCode::NO_CONTENT
 }
 
 async fn privatemode_chat_handler(
@@ -251,10 +250,8 @@ async fn serve_privatemode_provider_fixture(
         .route("/v1/chat/completions", post(privatemode_chat_handler))
         .route("/v1/completions", post(privatemode_chat_handler))
         .route("/v1/embeddings", post(privatemode_chat_handler))
-        .route(
-            "/v1/models",
-            get(privatemode_models_handler).post(privatemode_plaintext_path_handler),
-        )
+        .route("/readyz", get(privatemode_readiness_handler))
+        .route("/v1/models", post(privatemode_plaintext_path_handler))
         .with_state(ProviderState {
             calls: calls.clone(),
             plaintext_path_hits: plaintext_path_hits.clone(),
@@ -275,12 +272,12 @@ struct PrivatemodeCapacityCall {
     body: Vec<u8>,
 }
 
-async fn privatemode_capacity_models_handler(
+async fn privatemode_capacity_readiness_handler(
     State(state): State<PrivatemodeCapacityState>,
     headers: HeaderMap,
-) -> axum::response::Response {
+) -> StatusCode {
     state.readiness_checks.fetch_add(1, Ordering::SeqCst);
-    privatemode_models_handler(headers).await
+    privatemode_readiness_handler(headers).await
 }
 
 async fn privatemode_capacity_chat_handler(
@@ -333,7 +330,7 @@ async fn serve_privatemode_capacity_fixture() -> (
     let calls = state.calls.clone();
     let readiness_checks = state.readiness_checks.clone();
     let app = Router::new()
-        .route("/v1/models", get(privatemode_capacity_models_handler))
+        .route("/readyz", get(privatemode_capacity_readiness_handler))
         .route(
             "/v1/chat/completions",
             post(privatemode_capacity_chat_handler),
@@ -361,7 +358,7 @@ async fn serve_cross_origin_privatemode_redirect_fixture() -> (String, Arc<Atomi
     .await;
     let redirect = serve_router(
         Router::new()
-            .route("/v1/models", get(cross_origin_redirect))
+            .route("/readyz", get(cross_origin_redirect))
             .route("/v1/chat/completions", post(cross_origin_redirect))
             .with_state(format!("{sink}/credential-sink")),
     )
@@ -369,42 +366,14 @@ async fn serve_cross_origin_privatemode_redirect_fixture() -> (String, Arc<Atomi
     (redirect, sink_hits)
 }
 
-async fn oversized_models_with_content_length() -> axum::response::Response {
-    (
-        StatusCode::OK,
-        [("content-type", "application/json")],
-        vec![b' '; 1024 * 1024 + 1],
-    )
-        .into_response()
+async fn stalled_readiness() -> StatusCode {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    StatusCode::NO_CONTENT
 }
 
-async fn oversized_chunked_models() -> axum::response::Response {
-    let chunks = futures_util::stream::iter([
-        Ok::<_, Infallible>(Bytes::from(vec![b' '; 768 * 1024])),
-        Ok::<_, Infallible>(Bytes::from(vec![b' '; 768 * 1024])),
-    ]);
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(Body::from_stream(chunks))
-        .unwrap()
-}
-
-async fn indefinitely_trickled_models() -> axum::response::Response {
-    let chunks = futures_util::stream::unfold((), |()| async {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        Some((Ok::<_, Infallible>(Bytes::from_static(b" ")), ()))
-    });
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(Body::from_stream(chunks))
-        .unwrap()
-}
-
-async fn counted_models(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+async fn counted_readiness(State(hits): State<Arc<AtomicUsize>>) -> StatusCode {
     hits.fetch_add(1, Ordering::SeqCst);
-    Json(json!({"object": "list", "data": [{"id": "provider-model"}]}))
+    StatusCode::NO_CONTENT
 }
 
 async fn serve_router(app: Router) -> String {
@@ -416,11 +385,11 @@ async fn serve_router(app: Router) -> String {
     format!("http://{addr}")
 }
 
-async fn serve_counted_models_fixture() -> (String, Arc<AtomicUsize>) {
+async fn serve_counted_readiness_fixture() -> (String, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let base_url = serve_router(
         Router::new()
-            .route("/v1/models", get(counted_models))
+            .route("/readyz", get(counted_readiness))
             .with_state(hits.clone()),
     )
     .await;
@@ -1300,35 +1269,8 @@ async fn privatemode_never_follows_cross_origin_redirects() {
 }
 
 #[tokio::test]
-async fn privatemode_readiness_rejects_declared_and_chunked_oversized_bodies() {
-    let declared =
-        serve_router(Router::new().route("/v1/models", get(oversized_models_with_content_length)))
-            .await;
-    let chunked =
-        serve_router(Router::new().route("/v1/models", get(oversized_chunked_models))).await;
-
-    for base_url in [declared, chunked] {
-        let fixture = PrivatemodeTestDeployment::new(base_url);
-        let event = fixture
-            .verifier(10, 0)
-            .verify(fixture.verification_request("provider-model"))
-            .await;
-        assert_eq!(event.result, VerificationResult::Failed);
-        assert!(
-            event
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("exceeds 1048576 bytes")),
-            "unexpected readiness failure: {:?}",
-            event.reason
-        );
-    }
-}
-
-#[tokio::test]
 async fn privatemode_readiness_has_an_end_to_end_deadline() {
-    let base_url =
-        serve_router(Router::new().route("/v1/models", get(indefinitely_trickled_models))).await;
+    let base_url = serve_router(Router::new().route("/readyz", get(stalled_readiness))).await;
     let fixture = PrivatemodeTestDeployment::new(base_url);
     let event = tokio::time::timeout(
         Duration::from_secs(3),
@@ -1343,7 +1285,7 @@ async fn privatemode_readiness_has_an_end_to_end_deadline() {
 
 #[tokio::test]
 async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease() {
-    let (base_url, hits) = serve_counted_models_fixture().await;
+    let (base_url, hits) = serve_counted_readiness_fixture().await;
     let fixture = PrivatemodeTestDeployment::new(base_url);
     let verifier = fixture.verifier(10, 300);
 

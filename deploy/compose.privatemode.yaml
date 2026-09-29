@@ -29,16 +29,17 @@ services:
     secrets:
       - source: privatemode-api-key
         target: privatemode-api-key
+      - source: admin-token
+        target: private-ai-gateway-admin-token
     environment:
       PRIVATE_AI_GATEWAY_CONFIG_PATH: /etc/private-ai-gateway/gateway.config.json
       PRIVATE_AI_GATEWAY_CACHE_DIR: /var/lib/private-ai-gateway/cache
-      PRIVATE_AI_GATEWAY_ENV_FILE: /run/secrets/dstack-encrypted-env
+      PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/private-ai-gateway-admin-token
     volumes:
       - gateway-checkout:/var/lib/git-launcher
       - gateway-state:/var/lib/private-ai-gateway
       - privatemode-manifests:/run/privatemode-manifests:ro
       - /var/run/dstack.sock:/var/run/dstack.sock
-      - /dstack/.host-shared/.decrypted-env:/run/secrets/dstack-encrypted-env:ro
     depends_on:
       - privatemode-proxy
     restart: unless-stopped
@@ -100,6 +101,10 @@ volumes:
   gateway-state:
   privatemode-manifests:
 
+# Compose secrets keep only the variable names in the rendered, measured
+# document; dstack supplies the values from the encrypted environment.
 secrets:
   privatemode-api-key:
     environment: PRIVATEMODE_API_KEY
+  admin-token:
+    environment: PRIVATE_AI_GATEWAY_ADMIN_TOKEN

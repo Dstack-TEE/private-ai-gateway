@@ -3,18 +3,15 @@
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 
 use super::{current_unix_secs, CachedProviderEvent};
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{readiness_client, PrivatemodeProxyDeployment, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
-const MAX_MODELS_RESPONSE_BYTES: usize = 1024 * 1024;
-
 /// Verifier for the exact official Privatemode proxy deployment measured with
 /// the gateway. The proxy completes its initial Contrast verification and
-/// secret exchange before serving, so the model-list probe corroborates startup
+/// secret exchange before serving, so its readiness probe corroborates startup
 /// and liveness. Dynamic manifest history is reported as an observation only:
 /// v1.48 does not bind a logged manifest to the secret used for a request.
 #[derive(Debug, Clone)]
@@ -89,53 +86,23 @@ impl PrivatemodeProviderVerifier {
         event
     }
 
+    /// The proxy's `/readyz` answers only after it starts listening, which it
+    /// does only after the initial Contrast verification and secret exchange
+    /// for its API key succeed.
     async fn probe(&self) -> Result<(), UpstreamError> {
         let response = self
             .client
-            .get(format!("{}/v1/models", self.deployment.base_url()))
-            .header("accept", "application/json")
+            .get(format!("{}/readyz", self.deployment.base_url()))
             .send()
             .await
             .map_err(|err| {
                 UpstreamError::Transport(format!("Privatemode proxy probe failed: {err}"))
             })?;
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if !status.is_success() {
             return Err(UpstreamError::Transport(format!(
                 "Privatemode proxy readiness probe returned {status}"
             )));
-        }
-        let too_large = || {
-            UpstreamError::Transport(format!(
-                "Privatemode proxy readiness response exceeds {MAX_MODELS_RESPONSE_BYTES} bytes"
-            ))
-        };
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_MODELS_RESPONSE_BYTES as u64)
-        {
-            return Err(too_large());
-        }
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|err| {
-                UpstreamError::Transport(format!("Privatemode proxy readiness body failed: {err}"))
-            })?;
-            if body.len() + chunk.len() > MAX_MODELS_RESPONSE_BYTES {
-                return Err(too_large());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|err| {
-            UpstreamError::Transport(format!(
-                "Privatemode proxy readiness returned invalid JSON: {err}"
-            ))
-        })?;
-        if !payload.get("data").is_some_and(serde_json::Value::is_array) {
-            return Err(UpstreamError::Transport(
-                "Privatemode proxy readiness returned an invalid model list".to_string(),
-            ));
         }
         Ok(())
     }
