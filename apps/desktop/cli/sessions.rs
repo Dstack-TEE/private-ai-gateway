@@ -198,6 +198,16 @@ impl AuditedSession {
     }
 }
 
+/// The session listing, optionally for one model. The query is form-encoded
+/// (`/` as `%2F`, a space as `+`), as axum's `Query` and serde_urlencoded decode it.
+fn sessions_url(base_url: &str, model: Option<&str>) -> Result<url::Url, String> {
+    let mut url = endpoint(base_url, &["v1", "aci", "sessions"])?;
+    if let Some(model) = model {
+        url.query_pairs_mut().append_pair("model", model);
+    }
+    Ok(url)
+}
+
 /// List the service's current sessions and audit each full record (spec 9.2)
 /// against `now` plus the claims policy. Shared with `private-ai-proxy serve
 /// --require-claim`, which pins the accepted ids.
@@ -207,11 +217,9 @@ pub async fn audit_current_sessions(
     model: Option<&str>,
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
-    let mut url = endpoint(base_url, &["v1", "aci", "sessions"])?;
-    if let Some(model) = model {
-        url.query_pairs_mut().append_pair("model", model);
-    }
-    let listing = client.get(url.as_str(), None).await?;
+    let listing = client
+        .get(sessions_url(base_url, model)?.as_str(), None)
+        .await?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;
     let ids: Vec<String> = listing
@@ -253,4 +261,29 @@ pub async fn audit_current_sessions(
         });
     }
     Ok(audited)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_id_round_trips_through_the_listing_query() {
+        let url = sessions_url("https://gateway.example", Some("vendor/model id")).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://gateway.example/v1/aci/sessions?model=vendor%2Fmodel+id"
+        );
+        let parsed = url::Url::parse(url.as_str()).unwrap();
+        assert_eq!(
+            parsed.query_pairs().collect::<Vec<_>>(),
+            [("model".into(), "vendor/model id".into())]
+        );
+        assert_eq!(
+            sessions_url("https://gateway.example", None)
+                .unwrap()
+                .query(),
+            None
+        );
+    }
 }
