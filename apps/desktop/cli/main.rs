@@ -3,7 +3,7 @@ mod manage;
 
 use clap::{Args, Parser, Subcommand};
 use desktop_core::client::CallError;
-use private_ai_proxy::{args, audit, curl, send, serve, sessions, verify};
+use private_ai_proxy::{args::Command as Aci, audit, curl, send, serve, sessions, verify};
 use std::{ffi::OsStr, io::IsTerminal, path::Path};
 
 #[derive(Parser)]
@@ -50,7 +50,7 @@ enum Command {
     #[command(flatten)]
     Manage(manage::Action),
     #[command(flatten)]
-    Aci(args::Command),
+    Aci(Aci),
 }
 
 #[tokio::main]
@@ -71,25 +71,20 @@ async fn main() {
         error.exit()
     });
     let json = global.json;
+    let aci = |result: Result<i32, String>| result.map_err(CallError::Local);
     let (result, failure_code) = match command {
-        Command::Aci(command) => {
-            // Keep pap's own failures apart from curl's exit codes.
-            let failure_code = match command {
-                args::Command::Curl(_) => curl::PAP_FAILURE_EXIT_CODE,
-                _ => 1,
-            };
-            let result = match command {
-                args::Command::Verify(a) => verify::run(a, production).await,
-                args::Command::Audit(a) => audit::run(a, production).await,
-                args::Command::Sessions(a) => sessions::run(a, production).await,
-                args::Command::Send(a) => send::run(a, production).await,
-                args::Command::Curl(a) => curl::run(a, production).await,
-                args::Command::Serve(mut a) => {
-                    a.json_events |= json;
-                    serve::run(a, production).await
-                }
-            };
-            (result.map_err(CallError::Local), failure_code)
+        Command::Aci(Aci::Verify(a)) => (aci(verify::run(a, production).await), 1),
+        Command::Aci(Aci::Audit(a)) => (aci(audit::run(a, production).await), 1),
+        Command::Aci(Aci::Sessions(a)) => (aci(sessions::run(a, production).await), 1),
+        Command::Aci(Aci::Send(a)) => (aci(send::run(a, production).await), 1),
+        // Keep pap's own failures apart from curl's exit codes.
+        Command::Aci(Aci::Curl(a)) => (
+            aci(curl::run(a, production).await),
+            curl::PAP_FAILURE_EXIT_CODE,
+        ),
+        Command::Aci(Aci::Serve(mut a)) => {
+            a.json_events |= json;
+            (aci(serve::run(a, production).await), 1)
         }
         // Management calls block on the local API; keep them off the async workers.
         Command::Manage(action) => {

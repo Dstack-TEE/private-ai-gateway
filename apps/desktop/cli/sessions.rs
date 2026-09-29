@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
-use crate::transcript::print_json;
+use crate::output::print_json;
 use crate::verify::verify_service;
 use desktop_core::endpoint;
 use desktop_core::now_secs;

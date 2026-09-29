@@ -15,7 +15,7 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
-use crate::transcript::print_json;
+use crate::output::print_json;
 use crate::verify::{verify_service, ServiceVerification};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";

@@ -9,6 +9,8 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::output::print_json;
+
 /// One entry in the fixed check vocabulary (id, spec citation, title).
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct CheckDef {
@@ -273,14 +275,6 @@ impl Transcript {
             },
         })
     }
-}
-
-/// Pretty JSON on stdout, the form the ACI commands print.
-pub fn print_json(value: &Value) -> Result<(), String> {
-    let text =
-        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?;
-    println!("{text}");
-    Ok(())
 }
 
 #[cfg(test)]
