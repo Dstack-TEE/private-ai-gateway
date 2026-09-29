@@ -224,8 +224,9 @@ the Direct updater or install replacement code as a MAS rollback mechanism.
 
 Run from `apps/desktop`: focused Agent contract tests; `cargo test --locked
 --workspace`; workspace fmt/clippy; core, runtime and desktop shell clippy and tests
-with the `mac-app-store` feature; `npm run check` (TypeScript and Agent
-Integrations tests); `npm run test:release` (includes MAS package tests); and
+with the `mac-app-store` feature; `npm run check` (TypeScript and the
+renderer's Node tests, Agent Integrations among them); `npm run test:release`
+(includes MAS package tests); and
 `git diff --check`. In CI, `Desktop Tauri` (`desktop-native.yml`) runs fmt, the
 workspace clippy and tests, `npm run check` and `npm run test:release` on
 Linux; `Desktop Mac App Store` runs the `mac-app-store` feature clippy and
