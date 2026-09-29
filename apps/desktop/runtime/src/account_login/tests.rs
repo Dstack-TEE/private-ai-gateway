@@ -335,6 +335,11 @@ fn callback_pages_need_no_escaping() {
     for text in [APP_IDENTIFIER, BYLINE, PRODUCT_NAME] {
         assert!(!text.contains(['&', '<', '>', '"', '\'']), "{text}");
     }
+    // The icon's base64 goes inside a double-quoted attribute unescaped.
+    assert!(STANDARD
+        .encode(CALLBACK_ICON)
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')));
     for accepted in [true, false] {
         let page = callback_page(accepted);
         assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>\n"));

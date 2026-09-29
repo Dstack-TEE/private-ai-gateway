@@ -205,11 +205,12 @@ pub(super) fn callback_code(
 
 /// The icon the callback page shows, inlined: the loopback listener may stop
 /// before a browser would fetch a separate image.
-const CALLBACK_ICON: &[u8] = include_bytes!("../../../src/renderer/brand/app-icon-light.png");
+pub(super) const CALLBACK_ICON: &[u8] =
+    include_bytes!("../../../src/renderer/brand/app-icon-light.png");
 
 /// A callback page as the markup before and after its base64 icon. Every
-/// part is a compile-time constant; the brand strings are checked to need no
-/// escaping by `callback_pages_need_no_escaping`.
+/// part is a compile-time constant; `callback_pages_need_no_escaping` checks
+/// the brand strings and the icon's base64 alphabet.
 macro_rules! callback_page {
     ($title:literal, $tone:literal, $symbol:literal, $message:literal, $open_app:expr) => {
         [
@@ -280,13 +281,8 @@ pub(super) fn callback_page(accepted: bool) -> String {
     } else {
         DECLINED_PAGE
     };
-    let icon = STANDARD.encode(CALLBACK_ICON);
-    [
-        before,
-        &html_escape::encode_double_quoted_attribute(&icon),
-        after,
-    ]
-    .concat()
+    // Base64 has no character that HTML treats specially in an attribute.
+    [before, &STANDARD.encode(CALLBACK_ICON), after].concat()
 }
 
 pub(super) async fn callback(
