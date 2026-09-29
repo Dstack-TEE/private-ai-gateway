@@ -270,9 +270,8 @@ impl DesktopRuntime {
         let snapshot = settings.snapshot()?;
         let runtime_config = snapshot.config.runtime_config();
         let profiles = settings.profile_views(&snapshot);
-        let credential_saved = profiles.iter().any(|profile| {
-            profile.id == snapshot.config.active_profile && profile.credential_saved
-        });
+        let credential_saved =
+            crate::verifier_session::active_key_saved(&profiles, &snapshot.config.active_profile);
         let local = settings_config::resolve_local_api(snapshot.config.local_api.clone())
             .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
         let listener = proxy::bind_std(local.bind);

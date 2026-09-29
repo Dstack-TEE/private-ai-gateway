@@ -955,11 +955,7 @@ mod typescript {
             .into_iter()
             .map(|link| (name(&link), link.url().into()))
             .collect();
-        output.push_str(&constant(
-            "ABOUT_LINKS",
-            "Record<AboutLink, string>",
-            links.into(),
-        ));
+        output.push_str(&constant("ABOUT_LINKS", "Record<AboutLink, string>", links));
         let agents: Vec<_> = Agent::ALL
             .into_iter()
             .map(|agent| {
@@ -969,7 +965,7 @@ mod typescript {
         output.push_str(&constant(
             "AGENTS",
             "ReadonlyArray<{ id: string, name: string, website: string }>",
-            agents.into(),
+            agents,
         ));
         let api_key_pages: serde_json::Map<_, _> = ServiceProvider::ALL
             .into_iter()
@@ -978,57 +974,54 @@ mod typescript {
         output.push_str(&constant(
             "API_KEY_PAGES",
             "Partial<Record<ServiceProvider, string>>",
-            api_key_pages.into(),
+            api_key_pages,
         ));
-        let providers: serde_json::Map<_, _> = ServiceProvider::ALL
+        let providers: indexmap::IndexMap<_, _> = ServiceProvider::ALL
             .into_iter()
-            .map(|provider| {
-                let info = ServiceProviderInfo::from(provider);
-                (name(&provider), serde_json::to_value(info).unwrap())
-            })
+            .map(|provider| (name(&provider), ServiceProviderInfo::from(provider)))
             .collect();
         output.push_str(&constant(
             "SERVICE_PROVIDERS",
             "Readonly<Record<ServiceProvider, ServiceProviderInfo>>",
-            providers.into(),
+            providers,
         ));
         output.push_str(&constant(
             "DEFAULT_SERVICE_PROVIDER",
             "ServiceProvider",
-            serde_json::to_value(ServiceProvider::DEFAULT).unwrap(),
+            ServiceProvider::DEFAULT,
         ));
-        output.push_str(&constant("BYLINE", "string", crate::brand::BYLINE.into()));
+        output.push_str(&constant("BYLINE", "string", crate::brand::BYLINE));
         output.push_str(&constant(
             "INITIAL_STATE",
             "AppState",
-            serde_json::to_value(AppStateWire::from(AppState::default())).unwrap(),
+            AppStateWire::from(AppState::default()),
         ));
         let mut unavailable = AppState::default();
         unavailable.disconnect("The background service is unavailable.".into());
         output.push_str(&constant(
             "UNAVAILABLE_STATE",
             "AppState",
-            serde_json::to_value(AppStateWire::from(unavailable)).unwrap(),
+            AppStateWire::from(unavailable),
         ));
         output.push_str(&constant(
             "WEB_UI_PASSWORD_MIN_LENGTH",
             "number",
-            WEB_UI_PASSWORD_MIN_LENGTH.into(),
+            WEB_UI_PASSWORD_MIN_LENGTH,
         ));
         output.push_str(&constant(
             "WEB_DISTRIBUTION",
             "DistributionCapabilities",
-            serde_json::to_value(DistributionCapabilities::WEB).unwrap(),
+            DistributionCapabilities::WEB,
         ));
         output.push_str(&constant(
             "DEFAULT_LOCAL_API_CONFIG",
             "ListenConfig",
-            serde_json::to_value(ListenConfig::default()).unwrap(),
+            ListenConfig::default(),
         ));
         output.push_str(&constant(
             "DEFAULT_WEB_UI_CONFIG",
             "WebUiConfig",
-            serde_json::to_value(WebUiConfig::default()).unwrap(),
+            WebUiConfig::default(),
         ));
         output
             .lines()
@@ -1037,8 +1030,11 @@ mod typescript {
     }
 
     /// A value the Rust side owns, as a typed TypeScript constant.
-    fn constant(name: &str, ty: &str, value: serde_json::Value) -> String {
-        format!("export const {name}: {ty} = {value};\n")
+    fn constant(name: &str, ty: &str, value: impl Serialize) -> String {
+        format!(
+            "export const {name}: {ty} = {};\n",
+            serde_json::to_value(value).unwrap()
+        )
     }
 
     /// The serialized name of a unit enum variant.

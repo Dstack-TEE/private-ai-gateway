@@ -493,33 +493,23 @@ impl SessionManager {
         Ok(self.snapshot())
     }
 
-    /// What survives a stop or restart of the verifier: settings and their files, key status,
-    /// the local endpoint, and recent activity. The catalog does not: it
-    /// belongs to a verified session.
+    /// What survives a stop or restart of the verifier: everything but the
+    /// verification itself (its status, progress, service URL, identity,
+    /// checks and error) and the session's clock and reconnect, which the
+    /// caller sets. The last verified catalog stays for agent projection.
     fn carried(previous: &AppState) -> AppState {
         AppState {
-            backend_instance: previous.backend_instance.clone(),
-            sequence: previous.sequence,
-            wake_monitor_available: previous.wake_monitor_available,
-            config: previous.config.clone(),
-            client_key_revision: previous.client_key_revision,
-            client_key_available: previous.client_key_available,
-            profiles: previous.profiles.clone(),
-            active_profile_id: previous.active_profile_id.clone(),
-            local_api: previous.local_api.clone(),
-            api_key_saved: previous.api_key_saved,
-            proxy_url: previous.proxy_url.clone(),
-            endpoint_error: previous.endpoint_error.clone(),
-            activity: previous.activity.clone(),
-            session_id: previous.session_id.clone(),
-            session_active: previous.session_active,
-            session_usage: previous.session_usage.clone(),
-            usage_revision: previous.usage_revision,
-            catalog: previous.catalog.clone(),
-            web_ui: previous.web_ui.clone(),
-            config_files: previous.config_files.clone(),
-            agents_revision: previous.agents_revision,
-            ..AppState::default()
+            backend_connected: None,
+            status: VerificationStatus::Stopped,
+            configuration_verification: false,
+            progress: None,
+            remote_url: None,
+            identity: None,
+            checks: Vec::new(),
+            protected_since: None,
+            reconnecting: false,
+            error: None,
+            ..previous.clone()
         }
     }
 
@@ -557,16 +547,12 @@ impl SessionManager {
         config: StartConfig,
         profiles: Vec<ConfidentialProfile>,
         active_profile_id: String,
-        api_key_saved: bool,
         retain_catalog: bool,
     ) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
-        runtime.state.config = config;
-        runtime.state.profiles = profiles;
-        runtime.state.active_profile_id = active_profile_id;
-        runtime.state.api_key_saved = api_key_saved;
+        set_profiles(&mut runtime.state, profiles, active_profile_id, config);
         runtime.state.remote_url = None;
         runtime.state.identity = None;
         runtime.state.checks.clear();
@@ -588,14 +574,7 @@ impl SessionManager {
         active_profile_id: String,
         config: StartConfig,
     ) {
-        self.update(|state| {
-            state.api_key_saved = profiles
-                .iter()
-                .any(|profile| profile.id == active_profile_id && profile.credential_saved);
-            state.profiles = profiles;
-            state.active_profile_id = active_profile_id;
-            state.config = config;
-        });
+        self.update(|state| set_profiles(state, profiles, active_profile_id, config));
     }
 
     pub fn set_config_files(&self, files: desktop_core::contracts::ConfigFiles) {
@@ -967,6 +946,26 @@ impl SessionManager {
             .lock()
             .map_err(|_| "Protection state is unavailable".to_string())
     }
+}
+
+/// The saved profiles, the active one and its service configuration.
+fn set_profiles(
+    state: &mut AppState,
+    profiles: Vec<ConfidentialProfile>,
+    active_profile_id: String,
+    config: StartConfig,
+) {
+    state.api_key_saved = active_key_saved(&profiles, &active_profile_id);
+    state.profiles = profiles;
+    state.active_profile_id = active_profile_id;
+    state.config = config;
+}
+
+/// Whether the active profile has a saved credential.
+pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_id: &str) -> bool {
+    profiles
+        .iter()
+        .any(|profile| profile.id == active_profile_id && profile.credential_saved)
 }
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.
