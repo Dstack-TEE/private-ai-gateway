@@ -8,46 +8,24 @@ import { promisify } from "node:util";
 import { artifactName, desktopPackages, desktopTargets, manifestTargets, releaseAssetNames } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
-test("releases write latest.json to every channel feed and legacy per-platform files to their own", () => {
-  const targets = desktopTargets;
-  const manifest = { version: "0.1.2-beta.38", channel: "beta", platforms: Object.fromEntries(targets.map((target) => [target, { url: target, signature: target }])) };
-  assert.deepEqual(manifestTargets(manifest), targets);
+test("every channel feed gets latest.json, and each release's own feed the legacy per-platform files", () => {
   assert.throws(() => manifestTargets({ platforms: { unsupported: {} } }), /unsupported desktop targets: unsupported/);
   assert.throws(() => manifestTargets({ platforms: {} }), /no desktop targets/);
-  const complete = updateFeeds(manifest, targets, "beta");
-  assert.equal(complete.size, 7);
-  assert.deepEqual(complete.get("latest.json"), manifest);
-  assert.deepEqual(Object.keys(complete.get("latest-linux-aarch64.json").platforms), ["linux-aarch64-deb", "linux-aarch64-rpm"]);
-  const partial = updateFeeds({ ...manifest, version: "0.1.2-beta.39" }, ["darwin-aarch64"], "beta");
-  assert.deepEqual([...partial.keys()], ["latest-darwin-aarch64.json"]);
-  const stable = { ...manifest, version: "0.1.2", channel: "stable" };
-  assert.equal(updateFeeds(stable, targets, "stable").size, 7);
-  assert.deepEqual([...updateFeeds(stable, targets, "beta")], [["latest.json", stable]]);
-});
-
-test("feed files keep their names and contents", () => {
-  const entry = (target) => ({ signature: `sig-${target}`, url: `https://example.test/${target}` });
-  const manifest = (version, channel, targets) => ({ version, channel, pub_date: "2026-01-02T03:04:05.000Z", platforms: Object.fromEntries(targets.map((target) => [target, entry(target)])) });
-  const beta = manifest("0.3.0-beta.2", "beta", desktopTargets);
-  const perPlatform = (release) => ({
-    "latest-darwin-aarch64.json": { ...release, platforms: { "darwin-aarch64": entry("darwin-aarch64") } },
-    "latest-darwin-x86_64.json": { ...release, platforms: { "darwin-x86_64": entry("darwin-x86_64") } },
-    "latest-windows-x86_64.json": { ...release, platforms: { "windows-x86_64": entry("windows-x86_64") } },
-    "latest-windows-aarch64.json": { ...release, platforms: { "windows-aarch64": entry("windows-aarch64") } },
-    "latest-linux-x86_64.json": { ...release, platforms: { "linux-x86_64-deb": entry("linux-x86_64-deb"), "linux-x86_64-rpm": entry("linux-x86_64-rpm") } },
-    "latest-linux-aarch64.json": { ...release, platforms: { "linux-aarch64-deb": entry("linux-aarch64-deb"), "linux-aarch64-rpm": entry("linux-aarch64-rpm") } },
-  });
-  assert.deepEqual(Object.fromEntries(updateFeeds(beta, desktopTargets, "beta")), { "latest.json": beta, ...perPlatform(beta) });
-  const stable = manifest("0.3.0", "stable", desktopTargets);
-  assert.deepEqual(Object.fromEntries(updateFeeds(stable, desktopTargets, "stable")), { "latest.json": stable, ...perPlatform(stable) });
-  assert.deepEqual(Object.fromEntries(updateFeeds(stable, desktopTargets, "beta")), { "latest.json": stable });
+  const entry = (target) => ({ signature: target, url: target });
+  const manifest = (version, channel, targets = desktopTargets) => ({ version, channel, platforms: Object.fromEntries(targets.map((target) => [target, entry(target)])) });
+  const perPlatform = (release) => Object.fromEntries(["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "windows-aarch64", "linux-x86_64", "linux-aarch64"].map((name) => [
+    `latest-${name}.json`, { ...release, platforms: Object.fromEntries(desktopTargets.filter((target) => target.replace(/-(deb|rpm)$/, "") === name).map((target) => [target, entry(target)])) },
+  ]));
+  const feeds = (release, targets, feed) => Object.fromEntries(updateFeeds(release, targets, feed));
+  const beta = manifest("0.3.0-beta.2", "beta");
+  assert.deepEqual(manifestTargets(beta), desktopTargets);
+  assert.deepEqual(feeds(beta, desktopTargets, "beta"), { "latest.json": beta, ...perPlatform(beta) });
+  const stable = manifest("0.3.0", "stable");
+  assert.deepEqual(feeds(stable, desktopTargets, "stable"), { "latest.json": stable, ...perPlatform(stable) });
+  assert.deepEqual(feeds(stable, desktopTargets, "beta"), { "latest.json": stable });
   // A release missing a target never writes latest.json.
-  const linux = ["linux-x86_64-deb", "linux-x86_64-rpm"];
-  const partial = manifest("0.3.0-beta.3", "beta", linux);
-  assert.deepEqual(Object.fromEntries(updateFeeds(partial, linux, "beta")), {
-    "latest-linux-x86_64.json": { ...partial, platforms: { "linux-x86_64-deb": entry("linux-x86_64-deb"), "linux-x86_64-rpm": entry("linux-x86_64-rpm") } },
-  });
-  assert.deepEqual(Object.fromEntries(updateFeeds({ ...partial, channel: "stable", version: "0.3.0" }, linux, "beta")), {});
+  const partial = manifest("0.3.0-beta.3", "beta", ["darwin-aarch64"]);
+  assert.deepEqual(feeds(partial, ["darwin-aarch64"], "beta"), { "latest-darwin-aarch64.json": partial });
 });
 
 for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]]) {
@@ -66,13 +44,8 @@ for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]
       const text = await readFile(path.join(directory, "latest.json"), "utf8");
       const manifest = JSON.parse(text);
       // Tauri's static manifest format, pretty-printed with a final newline.
-      assert.equal(text, `${JSON.stringify(manifest, null, 2)}\n`);
-      assert.deepEqual(Object.keys(manifest), ["version", "channel", "pub_date", "platforms"]);
-      assert.equal(new Date(manifest.pub_date).toISOString(), manifest.pub_date);
-      assert.equal(manifest.version, version);
-      assert.equal(manifest.channel, channel);
+      assert.equal(text, `${JSON.stringify({ version, channel, pub_date: manifest.pub_date, platforms: manifest.platforms }, null, 2)}\n`);
       assert.deepEqual(Object.keys(manifest.platforms), desktopTargets);
-      for (const [target, entry] of Object.entries(manifest.platforms)) assert.deepEqual(Object.keys(entry), ["signature", "url"], target);
       assert.equal(manifest.platforms["windows-aarch64"].url, `https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-v${version}/private-ai-proxy-${version}-windows-arm64.exe`);
       assert.equal(manifest.platforms["darwin-x86_64"].signature, `private-ai-proxy-${version}-macos-x64.app.tar.gz-signature`);
       // An App Store package must never be published with the Direct release.

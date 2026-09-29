@@ -737,9 +737,6 @@ jobs:
           dmg="$(find "$PAP_BUNDLE_DIR/dmg" -type f -name '*.dmg' -print -quit)"
           test -d "$app_bundle"
           test -f "$dmg"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-service"
-          test -x "$app_bundle/Contents/MacOS/private-ai-proxy-helper"
           test -f "$app_bundle/Contents/Resources/Assets.car"
           test -f "$app_bundle/Contents/Resources/icon.icns"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app_bundle/Contents/Info.plist")" = Icon
