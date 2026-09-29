@@ -235,7 +235,7 @@ impl Projector {
     /// its native `providers` entry overlays the V1 `provider` one we write,
     /// so no source may define `providers.private-ai-proxy`.
     /// Keep the original write/restore path: selecting JSONC instead would
-    /// strand old connection journals and our JSON writer would lose comments.
+    /// strand old connection journals, and our JSON writer edits strict JSON only.
     /// Project/managed/remote sources need CLI context; references stay opaque
     /// here so inspection never reads an API key file or executes anything.
     pub(super) fn check_opencode_merge(
@@ -243,7 +243,7 @@ impl Projector {
         doc: &ConfigDoc,
         owns_model: bool,
     ) -> Result<(), String> {
-        let ConfigDoc::Json(projected) = doc else {
+        let Some(projected) = doc.as_json() else {
             return Err("OpenCode requires a JSON projection".to_string());
         };
         let global = self

@@ -419,10 +419,13 @@ fn opencode_process_overrides_follow_official_merge_order() {
             &global.join("opencode.jsonc"),
             "{/* preserved */\"model\":\"other/model\"}",
         );
-        let expected = ConfigDoc::Json(json!({
-            "model": "private-ai-proxy/test",
-            "provider": {"private-ai-proxy": {"name": "Gateway"}}
-        }));
+        let expected = ConfigDoc::Json(
+            json!({
+                "model": "private-ai-proxy/test",
+                "provider": {"private-ai-proxy": {"name": "Gateway"}}
+            })
+            .to_string(),
+        );
         if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
             write(&dir.join("opencode.json"), "{\"model\":\"other/dir-json\"}");
             write(
@@ -491,10 +494,13 @@ fn opencode_process_overrides_follow_official_merge_order() {
 #[test]
 fn opencode_2_provider_entry_in_the_owned_file_is_refused() {
     let sandbox = sandbox("opencode-2-provider");
-    let projected = ConfigDoc::Json(json!({
-        "provider": {"private-ai-proxy": {"name": "Gateway"}},
-        "providers": {"private-ai-proxy": {"settings": {"baseURL": "http://127.0.0.1:1/v1"}}}
-    }));
+    let projected = ConfigDoc::Json(
+        json!({
+            "provider": {"private-ai-proxy": {"name": "Gateway"}},
+            "providers": {"private-ai-proxy": {"settings": {"baseURL": "http://127.0.0.1:1/v1"}}}
+        })
+        .to_string(),
+    );
     let error = sandbox
         .projector
         .check_opencode_merge(&projected, false)
