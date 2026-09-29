@@ -11,6 +11,7 @@
 
 mod codex_service;
 mod discovery;
+mod dsh;
 mod error;
 mod projection;
 mod providers;
@@ -52,7 +53,7 @@ use desktop_core::{
 
 use crate::{
     catalog::{Catalog, Surface},
-    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
+    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, EntryKey, Format},
     secrets::SecretStore,
     tokens::{TokenFiles, TokenSet},
 };
@@ -117,6 +118,10 @@ struct Connection {
     /// a record from before this field is taken to match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
+    /// The connection created the config file, a YAML list that restoring
+    /// empties: it is removed again rather than left as `[]`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    created_file: bool,
     /// The agent is not authorized (disconnect in progress).
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,
@@ -168,6 +173,24 @@ struct OwnedField {
     #[serde(default)]
     value: Option<ConfigValue>,
     previous: Option<Previous>,
+    /// The keyed list item `path` is relative to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry: Option<OwnedEntry>,
+    /// Written only by adding a key or replacing a scalar, and restored byte
+    /// for byte: the added key is removed, or the scalar's `source` put back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact: bool,
+    /// The previous scalar's YAML source text, quoting included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnedEntry {
+    #[serde(flatten)]
+    key: EntryKey,
+    /// The connection appended the item, so restoring removes it whole.
+    created: bool,
 }
 
 /// The value a field held before the connection. Sensitive values are parked
@@ -477,6 +500,18 @@ struct Rollback {
     revoke_token: bool,
     secrets: Vec<(String, Option<String>)>,
     configs: Vec<(PathBuf, Option<String>)>,
+    /// Puts back a companion file the connection wrote.
+    companion: Option<selection::Edit>,
+}
+
+/// Remove `path` if it still holds `expected`.
+fn remove_unchanged(path: &Path, expected: Option<&str>) -> io::Result<()> {
+    if fs::read_to_string(path).ok().as_deref() != expected {
+        return Err(io::Error::other(
+            "The file changed while it was being restored",
+        ));
+    }
+    fs::remove_file(path)
 }
 
 /// SHA-256 over everything a preview was computed from: the config text, the

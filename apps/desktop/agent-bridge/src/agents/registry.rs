@@ -15,9 +15,12 @@ impl AgentIntegration for Agent {
         match self {
             Self::Codex => Surface::Responses,
             Self::ClaudeCode => Surface::Messages,
-            Self::OpenCode | Self::Pi | Self::Hermes | Self::OpenClaw | Self::OhMyPi => {
-                Surface::ChatCompletions
-            }
+            Self::OpenCode
+            | Self::Pi
+            | Self::Hermes
+            | Self::OpenClaw
+            | Self::OhMyPi
+            | Self::Dsh => Surface::ChatCompletions,
         }
     }
 
@@ -28,6 +31,7 @@ impl AgentIntegration for Agent {
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
+            Agent::Dsh => Format::YamlList,
         }
     }
 
@@ -36,6 +40,7 @@ impl AgentIntegration for Agent {
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
+            Agent::Dsh => dsh::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("config.toml"),
@@ -75,6 +80,7 @@ impl AgentIntegration for Agent {
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
+            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to every profile and reads the token from its own credential store. dsh web and the dsh desktop app apply it at once in new sessions; existing sessions keep their recorded model. Restart running dsh headless, acp or sdk processes. Runs started with --patch overrides are not covered. DeepSeek web search is turned off while connected because it sends queries to DeepSeek with your own key; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
             Agent::Codex if super::codex_service::AVAILABLE => {
                 "Codex will use its official custom model provider with the Responses API, the \

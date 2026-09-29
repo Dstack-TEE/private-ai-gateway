@@ -116,9 +116,8 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             catalog.models.len(),
         ),
         Field {
-            path: owned(SECRET_PATH),
-            value: Some(ConfigValue::Json(provider)),
             preview: Some("Native-host OpenClaw local token".into()),
+            ..generated_catalog(SECRET_PATH, provider, 0)
         },
     ];
     if let Some(id) = selected {

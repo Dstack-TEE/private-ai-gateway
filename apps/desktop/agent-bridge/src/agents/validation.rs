@@ -28,6 +28,9 @@ impl Projector {
         if agent == Agent::OhMyPi {
             oh_my_pi::validate_host(&self.home, self.tool_env)?;
         }
+        if agent == Agent::Dsh {
+            dsh::validate_host(&self.home, self.tool_env)?;
+        }
         let configured = agent.config_path(&self.home, self.tool_env);
         if !configured.is_absolute() {
             return Err("Set the agent config location to an absolute path; desktop and CLI working directories may differ".to_string());
@@ -119,8 +122,23 @@ impl Projector {
             options: &options,
         };
         let fields = fields(agent, &inputs)?;
-        let mut edit =
-            project(doc, &fields, prior, agent).map_err(AgentError::ConfigurationConflict)?;
+        let mut edit = project(doc, &fields, prior, agent).map_err(|reason| {
+            AgentError::ConfigurationConflict(if agent.format() == Format::YamlList {
+                format!(
+                    "{} cannot be changed safely: {reason}",
+                    agent.config_path(&self.home, self.tool_env).display()
+                )
+            } else {
+                reason
+            })
+        })?;
+        if agent == Agent::Dsh {
+            let token = self.tokens.read(agent.id()).ok().flatten();
+            let dsh_home = dsh::home_dir(&self.home, self.tool_env);
+            if token.is_none_or(|token| !dsh::credential_holds(&dsh_home, &token)) {
+                edit.changes.push(dsh::credential_change());
+            }
+        }
         if let Some(model) = options.default_model.as_deref() {
             let config_path = self
                 .action_path(agent, prior, true)
@@ -156,6 +174,8 @@ impl Projector {
     ) -> Result<(), AgentError> {
         match agent {
             Agent::OhMyPi => oh_my_pi::validate_config(doc, prior)
+                .map_err(AgentError::ConfigurationConflict),
+            Agent::Dsh => dsh::validate_config(&dsh::home_dir(&self.home, self.tool_env), doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
                 Err(AgentError::AuthenticationConflict("Codex's private_ai_proxy provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
@@ -448,7 +468,7 @@ impl Projector {
         let managed = doc.as_ref().is_some_and(|doc| {
             record.fields.iter().all(|field| {
                 (agent == Agent::Codex && field.path == ["model"])
-                    || doc.get_value(&refs(&field.path)) == field.value
+                    || owned_value(doc, field) == field.value
             })
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
@@ -526,6 +546,19 @@ impl Projector {
                     status.authorized = false;
                     status.attention = Some(attention.to_string());
                 }
+            }
+        }
+        if agent == Agent::Dsh && status.authorized {
+            let token = self.tokens.read(agent.id()).ok().flatten();
+            let dsh_home = dsh::home_dir(&self.home, self.tool_env);
+            if token.is_none_or(|token| !dsh::credential_holds(&dsh_home, &token)) {
+                status.connected = false;
+                status.authorized = false;
+                status.repair_action = Some(AgentRepairAction::Reconnect);
+                status.attention = Some(format!(
+                    "dsh's credential store no longer holds this connection's token ({}). Reconnect this agent",
+                    dsh::TOKEN_REF
+                ));
             }
         }
         if agent == Agent::OpenClaw && status.authorized {

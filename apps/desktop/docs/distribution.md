@@ -129,7 +129,7 @@ Authenticode remains optional and does not block the release.
 
 `Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
 package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
-OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
+DeepSeek Harness, OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
 live RedPill service, its verified usage record, restoration on disconnect and
 token revocation, then fail-closed behavior and restoration on stop
 ([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
@@ -467,7 +467,8 @@ do not protect against other programs running as the same OS user.
 OpenCode uses its file reference and OpenClaw its `singleValue` file SecretRef.
 Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
 Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
-quoted `/bin/cat` path. No external Agent launches a PAP executable or reads the
+quoted `/bin/cat` path. DeepSeek Harness has no command or file reference, so its
+token is written into dsh's own owner-only credential store (see below). No external Agent launches a PAP executable or reads the
 app container. The same transaction journal restores owned configuration,
 revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory
 proxy authority is withdrawn before restoration; restoration failures remain
@@ -479,6 +480,50 @@ MAS neither copies it to the container nor installs it in Home/shared paths.
 The private management socket uses the short `pap-ipc/api.sock` path at the
 root of the App Container so the Unix socket length limit is respected; it never
 uses `/private/tmp`.
+
+### DeepSeek Harness
+
+DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is supported at 0.1.7-rc.2, the
+version the live test installs; 0.2.0-rc.1 has the same configuration contract.
+dsh composes each profile from its bundle layers, then
+`$DSH_HOME/profiles/<name>/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`
+(`~/.dsh` by default), then any `--patch` overlays. Each layer is a list of items
+such as `{id: llm-pi-ai, config: ...}`, and a later item's `config` replaces the
+row's whole config. Every profile, the dsh desktop app's included, reads the home
+layer, and dsh never writes it, so a connection edits only that file. Profiles
+created later are covered too.
+
+The connection adds three keyed items there: a `private-ai-proxy` provider in
+`llm-pi-ai` (Chat Completions, `[TEE]` model names, and the compatibility
+switches the Local API needs), the default model in `agent-default-model`, and
+`disabled: true` on `web-search-deepseek`. That row would otherwise send search
+queries to DeepSeek with the user's own key; search providers the user installs
+(Exa, Perplexity) keep using their own keys. The provider reads its token through
+`apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`, which the connection stores in dsh's
+`.credentials.yaml` under dsh's own `<file>.lock` writer lock. That store is
+owner-only, reloads live and is never exported to the processes dsh starts. A
+store or patch list the connection created is removed on disconnect while it
+still holds exactly what was written.
+
+Keyed items are a general `ConfigDoc` capability. yaml-edit restores lists byte
+for byte only through appending and removing whole items, adding and removing
+keys, and replacing scalars. So in the user's own items the connection only
+adds keys or replaces scalars, journaling each scalar's source text. It refuses,
+as a configuration conflict naming the file, anything else: replacing a
+structured value, removing an existing key (such as a `reasoningEffort`),
+non-empty flow-style lists or items, a file without a final newline, and
+duplicate ids. The same checks deauthorize a connection when the configuration
+changes afterwards:
+- a profile's own `llm-pi-ai` config, which the home item would hide (move it
+  to the home layer);
+- a layer that disables or re-inserts these rows, or moves the credential store;
+- a foreign or changed `PRIVATE_AI_PROXY_DSH_TOKEN`;
+- a relative `DSH_HOME`;
+- a legacy `settings.yaml` not yet imported.
+
+`--patch` overlays and variables exported in the user's shell cannot be seen and
+are named in the connect note. dsh web and the dsh desktop app reload both files
+live, for new sessions; `dsh headless`, acp and sdk read them at start.
 
 ## Removed duplication and retained boundaries
 

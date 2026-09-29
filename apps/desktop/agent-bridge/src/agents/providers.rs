@@ -52,6 +52,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
     Ok(match agent {
         Agent::OpenClaw => openclaw::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
         Agent::OhMyPi => oh_my_pi::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
+        Agent::Dsh => dsh::fields(inputs)?,
         Agent::Codex => {
             let mut fields = vec![
                 set(&["model_provider"], "private_ai_proxy"),

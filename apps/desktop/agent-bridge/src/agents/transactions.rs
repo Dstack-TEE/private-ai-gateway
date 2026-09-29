@@ -271,12 +271,7 @@ impl Projector {
                     .map_err(|_| AgentError::RestorationFailed)?
             {
                 if !selection.changes.is_empty() {
-                    write_atomic(
-                        &selection.path,
-                        &selection.after,
-                        Some(selection.before.as_deref()),
-                    )
-                    .map_err(|_| AgentError::RestorationFailed)?;
+                    selection::commit(&selection).map_err(|_| AgentError::RestorationFailed)?;
                 }
             }
         }
@@ -312,12 +307,18 @@ impl Projector {
             }
         };
         if !edit.changes.is_empty() {
-            write_atomic(
-                path,
-                &doc.render().map_err(|_| AgentError::RestorationFailed)?,
-                Some(text.as_deref()),
-            )
-            .map_err(|_| AgentError::RestorationFailed)?;
+            let restored = doc.render().map_err(|_| AgentError::RestorationFailed)?;
+            // A list the connection created goes away again rather than stay `[]`.
+            let empty = ConfigDoc::parse(Format::YamlList, "")
+                .and_then(|empty| empty.render())
+                .map_err(|_| AgentError::Internal)?;
+            if record.created_file && agent.format() == Format::YamlList && restored == empty {
+                remove_unchanged(path, text.as_deref())
+                    .map_err(|_| AgentError::RestorationFailed)?;
+            } else {
+                write_atomic(path, &restored, Some(text.as_deref()))
+                    .map_err(|_| AgentError::RestorationFailed)?;
+            }
         }
         for entry in &edit.consumed_secrets {
             self.secrets
@@ -385,6 +386,12 @@ impl Projector {
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
         next_record.endpoint = Some(self.endpoint.clone());
+        next_record.created_file = agent.format() == Format::YamlList
+            && (text.is_none()
+                || self
+                    .current_record(agent, previous_record.as_ref())
+                    .is_some_and(|record| record.created_file));
+        let mut selection = edit.selection.clone();
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {
             // A fresh token on every new connection; a leftover file from an
@@ -412,6 +419,22 @@ impl Projector {
                     .map_err(|_| AgentError::CredentialStore)?;
                 guard.secrets.push((secret.entry.clone(), previous));
             }
+            if agent == Agent::Dsh {
+                // dsh reads the token itself, so it is stored once it is issued.
+                let token = self
+                    .tokens
+                    .read(agent.id())
+                    .ok()
+                    .flatten()
+                    .ok_or(AgentError::ConfigurationWrite)?;
+                let prior = self
+                    .current_record(agent, previous_record.as_ref())
+                    .and_then(|record| record.selection.as_ref());
+                let credential = selection::prepare_token(path, prior, &token)
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
+                next_record.selection = Some(credential.journal.clone());
+                selection = Some(credential);
+            }
             // Persist recovery before either file changes. An interrupted apply
             // is never authorized and must restore before another connection.
             let mut pending = next_record.clone();
@@ -430,17 +453,10 @@ impl Projector {
                 .map_err(|_| AgentError::ConfigurationWrite)?;
                 guard.configs.push((path.to_path_buf(), text.clone()));
             }
-            if let Some(selection) = &edit.selection {
+            if let Some(selection) = &selection {
                 if !selection.changes.is_empty() {
-                    write_atomic(
-                        &selection.path,
-                        &selection.after,
-                        Some(selection.before.as_deref()),
-                    )
-                    .map_err(|_| AgentError::ConfigurationWrite)?;
-                    guard
-                        .configs
-                        .push((selection.path.clone(), selection.before.clone()));
+                    selection::commit(selection).map_err(|_| AgentError::ConfigurationWrite)?;
+                    guard.companion = Some(selection.reversed());
                 }
             }
             store.insert(agent.id().to_string(), next_record);
@@ -510,6 +526,11 @@ impl Projector {
 
     pub(super) fn rollback(&self, agent: Agent, guard: Rollback) -> Result<(), String> {
         let mut first_error = None;
+        if let Some(companion) = &guard.companion {
+            if let Err(error) = selection::commit(companion) {
+                first_error.get_or_insert(format!("cannot restore the config: {error}"));
+            }
+        }
         for (path, original) in guard.configs.into_iter().rev() {
             let restored = match original {
                 Some(original) => write_atomic(&path, &original, None),

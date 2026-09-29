@@ -9,6 +9,7 @@ import piIcon from "@lobehub/icons-static-svg/icons/pi.svg";
 import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
+import dshIcon from "../assets/dsh.svg";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
 import type { Tone } from "../../shared/contracts";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
@@ -26,6 +27,7 @@ import { cn } from "../lib/utils";
 const AGENT_ICONS: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
+  dsh: dshIcon,
   opencode: openCodeIcon,
   pi: piIcon,
   "oh-my-pi": ohMyPiIcon,
