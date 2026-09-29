@@ -12,7 +12,9 @@ use crate::checks::{
     run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
     ReportOutcome, VerifierPolicy,
 };
-use crate::client::{host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError};
+use crate::client::{
+    attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError,
+};
 use crate::transcript::Transcript;
 
 /// Why a verification could not run: the service could not be reached or is
@@ -79,8 +81,9 @@ pub async fn verify_service(
         Some(nonce) => nonce.to_string(),
         None => random_nonce_hex(),
     };
+    let url = attestation_url(&base_url, &nonce)?;
     let resp = client
-        .fetch_attestation(&base_url, &nonce)
+        .fetch_attestation(&url)
         .await
         .map_err(|error| ServiceError::from_request(&error, &host))?;
     if !(200..300).contains(&resp.status) {
