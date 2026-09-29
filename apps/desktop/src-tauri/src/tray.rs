@@ -101,13 +101,12 @@ fn build_menu<R: Runtime>(
         .enabled(false)
         .build(app)?;
     let profiles = SubmenuBuilder::new(app, "Profiles").build()?;
-    // Check items are built checked; the agent items show the backend's
-    // agents once it lists them.
     let agents = Agent::ALL
         .into_iter()
         .map(|agent| {
             let id = format!("agent:{}", agent.id());
             let item = CheckMenuItemBuilder::with_id(id, agent.name())
+                .checked(false)
                 .enabled(false)
                 .build(app)?;
             Ok((agent, item))
@@ -678,11 +677,10 @@ mod tests {
         let app = app.handle();
         let (tray, menu) = build_menu(app, true).unwrap();
         app.manage(tray);
-        // Until the backend lists them, agent items are check items built
-        // checked (the builder's default) and disabled.
+        // Until the backend lists them, agent items are unchecked and disabled.
         let unlisted: Vec<String> = Agent::ALL
             .iter()
-            .map(|agent| format!("agent:{}: [x] {} (disabled)", agent.id(), agent.name()))
+            .map(|agent| format!("agent:{}: [ ] {} (disabled)", agent.id(), agent.name()))
             .collect();
         assert_eq!(
             describe_tray(&menu),
