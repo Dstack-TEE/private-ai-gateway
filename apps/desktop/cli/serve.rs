@@ -413,7 +413,7 @@ impl ProxyState {
         }
         let stale_pins = self.client.pinned_spkis(&self.host);
         let pins = verification.attested_spkis();
-        let verification_summary = verification.transcript.to_json(false);
+        let verification_summary = verification.transcript.to_json();
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
@@ -608,7 +608,7 @@ async fn initialize(
     .await?;
     if options.print_progress {
         println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human(false));
+        print!("{}", verification.transcript.render_human());
     }
     if !verification.transcript.verified() {
         return Err(VerifyError::Failed(
@@ -616,7 +616,7 @@ async fn initialize(
         ));
     }
 
-    let verification_summary = verification.transcript.to_json(false);
+    let verification_summary = verification.transcript.to_json();
     let pins = verification.attested_spkis();
     let ServiceVerification {
         report,

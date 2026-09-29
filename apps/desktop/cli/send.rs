@@ -15,25 +15,13 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
+use crate::transcript::print_json;
 use crate::verify::{verify_service, ServiceVerification};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
 pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, String> {
-    let bearer = if args.api_key_stdin {
-        if std::io::stdin().is_terminal() {
-            return Err("Refusing to read the API key from a terminal with --api-key-stdin; pipe it in or set ACI_API_KEY.".into());
-        }
-        Some(crate::read_api_key(std::io::stdin())?)
-    } else if let Some(key) = args.api_key.clone() {
-        // Like the `aci` alias note, never mixed into JSON-mode stderr.
-        if !args.json {
-            tracing::warn!("warning: --api-key exposes the key to other local processes and will be removed in 0.3; use --api-key-stdin or ACI_API_KEY.");
-        }
-        Some(key)
-    } else {
-        std::env::var("ACI_API_KEY").ok()
-    };
+    let bearer = api_key(&args)?;
     let verification = verify_service(
         &args.base_url,
         None,
@@ -44,12 +32,12 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     .await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human(false));
+        print!("{}", verification.transcript.render_human());
         println!();
     }
     if !verification.transcript.verified() {
         if args.json {
-            print_json(&verification.transcript.to_json(false))?;
+            print_json(&verification.transcript.to_json())?;
         }
         return Err("service verification failed; not sending the prompt (fail closed)".into());
     }
@@ -77,26 +65,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         .clone()
         .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
     let stream = !args.no_stream;
-    let mut body = json!({
-        "model": model,
-        "messages": [{ "role": "user", "content": prompt }],
-        "stream": stream,
-    });
-    // §5.3 serving constraints ride in the body; the service consumes and
-    // strips the member before forwarding. Verified serving is the default —
-    // `--allow-unverified` drops the demand.
-    if !args.allow_unverified || !args.sessions.is_empty() {
-        let mut provider = serde_json::Map::new();
-        if !args.allow_unverified {
-            provider.insert(PROVIDER_ACI_VERIFIED.to_string(), json!(true));
-        }
-        if !args.sessions.is_empty() {
-            provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(args.sessions));
-        }
-        body["provider"] = Value::Object(provider);
-    }
-    let request_body =
-        serde_json::to_vec(&body).map_err(|e| format!("failed to serialize request body: {e}"))?;
+    let request_body = chat_request(&args, &model, &prompt, stream)?;
 
     if !args.json {
         println!("model:  {model}");
@@ -140,24 +109,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         println!();
     }
 
-    // A streaming response the aggregator committed before selecting an
-    // upstream (pre-first-byte keep-alive, §5.2) carries no X-Receipt-Id
-    // header; the receipt still exists once the stream finalized and is
-    // retrievable by the response's own id. That is only legitimate for an
-    // unverified stream — a constrained request (the default) is never
-    // committed early, so a missing header there is a §5.2 violation this
-    // command must keep surfacing, not paper over.
-    let receipt_id = match response
-        .headers
-        .get("x-receipt-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-    {
-        Some(id) => id,
-        None if args.allow_unverified && stream => response_chat_id(&response.body)
-            .ok_or("response carried no X-Receipt-Id header and no readable response id")?,
-        None => return Err("response carried no X-Receipt-Id header".into()),
-    };
+    let receipt_id = receipt_id(&response, args.allow_unverified && stream)?;
     let receipt_resp = client
         .fetch_receipt(&base_url, &receipt_id, bearer.as_deref())
         .await?;
@@ -187,7 +139,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     );
 
     if args.json {
-        let mut output = transcript.to_json(false);
+        let mut output = transcript.to_json();
         output["model"] = json!(model);
         output["receipt_id"] = json!(receipt_id);
         output["request_body"] = json!(String::from_utf8_lossy(&request_body));
@@ -195,17 +147,75 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         print_json(&output)?;
     } else {
         println!("== receipt verification: {receipt_id} ==");
-        print!("{}", transcript.render_human(false));
+        print!("{}", transcript.render_human());
     }
     Ok(if transcript.verified() { 0 } else { 1 })
 }
 
-fn print_json(value: &Value) -> Result<(), String> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?
-    );
-    Ok(())
+/// The bearer key: piped to stdin, the deprecated `--api-key`, or `ACI_API_KEY`.
+fn api_key(args: &SendArgs) -> Result<Option<String>, String> {
+    if args.api_key_stdin {
+        if std::io::stdin().is_terminal() {
+            return Err("Refusing to read the API key from a terminal with --api-key-stdin; pipe it in or set ACI_API_KEY.".into());
+        }
+        return crate::read_api_key(std::io::stdin()).map(Some);
+    }
+    if let Some(key) = &args.api_key {
+        // Like the `aci` alias note, never mixed into JSON-mode stderr.
+        if !args.json {
+            tracing::warn!("warning: --api-key exposes the key to other local processes and will be removed in 0.3; use --api-key-stdin or ACI_API_KEY.");
+        }
+        return Ok(Some(key.clone()));
+    }
+    Ok(std::env::var("ACI_API_KEY").ok())
+}
+
+/// The chat completion request. §5.3 serving constraints ride in the body;
+/// the service consumes and strips the member before forwarding. Verified
+/// serving is the default — `--allow-unverified` drops the demand.
+fn chat_request(
+    args: &SendArgs,
+    model: &str,
+    prompt: &str,
+    stream: bool,
+) -> Result<Vec<u8>, String> {
+    let mut body = json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": prompt }],
+        "stream": stream,
+    });
+    if !args.allow_unverified || !args.sessions.is_empty() {
+        let mut provider = serde_json::Map::new();
+        if !args.allow_unverified {
+            provider.insert(PROVIDER_ACI_VERIFIED.to_string(), json!(true));
+        }
+        if !args.sessions.is_empty() {
+            provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(args.sessions));
+        }
+        body["provider"] = Value::Object(provider);
+    }
+    serde_json::to_vec(&body).map_err(|e| format!("failed to serialize request body: {e}"))
+}
+
+/// The response's receipt id. A streaming response the aggregator committed
+/// before selecting an upstream (pre-first-byte keep-alive, §5.2) carries no
+/// X-Receipt-Id header; the receipt still exists once the stream finalized
+/// and is retrievable by the response's own id. That is only legitimate for
+/// an unverified stream (`early_commit`) — a constrained request (the
+/// default) is never committed early, so a missing header there is a §5.2
+/// violation this command must keep surfacing, not paper over.
+fn receipt_id(response: &HttpResult, early_commit: bool) -> Result<String, String> {
+    let header = response
+        .headers
+        .get("x-receipt-id")
+        .and_then(|value| value.to_str().ok());
+    match header {
+        Some(id) => Ok(id.to_string()),
+        None if early_commit => response_chat_id(&response.body).ok_or_else(|| {
+            "response carried no X-Receipt-Id header and no readable response id".into()
+        }),
+        None => Err("response carried no X-Receipt-Id header".into()),
+    }
 }
 
 async fn first_model(

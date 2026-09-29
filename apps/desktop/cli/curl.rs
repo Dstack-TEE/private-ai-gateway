@@ -26,12 +26,12 @@ pub async fn run(args: CurlArgs, require_production_os: bool) -> Result<i32, Str
     let verification = verify_service(&origin, None, &policy, require_production_os, false).await?;
     // stdout belongs to curl's response, so the transcript goes to stderr.
     if args.json {
-        let transcript = serde_json::to_string(&verification.transcript.to_json(false))
+        let transcript = serde_json::to_string(&verification.transcript.to_json())
             .map_err(|e| format!("failed to serialize transcript: {e}"))?;
         eprintln!("{transcript}");
     } else {
         eprintln!("== ACI verification: {origin} ==");
-        eprint!("{}", verification.transcript.render_human(false));
+        eprint!("{}", verification.transcript.render_human());
     }
 
     let command_args = pinned_curl_args(

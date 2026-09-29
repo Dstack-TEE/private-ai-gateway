@@ -188,10 +188,14 @@ fn transient_audit_status(status: u16) -> bool {
     status == 404 || status == 429 || (500..600).contains(&status)
 }
 
+#[derive(Debug, thiserror::Error)]
 enum AuditFetchError {
+    #[error("fetch returned HTTP {0}")]
     Status(u16),
+    #[error("fetch failed: {0}")]
     Transport(String),
     /// The body exceeded this many bytes; retrying cannot help.
+    #[error("the document exceeds the {} KiB limit, so it was not checked or saved", .0 / 1024)]
     TooLarge(usize),
 }
 
@@ -206,20 +210,6 @@ impl From<GetError> for AuditFetchError {
         match error {
             GetError::Failed(error) => Self::Transport(error),
             GetError::TooLarge(limit) => Self::TooLarge(limit),
-        }
-    }
-}
-
-impl std::fmt::Display for AuditFetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Status(status) => write!(f, "fetch returned HTTP {status}"),
-            Self::Transport(error) => write!(f, "fetch failed: {error}"),
-            Self::TooLarge(limit) => write!(
-                f,
-                "the document exceeds the {} KiB limit, so it was not checked or saved",
-                limit / 1024
-            ),
         }
     }
 }

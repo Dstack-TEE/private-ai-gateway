@@ -57,21 +57,14 @@ pub fn host_of(url: &str) -> Result<String, String> {
 pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 
 /// Why a bounded GET produced no response.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum GetError {
     /// The request or its body read failed.
+    #[error("{0}")]
     Failed(String),
     /// The body exceeded this many bytes.
+    #[error("response body exceeds {} KiB", .0 / 1024)]
     TooLarge(usize),
-}
-
-impl std::fmt::Display for GetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Failed(error) => f.write_str(error),
-            Self::TooLarge(limit) => write!(f, "response body exceeds {} KiB", limit / 1024),
-        }
-    }
 }
 
 impl From<GetError> for String {

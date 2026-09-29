@@ -142,7 +142,7 @@ pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, S
         args.explain,
     )
     .await?;
-    verification.transcript.print(args.json, args.explain)
+    verification.transcript.print(args.json)
 }
 
 #[cfg(test)]

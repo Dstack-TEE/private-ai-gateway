@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
+use crate::transcript::print_json;
 use crate::verify::verify_service;
 use desktop_core::endpoint;
 use desktop_core::now_secs;
@@ -26,7 +27,7 @@ pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32,
     .await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human(false));
+        print!("{}", verification.transcript.render_human());
         println!();
     }
     if !verification.transcript.verified() {
@@ -50,11 +51,7 @@ pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32,
 
     if args.json {
         let sessions: Vec<Value> = audited.iter().map(AuditedSession::to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({ "sessions": sessions }))
-                .map_err(|e| e.to_string())?
-        );
+        print_json(&json!({ "sessions": sessions }))?;
     } else {
         if audited.is_empty() {
             println!("no current attested sessions listed");

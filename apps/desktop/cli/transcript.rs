@@ -6,10 +6,11 @@
 //! never count either way. Every line carries its spec section citation
 //! (`spec/aci.md` §9).
 
+use serde::Serialize;
 use serde_json::{json, Value};
 
 /// One entry in the fixed check vocabulary (id, spec citation, title).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct CheckDef {
     pub id: &'static str,
     pub section: &'static str,
@@ -90,7 +91,8 @@ pub const UPSTREAM_2: CheckDef = def(
     "cited session: document hashes to the id, served_at in window, evidence digest",
 );
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Pass,
     Fail,
@@ -100,15 +102,6 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Pass => "pass",
-            Status::Fail => "fail",
-            Status::Skip => "skip",
-            Status::Info => "info",
-        }
-    }
-
     fn marker(self) -> &'static str {
         match self {
             Status::Pass => "PASS",
@@ -119,15 +112,19 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Check {
+    #[serde(flatten)]
     pub def: CheckDef,
     pub status: Status,
     pub detail: String,
     /// Short clause naming why a skipped check was skipped; surfaced in the
     /// verdict line (`detail` carries the full reason).
+    #[serde(skip)]
     pub skip_reason: Option<String>,
-    /// `--explain` material: the exact computed inputs/digests for the check.
+    /// `--explain` material: the exact computed inputs/digests for the
+    /// check, present only when `--explain` asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<String>,
 }
 
@@ -225,9 +222,9 @@ impl Transcript {
         }
     }
 
-    /// Aligned one-line-per-check rendering, verdict line last. With
-    /// `include_explain`, each check's computed material follows it indented.
-    pub fn render_human(&self, include_explain: bool) -> String {
+    /// Aligned one-line-per-check rendering, verdict line last. Each check's
+    /// `--explain` material follows it indented.
+    pub fn render_human(&self) -> String {
         let mut out = String::new();
         for check in &self.checks {
             out.push_str(&format!(
@@ -242,14 +239,10 @@ impl Transcript {
                 out.push_str(&check.detail);
             }
             out.push('\n');
-            if include_explain {
-                if let Some(explain) = &check.explain {
-                    for line in explain.lines() {
-                        out.push_str("        | ");
-                        out.push_str(line);
-                        out.push('\n');
-                    }
-                }
+            for line in check.explain.iter().flat_map(|explain| explain.lines()) {
+                out.push_str("        | ");
+                out.push_str(line);
+                out.push('\n');
             }
         }
         out.push_str(&self.verdict_line());
@@ -259,41 +252,18 @@ impl Transcript {
 
     /// Print the transcript to stdout — pretty JSON or the human rendering —
     /// and return the subcommand exit code (0 iff VERIFIED).
-    pub fn print(&self, json: bool, explain: bool) -> Result<i32, String> {
+    pub fn print(&self, json: bool) -> Result<i32, String> {
         if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&self.to_json(explain))
-                    .map_err(|e| format!("failed to serialize transcript: {e}"))?
-            );
+            print_json(&self.to_json())?;
         } else {
-            print!("{}", self.render_human(explain));
+            print!("{}", self.render_human());
         }
         Ok(if self.verified() { 0 } else { 1 })
     }
 
-    pub fn to_json(&self, include_explain: bool) -> Value {
-        let checks: Vec<Value> = self
-            .checks
-            .iter()
-            .map(|check| {
-                let mut obj = json!({
-                    "id": check.def.id,
-                    "section": check.def.section,
-                    "title": check.def.title,
-                    "status": check.status.as_str(),
-                    "detail": check.detail,
-                });
-                if include_explain {
-                    if let Some(explain) = &check.explain {
-                        obj["explain"] = Value::String(explain.clone());
-                    }
-                }
-                obj
-            })
-            .collect();
+    pub fn to_json(&self) -> Value {
         json!({
-            "checks": checks,
+            "checks": self.checks,
             "verdict": {
                 "verified": self.verified(),
                 "passed": self.count(Status::Pass),
@@ -303,6 +273,14 @@ impl Transcript {
             },
         })
     }
+}
+
+/// Pretty JSON on stdout, the form the ACI commands print.
+pub fn print_json(value: &Value) -> Result<(), String> {
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?;
+    println!("{text}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -327,7 +305,7 @@ mod tests {
         t.pass(ID_2, "ok");
         assert!(t.verified());
         assert!(t.verdict_line().starts_with("VERIFIED"));
-        assert_eq!(t.to_json(false)["verdict"]["verified"], Value::Bool(true));
+        assert_eq!(t.to_json()["verdict"]["verified"], Value::Bool(true));
     }
 
     #[test]
@@ -379,8 +357,8 @@ mod tests {
         assert!(t.verified());
         assert_eq!(t.count(Status::Pass), 1);
         assert_eq!(t.verdict_line(), "VERIFIED (1 pass)");
-        assert!(t.render_human(false).contains("INFO  receipt-note"));
-        assert_eq!(t.to_json(false)["checks"][1]["status"], "info");
+        assert!(t.render_human().contains("INFO  receipt-note"));
+        assert_eq!(t.to_json()["checks"][1]["status"], "info");
     }
 
     #[test]
@@ -390,16 +368,17 @@ mod tests {
             ..Default::default()
         };
         t.pass(ID_2, "ok");
+        t.pass(ID_3, "ok");
         t.explain("input: {}\ncomputed: sha256:ab");
-        let v = t.to_json(true);
+        let v = t.to_json();
         assert_eq!(v["checks"][0]["id"], "id-2");
         assert_eq!(v["checks"][0]["section"], "9.1(2)");
         assert_eq!(v["checks"][0]["status"], "pass");
-        assert!(v["checks"][0]["explain"].is_string());
+        assert!(v["checks"][1]["explain"].is_string());
         assert_eq!(v["verdict"]["verified"], true);
-        assert_eq!(v["verdict"]["passed"], 1);
+        assert_eq!(v["verdict"]["passed"], 2);
         assert_eq!(v["verdict"]["workload_keyset_digest"], "sha256:cd");
-        // Without explain requested, the field stays out of the wire shape.
-        assert!(t.to_json(false)["checks"][0].get("explain").is_none());
+        // A check without explain material has no such field.
+        assert!(v["checks"][0].get("explain").is_none());
     }
 }
