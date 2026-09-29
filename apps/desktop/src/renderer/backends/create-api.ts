@@ -1,24 +1,20 @@
-import {
-  AGENTS_CHANGED_EVENT,
-  APPEARANCE_EVENT,
-  CLIENT_KEY_CHANGED_EVENT,
-  LAUNCH_PREFERENCES_EVENT,
-  SETTINGS_RESET_EVENT,
-  STATE_EVENT,
-  type CliRegistration,
-  type DesktopApi,
-  type DistributionCapabilities,
-  type LoginPresentation,
-  type NotificationPermissionStatus,
-  type ProfileBackup,
-  type ServiceProvider,
-  type UiEvent,
-  type UiEventPayloads,
-  type UiMethod,
-  type UiRequests,
-  type UiResponses,
-  type UpdateChannel,
-  type UpdateInfo,
+// Node runs `npm run test:renderer` on this file as is, so a value import names its file.
+import { AGENTS_CHANGED_EVENT, APPEARANCE_EVENT, CLIENT_KEY_CHANGED_EVENT, LAUNCH_PREFERENCES_EVENT, SETTINGS_RESET_EVENT, STATE_EVENT } from "../../shared/contracts.generated.ts";
+import type {
+  CliRegistration,
+  DesktopApi,
+  DistributionCapabilities,
+  LoginPresentation,
+  NotificationPermissionStatus,
+  ProfileBackup,
+  ServiceProvider,
+  UiEvent,
+  UiEventPayloads,
+  UiMethod,
+  UiRequests,
+  UiResponses,
+  UpdateChannel,
+  UpdateInfo,
 } from "../../shared/contracts";
 
 /** A UI method's parameters, which a method that takes none may omit. */
