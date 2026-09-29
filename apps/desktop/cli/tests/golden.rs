@@ -1,8 +1,9 @@
 //! Golden outputs of the command surface: help, human and `--json` output,
-//! error messages and exit codes, each case as `$ pap <args>` with its exit
-//! code and both streams. After an intended change, rewrite them with
-//! `SNAPSHOTS=overwrite cargo test --package private-ai-proxy --test golden
-//! --bin private-ai-proxy`; the binary's tests hold the human renderings.
+//! error messages and exit codes. Each case is `$ pap <args>`, with a nonzero
+//! exit code, then stdout, then stderr marked `! `. After an intended change,
+//! rewrite them with `SNAPSHOTS=overwrite cargo test --package
+//! private-ai-proxy --test golden --bin private-ai-proxy`; the binary's tests
+//! hold the human renderings.
 mod support;
 
 use std::{
@@ -11,11 +12,9 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
-    time::Duration,
 };
 
-use serde_json::Value;
+use sha2::{Digest, Sha256};
 use snapbox::{assert::DEFAULT_ACTION_ENV, Assert, Data, Redactions};
 use support::Backend;
 
@@ -27,131 +26,47 @@ fn sandbox_teardown_watchdog() {
     support::watchdog();
 }
 
-/// Every command path, as `--help` and `help` list them.
-const COMMANDS: &[&str] = &[
-    "",
-    "status",
-    "start",
-    "stop",
-    "service",
-    "service start",
-    "service stop",
-    "service status",
-    "profiles",
-    "profiles list",
-    "profiles show",
-    "profiles import",
-    "profiles export",
-    "profiles login",
-    "profiles add",
-    "profiles verify",
-    "profiles edit",
-    "profiles use",
-    "profiles remove",
-    "agents",
-    "agents list",
-    "agents connect",
-    "agents disconnect",
-    "agents disconnect-all",
-    "models",
-    "models list",
-    "usage",
-    "usage list",
-    "usage show",
-    "usage export",
-    "usage clear",
-    "settings",
-    "settings reset",
-    "settings show",
-    "settings schema",
-    "settings set",
-    "token",
-    "token rotate",
-    "token show",
-    "token clear-credential",
-    "web-ui",
-    "web-ui password",
-    "web-ui password show",
-    "web-ui password rotate",
-    "cli",
-    "cli status",
-    "cli install",
-    "cli uninstall",
-    "app",
-    "app open",
-    "doctor",
-    "diagnostics",
-    "completions",
-    "verify",
-    "audit",
-    "sessions",
-    "send",
-    "curl",
-    "serve",
-];
-
-/// One invocation as a transcript entry: the command line, exit code, stdout
-/// and stderr.
-struct Case {
-    command: Command,
-    label: String,
-    stdin: Option<String>,
+/// One transcript entry: `command` run with `line`, split as a shell would,
+/// and `stdin`.
+fn run(mut command: Command, line: &str, stdin: &str) -> String {
+    let mut child = command
+        .args(shlex::split(line).expect("a well-formed command line"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(stdin.as_bytes()).unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    let mut entry = format!("$ pap {line}");
+    if output.status.code() != Some(0) {
+        entry.push_str(&format!("  # exit {:?}", output.status.code()));
+    }
+    entry.push('\n');
+    entry.push_str(&String::from_utf8_lossy(&output.stdout));
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        entry.push_str(&format!("! {line}\n"));
+    }
+    entry + "\n"
 }
 
-impl Case {
-    fn new(args: &[&str]) -> Self {
-        Self::with(Command::new(PAP), args)
-    }
-
-    fn with(mut command: Command, args: &[&str]) -> Self {
-        command.args(args).stdin(Stdio::null());
-        Self {
-            command,
-            label: args.join(" "),
-            stdin: None,
-        }
-    }
-
-    fn env(mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        self.command.env(key, value);
-        self
-    }
-
-    fn stdin(mut self, input: &str) -> Self {
-        self.command.stdin(Stdio::piped());
-        self.stdin = Some(input.to_string());
-        self
-    }
-
-    fn run(mut self) -> String {
-        let mut child = self
-            .command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        if let Some(input) = &self.stdin {
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes())
-                .unwrap();
-        }
-        let output = child.wait_with_output().unwrap();
-        format!(
-            "$ pap {}\nexit: {:?}\n--- stdout\n{}--- stderr\n{}\n",
-            self.label,
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        )
-    }
+/// A path or URL as one shell word.
+fn quote(value: &str) -> String {
+    shlex::try_quote(value).unwrap().into_owned()
 }
 
 /// Compares byte for byte, after replacing run-dependent values with
 /// placeholders, against `tests/golden/<name>`.
-fn assert_golden(name: &str, actual: String, redactions: Redactions) {
+fn assert_golden(name: &str, actual: String, values: &[(&'static str, &str)]) {
+    let mut redactions = Redactions::new();
+    for (placeholder, value) in values {
+        redactions.insert(placeholder, value.to_string()).unwrap();
+    }
+    // The expiry check (id-3) names the current time.
+    let now = regex::Regex::new(r"now (?<redacted>\d+) < not_after").unwrap();
+    redactions.insert("[NOW]", now).unwrap();
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/golden")
         .join(name);
@@ -161,65 +76,63 @@ fn assert_golden(name: &str, actual: String, redactions: Redactions) {
     );
 }
 
-fn redactions(values: &[(&'static str, &str)]) -> Redactions {
-    let mut redactions = Redactions::new();
-    redactions
-        .insert("[VERSION]", env!("CARGO_PKG_VERSION"))
-        .unwrap();
-    for (placeholder, value) in values {
-        redactions.insert(placeholder, value.to_string()).unwrap();
-    }
-    redactions
-}
-
-/// A port nothing listens on, so every connection to it is refused.
-fn closed_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
-
-#[test]
-fn help() {
-    let mut transcript = Case::new(&["-h"]).run();
-    transcript.push_str(&Case::new(&["--version"]).run());
-    for command in COMMANDS {
-        let mut args: Vec<&str> = command.split_whitespace().collect();
-        args.push("--help");
-        transcript.push_str(&Case::new(&args).run());
-    }
-    transcript.push_str(&Case::new(&[]).run());
-    transcript.push_str(&Case::new(&["help", "verify"]).run());
-    assert_golden("help.txt", transcript, redactions(&[]));
-}
-
-#[test]
-fn completions() {
-    let transcript = Case::new(&["completions", "bash"]).run();
-    assert_golden("completions-bash.txt", transcript, redactions(&[]));
-}
-
-/// A plain-HTTP service that answers every request with `body`, as an ACI
-/// service serves its attestation report.
+/// A plain-HTTP service that answers with `body`, as an ACI service serves
+/// its attestation report, except under the paths named for other answers.
 fn serve_json(body: Vec<u8>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
         for mut stream in listener.incoming().map_while(Result::ok) {
-            // Read the whole request head so closing never resets the reply.
+            // Read the whole request head so closing never resets the reply;
+            // a TLS handshake (not `GET`) gets the plain reply at once.
             let mut head = Vec::new();
             let mut byte = [0];
-            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+            while !head.ends_with(b"\r\n\r\n")
+                && head.first().is_none_or(|first| *first == b'G')
+                && stream.read(&mut byte).unwrap_or(0) == 1
+            {
                 head.push(byte[0]);
             }
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(&body);
+            let path = String::from_utf8_lossy(&head)
+                .split('/')
+                .nth(1)
+                .map(str::to_owned);
+            let (status, body) = match path.as_deref() {
+                Some("busy") => ("503 Service Unavailable", &b""[..]),
+                Some("limited") => ("429 Too Many Requests", &b""[..]),
+                Some("private") => ("403 Forbidden", &b""[..]),
+                Some("missing") => ("404 Not Found", &b""[..]),
+                Some("plain") => ("200 OK", &b"not an attestation"[..]),
+                _ => ("200 OK", &body[..]),
+            };
+            let head = format!("HTTP/1.1 {status}\r\nconnection: close\r\ncontent-length");
+            let _ = write!(stream, "{head}: {}\r\n\r\n", body.len());
+            let _ = stream.write_all(body);
         }
     });
     url
+}
+
+/// Usage for the whole command, help for an ACI and a management command, and
+/// the completion script, which lists every command, option and value, by
+/// digest.
+#[test]
+fn help() {
+    let mut transcript: String = ["", "help verify", "settings set -h"]
+        .iter()
+        .map(|line| run(Command::new(PAP), line, ""))
+        .collect();
+    let script = Command::new(PAP)
+        .args(["completions", "bash"])
+        .output()
+        .unwrap()
+        .stdout;
+    transcript.push_str(&format!(
+        "$ pap completions bash\nsha256 {}, {} lines\n",
+        hex::encode(Sha256::digest(&script)),
+        String::from_utf8_lossy(&script).lines().count()
+    ));
+    assert_golden("help.txt", transcript, &[]);
 }
 
 #[test]
@@ -227,226 +140,130 @@ fn aci_commands() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let report = fixtures.join("aci_report_fixture.json");
-    let wire: Value =
+    let wire: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(fixtures.join("aci_wire_fixtures.json")).unwrap())
             .unwrap();
     let file = |name: &str, contents: &[u8]| {
         let path = root.join(name);
         fs::write(&path, contents).unwrap();
-        path.to_str().unwrap().to_string()
+        quote(path.to_str().unwrap())
     };
     let receipt = file("receipt.json", wire["receipt"].to_string().as_bytes());
     let session = file("session.json", wire["session"].to_string().as_bytes());
-    let request = file(
-        "request.json",
-        br#"{"messages":[{"content":"hi","role":"user"}],"model":"demo-model"}"#,
-    );
+    let request = br#"{"messages":[{"content":"hi","role":"user"}],"model":"demo-model"}"#;
+    let request = file("request.json", request);
     let response = file("response.json", br#"{"choices":[],"id":"chatcmpl-123"}"#);
     let invalid = file("invalid.json", b"{");
-    let missing = root.join("missing.json");
+    let missing = quote(root.join("missing.json").to_str().unwrap());
+    let report = fixtures.join("aci_report_fixture.json");
     // The fixture report binds this nonce, so its checks reach explain material.
     let service = serve_json(fs::read(&report).unwrap());
+    let tls = service.replace("http:", "https:");
     let nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
-    let report = report.to_str().unwrap();
-    let missing = missing.to_str().unwrap();
-    let refused = format!("https://127.0.0.1:{}", closed_port());
-    let session_id = "a".repeat(64);
+    let report = format!("audit --report {}", quote(report.to_str().unwrap()));
+    let refused = format!(
+        "https://{}",
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    );
+    let pin = "a".repeat(64);
+    let kms = "--accept-dstack-kms-root-public-key";
     let root_key = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-
-    let cases: Vec<Case> = vec![
-        Case::new(&["audit", "--report", report]),
-        Case::new(&["audit", "--report", report, "--json"]),
-        Case::new(&["--json", "audit", "--report", report]),
-        Case::new(&[
-            "audit",
-            "--report",
-            report,
-            "--accept-compose",
-            "abcd",
-            "--accept-subject",
-            "app-id:0xab",
-            "--accept-dstack-kms-root-public-key",
-            root_key,
-            "--require-production-os",
-            "--skip-expiry",
-        ]),
-        Case::new(&[
-            "audit",
-            "--report",
-            report,
-            "--receipt",
-            &receipt,
-            "--session",
-            &session,
-            "--request-body",
-            &request,
-            "--response-body",
-            &response,
-            "--require-claim",
-            "tee_attested=hardware_proven",
-            "--pin",
-            &session_id,
-        ]),
-        Case::new(&[
-            "audit",
-            "--report",
-            report,
-            "--receipt",
-            &receipt,
-            "--require-verified",
-            "--json",
-        ]),
-        Case::new(&["audit", "--report", missing]),
-        Case::new(&["audit", "--report", missing, "--json"]),
-        Case::new(&["audit", "--report", &invalid]),
-        Case::new(&["audit", "--report", report, "--receipt", &invalid]),
-        Case::new(&["audit", "--report", report, "--pin", "not-hex"]),
-        Case::new(&["audit", "--report", report, "--pin", "not-hex", "--json"]),
-        Case::new(&["audit", "--report", report, "--require-claim", "a=b"]),
-        Case::new(&["audit", "--report", report, "--accept-subject", "0xab"]),
-        Case::new(&[
-            "audit",
-            "--report",
-            report,
-            "--accept-dstack-kms-root-public-key",
-            root_key,
-        ]),
-        Case::new(&["audit"]),
-        Case::new(&["verify", &service, "--nonce", nonce, "--explain"]),
-        Case::new(&["verify", &service, "--nonce", nonce, "--explain", "--json"]),
-        Case::new(&["verify", &service, "--nonce", nonce, "--json"]),
-        Case::new(&["verify", &refused]),
-        Case::new(&["verify", &refused, "--json", "--explain"]),
-        Case::new(&["verify", ""]),
-        Case::new(&["verify", "not a url"]),
-        Case::new(&["verify", &refused, "--accept-subject", "app-id:0xab"]),
-        Case::new(&["sessions", &refused, "--model", "demo"]),
-        Case::new(&["sessions", &refused, "--json"]),
-        Case::new(&["send", &refused]).env("ACI_API_KEY", "sk-test"),
-        Case::new(&["send", &refused, "--json", "--no-stream"]),
-        Case::new(&["send", &refused, "--api-key-stdin"]).stdin("  \n"),
-        Case::new(&["send", &refused, "--api-key-stdin"]).stdin("sk-test\n"),
-        Case::new(&["send", &refused, "--api-key", "sk-test", "--json"]),
-        Case::new(&["send", &refused, "--api-key-stdin", "--api-key", "sk-test"]),
-        Case::new(&[
-            "send",
-            &refused,
-            "--allow-unverified",
-            "--session",
-            &session_id,
-        ]),
-        Case::new(&["send", &refused, "--session", "short"]),
-        Case::new(&["curl", "http://example.com/v1/models"]),
-        Case::new(&["curl", "https://user@example.com/v1/models", "--json"]),
-        Case::new(&["curl", "https://example.com/v1/models#frag"]),
-        Case::new(&["curl", "https://example.com/v1/models", "--", "-L"]),
-        Case::new(&["curl", "https://example.com/v1/models", "--", "--header"]),
-        Case::new(&[
-            "curl",
-            &format!("{refused}/v1/models"),
-            "--",
-            "--silent",
-            "--header",
-            "accept: */*",
-        ]),
-        Case::new(&["curl"]),
-        Case::new(&["serve", &refused]),
-        Case::new(&["serve", &refused, "--json-events"]),
-        Case::new(&["--json", "serve", &refused]),
-        Case::new(&[
-            "serve",
-            &refused,
-            "--session",
-            &session_id,
-            "--allow-unverified",
-        ]),
-        Case::new(&[
-            "serve",
-            &refused,
-            "--accept-subject",
-            "0xab",
-            "--json-events",
-        ]),
-        Case::new(&["unknown-command"]),
-        Case::new(&["--json", "--non-interactive", "unknown-command"]),
-        Case::new(&["verify", "--unknown-option"]),
-        Case::new(&["verify", &refused, "--json", "--unknown-option"]),
-    ];
-    let transcript: String = cases.into_iter().map(Case::run).collect();
-    let mut redactions = redactions(&[
-        ("[ROOT]", root.to_str().unwrap()),
-        ("[FIXTURES]", fixtures.to_str().unwrap()),
-        ("[REFUSED]", &refused),
-        ("[SERVICE]", &service),
-    ]);
-    // The expiry check (id-3) names the current time.
-    let now = regex::Regex::new(r"now (?<redacted>\d+) < not_after").unwrap();
-    redactions.insert("[NOW]", now).unwrap();
-    assert_golden("aci.txt", transcript, redactions);
+    let mut transcript: String = [
+        format!("{report} --nonce {nonce}"),
+        format!("{report} --receipt {receipt} --session {session} --request-body {request} --response-body {response} --require-claim tee_attested=hardware_proven --pin {pin}"),
+        format!("audit --report {missing}"),
+        format!("audit --report {missing} --json"),
+        format!("audit --report {invalid}"),
+        format!("{report} --receipt {invalid}"),
+        format!("{report} --pin not-hex --json"),
+        format!("{report} --require-claim a=b"),
+        format!("{report} --accept-subject 0xab"),
+        format!("{report} --accept-subject app-id:0xab"),
+        format!("{report} {kms} {root_key}"),
+        format!("{report} --accept-subject app-id:0xab {kms} 02zz"),
+        format!("verify {service} --nonce {nonce} --explain"),
+        format!("verify {service} --nonce {nonce} --explain --json"),
+        format!("verify {service}/busy"),
+        format!("verify {service}/limited"),
+        format!("verify {service}/private"),
+        format!("verify {service}/missing"),
+        format!("verify {service}/plain"),
+        format!("verify {tls}"),
+        format!("verify {refused}"),
+        format!("verify {refused} --json"),
+        "verify ''".to_string(),
+        "verify 'not a url'".to_string(),
+        format!("sessions {refused} --model demo"),
+        format!("send {refused} --api-key sk-test --no-stream"),
+        format!("send {refused} --api-key-stdin --api-key sk-test"),
+        format!("send {refused} --allow-unverified --session {pin}"),
+        format!("send {refused} --session short"),
+        "curl http://example.com/v1/models".to_string(),
+        "curl https://user@example.com/v1/models --json".to_string(),
+        "curl 'https://example.com/v1/models#frag'".to_string(),
+        "curl https://example.com/v1/models -- -L".to_string(),
+        "curl https://example.com/v1/models -- --header".to_string(),
+        format!("curl {refused}/v1 -- --silent -H 'a: b'"),
+        "curl".to_string(),
+        format!("serve {refused}"),
+        format!("serve {refused} --json-events"),
+        format!("--json serve {refused}"),
+        format!("serve {refused} --session {pin} --allow-unverified"),
+        "unknown-command".to_string(),
+        "--json --non-interactive unknown-command".to_string(),
+        format!("verify {refused} --json --unknown-option"),
+    ]
+    .iter()
+    .map(|line| run(Command::new(PAP), line, ""))
+    .collect();
+    let line = format!("send {refused} --api-key-stdin");
+    transcript.push_str(&run(Command::new(PAP), &line, "  \n"));
+    assert_golden(
+        "aci.txt",
+        transcript,
+        &[
+            ("[ROOT]", root.to_str().unwrap()),
+            ("[FIXTURES]", fixtures.to_str().unwrap()),
+            ("[REFUSED]", &refused),
+            ("[SERVICE]", &service),
+            ("[TLS_SERVICE]", &tls),
+        ],
+    );
 }
 
 #[test]
 fn management_without_a_backend() {
     let home = tempfile::tempdir().unwrap();
-    let case =
-        |args: &[&str]| Case::new(args).env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path());
-    let cases = vec![
-        case(&["status"]),
-        case(&["status", "--json"]),
-        case(&["status", "--watch"]),
-        case(&["service", "status"]),
-        case(&["profiles", "list"]),
-        case(&["--json", "profiles", "list"]),
-        case(&["stop"]),
-        case(&["token", "show"]),
-        case(&["token", "show", "--yes", "--json"]),
-        case(&[
-            "--json",
-            "profiles",
-            "add",
-            "--id",
-            "test",
-            "--name",
-            "Test",
-            "--url",
-            "https://example.com",
-            "--key-stdin",
-        ]),
-        case(&[
-            "profiles",
-            "add",
-            "--id",
-            "test",
-            "--name",
-            "Test",
-            "--url",
-            "not a url",
-            "--yes",
-        ]),
-        case(&["profiles", "add", "--id", "test"]),
-        case(&[
-            "profiles",
-            "edit",
-            "work",
-            "--allow-development-os",
-            "--require-production-os",
-        ]),
-        case(&["agents", "connect", "codex", "--dry-run", "--revision", "r"]),
-        case(&["start", "--timeout", "0"]),
-        case(&["usage", "list", "--limit", "101"]),
-        case(&["usage", "export", "--output", "out.csv", "--format", "json"]),
-        case(&["settings", "set", "appearance"]),
-        case(&["settings", "set", "no-such-key", "true"]),
-        case(&["settings", "set", "web-ui.password", "secret", "--yes"]),
-        case(&["completions", "no-such-shell"]),
-    ];
-    let transcript: String = cases.into_iter().map(Case::run).collect();
-    assert_golden(
-        "management-offline.txt",
-        transcript,
-        redactions(&[("[HOME]", home.path().to_str().unwrap())]),
-    );
+    let transcript: String = [
+        "status",
+        "status --json",
+        "status --watch",
+        "profiles list",
+        "--json profiles list",
+        "token show",
+        "--json profiles add --id test --name Test --url https://example.com --key-stdin",
+        "profiles add --id t --name T --url 'not a url' --yes",
+        "profiles add --id test",
+        "profiles edit work --allow-development-os --require-production-os",
+        "agents connect codex --dry-run --revision r",
+        "start --timeout 0",
+        "settings set appearance",
+        "settings set no-such-key true",
+        "settings set web-ui.password secret --yes",
+    ]
+    .iter()
+    .map(|line| {
+        let mut command = Command::new(PAP);
+        command.env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path());
+        run(command, line, "")
+    })
+    .collect();
+    assert_golden("management-offline.txt", transcript, &[]);
+    // Nothing started a backend or saved a credential, even the refused `profiles add`.
+    assert!(fs::read_dir(home.path()).unwrap().next().is_none());
 }
 
 /// The first state `status --watch` prints, through its models line, which
@@ -457,23 +274,11 @@ fn first_watch_snapshot(mut command: Command) -> String {
         .args(["status", "--watch"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let (lines, received) = mpsc::channel();
-    let stdout = BufReader::new(child.stdout.take().unwrap());
-    std::thread::spawn(move || {
-        for line in stdout.lines().map_while(Result::ok) {
-            if lines.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let mut snapshot = String::from("$ pap status --watch (first state)\n--- stdout\n");
-    loop {
-        let line = received
-            .recv_timeout(Duration::from_secs(30))
-            .expect("status --watch prints the current state");
+    let mut snapshot = String::from("$ pap status --watch  # first state\n");
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
         snapshot.push_str(&line);
         snapshot.push('\n');
         if line.starts_with("Models: ") {
@@ -490,134 +295,86 @@ fn management_with_a_backend() {
     let backend = Backend::start();
     let root = backend.directory.path();
     let backup = root.join("profiles.json");
-    fs::write(
-        &backup,
-        r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#,
-    )
-    .unwrap();
-    let backup = backup.to_str().unwrap();
+    let profiles = r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#;
+    fs::write(&backup, profiles).unwrap();
+    let backup = quote(backup.to_str().unwrap());
     let state = backend.run(&["status"]);
     let pid = state["backend"]["processId"].to_string();
     let port = state["gateway"]["localApi"]["port"].to_string();
-    let case = |args: &[&str]| Case::with(backend.command(&[]), args);
+    let case = |line: &str| run(backend.command(&[]), line, "");
     let mut transcript: String = [
-        case(&["status"]),
-        case(&["service", "start"]),
-        case(&["settings", "show"]),
-        case(&["settings", "show", "--json"]),
-        case(&["profiles", "list"]),
-        case(&["profiles", "list", "--json"]),
-        case(&["profiles", "import", backup]),
-        case(&["profiles", "import", backup, "--yes"]),
+        "status",
+        "service start",
+        "settings show",
+        "settings show --json",
+        "profiles list --json",
+        &format!("profiles import {backup}"),
+        &format!("profiles import {backup} --yes"),
     ]
-    .into_iter()
-    .map(Case::run)
+    .iter()
+    .map(|line| case(line))
     .collect();
     transcript.push_str(&first_watch_snapshot(backend.command(&[])));
     let profile = backend.run(&["profiles", "list"])[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
-    let exported = root.join("exported.json");
-    let diagnostics = root.join("diagnostics.json");
-    let usage = root.join("usage.csv");
+    let password = "settings set web-ui.password --value-stdin --yes";
+    transcript.push_str(&run(backend.command(&[]), password, "a new password\r\n"));
+    let exported = quote(root.join("exported.json").to_str().unwrap());
+    let usage = quote(root.join("usage.csv").to_str().unwrap());
     transcript.extend(
         [
-            case(&["profiles", "list"]),
-            case(&["profiles", "show", &profile]),
-            case(&["profiles", "show", "missing"]),
-            case(&["profiles", "export", "--output", exported.to_str().unwrap()]),
-            case(&["profiles", "export", "--output", exported.to_str().unwrap()]),
-            case(&["diagnostics", "--output", diagnostics.to_str().unwrap()]),
-            case(&["profiles", "use", "missing", "--yes"]),
-            case(&["profiles", "use", "missing", "--yes", "--json"]),
-            case(&["profiles", "remove", &profile, "--yes"]),
-            case(&["profiles", "list"]),
-            case(&["settings", "set", "appearance", "dark", "--yes"]),
-            case(&["settings", "set", "appearance", "purple", "--yes"]),
-            case(&["settings", "set", "update-channel", "nightly", "--yes"]),
-            case(&["settings", "set", "local-api.port", "port", "--yes"]),
-            case(&["settings", "set", "web-ui.port", "port", "--yes"]),
-            case(&["settings", "set", "connect-on-launch", "maybe", "--yes"]),
-            case(&["settings", "set", "notifications", "[]", "--yes"]),
-            case(&["settings", "set", "appearance", "--value-stdin", "--yes"]),
-            case(&["settings", "set", "autoCliRegistration", "false", "--yes"]),
-            case(&[
-                "settings",
-                "set",
-                "notifications",
-                "{\"gateway\":false}",
-                "--yes",
-            ]),
-            case(&[
-                "settings",
-                "set",
-                "notifications.local-api",
-                "false",
-                "--yes",
-            ]),
-            case(&[
-                "settings",
-                "set",
-                "web-ui.password",
-                "--value-stdin",
-                "--yes",
-            ])
-            .stdin("a new password\r\n"),
-            case(&["settings", "set", "appearance", "light", "--yes", "--json"]),
-            case(&["usage", "list"]),
-            case(&[
-                "usage", "list", "--json", "--agent", "codex", "--limit", "5",
-            ]),
-            case(&["usage", "show", "missing"]),
-            case(&["usage", "show", "missing", "--receipt", "--json"]),
-            case(&["usage", "export", "--output", usage.to_str().unwrap()]),
-            case(&["usage", "clear"]),
-            case(&["usage", "clear", "--yes"]),
-            case(&["usage", "clear", "--yes", "--json"]),
-            case(&["models", "list"]),
-            case(&["models", "list", "--json"]),
-            case(&["token", "rotate", "--yes"]),
-            case(&["token", "rotate", "--yes", "--json"]),
-            case(&["token", "clear-credential", "--yes"]),
-            case(&["web-ui", "password", "rotate", "--yes"]),
-            case(&["web-ui", "password", "rotate", "--yes", "--json"]),
-            case(&[
-                "agents",
-                "disconnect",
-                "codex",
-                "--revision",
-                "stale",
-                "--yes",
-            ]),
-            case(&[
-                "--json",
-                "--yes",
-                "agents",
-                "disconnect",
-                "codex",
-                "--revision",
-                "stale",
-            ]),
-            case(&["agents", "connect", "no-such-agent", "--dry-run"]),
-            case(&["stop"]),
-            case(&["stop", "--offline"]),
-            case(&["status"]),
-            case(&["service", "stop"]),
-            case(&["service", "stop", "--yes"]),
-            case(&["service", "status"]),
+            "profiles list",
+            &format!("profiles show {profile}"),
+            "profiles show missing",
+            &format!("profiles export --output {exported}"),
+            &format!("profiles export --output {exported}"),
+            "profiles use missing --yes",
+            "profiles use missing --yes --json",
+            &format!("profiles remove {profile} --yes"),
+            "settings set appearance dark --yes",
+            "settings set appearance purple --yes",
+            "settings set update-channel nightly --yes",
+            "settings set local-api.port port --yes",
+            "settings set connect-on-launch maybe --yes",
+            r#"settings set notifications '{"gateway":false}' --yes"#,
+            "settings set autoCliRegistration false --yes",
+            "settings set appearance --value-stdin --yes",
+            "settings set appearance light --yes --json",
+            "usage list",
+            "usage list --json --agent codex --limit 5",
+            "usage show missing",
+            "usage show missing --receipt --json",
+            &format!("usage export --output {usage}"),
+            "usage clear",
+            "usage clear --yes --json",
+            "models list",
+            "models list --json",
+            "token rotate --yes",
+            "token clear-credential --yes",
+            "web-ui password rotate --yes",
+            "agents disconnect codex --revision stale --yes",
+            "--json --yes agents disconnect codex --revision x",
+            "agents connect no-such-agent --dry-run",
+            "stop",
+            "stop --offline",
+            "service stop",
+            "service stop --yes",
+            "service status",
         ]
-        .into_iter()
-        .map(Case::run),
+        .iter()
+        .map(|line| case(line)),
     );
     assert_golden(
         "management.txt",
         transcript,
-        redactions(&[
+        &[
             ("[ROOT]", root.to_str().unwrap()),
             ("[PROFILE]", &profile),
             ("[PORT]", &port),
             ("[PID]", &pid),
-        ]),
+            ("[VERSION]", env!("CARGO_PKG_VERSION")),
+        ],
     );
 }

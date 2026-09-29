@@ -15,7 +15,7 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
-use crate::output::print_json;
+use crate::print_json;
 use crate::verify::{verify_service, ServiceVerification};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
@@ -42,7 +42,6 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         return Err("service verification failed; not sending the prompt (fail closed)".into());
     }
 
-    let pins = verification.attested_spkis();
     let ServiceVerification {
         mut transcript,
         report,
@@ -50,6 +49,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         client,
         base_url,
         host,
+        tls_pins: pins,
         ..
     } = verification;
 

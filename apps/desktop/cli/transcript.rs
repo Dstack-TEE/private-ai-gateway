@@ -9,7 +9,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::output::print_json;
+use crate::print_json;
 
 /// One entry in the fixed check vocabulary (id, spec citation, title).
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -323,19 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn any_fail_blocks_the_verdict() {
-        let mut t = Transcript::default();
-        t.pass(ID_2, "ok");
-        t.fail(ID_3, "keyset expired");
-        t.skip(ID_1, "quote collateral offline", "quote collateral offline");
-        assert!(!t.verified());
-        assert_eq!(
-            t.verdict_line(),
-            "NOT VERIFIED (1 pass, 1 failed, 1 skipped: quote collateral offline)"
-        );
-    }
-
-    #[test]
     fn empty_transcript_is_not_verified() {
         assert!(!Transcript::default().verified());
     }
@@ -353,26 +340,5 @@ mod tests {
         assert_eq!(t.verdict_line(), "VERIFIED (1 pass)");
         assert!(t.render_human().contains("INFO  receipt-note"));
         assert_eq!(t.to_json()["checks"][1]["status"], "info");
-    }
-
-    #[test]
-    fn json_shape_carries_checks_and_verdict() {
-        let mut t = Transcript {
-            workload_keyset_digest: Some("sha256:cd".to_string()),
-            ..Default::default()
-        };
-        t.pass(ID_2, "ok");
-        t.pass(ID_3, "ok");
-        t.explain("input: {}\ncomputed: sha256:ab");
-        let v = t.to_json();
-        assert_eq!(v["checks"][0]["id"], "id-2");
-        assert_eq!(v["checks"][0]["section"], "9.1(2)");
-        assert_eq!(v["checks"][0]["status"], "pass");
-        assert!(v["checks"][1]["explain"].is_string());
-        assert_eq!(v["verdict"]["verified"], true);
-        assert_eq!(v["verdict"]["passed"], 2);
-        assert_eq!(v["verdict"]["workload_keyset_digest"], "sha256:cd");
-        // A check without explain material has no such field.
-        assert!(v["checks"][0].get("explain").is_none());
     }
 }

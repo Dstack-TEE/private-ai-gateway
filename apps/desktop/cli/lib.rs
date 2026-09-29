@@ -9,7 +9,6 @@ mod capture;
 mod checks;
 mod client;
 pub mod curl;
-mod output;
 pub mod send;
 pub mod serve;
 pub mod sessions;
@@ -32,6 +31,14 @@ pub fn read_api_key(input: impl std::io::Read) -> Result<String, String> {
     }
     let key = String::from_utf8(bytes).map_err(|_| "Credential must be UTF-8")?;
     desktop_core::config::validate_api_key(&key)
+}
+
+/// Pretty JSON on stdout, the form the ACI commands print.
+fn print_json(value: &serde_json::Value) -> Result<(), String> {
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?;
+    println!("{text}");
+    Ok(())
 }
 
 /// Select the provider used by the CLI and its verifier dependencies.

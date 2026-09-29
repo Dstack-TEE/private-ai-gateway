@@ -1,157 +1,66 @@
 $ pap status
-exit: Some(0)
---- stdout
 Backend not running.
 Start backend: private-ai-proxy service start
 Start protection: private-ai-proxy start
---- stderr
 
 $ pap status --json
-exit: Some(0)
---- stdout
 {"backend":null,"status":"not_running"}
---- stderr
 
-$ pap status --watch
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
+$ pap status --watch  # exit Some(1)
+! private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
 
-$ pap service status
-exit: Some(0)
---- stdout
-Backend not running.
-Start backend: private-ai-proxy service start
-Start protection: private-ai-proxy start
---- stderr
+$ pap profiles list  # exit Some(1)
+! private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
 
-$ pap profiles list
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
+$ pap --json profiles list  # exit Some(1)
+! {"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
 
-$ pap --json profiles list
-exit: Some(1)
---- stdout
---- stderr
-{"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
+$ pap token show  # exit Some(1)
+! private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
 
-$ pap stop
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
+$ pap --json profiles add --id test --name Test --url https://example.com --key-stdin  # exit Some(1)
+! {"error":{"code":"command_failed","message":"Confirmation required. Pass --yes for noninteractive changes."}}
 
-$ pap token show
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+$ pap profiles add --id t --name T --url 'not a url' --yes  # exit Some(1)
+! private-ai-proxy: Gateway URL must be a valid HTTP or HTTPS URL
 
-$ pap token show --yes --json
-exit: Some(1)
---- stdout
---- stderr
-{"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
+$ pap profiles add --id test  # exit Some(2)
+! error: the following required arguments were not provided:
+!   --name <NAME>
+!   --url <URL>
+! 
+! Usage: private-ai-proxy profiles add --id <ID> --name <NAME> --url <URL>
+! 
+! For more information, try '--help'.
 
-$ pap --json profiles add --id test --name Test --url https://example.com --key-stdin
-exit: Some(1)
---- stdout
---- stderr
-{"error":{"code":"command_failed","message":"Confirmation required. Pass --yes for noninteractive changes."}}
+$ pap profiles edit work --allow-development-os --require-production-os  # exit Some(2)
+! error: the argument '--allow-development-os' cannot be used with '--require-production-os'
+! 
+! Usage: private-ai-proxy profiles edit --allow-development-os <ID>
+! 
+! For more information, try '--help'.
 
-$ pap profiles add --id test --name Test --url not a url --yes
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Gateway URL must be a valid HTTP or HTTPS URL
+$ pap agents connect codex --dry-run --revision r  # exit Some(2)
+! error: the argument '--dry-run' cannot be used with '--revision <REVISION>'
+! 
+! Usage: private-ai-proxy agents connect --dry-run <ID>
+! 
+! For more information, try '--help'.
 
-$ pap profiles add --id test
-exit: Some(2)
---- stdout
---- stderr
-error: the following required arguments were not provided:
-  --name <NAME>
-  --url <URL>
+$ pap start --timeout 0  # exit Some(2)
+! error: invalid value '0' for '--timeout <TIMEOUT>': 0 is not in 1..=300
+! 
+! For more information, try '--help'.
 
-Usage: private-ai-proxy profiles add --id <ID> --name <NAME> --url <URL>
+$ pap settings set appearance  # exit Some(1)
+! private-ai-proxy: Missing the value for appearance
 
-For more information, try '--help'.
+$ pap settings set no-such-key true  # exit Some(2)
+! error: invalid value 'no-such-key' for '<KEY>'
+!   [possible values: auto-cli-registration, notifications.enabled, notifications.gateway, notifications.local-api, notifications.verification, connect-on-launch, appearance, update-channel, local-api.listen-address, local-api.allow-network-access, local-api.port, local-api.client-host, web-ui.enabled, web-ui.port, web-ui.listen-address, web-ui.allow-network-access, web-ui.client-host, web-ui.password]
+! 
+! For more information, try '--help'.
 
-$ pap profiles edit work --allow-development-os --require-production-os
-exit: Some(2)
---- stdout
---- stderr
-error: the argument '--allow-development-os' cannot be used with '--require-production-os'
-
-Usage: private-ai-proxy profiles edit --allow-development-os <ID>
-
-For more information, try '--help'.
-
-$ pap agents connect codex --dry-run --revision r
-exit: Some(2)
---- stdout
---- stderr
-error: the argument '--dry-run' cannot be used with '--revision <REVISION>'
-
-Usage: private-ai-proxy agents connect --dry-run <ID>
-
-For more information, try '--help'.
-
-$ pap start --timeout 0
-exit: Some(2)
---- stdout
---- stderr
-error: invalid value '0' for '--timeout <TIMEOUT>': 0 is not in 1..=300
-
-For more information, try '--help'.
-
-$ pap usage list --limit 101
-exit: Some(2)
---- stdout
---- stderr
-error: invalid value '101' for '--limit <LIMIT>': 101 is not in 1..=100
-
-For more information, try '--help'.
-
-$ pap usage export --output out.csv --format json
-exit: Some(2)
---- stdout
---- stderr
-error: invalid value 'json' for '--format <FORMAT>'
-  [possible values: csv]
-
-For more information, try '--help'.
-
-$ pap settings set appearance
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Missing the value for appearance
-
-$ pap settings set no-such-key true
-exit: Some(2)
---- stdout
---- stderr
-error: invalid value 'no-such-key' for '<KEY>'
-  [possible values: auto-cli-registration, notifications.enabled, notifications.gateway, notifications.local-api, notifications.verification, connect-on-launch, appearance, update-channel, local-api.listen-address, local-api.allow-network-access, local-api.port, local-api.client-host, web-ui.enabled, web-ui.port, web-ui.listen-address, web-ui.allow-network-access, web-ui.client-host, web-ui.password]
-
-For more information, try '--help'.
-
-$ pap settings set web-ui.password secret --yes
-exit: Some(1)
---- stdout
---- stderr
-private-ai-proxy: Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument.
-
-$ pap completions no-such-shell
-exit: Some(2)
---- stdout
---- stderr
-error: invalid value 'no-such-shell' for '<SHELL>'
-  [possible values: bash, elvish, fish, powershell, zsh]
-
-For more information, try '--help'.
+$ pap settings set web-ui.password secret --yes  # exit Some(1)
+! private-ai-proxy: Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument.
 

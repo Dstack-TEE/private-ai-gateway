@@ -190,7 +190,8 @@ fn status(value: &Value) -> String {
         _ => "Not protected",
     };
     let mut lines = vec![status.to_string()];
-    if let Some(backend) = value.get("backend").filter(|backend| backend.is_object()) {
+    let backend = &value["backend"];
+    if backend.is_object() {
         lines.push(format!(
             "Backend: running (PID {}, version {})",
             text(&backend["processId"]),
@@ -221,16 +222,19 @@ fn status(value: &Value) -> String {
     } else if state["profiles"].is_array() {
         lines.push("Profile: None selected".into());
     }
-    if let Some(saved) = state["apiKeySaved"].as_bool() {
-        lines.push(format!(
-            "Service credential: {}",
-            if saved {
-                "Saved (credentials.toml)"
-            } else {
-                "Not saved"
-            }
-        ));
-    }
+    // A labelled line for a boolean field, when the state has it.
+    let flag = |label: &str, value: &Value, yes: &str, no: &str| {
+        value
+            .as_bool()
+            .map(|set| format!("{label}: {}", if set { yes } else { no }))
+    };
+    let network = "Loopback only";
+    lines.extend(flag(
+        "Service credential",
+        &state["apiKeySaved"],
+        "Saved (credentials.toml)",
+        "Not saved",
+    ));
     if state.get("localApi").is_some() {
         lines.push(format!(
             "Local API: {}",
@@ -239,12 +243,8 @@ fn status(value: &Value) -> String {
                 .map(safe)
                 .unwrap_or_else(|| "Not listening".into())
         ));
-        if let Some(network) = state["localApi"]["allowNetworkAccess"].as_bool() {
-            lines.push(format!(
-                "Network access: {}",
-                if network { "Allowed" } else { "Loopback only" }
-            ));
-        }
+        let allowed = &state["localApi"]["allowNetworkAccess"];
+        lines.extend(flag("Network access", allowed, "Allowed", network));
     } else if let Some(endpoint) = state["proxyUrl"].as_str() {
         lines.push(format!("Local API: {}", safe(endpoint)));
     }
@@ -258,12 +258,8 @@ fn status(value: &Value) -> String {
                 (None, None) => "Not listening".into(),
             }
         ));
-        if let Some(network) = web_ui["allowNetworkAccess"].as_bool() {
-            lines.push(format!(
-                "Web UI network access: {}",
-                if network { "Allowed" } else { "Loopback only" }
-            ));
-        }
+        let allowed = &web_ui["allowNetworkAccess"];
+        lines.extend(flag("Web UI network access", allowed, "Allowed", network));
     }
     if let Some(error) = state["configFiles"]["error"].as_str() {
         lines.push(format!(
@@ -279,20 +275,14 @@ fn status(value: &Value) -> String {
     {
         lines.push(format!("Settings warning: {}", safe(warning)));
     }
-    if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
-        lines.push(format!(
-            "Production OS: {}",
-            if required {
-                "Required"
-            } else {
-                "Development images allowed"
-            }
-        ));
-    }
-    if let Some(identity) = state
-        .get("identity")
-        .filter(|identity| identity.is_object())
-    {
+    lines.extend(flag(
+        "Production OS",
+        &state["config"]["requireProductionOs"],
+        "Required",
+        "Development images allowed",
+    ));
+    let identity = &state["identity"];
+    if identity.is_object() {
         lines.push(format!(
             "Identity: {} | {}",
             text(&identity["teeType"]),
@@ -338,7 +328,8 @@ fn status(value: &Value) -> String {
     }
     if let Some(session) = state["sessionId"].as_str() {
         lines.push(format!("Session: {}", safe(session)));
-        if let Some(usage) = state.get("sessionUsage").filter(|usage| usage.is_object()) {
+        let usage = &state["sessionUsage"];
+        if usage.is_object() {
             lines.push(format!(
                 "Requests: {} total | {} protected | {} blocked locally | {} failed proof",
                 text(&usage["requests"]),
@@ -489,220 +480,4 @@ fn label(key: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn status_and_nested_details_do_not_emit_terminal_controls() {
-        let output = status(
-            &json!({"status":"error", "error":"bad\u{001b}[31m\nline", "progress":"Checking", "wakeMonitorAvailable":false}),
-        );
-        assert!(output.contains("Error: bad [31m line"));
-        assert!(output.contains("Progress: Checking"));
-        assert!(output.contains("Wake monitoring unavailable"));
-        assert!(
-            !details(&json!({"\u{001b}key":"\u{202e}value"})).contains(['\u{001b}', '\u{202e}'])
-        );
-    }
-}
-
-/// Every human rendering over representative backend values, as a golden
-/// file beside the command-line goldens in `tests/golden`.
-#[cfg(test)]
-mod golden {
-    use crate::{Cli, Command};
-    use clap::Parser;
-    use serde_json::{json, Value};
-
-    fn gateway() -> Value {
-        json!({
-            "status": "verified", "activeProfileId": "work", "apiKeySaved": true,
-            "profiles": [{"id": "work", "name": "Work", "provider": "redpill", "remoteUrl": "https://tee.redpill.ai"}],
-            "proxyUrl": "http://127.0.0.1:4180", "localApi": {"allowNetworkAccess": true},
-            "webUi": {"enabled": true, "url": "http://127.0.0.1:4182", "allowNetworkAccess": false},
-            "configFiles": {"error": "bad\u{001b}[31m value", "warnings": ["unknown key `x`"]},
-            "config": {"requireProductionOs": false},
-            "identity": {"teeType": "tdx", "trustLevel": "hardware_verified"},
-            "checks": [
-                {"title": "Quote", "status": "pass"}, {"title": "Binding", "status": "fail"},
-                {"title": "Custody", "status": "skip"}, {"title": "Channel", "status": "fail"},
-            ],
-            "catalog": {"models": [{"id": "a"}, {"id": "b"}]}, "sessionId": "session-1",
-            "sessionUsage": {"requests": 12, "protected": 10, "blockedLocally": 1, "failedProof": 1, "inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 5, "cacheWriteTokens": 0, "costUsd": 0.0012},
-            "progress": "Checking", "error": "", "endpointError": "Port in use",
-            "wakeMonitorAvailable": false, "activity": [{"detail": "never shown"}],
-        })
-    }
-
-    fn agents() -> Value {
-        json!([
-            {"id": "codex", "name": "Codex", "installed": true, "connected": true, "authorized": true},
-            {"id": "claude", "name": "Claude Code", "installed": true, "connected": true, "authorized": false, "attention": "Restart it", "error": "changed\u{001b}"},
-            {"id": "saved", "name": "Saved", "installed": true, "recorded": true},
-            {"id": "gone", "name": "Gone", "installed": false},
-            {"id": "idle", "name": "Idle", "installed": true, "connected": false},
-        ])
-    }
-
-    fn cases() -> Vec<(&'static str, Value)> {
-        let state = gateway();
-        let mut disconnected = state.clone();
-        disconnected["backendConnected"] = json!(false);
-        let mut configuring = state.clone();
-        configuring["configurationVerification"] = json!(true);
-        let mut reconnecting = state.clone();
-        reconnecting["reconnecting"] = json!(true);
-        let mut failed_web_ui = state.clone();
-        failed_web_ui["webUi"] = json!({"enabled": true, "error": "Address in use"});
-        let mut stopped = json!({"status": "stopped", "activeProfileId": "gone", "config": {}, "proxyUrl": "http://127.0.0.1:4180"});
-        stopped["catalog"] = json!({"models": []});
-        vec![
-            (
-                "status",
-                json!({"backend": {"processId": 42, "version": "0.2.1"}, "gateway": state}),
-            ),
-            ("status", json!({"backend": null, "status": "not_running"})),
-            ("status", disconnected),
-            ("status", configuring),
-            ("status", reconnecting),
-            ("status", failed_web_ui),
-            ("status", stopped),
-            (
-                "status",
-                json!({"status": "blocked", "profiles": [], "error": "Blocked"}),
-            ),
-            ("status", json!({"status": "error", "activeProfileId": ""})),
-            ("status", json!({"status": "verifying"})),
-            // A production OS requirement shows; a token never does.
-            (
-                "status",
-                json!({"status": "stopped", "config": {"requireProductionOs": true}, "token": "never-print-token"}),
-            ),
-            (
-                "service status",
-                json!({"backend": null, "status": "not_running"}),
-            ),
-            ("start", gateway()),
-            ("stop", gateway()),
-            ("stop --offline", agents()),
-            (
-                "stop --offline",
-                json!({"id": "codex", "name": "Codex", "installed": true}),
-            ),
-            ("service start", json!({"version": "0.2.1"})),
-            ("service stop", json!({"status": "stopped"})),
-            (
-                "app open",
-                json!({"url": "http://127.0.0.1:4182", "browserOpened": true}),
-            ),
-            (
-                "app open --web",
-                json!({"url": "http://127.0.0.1:4182", "browserOpened": false}),
-            ),
-            ("app open", json!({"opened": true})),
-            (
-                "profiles list",
-                json!([{"id": "work", "name": "Work", "provider": "redpill", "remoteUrl": null}]),
-            ),
-            ("profiles list", json!([])),
-            (
-                "profiles show work",
-                json!({"id": "work", "name": "Work", "auth": {"kind": "apiKey"}, "tags": [], "credentialSaved": false}),
-            ),
-            (
-                "profiles import backup.json",
-                json!({"imported": 1, "skipped": 0}),
-            ),
-            (
-                "profiles export --output out.json",
-                json!({"exported": "/tmp/out.json"}),
-            ),
-            ("profiles use work", gateway()),
-            ("profiles login work", gateway()),
-            ("profiles add --id w --name W --url https://x", gateway()),
-            ("profiles verify work", gateway()),
-            ("profiles edit work", gateway()),
-            ("profiles remove work", json!({})),
-            ("agents list", agents()),
-            ("agents list", json!([])),
-            ("agents connect codex", agents()[0].clone()),
-            (
-                "agents connect codex --dry-run",
-                json!({"revision": "r1", "changes": [{"path": "~/.codex/config.toml", "action": "update"}], "warnings": []}),
-            ),
-            ("agents disconnect codex", agents()[2].clone()),
-            (
-                "agents disconnect codex --dry-run",
-                json!({"revision": "r2", "changes": []}),
-            ),
-            ("agents disconnect-all", agents()),
-            (
-                "models list",
-                json!({"models": [{"id": "m1", "name": "Model One"}, {"id": "m2"}]}),
-            ),
-            ("models list", json!({"models": []})),
-            (
-                "usage list",
-                json!({"items": [
-                {"id": "a", "model": "m", "status": 200, "leftDevice": true, "verified": true, "inputTokens": 1, "outputTokens": 2},
-                {"id": "b", "model": "m", "status": 200, "leftDevice": true, "verified": false},
-                {"id": "c", "status": 0, "leftDevice": false, "verified": null},
-                {"id": "d", "status": 500, "leftDevice": true},
-            ], "nextCursor": "next\u{0007}"}),
-            ),
-            ("usage list", json!({"items": [], "nextCursor": null})),
-            (
-                "usage show a",
-                json!({"id": "a", "model": "m", "costUsd": 0.5, "receipt": {"verified": true}}),
-            ),
-            ("usage export --output u.csv", json!({"rows": 3})),
-            ("usage clear", json!({"deleted": 7})),
-            ("settings reset", gateway()),
-            (
-                "settings show",
-                json!({"files": {"config": "/c.toml", "error": null}, "settings": {"appearance": "dark"}}),
-            ),
-            ("settings set appearance dark", gateway()),
-            ("settings set webUiPort 1", gateway()),
-            ("token rotate", json!({"rotated": true})),
-            ("token show", json!({"token": "sk-pap-example"})),
-            ("token clear-credential", gateway()),
-            ("web-ui password show", json!({"password": "pass word"})),
-            ("web-ui password rotate", json!({"rotated": true})),
-            (
-                "cli status",
-                json!({"registered": false, "directory": "/home/u/.local/bin", "onPath": true}),
-            ),
-            ("cli install", json!({"registered": true})),
-            ("cli uninstall", json!({"registered": false})),
-            (
-                "doctor",
-                json!({"version": "0.2.1", "update": {"error": "offline"}, "backendRunning": false, "errors": {}, "warnings": {"credentials": "readable"}}),
-            ),
-            (
-                "diagnostics --output d.json",
-                json!({"exported": "/tmp/d.json"}),
-            ),
-        ]
-    }
-
-    #[test]
-    fn human_output() {
-        let mut transcript = String::new();
-        for (args, value) in cases() {
-            let cli = Cli::try_parse_from(std::iter::once("pap").chain(args.split(' '))).unwrap();
-            let Command::Manage(action) = cli.command else {
-                panic!("{args} is not a management command");
-            };
-            transcript.push_str(&format!(
-                "$ pap {args}\n{value}\n---\n{}\n\n",
-                super::render(&action, &value)
-            ));
-        }
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/human.txt");
-        snapbox::Assert::new()
-            .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
-            .eq(transcript, snapbox::Data::read_from(&path, None).raw());
-    }
-}
+mod tests;

@@ -52,16 +52,10 @@ pub struct ServiceVerification {
     pub base_url: String,
     pub host: String,
     pub observed_spki: Option<String>,
-    tls_pins: Vec<String>,
-}
-
-impl ServiceVerification {
     /// The pin set for every later connection to this host: the attested TLS
     /// keys the report declares its clients pin (§4.2), which id-6 required
     /// the observed key to be among. Empty unless id-6 passed.
-    pub fn attested_spkis(&self) -> Vec<String> {
-        self.tls_pins.clone()
-    }
+    pub tls_pins: Vec<String>,
 }
 
 pub async fn verify_service(
@@ -143,81 +137,4 @@ pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, S
     )
     .await?;
     verification.transcript.print(args.json)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn failure(base_url: &str) -> ServiceError {
-        match verify_service(base_url, None, &VerifierPolicy::default(), true, false).await {
-            Err(VerifyError::Service(error)) => error,
-            Err(VerifyError::Failed(detail)) => panic!("unclassified failure: {detail}"),
-            Ok(_) => panic!("{base_url} verified"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_service_that_cannot_be_verified_is_explained_by_its_host() {
-        let host = "127.0.0.1".to_string();
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = closed.local_addr().unwrap().port();
-        drop(closed);
-        let refused = failure(&format!("https://127.0.0.1:{port}")).await;
-        assert_eq!(refused, ServiceError::Refused { host: host.clone() });
-        assert_eq!(
-            refused.to_string(),
-            "127.0.0.1 refused the connection. Check the service URL and port."
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let status = |code: u16| {
-            axum::routing::get(
-                move || async move { axum::http::StatusCode::from_u16(code).unwrap() },
-            )
-        };
-        let plain = axum::Router::new()
-            .route(
-                "/v1/aci/attestation",
-                axum::routing::get(|| async { "not an attestation" }),
-            )
-            .route("/busy/v1/aci/attestation", status(503))
-            .route("/limited/v1/aci/attestation", status(429))
-            .route("/private/v1/aci/attestation", status(403));
-        tokio::spawn(async move { axum::serve(listener, plain).await });
-        assert_eq!(
-            failure(&format!("https://127.0.0.1:{port}")).await,
-            ServiceError::Tls { host: host.clone() }
-        );
-        assert_eq!(
-            failure(&format!("http://127.0.0.1:{port}/elsewhere")).await,
-            ServiceError::NotAci { host: host.clone() }
-        );
-        for (path, status) in [("busy", 503), ("limited", 429)] {
-            let unavailable = failure(&format!("http://127.0.0.1:{port}/{path}")).await;
-            assert_eq!(
-                unavailable,
-                ServiceError::Unavailable {
-                    host: host.clone(),
-                    status
-                }
-            );
-            assert_eq!(
-                unavailable.to_string(),
-                format!("127.0.0.1 is unavailable right now (HTTP {status}). Try again later.")
-            );
-        }
-        assert_eq!(
-            failure(&format!("http://127.0.0.1:{port}/private")).await,
-            ServiceError::Status {
-                host: host.clone(),
-                status: 403
-            }
-        );
-        assert_eq!(
-            failure(&format!("http://127.0.0.1:{port}")).await,
-            ServiceError::NotAci { host }
-        );
-    }
 }

@@ -412,7 +412,7 @@ impl ProxyState {
             return Err("service re-verification did not reach VERIFIED".to_string());
         }
         let stale_pins = self.client.pinned_spkis(&self.host);
-        let pins = verification.attested_spkis();
+        let pins = verification.tls_pins;
         let verification_summary = verification.transcript.to_json();
         let identity = verification
             .identity
@@ -617,7 +617,6 @@ async fn initialize(
     }
 
     let verification_summary = verification.transcript.to_json();
-    let pins = verification.attested_spkis();
     let ServiceVerification {
         report,
         identity,
@@ -625,6 +624,7 @@ async fn initialize(
         base_url,
         host,
         observed_spki,
+        tls_pins: pins,
         ..
     } = verification;
     let identity =
@@ -1197,21 +1197,12 @@ fn join_url(base_url: &str, uri: &Uri) -> Result<url::Url, url::ParseError> {
 /// for the client-side §9.3(6) membership check. Malformed bodies pin nothing;
 /// the service rejects them itself.
 fn pinned_session_ids(body: &[u8]) -> Vec<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|parsed| {
-            let list = parsed
-                .get("provider")?
-                .get(PROVIDER_ACI_SESSION_IDS)?
-                .as_array()?
-                .clone();
-            Some(
-                list.iter()
-                    .filter_map(|id| id.as_str().map(str::to_string))
-                    .collect(),
-            )
-        })
-        .unwrap_or_default()
+    let parsed: Value = serde_json::from_slice(body).unwrap_or_default();
+    let ids = parsed["provider"][PROVIDER_ACI_SESSION_IDS].as_array();
+    ids.into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect()
 }
 
 /// Tighten an inference body (§5.3): demand verified serving and compose the
