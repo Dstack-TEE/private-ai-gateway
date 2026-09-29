@@ -1,61 +1,85 @@
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct Field {
     pub(super) path: Vec<String>,
     /// `None` makes the key absent.
     pub(super) value: Option<ConfigValue>,
     /// Concise preview text for generated structured values.
     pub(super) preview: Option<String>,
+    /// The keyed list item `path` is relative to.
+    pub(super) entry: Option<EntryKey>,
+    /// See [`OwnedField::exact`].
+    pub(super) exact: bool,
+    /// See [`OwnedField::container`].
+    pub(super) container: bool,
+}
+
+impl Field {
+    /// Scope the field to the list item whose `id` is `id`. Fields in list
+    /// items are exact.
+    pub(super) fn in_entry(self, id: &str) -> Self {
+        Field {
+            entry: Some(EntryKey {
+                key: "id".to_string(),
+                id: id.to_string(),
+            }),
+            exact: true,
+            ..self
+        }
+    }
+
+    pub(super) fn exact(self) -> Self {
+        Field {
+            exact: true,
+            ..self
+        }
+    }
+}
+
+fn field(path: &[&str], value: Option<ConfigValue>, preview: Option<String>) -> Field {
+    Field {
+        path: owned(path),
+        value,
+        preview,
+        entry: None,
+        exact: false,
+        container: false,
+    }
 }
 
 pub(super) fn set(path: &[&str], value: impl Into<String>) -> Field {
-    Field {
-        path: owned(path),
-        value: Some(ConfigValue::Str(value.into())),
-        preview: None,
-    }
+    field(path, Some(ConfigValue::Str(value.into())), None)
 }
 
 pub(super) fn number(path: &[&str], value: u64) -> Field {
-    Field {
-        path: owned(path),
-        value: Some(ConfigValue::Number(value)),
-        preview: None,
-    }
+    field(path, Some(ConfigValue::Number(value)), None)
 }
 
 pub(super) fn boolean(path: &[&str], value: bool) -> Field {
-    Field {
-        path: owned(path),
-        value: Some(ConfigValue::Bool(value)),
-        preview: None,
-    }
+    field(path, Some(ConfigValue::Bool(value)), None)
 }
 
 pub(super) fn generated_catalog(path: &[&str], value: serde_json::Value, models: usize) -> Field {
-    Field {
-        path: owned(path),
-        value: Some(ConfigValue::Json(value)),
-        preview: Some(format!("Generated catalog ({models} models)")),
-    }
+    field(
+        path,
+        Some(ConfigValue::Json(value)),
+        Some(format!("Generated catalog ({models} models)")),
+    )
 }
 
 pub(super) fn list(path: &[&str], values: &[&str]) -> Field {
-    Field {
-        path: owned(path),
-        value: Some(ConfigValue::List(
+    field(
+        path,
+        Some(ConfigValue::List(
             values.iter().map(|value| (*value).to_string()).collect(),
         )),
-        preview: None,
-    }
+        None,
+    )
 }
 
 pub(super) fn absent(path: &[&str]) -> Field {
-    Field {
-        path: owned(path),
-        value: None,
-        preview: None,
-    }
+    field(path, None, None)
 }
 
 pub(super) fn owned(path: &[&str]) -> Vec<String> {
@@ -171,6 +195,8 @@ pub(super) fn stale_helper(
         Agent::OpenCode => return false,
         Agent::OpenClaw => return false, // Validated with the token path by Projector.
         Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe, token_path),
+        // The token itself is stored; status compares it with the token file.
+        Agent::Dsh => return false,
     };
     // Only inspect the helper-bearing field we recorded, not provider metadata.
     record.fields.iter().any(|field| {
@@ -232,6 +258,9 @@ pub(super) fn provider_namespace(path: &[String]) -> Option<&[String]> {
 }
 
 pub(super) fn retain_provider_field(field: &OwnedField, fields: &[OwnedField]) -> bool {
+    if field.exact {
+        return false;
+    }
     if field.path == owned(&["model_providers", "private_ai_proxy", "name"]) {
         return !matches!(
             &field.previous,
@@ -279,25 +308,56 @@ pub(super) fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue>
 /// `previous`, so reconnecting never records our own value as the original.
 /// Previous values of sensitive fields are returned as pending secrets and
 /// referenced by entry name; they never appear in changes or the record.
+/// Exact fields, including every field in a keyed list item, only add keys or
+/// replace scalars so that [`restore`] puts back every byte.
 pub(super) fn project(
     doc: &mut ConfigDoc,
     fields: &[Field],
     prior: Option<&Connection>,
     agent: Agent,
 ) -> Result<Edit, String> {
-    let mut record = Connection::default();
-    let mut changes = Vec::new();
-    let mut pending_secrets = Vec::new();
-    for field in fields {
+    let prior = prior.map_or(&[][..], |prior| prior.fields.as_slice());
+    let mut edit = Edit {
+        record: Some(Connection::default()),
+        ..Edit::default()
+    };
+    let mut entries: Vec<&EntryKey> = Vec::new();
+    for key in fields.iter().filter_map(|field| field.entry.as_ref()) {
+        if !entries.contains(&key) {
+            entries.push(key);
+        }
+    }
+    let lists_ours = prior.iter().any(|field| {
+        field
+            .entry
+            .as_ref()
+            .is_some_and(|entry| entry.created && doc.entry(&entry.key).ok().flatten().is_some())
+    });
+    if !entries.is_empty() && !lists_ours {
+        doc.list_editable()
+            .map_err(|reason| format!("the list cannot be edited safely: {reason}"))?;
+    }
+    for key in entries {
+        project_entry(doc, key, fields, prior, &mut edit)?;
+    }
+    let exact: Vec<&Field> = fields
+        .iter()
+        .filter(|field| field.exact && field.entry.is_none())
+        .collect();
+    let prior_exact: Vec<&OwnedField> = prior
+        .iter()
+        .filter(|field| field.exact && field.entry.is_none())
+        .collect();
+    for field in anchor(Some(doc), &exact, &prior_exact)? {
+        project_exact(doc, field, &prior_exact, None, &mut edit)?;
+    }
+    for field in fields.iter().filter(|field| !field.exact) {
         let path = refs(&field.path);
         let sensitive = is_sensitive(&field.path);
         let current = doc.get_value(&path);
-        let still_ours = prior.and_then(|prior| {
-            prior
-                .fields
-                .iter()
-                .find(|owned| owned.path == field.path && current == owned.value)
-        });
+        let still_ours = prior
+            .iter()
+            .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
         // App-owned structured providers must never absorb an unmanaged object:
         // it may contain nested credentials that a field-name check cannot see.
         if matches!(field.value, Some(ConfigValue::Json(_)))
@@ -314,7 +374,7 @@ pub(super) fn project(
             {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
-                    pending_secrets.push(PendingSecret {
+                    edit.pending_secrets.push(PendingSecret {
                         entry: entry.clone(),
                         value: held.display(),
                     });
@@ -329,7 +389,7 @@ pub(super) fn project(
                 Some(value) => doc.set_value(&path, value)?,
                 None => doc.remove(&path)?,
             }
-            changes.push(if sensitive {
+            edit.changes.push(if sensitive {
                 ConfigChange {
                     key: path.join("."),
                     before: current.as_ref().map(|_| "Existing secret".to_string()),
@@ -348,25 +408,337 @@ pub(super) fn project(
                 )
             });
         }
-        record.fields.push(OwnedField {
+        owned_fields(&mut edit).push(OwnedField {
             path: field.path.clone(),
             value: field.value.clone(),
             previous,
+            entry: None,
+            exact: false,
+            source: None,
+            hashed: false,
+            container: false,
         });
     }
-    Ok(Edit {
-        selection: None,
-        changes,
-        record: Some(record),
-        pending_secrets,
-        consumed_secrets: Vec::new(),
-    })
+    Ok(edit)
+}
+
+fn owned_fields(edit: &mut Edit) -> &mut Vec<OwnedField> {
+    &mut edit.record.get_or_insert_with(Connection::default).fields
+}
+
+/// Project the fields of one keyed list item. An item the connection appends
+/// holds nothing else and is replaced whole; in the user's own item the
+/// fields only add keys or replace scalars.
+fn project_entry(
+    doc: &mut ConfigDoc,
+    key: &EntryKey,
+    fields: &[Field],
+    prior: &[OwnedField],
+    edit: &mut Edit,
+) -> Result<(), String> {
+    let context = |reason: String| format!("its `{}: {}` item {reason}", key.key, key.id);
+    let group: Vec<&Field> = fields
+        .iter()
+        .filter(|field| field.entry.as_ref() == Some(key))
+        .collect();
+    let prior: Vec<&OwnedField> = prior
+        .iter()
+        .filter(|field| field.entry.as_ref().is_some_and(|entry| entry.key == *key))
+        .collect();
+    let item = doc.entry(key)?;
+    let appended = item
+        .as_ref()
+        .is_none_or(|item| !prior.is_empty() && appended_intact(item, key, &prior));
+    if let (Some(mut item), false) = (item.clone(), appended) {
+        if item.is_flow(&[]) {
+            return Err(context(
+                "is written in flow style ({...}); write it as a block mapping".to_string(),
+            ));
+        }
+        let prior: Vec<&OwnedField> = prior
+            .into_iter()
+            .filter(|field| field.entry.as_ref().is_some_and(|entry| !entry.created))
+            .collect();
+        let entry = OwnedEntry {
+            key: key.clone(),
+            created: false,
+        };
+        for field in anchor(Some(&item), &group, &prior).map_err(context)? {
+            project_exact(&mut item, field, &prior, Some(entry.clone()), edit).map_err(context)?;
+        }
+        return Ok(());
+    }
+    let fields = anchor(None, &group, &[]).map_err(context)?;
+    let unchanged = item.as_ref().is_some_and(|item| {
+        fields
+            .iter()
+            .all(|field| item.get_value(&refs(&field.path)) == field.value)
+    });
+    if !unchanged {
+        let mut content = serde_json::Map::new();
+        content.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
+        for field in &fields {
+            if let Some(value) = &field.value {
+                content.insert(field.path[0].clone(), value.to_json());
+            }
+        }
+        if item.is_some() {
+            doc.remove_entry(key)?;
+        }
+        doc.insert_entry(&serde_json::Value::Object(content))?;
+    }
+    for field in fields {
+        let path = refs(&field.path);
+        let current = item.as_ref().and_then(|item| item.get_value(&path));
+        if current != field.value {
+            let mut change = preview_change(
+                &path,
+                current,
+                field.value.clone(),
+                field.preview.as_deref(),
+            );
+            change.key = format!("{}.{}", key.id, change.key);
+            edit.changes.push(change);
+        }
+        owned_fields(edit).push(OwnedField {
+            path: field.path,
+            value: field.value,
+            previous: None,
+            entry: Some(OwnedEntry {
+                key: key.clone(),
+                created: true,
+            }),
+            exact: true,
+            source: None,
+            hashed: false,
+            container: false,
+        });
+    }
+    Ok(())
+}
+
+/// Whether an item the connection appended still holds exactly what it wrote,
+/// with nothing the user added.
+fn appended_intact(item: &ConfigDoc, key: &EntryKey, fields: &[&OwnedField]) -> bool {
+    let mut expected = serde_json::Map::new();
+    expected.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
+    for field in fields {
+        match (&field.entry, &field.value) {
+            (Some(entry), Some(value)) if entry.created && field.path.len() == 1 => {
+                expected.insert(field.path[0].clone(), value.to_json());
+            }
+            _ => return false,
+        }
+    }
+    item.get_value(&[]) == Some(ConfigValue::Json(serde_json::Value::Object(expected)))
+}
+
+/// Exact fields only add keys or replace scalars. In an item the connection
+/// appends, each field is written under its first key and the item leaves
+/// whole. Elsewhere a missing parent is created as an empty block mapping of
+/// its own (a container field, also one a prior connection created), which
+/// restoring removes only while it is empty, so keys others add later neither
+/// keep the connection's own keys in place nor block reconnecting.
+fn anchor(
+    target: Option<&ConfigDoc>,
+    fields: &[&Field],
+    prior: &[&OwnedField],
+) -> Result<Vec<Field>, String> {
+    let mut anchored: Vec<Field> = Vec::new();
+    for field in fields {
+        let path = refs(&field.path);
+        let Some(value) = &field.value else {
+            if target.is_some_and(|target| target.contains(&path)) {
+                return Err(format!(
+                    "sets `{}`, which cannot be removed and put back exactly; remove it",
+                    path.join(".")
+                ));
+            }
+            continue;
+        };
+        let Some(target) = target else {
+            let nested = field.path[1..].iter().rev().fold(
+                value.to_json(),
+                |value, key| serde_json::json!({ key.as_str(): value }),
+            );
+            match anchored
+                .iter_mut()
+                .find(|other| other.path[..] == field.path[..1])
+            {
+                Some(other) => {
+                    let mut merged = other.value.as_ref().map(ConfigValue::to_json);
+                    merge_json(merged.as_mut(), nested)
+                        .ok_or_else(|| format!("sets `{}` twice", path.join(".")))?;
+                    other.value = merged.and_then(|merged| ConfigValue::from_json(&merged));
+                    other.preview = other.preview.take().or_else(|| field.preview.clone());
+                }
+                None => anchored.push(Field {
+                    path: field.path[..1].to_vec(),
+                    value: ConfigValue::from_json(&nested),
+                    ..(*field).clone()
+                }),
+            }
+            continue;
+        };
+        for depth in 1..path.len() {
+            let parent = &field.path[..depth];
+            let created = prior
+                .iter()
+                .any(|owned| owned.container && owned.path == parent)
+                || !target.contains(&path[..depth]);
+            if created && !anchored.iter().any(|other| other.path == parent) {
+                anchored.push(Field {
+                    path: parent.to_vec(),
+                    value: None,
+                    preview: None,
+                    container: true,
+                    ..(*field).clone()
+                });
+            }
+        }
+        anchored.push((*field).clone());
+    }
+    Ok(anchored)
+}
+
+fn merge_json(target: Option<&mut serde_json::Value>, source: serde_json::Value) -> Option<()> {
+    let (Some(serde_json::Value::Object(target)), serde_json::Value::Object(source)) =
+        (target, source)
+    else {
+        return None;
+    };
+    for (key, value) in source {
+        match target.get_mut(&key) {
+            Some(existing) => merge_json(Some(existing), value)?,
+            None => {
+                target.insert(key, value);
+            }
+        }
+    }
+    Some(())
+}
+
+fn project_exact(
+    target: &mut ConfigDoc,
+    field: Field,
+    prior: &[&OwnedField],
+    entry: Option<OwnedEntry>,
+    edit: &mut Edit,
+) -> Result<(), String> {
+    let path = refs(&field.path);
+    let name = path.join(".");
+    if field.container {
+        if !target.contains(&path) {
+            if target.is_flow(&path[..path.len() - 1]) {
+                return Err(format!(
+                    "writes `{name}` in flow style ({{...}}); write it as a block mapping"
+                ));
+            }
+            target.create_mapping(&path)?;
+        }
+        owned_fields(edit).push(OwnedField {
+            path: field.path,
+            value: None,
+            previous: None,
+            entry,
+            exact: true,
+            source: None,
+            hashed: false,
+            container: true,
+        });
+        return Ok(());
+    }
+    let current = target.get_value(&path);
+    if current.is_none() && target.contains(&path) {
+        return Err(format!(
+            "has `{name}`, which cannot be read safely (an alias, tag or duplicate key)"
+        ));
+    }
+    if target.is_flow(&path[..path.len() - 1]) {
+        return Err(format!(
+            "writes `{name}` in flow style ({{...}}); write it as a block mapping"
+        ));
+    }
+    let still_ours = prior
+        .iter()
+        .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
+    let (previous, source) = match (still_ours, &current) {
+        (Some(owned), _) => (owned.previous.clone(), owned.source.clone()),
+        (None, None) => (None, None),
+        (None, Some(ConfigValue::List(_) | ConfigValue::Json(_))) => {
+            return Err(format!(
+                "already has `{name}`, a structured value that cannot be replaced and put back exactly"
+            ))
+        }
+        (None, Some(_)) if matches!(field.value, Some(ConfigValue::List(_) | ConfigValue::Json(_))) => {
+            return Err(format!(
+                "already has `{name}`, which cannot be replaced by a structured value and put back exactly"
+            ))
+        }
+        (None, Some(_)) if is_sensitive(&field.path) => {
+            return Err(format!("already holds a credential at `{name}`"))
+        }
+        (None, Some(held)) => (
+            Some(Previous::Plain(held.clone())),
+            target.scalar_source(&path),
+        ),
+    };
+    if current != field.value {
+        match &field.value {
+            Some(value) => target.set_value(&path, value)?,
+            None => target.remove_exact(&path)?,
+        }
+        let mut change = if is_sensitive(&field.path) {
+            ConfigChange {
+                key: name,
+                before: None,
+                after: Some("Managed local credential".to_string()),
+                sensitive: true,
+            }
+        } else {
+            preview_change(
+                &path,
+                current,
+                field.value.clone(),
+                field.preview.as_deref(),
+            )
+        };
+        if let Some(entry) = &entry {
+            change.key = format!("{}.{}", entry.key.id, change.key);
+        }
+        edit.changes.push(change);
+    }
+    owned_fields(edit).push(OwnedField {
+        path: field.path,
+        value: field.value,
+        previous,
+        entry,
+        exact: true,
+        source,
+        hashed: false,
+        container: false,
+    });
+    Ok(())
+}
+
+/// What the config holds at an owned field, inside its list item if it has one.
+pub(super) fn owned_value(doc: &ConfigDoc, field: &OwnedField) -> Option<ConfigValue> {
+    match &field.entry {
+        Some(entry) => doc
+            .entry(&entry.key)
+            .ok()
+            .flatten()?
+            .get_value(&refs(&field.path)),
+        None => doc.get_value(&refs(&field.path)),
+    }
 }
 
 /// Undo a connection: every owned field that still holds what we wrote goes
 /// back to its previous value (plain, or fetched from the credential store)
 /// or disappears, pruning emptied containers; anything the user changed since
-/// is left alone. Idempotent: a field already restored is skipped.
+/// is left alone. Idempotent: a field already restored is skipped. Exact
+/// fields put back the recorded bytes, and list items the connection appended
+/// are removed whole, first to last, while every field in them is unchanged.
 pub(super) fn restore(
     doc: &mut ConfigDoc,
     record: &Connection,
@@ -405,7 +777,63 @@ pub(super) fn restore(
     }
     let mut changes = Vec::new();
     let mut consumed_secrets = Vec::new();
+    let mut appended: Vec<(usize, &EntryKey)> = Vec::new();
+    for entry in record
+        .fields
+        .iter()
+        .filter_map(|field| field.entry.as_ref().filter(|entry| entry.created))
+    {
+        if appended.iter().any(|(_, key)| *key == &entry.key) {
+            continue;
+        }
+        let fields: Vec<&OwnedField> = record
+            .fields
+            .iter()
+            .filter(|field| field.entry.as_ref() == Some(entry))
+            .collect();
+        let intact = doc
+            .entry(&entry.key)
+            .map_err(AgentError::ConfigurationConflict)?
+            .is_some_and(|item| appended_intact(&item, &entry.key, &fields));
+        if intact {
+            let index = doc
+                .entry_index(&entry.key)
+                .map_err(AgentError::ConfigurationConflict)?;
+            appended.extend(index.map(|index| (index, &entry.key)));
+        }
+    }
+    appended.sort_by_key(|(index, _)| *index);
+    for (_, key) in appended {
+        doc.remove_entry(key)
+            .map_err(|_| AgentError::RestorationFailed)?;
+        changes.push(ConfigChange {
+            key: key.id.clone(),
+            before: Some("Connected item".into()),
+            after: None,
+            sensitive: false,
+        });
+    }
     for field in &record.fields {
+        if field.container || field.entry.as_ref().is_some_and(|entry| entry.created) {
+            continue;
+        }
+        if field.exact {
+            let change = match &field.entry {
+                Some(entry) => match doc
+                    .entry(&entry.key)
+                    .map_err(AgentError::ConfigurationConflict)?
+                {
+                    Some(mut item) => restore_exact(&mut item, field)?.map(|mut change| {
+                        change.key = format!("{}.{}", entry.key.id, change.key);
+                        change
+                    }),
+                    None => None,
+                },
+                None => restore_exact(doc, field)?,
+            };
+            changes.extend(change);
+            continue;
+        }
         if retain_provider_field(field, &record.fields) {
             let path = refs(&field.path);
             let inactive = inactive_provider_value(field);
@@ -429,7 +857,7 @@ pub(super) fn restore(
         if let Some(Previous::Secret { secret_ref }) = &field.previous {
             consumed_secrets.push(secret_ref.clone());
         }
-        if current != field.value {
+        if !field.holds(current.as_ref()) {
             continue;
         }
         let sensitive = is_sensitive(&field.path);
@@ -468,6 +896,26 @@ pub(super) fn restore(
             change(&path, current, restored)
         });
     }
+    // Containers go last, innermost first, and only while nothing is left in them.
+    for field in record.fields.iter().rev().filter(|field| field.container) {
+        let empty = Some(ConfigValue::Json(serde_json::json!({})));
+        let path = refs(&field.path);
+        let removed = match &field.entry {
+            Some(entry) => match doc
+                .entry(&entry.key)
+                .map_err(AgentError::ConfigurationConflict)?
+            {
+                Some(mut item) if item.get_value(&path) == empty => Some(item.remove_exact(&path)),
+                _ => None,
+            },
+            None if doc.get_value(&path) == empty => Some(doc.remove_exact(&path)),
+            None => None,
+        };
+        if let Some(removed) = removed {
+            removed.map_err(|_| AgentError::RestorationFailed)?;
+            changes.push(change(&path, empty, None));
+        }
+    }
     Ok(Edit {
         selection: None,
         changes,
@@ -475,6 +923,40 @@ pub(super) fn restore(
         pending_secrets: Vec::new(),
         consumed_secrets,
     })
+}
+
+/// Put an exact field back: remove the key it added, or the scalar source it
+/// replaced. A field the user changed since is left alone.
+fn restore_exact(
+    target: &mut ConfigDoc,
+    field: &OwnedField,
+) -> Result<Option<ConfigChange>, AgentError> {
+    let path = refs(&field.path);
+    let current = target.get_value(&path);
+    if !field.holds(current.as_ref()) {
+        return Ok(None);
+    }
+    let restored = match &field.previous {
+        Some(Previous::Plain(value)) => Some(value.clone()),
+        Some(Previous::Secret { .. }) => return Err(AgentError::RestorationFailed),
+        None => None,
+    };
+    match (&restored, &field.source) {
+        (Some(_), Some(source)) => target.set_scalar_source(&path, source),
+        (Some(value), None) => target.set_value(&path, value),
+        (None, _) => target.remove_exact(&path),
+    }
+    .map_err(|_| AgentError::RestorationFailed)?;
+    Ok(Some(if is_sensitive(&field.path) {
+        ConfigChange {
+            key: path.join("."),
+            before: Some("Managed local credential".to_string()),
+            after: None,
+            sensitive: true,
+        }
+    } else {
+        change(&path, current, restored)
+    }))
 }
 
 pub(super) fn change(
@@ -570,5 +1052,6 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::Hermes => doc.get_str(&["model", "default"]),
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::OhMyPi => None,
+        Agent::Dsh => dsh::selected_model(doc),
     }
 }

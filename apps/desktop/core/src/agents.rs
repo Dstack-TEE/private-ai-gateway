@@ -81,12 +81,14 @@ pub enum Agent {
     Hermes,
     OpenClaw,
     OhMyPi,
+    Dsh,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 7] = [
+    pub const ALL: [Agent; 8] = [
         Agent::ClaudeCode,
         Agent::Codex,
+        Agent::Dsh,
         Agent::Hermes,
         Agent::Pi,
         Agent::OhMyPi,
@@ -110,6 +112,7 @@ impl Agent {
             Agent::Hermes => "hermes",
             Agent::OpenClaw => "openclaw",
             Agent::OhMyPi => "oh-my-pi",
+            Agent::Dsh => "dsh",
         }
     }
 
@@ -122,6 +125,7 @@ impl Agent {
             Agent::Hermes => "Hermes Agent",
             Agent::OpenClaw => "OpenClaw",
             Agent::OhMyPi => "Oh My Pi",
+            Agent::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -134,6 +138,7 @@ impl Agent {
             Agent::Hermes => "https://hermes-agent.nousresearch.com",
             Agent::OpenClaw => "https://openclaw.ai",
             Agent::OhMyPi => "https://omp.sh",
+            Agent::Dsh => "https://deepseek-harness.github.io/deepseek-harness/",
         }
     }
 }

@@ -2,13 +2,15 @@
 //! but the edited value kept via the `jsonc-parser` CST) and TOML (comments
 //! and layout kept via `toml_edit`). A path is a key sequence;
 //! containers along it are created on demand and pruned again when a removal
-//! leaves them empty, so a disconnect leaves no empty shells behind.
+//! leaves them empty, so a disconnect leaves no empty shells behind. YAML
+//! lists can also be edited by keyed item (`EntryKey`), where edits are limited
+//! to what restores byte for byte.
 
 use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
-use yaml_edit::{path::YamlPath, AsYaml, YamlFile};
+use yaml_edit::{path::YamlPath, AsYaml, Mapping, Sequence, YamlFile, YamlNode};
 
 /// Read-only JSONC inspection. Never render this value back over a user's file:
 /// the regular JSON writer does not preserve comments.
@@ -41,6 +43,8 @@ pub enum Format {
     Json5,
     Toml,
     Yaml,
+    /// YAML whose root is a list, such as a Cordis patch list.
+    YamlList,
 }
 
 /// The scalar and structured values a projection writes.
@@ -67,7 +71,7 @@ impl ConfigValue {
         }
     }
 
-    fn from_json(value: &Value) -> Option<Self> {
+    pub(crate) fn from_json(value: &Value) -> Option<Self> {
         match value {
             Value::String(text) => Some(ConfigValue::Str(text.clone())),
             Value::Number(number) => number.as_u64().map(ConfigValue::Number),
@@ -83,7 +87,7 @@ impl ConfigValue {
         }
     }
 
-    fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         match self {
             ConfigValue::Str(text) => Value::String(text.clone()),
             ConfigValue::Number(number) => Value::from(*number),
@@ -146,6 +150,17 @@ pub enum ConfigDoc {
     Json5(String),
     Toml(DocumentMut),
     Yaml(YamlFile),
+    /// A live view of one mapping item of a YAML list: edits through it change
+    /// the document it came from, which is the one to render.
+    YamlItem(Mapping),
+}
+
+/// A mapping item of a YAML list, selected by the value of one of its keys,
+/// such as `{id: llm-pi-ai}` in a Cordis patch list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryKey {
+    pub key: String,
+    pub id: String,
 }
 
 impl ConfigDoc {
@@ -173,6 +188,19 @@ impl ConfigDoc {
                     .map(Self::Yaml)
                     .map_err(|_| "not valid YAML".to_string())
             }
+            Format::YamlList => {
+                let source = if text.trim().is_empty() { "[]\n" } else { text };
+                let file = source
+                    .parse::<YamlFile>()
+                    .map_err(|_| "not valid YAML".to_string())?;
+                let mut documents = file.documents();
+                if documents.next().and_then(|doc| doc.as_sequence()).is_none()
+                    || documents.next().is_some()
+                {
+                    return Err("not a single YAML list".to_string());
+                }
+                Ok(Self::Yaml(file))
+            }
         }
     }
 
@@ -186,6 +214,27 @@ impl ConfigDoc {
                     .map_err(|_| "YAML edit produced invalid syntax".to_string())?;
                 Ok(text)
             }
+            Self::YamlItem(_) => Err("render the document that holds this item".to_string()),
+        }
+    }
+
+    /// The YAML node at `path` below the document root or the list item.
+    fn yaml_node(&self, path: &[&str]) -> Option<YamlNode> {
+        match self {
+            Self::Yaml(file) => {
+                let document = file.documents().next()?;
+                if path.is_empty() {
+                    document
+                        .as_mapping()
+                        .map(YamlNode::Mapping)
+                        .or_else(|| document.as_sequence().map(YamlNode::Sequence))
+                } else {
+                    document.try_get_path(&path.join(".")).ok()
+                }
+            }
+            Self::YamlItem(item) if path.is_empty() => Some(YamlNode::Mapping(item.clone())),
+            Self::YamlItem(item) => item.try_get_path(&path.join(".")).ok(),
+            _ => None,
         }
     }
 
@@ -197,15 +246,7 @@ impl ConfigDoc {
             }
             Self::Json(text) => ConfigValue::from_json(json_get(&json_value(text).ok()?, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
-            Self::Yaml(file) => {
-                let document = file.documents().next()?;
-                let node = if path.is_empty() {
-                    yaml_edit::YamlNode::Mapping(document.as_mapping()?)
-                } else {
-                    document.try_get_path(&path.join(".")).ok()?
-                };
-                yaml_value(node)
-            }
+            Self::Yaml(_) | Self::YamlItem(_) => yaml_value(self.yaml_node(path)?),
         }
     }
 
@@ -233,10 +274,7 @@ impl ConfigDoc {
                 .ok()
                 .is_some_and(|root| json_get(&root, path).is_some()),
             Self::Toml(doc) => toml_get(doc.as_item(), path).is_some(),
-            Self::Yaml(file) => file
-                .documents()
-                .next()
-                .is_some_and(|doc| doc.try_get_path(&path.join(".")).is_ok()),
+            Self::Yaml(_) | Self::YamlItem(_) => !path.is_empty() && self.yaml_node(path).is_some(),
         }
     }
 
@@ -257,21 +295,9 @@ impl ConfigDoc {
                     .documents()
                     .next()
                     .ok_or_else(|| "YAML document is empty".to_string())?;
-                let path = path.join(".");
-                match value {
-                    ConfigValue::Str(value) => doc.try_set_path(&path, value.as_str()),
-                    ConfigValue::Number(value) => {
-                        let value = i64::try_from(*value)
-                            .map_err(|_| "number too large for YAML".to_string())?;
-                        doc.try_set_path(&path, value)
-                    }
-                    ConfigValue::Bool(value) => doc.try_set_path(&path, *value),
-                    ConfigValue::List(_) | ConfigValue::Json(_) => {
-                        doc.try_set_path(&path, yaml_input(value.to_json())?)
-                    }
-                }
-                .map_err(|_| format!("cannot edit YAML path {path}"))?;
+                yaml_set(&doc, path, value)?;
             }
+            Self::YamlItem(item) => yaml_set(item, path, value)?,
         }
         Ok(())
     }
@@ -291,14 +317,14 @@ impl ConfigDoc {
             Self::Toml(doc) => {
                 toml_get(doc.as_item(), path).is_some_and(|item| item.as_table_like().is_some())
             }
-            Self::Yaml(file) => file.documents().next().is_some_and(|doc| {
-                doc.try_get_path(&path.join("."))
-                    .is_ok_and(|node| node.is_mapping())
-            }),
+            Self::Yaml(_) | Self::YamlItem(_) => {
+                !path.is_empty() && self.yaml_node(path).is_some_and(|node| node.is_mapping())
+            }
         }
     }
 
     /// Remove the key at `path`, then prune containers left empty above it.
+    /// Inside a list item only the key itself is removed.
     pub fn remove(&mut self, path: &[&str]) -> Result<(), String> {
         let Ok((leaf, parents)) = split_leaf(path) else {
             return Ok(());
@@ -322,6 +348,7 @@ impl ConfigDoc {
                     table.remove(leaf);
                     table.is_empty()
                 }),
+            Self::YamlItem(_) => return self.remove_exact(path),
             Self::Yaml(file) => {
                 let Some(doc) = file.documents().next() else {
                     return Ok(());
@@ -358,6 +385,217 @@ impl ConfigDoc {
         }
         Ok(())
     }
+
+    /// Remove exactly the key at `path`, never its parents. Other formats
+    /// fall back to [`Self::remove`].
+    pub fn remove_exact(&mut self, path: &[&str]) -> Result<(), String> {
+        let path_text = path.join(".");
+        let removed = match self {
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .map(|doc| doc.try_remove_path(&path_text)),
+            Self::YamlItem(item) => Some(item.try_remove_path(&path_text)),
+            _ => return self.remove(path),
+        };
+        match removed {
+            Some(Err(yaml_edit::path::PathError::NotFound { .. })) | Some(Ok(_)) | None => Ok(()),
+            Some(Err(_)) => Err(format!("cannot edit YAML path {path_text}")),
+        }
+    }
+
+    /// Create an empty mapping at `path`. In YAML it is written as a block
+    /// mapping once it has entries, so keys added to it and removed again
+    /// restore it byte for byte.
+    pub fn create_mapping(&mut self, path: &[&str]) -> Result<(), String> {
+        let path_text = path.join(".");
+        match self {
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .ok_or_else(|| "YAML document is empty".to_string())?
+                .try_set_path(&path_text, Mapping::new_pending_block()),
+            Self::YamlItem(item) => item.try_set_path(&path_text, Mapping::new_pending_block()),
+            _ => return self.set_value(path, &ConfigValue::Json(Value::Object(Map::new()))),
+        }
+        .map_err(|_| format!("cannot edit YAML path {path_text}"))
+    }
+
+    /// A new, empty YAML mapping document written in block style.
+    pub fn new_yaml_mapping() -> Self {
+        let file = YamlFile::new();
+        file.ensure_document();
+        Self::Yaml(file)
+    }
+
+    /// The source text of the YAML scalar at `path`, quoting included.
+    pub fn scalar_source(&self, path: &[&str]) -> Option<String> {
+        match self.yaml_node(path)? {
+            YamlNode::Scalar(scalar) if !path.is_empty() => Some(scalar.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Put back a YAML scalar from the source text [`Self::scalar_source`] gave.
+    pub fn set_scalar_source(&mut self, path: &[&str], source: &str) -> Result<(), String> {
+        let file = source
+            .parse::<YamlFile>()
+            .map_err(|_| "The recorded YAML scalar is invalid".to_string())?;
+        let scalar = file
+            .documents()
+            .next()
+            .and_then(|doc| doc.as_scalar())
+            .filter(|scalar| scalar.to_string() == source)
+            .ok_or_else(|| "The recorded YAML scalar is invalid".to_string())?;
+        let path_text = path.join(".");
+        match self {
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .ok_or_else(|| "YAML document is empty".to_string())?
+                .try_set_path(&path_text, scalar),
+            Self::YamlItem(item) => item.try_set_path(&path_text, scalar),
+            _ => return Err("scalar sources are YAML only".to_string()),
+        }
+        .map_err(|_| format!("cannot edit YAML path {path_text}"))
+    }
+
+    /// Whether the YAML collection at `path` (`[]` is the root or the item)
+    /// is written in flow style and has entries.
+    pub fn is_flow(&self, path: &[&str]) -> bool {
+        match self.yaml_node(path) {
+            Some(YamlNode::Mapping(mapping)) => mapping.is_flow_style() && !mapping.is_empty(),
+            Some(YamlNode::Sequence(list)) => list.is_flow_style() && !list.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn yaml_list(&self) -> Result<Sequence, String> {
+        match self {
+            Self::Yaml(file) => file
+                .documents()
+                .next()
+                .and_then(|doc| doc.as_sequence())
+                .ok_or_else(|| "The document is not a YAML list".to_string()),
+            _ => Err("The document is not a YAML list".to_string()),
+        }
+    }
+
+    /// The mapping items of a YAML list, as read-only views.
+    pub fn items(&self) -> Result<Vec<ConfigDoc>, String> {
+        Ok(self
+            .yaml_list()?
+            .values()
+            .filter_map(|item| match item {
+                YamlNode::Mapping(mapping) => Some(Self::YamlItem(mapping)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// The position of the item `entry` selects; found by reading only. More
+    /// than one match is ambiguous, because the consumer would apply both.
+    pub fn entry_index(&self, entry: &EntryKey) -> Result<Option<usize>, String> {
+        let mut found = None;
+        for (index, item) in self.yaml_list()?.values().enumerate() {
+            let YamlNode::Mapping(mapping) = item else {
+                continue;
+            };
+            let Some(YamlNode::Scalar(value)) = mapping.get(entry.key.as_str()) else {
+                continue;
+            };
+            if value.as_string() == entry.id && found.replace(index).is_some() {
+                return Err(format!(
+                    "The list has more than one item with {}: {}",
+                    entry.key, entry.id
+                ));
+            }
+        }
+        Ok(found)
+    }
+
+    /// A live view of the item `entry` selects, if the list has one.
+    pub fn entry(&self, entry: &EntryKey) -> Result<Option<ConfigDoc>, String> {
+        let Some(index) = self.entry_index(entry)? else {
+            return Ok(None);
+        };
+        match self.yaml_list()?.get(index) {
+            Some(YamlNode::Mapping(mapping)) => Ok(Some(Self::YamlItem(mapping))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Append `content`, a JSON object, as a new last item of the list. Check
+    /// [`Self::list_editable`] on the user's list before the first append.
+    pub fn insert_entry(&mut self, content: &Value) -> Result<(), String> {
+        let list = self.yaml_list()?;
+        list.insert(list.len(), yaml_input(content.clone())?);
+        Ok(())
+    }
+
+    /// Remove the item `entry` selects. Items appended together are removed
+    /// in the order they were appended.
+    pub fn remove_entry(&mut self, entry: &EntryKey) -> Result<(), String> {
+        if let Some(index) = self.entry_index(entry)? {
+            self.yaml_list()?.remove(index);
+        }
+        Ok(())
+    }
+
+    /// Whether items can be appended to this list and removed again byte for
+    /// byte; the error says what to change.
+    //
+    // yaml-edit 0.3.2 edits lists and items byte for byte only through
+    // `Sequence::insert`/`remove` of a whole item and `Mapping` key additions,
+    // removals and scalar replacements. Relax these checks if it learns more:
+    // G1: re-inserting a saved block item loses its nested indentation:
+    //     `- id: b\n  config:\n    k: 1\n` comes back as `  config:\nk: 1`.
+    // G2: `Mapping::set` with a saved block value over-indents it and drops its
+    //     leading comment; `insert_at_index_preserving` renders
+    //     `    \nreasoningEffort: max\n`.
+    // G3: in a non-empty flow list, removing the last item leaves
+    //     `[{id: a}, ]`, and appending after `[\n  {id: a},\n]` gives `,\n,`.
+    // G4: appending to a list without a trailing newline adds one to the
+    //     previous item that removing the new item does not take back.
+    // G5: an appended item starts at column 1 even when the list is indented,
+    //     so `    - id: a\n` gains `- id: b`, which YAML parsers reject.
+    pub fn list_editable(&self) -> Result<(), String> {
+        let list = self.yaml_list()?;
+        let text = self.render()?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            return Err("it does not end with a newline; add one".to_string());
+        }
+        if list.is_flow_style() && !list.is_empty() {
+            return Err(
+                "its list is written in flow style ([...]); write it as a block list (- item)"
+                    .to_string(),
+            );
+        }
+        if !list.is_flow_style() && list.start_position(&text).column != 1 {
+            return Err(
+                "its list is indented; start each `- ` item at the beginning of the line"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn yaml_set(target: &impl YamlPath, path: &[&str], value: &ConfigValue) -> Result<(), String> {
+    let path = path.join(".");
+    match value {
+        ConfigValue::Str(value) => target.try_set_path(&path, value.as_str()),
+        ConfigValue::Number(value) => {
+            let value =
+                i64::try_from(*value).map_err(|_| "number too large for YAML".to_string())?;
+            target.try_set_path(&path, value)
+        }
+        ConfigValue::Bool(value) => target.try_set_path(&path, *value),
+        ConfigValue::List(_) | ConfigValue::Json(_) => {
+            target.try_set_path(&path, yaml_input(value.to_json())?)
+        }
+    }
+    .map_err(|_| format!("cannot edit YAML path {path}"))
 }
 
 fn json5_options() -> jsonc_parser::ParseOptions {

@@ -52,7 +52,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if agent == Agent::OpenCode {
+        if matches!(agent, Agent::OpenCode | Agent::Dsh) {
             assert_scan(&sandbox, true, None);
         } else if agent == Agent::OpenClaw {
             assert_scan(
@@ -82,13 +82,27 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Agent::Hermes => &["providers", "private-ai-proxy", "key_cmd"][..],
             Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
+            Agent::Dsh => &["config", "model"][..],
         };
-        config.set_str(field, "external-edit").unwrap();
+        // dsh's fields live in keyed items of its patch list.
+        let item = EntryKey {
+            key: "id".into(),
+            id: "agent-default-model".into(),
+        };
+        let edited = |config: &ConfigDoc| match agent {
+            Agent::Dsh => config.entry(&item).unwrap().unwrap(),
+            _ => config.clone(),
+        };
+        if agent == Agent::Dsh {
+            edited(&config).set_str(field, "external-edit").unwrap();
+        } else {
+            config.set_str(field, "external-edit").unwrap();
+        }
         write(&path, &config.render().unwrap());
         assert_scan(&sandbox, false, Some("settings changed"));
         disconnect(&sandbox, agent);
         assert_eq!(
-            doc(&sandbox, agent).get_str(field).as_deref(),
+            edited(&doc(&sandbox, agent)).get_str(field).as_deref(),
             Some("external-edit"),
         );
     }

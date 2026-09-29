@@ -2,6 +2,7 @@ import React from "react";
 import { ExternalLink, FolderLock, LoaderCircle } from "lucide-react";
 import claudeCodeIcon from "@lobehub/icons-static-svg/icons/claudecode-color.svg";
 import codexIcon from "@lobehub/icons-static-svg/icons/codex-color.svg";
+import deepSeekIcon from "@lobehub/icons-static-svg/icons/deepseek-color.svg";
 import hermesIcon from "@lobehub/icons-static-svg/icons/hermesagent.svg";
 import openCodeIcon from "@lobehub/icons-static-svg/icons/opencode.svg";
 import openClawIcon from "@lobehub/icons-static-svg/icons/openclaw-color.svg";
@@ -26,6 +27,7 @@ import { cn } from "../lib/utils";
 const AGENT_ICONS: Record<string, string> = {
   codex: codexIcon,
   "claude-code": claudeCodeIcon,
+  dsh: deepSeekIcon,
   opencode: openCodeIcon,
   pi: piIcon,
   "oh-my-pi": ohMyPiIcon,

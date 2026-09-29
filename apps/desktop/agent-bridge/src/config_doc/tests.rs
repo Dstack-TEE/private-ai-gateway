@@ -181,3 +181,136 @@ fn serde_json_float_parsing_is_not_roundtrip() {
     assert_ne!(exact, 0.05);
     assert_eq!(parsed, 0.05);
 }
+
+fn key(id: &str) -> EntryKey {
+    EntryKey {
+        key: "id".to_string(),
+        id: id.to_string(),
+    }
+}
+
+/// The keyed-item operations the projection relies on restore every byte:
+/// appending and removing a whole item, adding and removing a key inside an
+/// existing item, and replacing a scalar from its recorded source text.
+#[test]
+fn yaml_list_items_round_trip_byte_for_byte() {
+    let lists = [
+        "# my patches\n- id: a # keep\n  config:\n    x: 1\n",
+        "-   id: a\n    config:\n        x: 1\n",
+        "- id: a\r\n  config:\r\n    x: 1\r\n",
+        "- id: a\n# trailing comment\n",
+        "- {id: a, config: {x: 1}}\n",
+        "[]\n",
+        "# only a comment above\n[]\n",
+    ];
+    let ours = serde_json::json!({"id": "ours", "config": {"providers": {"p": {"models": [{"id": "m"}]}}}});
+    for source in lists {
+        let mut doc = ConfigDoc::parse(Format::YamlList, source).unwrap();
+        doc.list_editable().unwrap();
+        doc.insert_entry(&ours).unwrap();
+        doc.insert_entry(&serde_json::json!({"id": "second", "disabled": true}))
+            .unwrap();
+        let written = doc.render().unwrap();
+        let reparsed = ConfigDoc::parse(Format::YamlList, &written).unwrap();
+        let item = reparsed.entry(&key("ours")).unwrap().unwrap();
+        assert_eq!(
+            item.get_value(&["config", "providers", "p", "models"]),
+            Some(ConfigValue::Json(serde_json::json!([{"id": "m"}]))),
+            "{source:?}"
+        );
+        doc.remove_entry(&key("ours")).unwrap();
+        doc.remove_entry(&key("second")).unwrap();
+        assert_eq!(doc.render().unwrap(), source, "{source:?}");
+    }
+
+    let source = "# head\n- id: a\n  config:\n    providers:\n      mine: {k: v} # c\n    model: 'deepseek-flash' # mine\n    effort: \"max\"\n- id: b\n";
+    let doc = ConfigDoc::parse(Format::YamlList, source).unwrap();
+    let mut item = doc.entry(&key("a")).unwrap().unwrap();
+    item.set_value(
+        &["config", "providers", "ours"],
+        &ConfigValue::Json(serde_json::json!({"api": "x"})),
+    )
+    .unwrap();
+    item.set_value(&["disabled"], &ConfigValue::Bool(false))
+        .unwrap();
+    let model = item.scalar_source(&["config", "model"]).unwrap();
+    let effort = item.scalar_source(&["config", "effort"]).unwrap();
+    assert_eq!(
+        (model.as_str(), effort.as_str()),
+        ("'deepseek-flash'", "\"max\"")
+    );
+    item.set_str(&["config", "model"], "ours/model").unwrap();
+    item.set_str(&["config", "effort"], "low").unwrap();
+    let written = doc.render().unwrap();
+    assert!(written.contains("mine: {k: v} # c"), "{written}");
+    item.remove(&["config", "providers", "ours"]).unwrap();
+    item.remove(&["disabled"]).unwrap();
+    item.set_scalar_source(&["config", "model"], &model)
+        .unwrap();
+    item.set_scalar_source(&["config", "effort"], &effort)
+        .unwrap();
+    assert_eq!(doc.render().unwrap(), source);
+}
+
+#[test]
+fn yaml_list_edits_refuse_what_cannot_be_restored() {
+    // Duplicate ids are ambiguous; they are found without editing anything.
+    let duplicated = "- id: a\n- id: b\n- id: a\n";
+    let doc = ConfigDoc::parse(Format::YamlList, duplicated).unwrap();
+    assert!(doc.entry(&key("a")).is_err());
+    assert!(doc.entry(&key("b")).unwrap().is_some());
+    assert!(doc.entry(&key("c")).unwrap().is_none());
+    assert_eq!(doc.render().unwrap(), duplicated);
+    for source in [
+        "- id: a",
+        "[{id: a}]\n",
+        "[\n  {id: a},\n]\n",
+        "    - id: a\n",
+        "# indented\n  - id: a\n",
+    ] {
+        let doc = ConfigDoc::parse(Format::YamlList, source).unwrap();
+        assert!(doc.list_editable().is_err(), "{source:?}");
+    }
+    for source in ["a: 1\n", "- a\n---\n- b\n", "# comment only\n"] {
+        assert!(
+            ConfigDoc::parse(Format::YamlList, source).is_err(),
+            "{source:?}"
+        );
+    }
+    let flow = ConfigDoc::parse(Format::YamlList, "- {id: a, config: {x: 1}}\n").unwrap();
+    let item = flow.entry(&key("a")).unwrap().unwrap();
+    assert!(item.is_flow(&[]) && item.is_flow(&["config"]));
+    let block = ConfigDoc::parse(Format::YamlList, "- id: a\n  config: {}\n").unwrap();
+    let item = block.entry(&key("a")).unwrap().unwrap();
+    assert!(!item.is_flow(&[]) && !item.is_flow(&["config"]));
+}
+
+/// A missing parent is created as its own empty block mapping: keys added to
+/// it and removed again, and the container removed while empty, restore every
+/// byte, and a key someone else adds keeps it block style.
+#[test]
+fn created_yaml_containers_stay_block_style_and_round_trip() {
+    for source in [
+        "version: 1\n",
+        "version: 1\n# keep\nrecords:\n  a/b: {kind: api-key}\n",
+        "version: 1\r\n",
+    ] {
+        let mut doc = ConfigDoc::parse(Format::Yaml, source).unwrap();
+        doc.create_mapping(&["refs"]).unwrap();
+        doc.set_str(&["refs", "TOKEN"], "x").unwrap();
+        doc.set_str(&["refs", "OTHER"], "y").unwrap();
+        assert!(!doc.is_flow(&["refs"]), "{source:?}");
+        doc.remove_exact(&["refs", "TOKEN"]).unwrap();
+        doc.remove_exact(&["refs", "OTHER"]).unwrap();
+        assert_eq!(
+            doc.get_value(&["refs"]),
+            Some(ConfigValue::Json(serde_json::json!({})))
+        );
+        doc.remove_exact(&["refs"]).unwrap();
+        assert_eq!(doc.render().unwrap(), source);
+    }
+    let mut doc = ConfigDoc::new_yaml_mapping();
+    doc.set_value(&["version"], &ConfigValue::Number(1))
+        .unwrap();
+    assert_eq!(doc.render().unwrap(), "version: 1\n");
+}

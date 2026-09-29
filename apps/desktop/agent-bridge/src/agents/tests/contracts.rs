@@ -40,6 +40,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             Agent::OpenClaw => r#"{"agents":{"defaults":{"model":{"primary":"original/native","fallbacks":["original/fallback"]}}}}"#,
             Agent::Pi => "{}",
             Agent::OhMyPi => "theme: dark\n",
+            Agent::Dsh => "# user patches\n- id: session-telemetry-otel\n  disabled: true\n",
         };
             write(&config, original);
             let defaults = match agent {
@@ -53,10 +54,20 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 Format::Yaml,
                 "modelRoles:\n  default: original/native\n  smol: original/small\ntheme: dark\n",
             )),
+            Agent::Dsh => Some((
+                config.with_file_name(dsh::CREDENTIALS_FILE),
+                Format::Yaml,
+                "version: 1\nrefs:\n  DEEPSEEK_API_KEY: user-key\n",
+            )),
             _ => None,
         };
             if let Some((path, _, text)) = &defaults {
                 write(path, text);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+                }
             }
             let catalog = catalog();
             let options = ConnectOptions::default();
@@ -117,7 +128,11 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
             if let Some((path, _, _)) = &defaults {
                 assert!(fs::read_to_string(path)
                     .unwrap()
-                    .contains("private-ai-proxy"));
+                    .contains(if agent == Agent::Dsh {
+                        dsh::TOKEN_REF
+                    } else {
+                        "private-ai-proxy"
+                    }));
             }
             disconnect(&sandbox, agent);
             assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
@@ -153,7 +168,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                 .unwrap()
                 .get(agent.id())
                 .cloned();
-            if agent == Agent::ClaudeCode {
+            if matches!(agent, Agent::ClaudeCode | Agent::Dsh) {
                 assert!(record.is_none());
             } else {
                 let record = record.unwrap();
