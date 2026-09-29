@@ -109,7 +109,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
     let provider = json!({
         "displayName": PRODUCT_NAME,
         "api": "openai-completions",
-        "baseURL": format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
+        "baseURL": api_url(inputs.endpoint).map_err(|_| AgentError::InvalidState)?,
         "apiKeyEnv": TOKEN_REF,
         // The proxy serves many upstreams; send the request shape all accept.
         "compat": {"supportsDeveloperRole": false, "maxTokensField": "max_tokens"},
