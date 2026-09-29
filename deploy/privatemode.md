@@ -38,8 +38,14 @@ phala deploy -n private-ai-gateway \
   -c /tmp/private-ai-gateway-privatemode.json \
   -e PRIVATE_AI_GATEWAY_ADMIN_TOKEN="$PRIVATE_AI_GATEWAY_ADMIN_TOKEN" \
   -e PRIVATEMODE_API_KEY="$PRIVATEMODE_API_KEY" \
+  --no-dev-os --image dstack-0.5.9 \
   --wait
 ```
+
+When an SSH key is available, the Phala CLI selects a dev OS image by default,
+and its default production image may be newer than the reviewed allowlist.
+`--no-dev-os` with an explicit image keeps the deployment on a production OS
+image that `pap verify --require-production-os` accepts.
 
 Rendering puts the git commit, image digest, and the digests of the admin
 token, inference token, and Privatemode API key into the measured Compose; the
@@ -118,14 +124,15 @@ nonce="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 artifact_dir="$(mktemp -d)"
 curl -fsS "$GATEWAY_URL/v1/aci/attestation?nonce=$nonce" \
   -o "$artifact_dir/report.json"
-if pap verify "$GATEWAY_URL" --nonce "$nonce" --json \
+if pap verify "$GATEWAY_URL" --nonce "$nonce" --require-production-os --json \
   >"$artifact_dir/live-verification.json"; then
   :
 else
   test "$?" -eq 1
 fi
 # Phala's public TLS terminates outside this workload: id-6 must fail. The
-# quote, nonce/keyset binding, expiry, and measured Compose must still pass.
+# quote, nonce/keyset binding, expiry, measured Compose, and production OS
+# image must still pass.
 jq -e --slurpfile report "$artifact_dir/report.json" '
   .verdict.failed == 1 and
   .verdict.workload_keyset_digest == $report[0].workload_keyset_digest and
@@ -143,9 +150,13 @@ terminates outside the attested workload, so this Compose sets
 `require_client_e2ee` and the gateway rejects such requests with
 `e2ee_required`. Use a client implementing
 [ACI E2EE v2](../spec/e2ee-v2.md) to verify the quoted keyset, encrypt every
-content-bearing request field, and decrypt the response. For the receipt audit,
-save the request body as reconstructed by the gateway after E2EE decryption in
-`$artifact_dir/request.json`, the **exact encrypted response bytes received** in
+content-bearing request field, and decrypt the response. Include
+`"provider": {"aci_verified": true}` in the request body so the gateway must
+serve through a verified session; otherwise the receipt records
+`required: false` and the audit's `--require-verified` fails `upstream-1`.
+
+For the receipt audit, save the request body as reconstructed by the gateway
+after E2EE decryption in `$artifact_dir/request.json`, the **exact encrypted response bytes received** in
 `$artifact_dir/inference.json`, and the response's `x-receipt-id` as `receipt_id`.
 The client can keep its locally decrypted response separately. Do not use
 `pap serve` here: it requires an attested TLS binding that Phala ingress does
