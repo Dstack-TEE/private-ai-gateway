@@ -5023,6 +5023,7 @@ dependencies = [
  "private-ai-proxy-runtime",
  "rand 0.10.3",
  "rcgen",
+ "regex",
  "reqwest",
  "rpassword",
  "rustix",
@@ -6526,6 +6527,7 @@ dependencies = [
  "anstream",
  "anstyle",
  "normalize-line-endings",
+ "regex",
  "similar",
  "snapbox-macros",
 ]

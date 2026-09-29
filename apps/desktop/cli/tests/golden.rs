@@ -1,14 +1,18 @@
 //! Golden outputs of the command surface: help, human and `--json` output,
 //! error messages and exit codes, each case as `$ pap <args>` with its exit
 //! code and both streams. After an intended change, rewrite them with
-//! `SNAPSHOTS=overwrite cargo test --package private-ai-proxy --test golden`.
+//! `SNAPSHOTS=overwrite cargo test --package private-ai-proxy --test golden
+//! --bin private-ai-proxy`; the binary's tests hold the human renderings.
 mod support;
 
 use std::{
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
     path::Path,
     process::{Command, Stdio},
+    sync::mpsc,
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -183,7 +187,39 @@ fn help() {
         args.push("--help");
         transcript.push_str(&Case::new(&args).run());
     }
+    transcript.push_str(&Case::new(&[]).run());
+    transcript.push_str(&Case::new(&["help", "verify"]).run());
     assert_golden("help.txt", transcript, redactions(&[]));
+}
+
+#[test]
+fn completions() {
+    let transcript = Case::new(&["completions", "bash"]).run();
+    assert_golden("completions-bash.txt", transcript, redactions(&[]));
+}
+
+/// A plain-HTTP service that answers every request with `body`, as an ACI
+/// service serves its attestation report.
+fn serve_json(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().map_while(Result::ok) {
+            // Read the whole request head so closing never resets the reply.
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(&body);
+        }
+    });
+    url
 }
 
 #[test]
@@ -209,6 +245,9 @@ fn aci_commands() {
     let response = file("response.json", br#"{"choices":[],"id":"chatcmpl-123"}"#);
     let invalid = file("invalid.json", b"{");
     let missing = root.join("missing.json");
+    // The fixture report binds this nonce, so its checks reach explain material.
+    let service = serve_json(fs::read(&report).unwrap());
+    let nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
     let report = report.to_str().unwrap();
     let missing = missing.to_str().unwrap();
     let refused = format!("https://127.0.0.1:{}", closed_port());
@@ -274,6 +313,9 @@ fn aci_commands() {
             root_key,
         ]),
         Case::new(&["audit"]),
+        Case::new(&["verify", &service, "--nonce", nonce, "--explain"]),
+        Case::new(&["verify", &service, "--nonce", nonce, "--explain", "--json"]),
+        Case::new(&["verify", &service, "--nonce", nonce, "--json"]),
         Case::new(&["verify", &refused]),
         Case::new(&["verify", &refused, "--json", "--explain"]),
         Case::new(&["verify", ""]),
@@ -332,15 +374,16 @@ fn aci_commands() {
         Case::new(&["verify", &refused, "--json", "--unknown-option"]),
     ];
     let transcript: String = cases.into_iter().map(Case::run).collect();
-    assert_golden(
-        "aci.txt",
-        transcript,
-        redactions(&[
-            ("[ROOT]", root.to_str().unwrap()),
-            ("[FIXTURES]", fixtures.to_str().unwrap()),
-            ("[REFUSED]", &refused),
-        ]),
-    );
+    let mut redactions = redactions(&[
+        ("[ROOT]", root.to_str().unwrap()),
+        ("[FIXTURES]", fixtures.to_str().unwrap()),
+        ("[REFUSED]", &refused),
+        ("[SERVICE]", &service),
+    ]);
+    // The expiry check (id-3) names the current time.
+    let now = regex::Regex::new(r"now (?<redacted>\d+) < not_after").unwrap();
+    redactions.insert("[NOW]", now).unwrap();
+    assert_golden("aci.txt", transcript, redactions);
 }
 
 #[test]
@@ -351,6 +394,7 @@ fn management_without_a_backend() {
     let cases = vec![
         case(&["status"]),
         case(&["status", "--json"]),
+        case(&["status", "--watch"]),
         case(&["service", "status"]),
         case(&["profiles", "list"]),
         case(&["--json", "profiles", "list"]),
@@ -405,6 +449,42 @@ fn management_without_a_backend() {
     );
 }
 
+/// The first state `status --watch` prints, through its models line, which
+/// ends the rendering of a backend with no protection session. The watch
+/// streams until stopped, so the command is killed once it has been read.
+fn first_watch_snapshot(mut command: Command) -> String {
+    let mut child = command
+        .args(["status", "--watch"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let (lines, received) = mpsc::channel();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    std::thread::spawn(move || {
+        for line in stdout.lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut snapshot = String::from("$ pap status --watch (first state)\n--- stdout\n");
+    loop {
+        let line = received
+            .recv_timeout(Duration::from_secs(30))
+            .expect("status --watch prints the current state");
+        snapshot.push_str(&line);
+        snapshot.push('\n');
+        if line.starts_with("Models: ") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    snapshot + "\n"
+}
+
 #[test]
 fn management_with_a_backend() {
     let backend = Backend::start();
@@ -433,6 +513,7 @@ fn management_with_a_backend() {
     .into_iter()
     .map(Case::run)
     .collect();
+    transcript.push_str(&first_watch_snapshot(backend.command(&[])));
     let profile = backend.run(&["profiles", "list"])[0]["id"]
         .as_str()
         .unwrap()

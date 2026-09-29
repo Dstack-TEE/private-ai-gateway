@@ -81,6 +81,17 @@ Imported: 1
 Skipped: 0
 --- stderr
 
+$ pap status --watch (first state)
+--- stdout
+Not protected
+Profile: Work ([PROFILE])
+Service: phala | https://inference.phala.com
+Service credential: Not saved
+Local API: http://127.0.0.1:[PORT]
+Network access: Loopback only
+Production OS: Required
+Models: No verified catalog
+
 $ pap profiles list
 exit: Some(0)
 --- stdout

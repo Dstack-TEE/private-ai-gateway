@@ -165,6 +165,13 @@ $ pap status
 ---
 Verifying
 
+$ pap status
+{"status":"stopped","config":{"requireProductionOs":true},"token":"never-print-token"}
+---
+Not protected
+Production OS: Required
+Models: No verified catalog
+
 $ pap service status
 {"backend":null,"status":"not_running"}
 ---

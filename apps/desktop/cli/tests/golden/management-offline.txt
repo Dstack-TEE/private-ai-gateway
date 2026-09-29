@@ -12,6 +12,12 @@ exit: Some(0)
 {"backend":null,"status":"not_running"}
 --- stderr
 
+$ pap status --watch
+exit: Some(1)
+--- stdout
+--- stderr
+private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
+
 $ pap service status
 exit: Some(0)
 --- stdout

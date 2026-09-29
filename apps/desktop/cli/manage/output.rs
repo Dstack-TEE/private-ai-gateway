@@ -574,6 +574,11 @@ mod golden {
             ),
             ("status", json!({"status": "error", "activeProfileId": ""})),
             ("status", json!({"status": "verifying"})),
+            // A production OS requirement shows; a token never does.
+            (
+                "status",
+                json!({"status": "stopped", "config": {"requireProductionOs": true}, "token": "never-print-token"}),
+            ),
             (
                 "service status",
                 json!({"backend": null, "status": "not_running"}),
