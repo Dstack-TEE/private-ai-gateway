@@ -1,15 +1,16 @@
 import { createContext, useContext, useEffect, useLayoutEffect, type PropsWithChildren } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hint } from "./hint";
-import type { Appearance, DesktopApi } from "../../shared/contracts";
+import type { Appearance } from "../../shared/contracts";
 import { ItemContent, ItemTitle, ItemActions } from "./ui/item";
 import { SettingsItem } from "./settings";
 import { FieldLabel } from "./ui/field";
-import { useReportFailure } from "./confirm";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
+import { desktopApi } from "../lib/environment";
 
 const AppearanceContext = createContext<Appearance | null>(null);
+const appearanceQuery = queryOptions({ queryKey: ["appearance"], queryFn: () => desktopApi.getAppearance() });
 
 /**
  * Selects the document's appearance while mounted; `public/appearance-init.js`
@@ -26,11 +27,11 @@ function useAppearanceTheme(value: Appearance) {
 }
 
 /** The saved appearance; the desktop shell applies it natively as well. */
-export function AppearanceProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
+export function AppearanceProvider({ children }: PropsWithChildren) {
   const client = useQueryClient();
-  const { data } = useQuery({ queryKey: ["appearance"], queryFn: () => api.getAppearance() });
+  const { data } = useQuery(appearanceQuery);
   const value = data ?? "system";
-  useEffect(() => api.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: ["appearance"] }).then(() => client.setQueryData(["appearance"], next)); }), [api, client]);
+  useEffect(() => desktopApi.onAppearanceChange((next) => { void client.cancelQueries({ queryKey: appearanceQuery.queryKey }).then(() => client.setQueryData(appearanceQuery.queryKey, next)); }), [client]);
   useAppearanceTheme(value);
   return <AppearanceContext.Provider value={value}>{children}</AppearanceContext.Provider>;
 }
@@ -41,15 +42,14 @@ export function useAppearance(): Appearance {
   return appearance;
 }
 
-export function AppearanceControl({ api }: { api: DesktopApi }) {
+export function AppearanceControl() {
   const client = useQueryClient();
   const appearance = useAppearance();
-  const reportFailure = useReportFailure();
   const mutation = useMutation({
-    mutationFn: (next: Appearance) => api.setAppearance(next),
-    onMutate: () => client.cancelQueries({ queryKey: ["appearance"] }),
-    onSuccess: (_, next) => { client.setQueryData(["appearance"], next); },
-    onError: (error) => reportFailure("Could not change the appearance", error),
+    mutationFn: (next: Appearance) => desktopApi.setAppearance(next),
+    onMutate: () => client.cancelQueries({ queryKey: appearanceQuery.queryKey }),
+    onSuccess: (_, next) => { client.setQueryData(appearanceQuery.queryKey, next); },
+    meta: { errorTitle: "Could not change the appearance" },
   });
   return <SettingsItem><ItemContent><ItemTitle><FieldLabel id="appearance-label">Theme</FieldLabel></ItemTitle></ItemContent><ItemActions>
     <ToggleGroup size="sm" variant="outline" spacing={0} aria-labelledby="appearance-label" value={[appearance]} disabled={mutation.isPending} onValueChange={([value]) => {

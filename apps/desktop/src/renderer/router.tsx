@@ -9,7 +9,7 @@ import { OverviewPage } from "./features/overview";
 import { SettingsPage } from "./features/settings";
 import { UsagePage } from "./features/usage";
 import { distributionCapabilities, session, web } from "./lib/environment";
-import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/page-queries";
+import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/queries";
 import { queryClient } from "./lib/query-client";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 
@@ -70,7 +70,7 @@ const settingsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/settings",
   loader: ({ context }) => {
-    if (distributionCapabilities.cliRegistration) void context.queryClient.prefetchQuery(cliRegistrationQuery());
+    if (distributionCapabilities.cliRegistration) void context.queryClient.prefetchQuery(cliRegistrationQuery);
   },
   component: SettingsPage,
   staticData: { title: "Settings", icon: Settings },

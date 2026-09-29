@@ -20,12 +20,12 @@ const ConfirmContext = createContext<((request: Request) => Promise<boolean>) | 
 const ConfirmOpenContext = createContext(false);
 
 /**
- * Asks for decisions (`useConfirm`) and reports failed actions
- * (`useReportFailure`) and reads (`meta.errorTitle`) in an AlertDialog, one
+ * Asks for decisions (`useConfirm`) and reports failures (`useReportFailure`,
+ * and the `meta.errorTitle` of reads and actions) in an AlertDialog, one
  * request at a time in the order they were made (`createDialogQueue`). A
- * destructive question focuses
- * Cancel, the safe choice, so Return never starts the action; any other
- * question focuses its action, and an alert its only button, OK.
+ * destructive question focuses Cancel, the safe choice, so Return never
+ * starts the action; any other question focuses its action, and an alert its
+ * only button, OK.
  */
 export function ConfirmProvider({ children }: PropsWithChildren) {
   const [request, setRequest] = useState<Request>();
@@ -59,11 +59,12 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
   // A query with `meta.errorTitle` reports its failure once: when a page
   // shows it (not a prefetch) and it has no data yet. A failed refetch of
   // data on screen stays silent. A successful fetch of the query ends its
-  // failure streak, and so does the end of a web UI session.
+  // failure streak, and so does the end of a web UI session. A mutation with
+  // `meta.errorTitle` reports each failure.
   const client = useQueryClient();
   useEffect(() => {
     const reported = new Set<string>();
-    const unsubscribe = client.getQueryCache().subscribe((event) => {
+    const unsubscribeQueries = client.getQueryCache().subscribe((event) => {
       if (event.type !== "updated") return;
       const { query, action } = event;
       if (action.type === "success") reported.delete(query.queryHash);
@@ -73,9 +74,15 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
       reported.add(query.queryHash);
       void ask({ kind: "alert", title, message: errorMessage(action.error) });
     });
+    const unsubscribeMutations = client.getMutationCache().subscribe((event) => {
+      if (event.type !== "updated" || event.action.type !== "error") return;
+      const title = event.mutation.meta?.errorTitle;
+      if (title && !(event.action.error instanceof SessionEndedError)) void ask({ kind: "alert", title, message: errorMessage(event.action.error) });
+    });
     const unsubscribeSession = session?.onEnded(() => reported.clear());
     return () => {
-      unsubscribe();
+      unsubscribeQueries();
+      unsubscribeMutations();
       unsubscribeSession?.();
     };
   }, [client, ask]);

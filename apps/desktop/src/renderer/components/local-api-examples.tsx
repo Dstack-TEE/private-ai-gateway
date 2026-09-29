@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import type { ModelSummary } from "../../shared/contracts";
 import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
 import { useCopy } from "../hooks/use-copy";
 import { AppDialog, DoneFooter, type DialogControl } from "./app-dialog";
@@ -9,13 +8,13 @@ import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { errorMessage } from "../lib/error-message";
+import { localEndpoint } from "../lib/format";
+import { useShell } from "../lib/shell";
 
-export function LocalApiExamplesDialog({ endpoint, models: catalogModels, apiKey, ...control }: {
-  /** The Local API key; empty while it is unavailable. */
-  apiKey: string;
-  endpoint?: string; models: ModelSummary[];
-} & DialogControl) {
-  const models = catalogModels.filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
+export function LocalApiExamplesDialog(control: DialogControl) {
+  const { state, clientKey: apiKey } = useShell();
+  const endpoint = state.proxyUrl ?? localEndpoint(state.localApi);
+  const models = (state.catalog?.models ?? []).filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
   const model = models.some((entry) => entry.id === selection) ? selection : models[0]?.id ?? "";

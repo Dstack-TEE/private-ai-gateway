@@ -78,9 +78,11 @@ protection problems, is stored under that key.
   interactions, and `lib/` contains presentation rules and the live desktop API
   binding. Features never import the app.
 - Dialogs are shadcn `Dialog`s in the one window, in the desktop app and the web
-  UI alike. Decisions (`useConfirm`) and alerts (`useReportFailure`) share one
+  UI alike. Decisions (`useConfirm`) and failure alerts share one
   `AlertDialog` on every platform, like WinUI's ContentDialog and libadwaita's
-  AlertDialog, one request at a time. A destructive decision focuses Cancel,
+  AlertDialog, one request at a time. A query, or a mutation whose failure has
+  a fixed title, reports through its `meta.errorTitle`; any other failure goes
+  through `useReportFailure`. A destructive decision focuses Cancel,
   so Return never starts it; any other focuses its action.
   The shell injects the platform (`<html data-platform>`) for platform
   behaviour such as tooltip delays and drag regions; every platform and the

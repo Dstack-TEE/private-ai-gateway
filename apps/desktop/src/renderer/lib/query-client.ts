@@ -11,8 +11,9 @@ export const queryClient = new QueryClient({
 
 declare module "@tanstack/react-query" {
   interface Register {
-    /** `errorTitle` opts a read in to reporting its failure (`ConfirmProvider`). */
+    /** `errorTitle` opts a read or an action in to reporting its failure (`ConfirmProvider`). */
     queryMeta: { errorTitle?: string };
+    mutationMeta: { errorTitle?: string };
   }
 }
 

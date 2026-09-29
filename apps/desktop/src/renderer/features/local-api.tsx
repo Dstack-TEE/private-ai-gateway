@@ -10,27 +10,19 @@ import { Item } from "../components/ui/item";
 import { InputGroup, InputGroupInput, InputGroupAddon, InputGroupButton } from "../components/ui/input-group";
 import { IconButton } from "../components/controls";
 import { AppDialog, AppDialogBody, type DialogControl } from "../components/app-dialog";
-import { useConfirm } from "../components/confirm";
+import { useConfirm, useReportFailure } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
-import { DEFAULT_LOCAL_API_CONFIG, type AppState, type ListenConfig } from "../../shared/contracts";
+import { DEFAULT_LOCAL_API_CONFIG, type ListenConfig } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
 import { AuthoredError, errorMessage } from "../lib/error-message";
-import { useReportFailure } from "../components/confirm";
+import { useShell } from "../lib/shell";
+import { useSetAppState } from "../lib/use-app-state";
 import { useCopy } from "../hooks/use-copy";
 import { cn } from "../lib/utils";
 
-export function LocalApiPanel({
-  proxyUrl,
-  clientKey,
-  clientKeyVisible,
-  onToggleKey,
-}: {
-  proxyUrl?: string;
-  clientKey: string;
-  clientKeyVisible: boolean;
-  onToggleKey(): void;
-}): React.JSX.Element {
+export function LocalApiPanel(): React.JSX.Element {
+  const { state: { proxyUrl }, clientKey, clientKeyVisible, toggleClientKey } = useShell();
   const endpointLabel = "Local API endpoint";
   const keyLabel = "Local API key";
   const reportFailure = useReportFailure();
@@ -47,7 +39,7 @@ export function LocalApiPanel({
         copied={isCopied(clientKey)}
         onCopy={copy}
       >
-        <IconButton className="relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
+        <IconButton className="relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={toggleClientKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </CopyRow>
       {status}
     </div>
@@ -90,24 +82,10 @@ function CopyRow({
   );
 }
 
-export function LocalApiDialog({
-  state,
-  clientKey,
-  clientKeyVisible,
-  onToggleKey,
-  onRotate,
-  onSave,
-  onClose,
-  ...control
-}: {
-  state: AppState;
-  /** Undefined until the key has been read; the window reports a failed read. */
-  clientKey: string | undefined;
-  clientKeyVisible: boolean;
-  onToggleKey(): void;
-  onRotate(): Promise<void>;
-  onSave(config: ListenConfig): Promise<void>;
-} & DialogControl): React.JSX.Element {
+/** The window reports a failed read of the key. */
+export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JSX.Element {
+  const { state, clientKey, clientKeyVisible, toggleClientKey, rotateClientKey } = useShell();
+  const setState = useSetAppState();
   const frozen = state.status === "verifying";
   const [draft, setDraft] = useState<ListenConfig>(state.localApi);
   const addressKind = localAddressKind(draft.listenAddress);
@@ -123,7 +101,7 @@ export function LocalApiDialog({
         message: "The old key stops working immediately. Update your tools with the new key. Agent credentials do not change. In-flight requests may be interrupted.",
         confirmLabel: "Rotate Key",
         destructive: true,
-      })) await onRotate();
+      })) await rotateClientKey();
     },
     onMutate: () => setError(undefined),
     onError: report,
@@ -137,7 +115,7 @@ export function LocalApiDialog({
         message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
       })) return false;
-      await onSave({ ...draft, allowNetworkAccess: networkAccess });
+      setState(await desktopApi.saveLocalApiConfig({ ...draft, allowNetworkAccess: networkAccess }));
       return true;
     },
     onMutate: () => setError(undefined),
@@ -154,14 +132,14 @@ export function LocalApiDialog({
       <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <AppDialogBody className="py-1">
           <FieldGroup>
-          <ListenerFields api={desktopApi} idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
+          <ListenerFields idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
           <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Local API key</FieldLabel>
             <InputGroup>
               <InputGroupInput id="local-client-key" className="font-mono text-xs" type={clientKeyVisible ? "text" : "password"} value={clientKey ?? ""} readOnly />
               <InputGroupAddon align="inline-end">
-                <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={onToggleKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
+                <Hint content={clientKeyVisible ? "Hide Local API key" : "Show Local API key"}><InputGroupButton size="icon-xs" aria-label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} onClick={toggleClientKey}>{clientKeyVisible ? <EyeOff /> : <Eye />}</InputGroupButton></Hint>
                 <Hint content="Copy Local API key"><InputGroupButton size="icon-xs" aria-label="Copy Local API key" disabled={saving || !clientKey} onClick={copyKey}>{isCopied(clientKey) ? <Check /> : <Copy />}</InputGroupButton></Hint>
                 <Hint content="Rotate key"><InputGroupButton size="icon-xs" aria-label="Rotate key" disabled={frozen || saving} onClick={() => rotate.mutate()}><RefreshCw /></InputGroupButton></Hint>
               </InputGroupAddon>

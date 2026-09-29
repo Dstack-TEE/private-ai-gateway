@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAccountLogin } from "../lib/use-account-login";
 import { afterVerification, useSetAppState } from "../lib/use-app-state";
@@ -21,31 +21,22 @@ import { useConfirm, type Confirmation } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type AppState, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
+import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities, web } from "../lib/environment";
-import { profileIsAvailable } from "../lib/protection";
+import { activeProfile, profileIsAvailable } from "../lib/protection";
+import { useShell } from "../lib/shell";
 import { ServiceLogo } from "../components/brand";
 import { serviceHost } from "../lib/format";
 import { cn } from "../lib/utils";
 
-export function ProfilesDialog({
-  state,
-  repair,
-  onActivate,
-  onSave,
-  onDelete,
-  onClose,
-  ...control
-}: {
-  state: AppState;
+export function ProfilesDialog({ repair, onClose, ...control }: {
   /** Opens the active profile's editor on top, for protection that needs its credential. */
   repair: boolean;
-  onActivate(profileId: string): Promise<void>;
-  onSave(profile: ConfidentialProfileInput, key?: string): Promise<void>;
-  onDelete(profileId: string): Promise<void>;
 } & DialogControl): React.JSX.Element {
-  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
-  const editor = useDialog<{ profile?: ConfidentialProfile }>(repair && activeProfile ? { profile: activeProfile } : undefined);
+  const { state } = useShell();
+  const setState = useSetAppState();
+  const active = activeProfile(state);
+  const editor = useDialog<{ profile?: ConfidentialProfile }>(repair && active ? { profile: active } : undefined);
   const openedProfile = editor.payload?.profile;
   const liveProfile = openedProfile && state.profiles.find((profile) => profile.id === openedProfile.id);
   // Deleting the profile, in the editor or elsewhere, closes its editor, which
@@ -57,11 +48,15 @@ export function ProfilesDialog({
   const [transfer, setTransfer] = useState<{ message: string; failed: boolean }>();
   const busy = state.status === "verifying";
   const frozen = busy || transferBusy;
-  const activate = useMutation({ mutationFn: onActivate, onMutate: () => setTransfer(undefined), onSuccess: onClose });
+  const activate = useMutation({
+    mutationFn: async (profileId: string) => setState(await desktopApi.activateProfile(profileId)),
+    onMutate: () => setTransfer(undefined),
+    onSuccess: onClose,
+  });
   const workingProfileId = activate.isPending ? activate.variables : undefined;
   const error = activate.error ? errorMessage(activate.error) : transfer?.failed ? transfer.message : undefined;
-  const activeProfileAvailable = profileIsAvailable(activeProfile, state);
-  const activeConnection = activeProfile && connectionRequirement(activeProfile);
+  const activeProfileAvailable = profileIsAvailable(active, state);
+  const activeConnection = active && connectionRequirement(active);
 
   const select = (profile: ConfidentialProfile) => {
     if (profile.id === state.activeProfileId) onClose();
@@ -76,20 +71,20 @@ export function ProfilesDialog({
       {!activeProfileAvailable && (
         <p className="flex items-start gap-1.75 rounded-lg bg-warning/10 px-3 py-2.25 text-warning wrap-anywhere">
           <TriangleAlert size={15} aria-hidden="true" />
-          {activeProfile ? `${activeConnection} for “${activeProfile.name}” to start protection.` : "Add a profile to start protection."}
+          {active ? `${activeConnection} for “${active.name}” to start protection.` : "Add a profile to start protection."}
         </p>
       )}
       {state.profiles.length > 0 && <ItemGroup className="min-h-0 flex-auto gap-0 overflow-auto rounded-2xl border bg-card" aria-label="AI service profiles">
         {state.profiles.map((profile) => {
-          const active = profile.id === state.activeProfileId;
+          const selected = profile.id === state.activeProfileId;
           const working = profile.id === workingProfileId;
           const status = profileIsAvailable(profile, state) ? "Ready" : connectionRequirement(profile);
           // The edit button sits over the end of the row, which is one button.
           return (
-            <div role="listitem" key={profile.id} className={cn("grid min-w-0 grid-cols-[minmax(0,1fr)_52px] items-center border-b last:border-b-0", active && "bg-muted")}>
+            <div role="listitem" key={profile.id} className={cn("grid min-w-0 grid-cols-[minmax(0,1fr)_52px] items-center border-b last:border-b-0", selected && "bg-muted")}>
               <ActionItem
-                className={cn("col-span-full row-start-1 min-w-0 pr-17", active && "hover:bg-transparent")}
-                aria-current={active || undefined}
+                className={cn("col-span-full row-start-1 min-w-0 pr-17", selected && "hover:bg-transparent")}
+                aria-current={selected || undefined}
                 disabled={frozen || Boolean(workingProfileId)}
                 onClick={() => select(profile)}
               >
@@ -98,7 +93,7 @@ export function ProfilesDialog({
                   <ItemTitle className="w-full line-clamp-none truncate leading-5 font-semibold">{profile.name}</ItemTitle>
                   <ItemDescription className="line-clamp-none truncate text-xs">{serviceHost(profile.remoteUrl)} · {status}</ItemDescription>
                 </ItemContent>
-                {(working || active) && <ItemActions>
+                {(working || selected) && <ItemActions>
                   {working ? <LoaderCircle className="animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
                 </ItemActions>}
               </ActionItem>
@@ -112,13 +107,12 @@ export function ProfilesDialog({
       <DialogFooter>
         <div className="flex items-center gap-2 sm:mr-auto">
           <Button ref={newProfileButton} type="button" variant="outline" aria-haspopup="dialog" disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({})}><Plus size={15} />New Profile</Button>
-          <ProfileTransfer api={desktopApi} disabled={busy || Boolean(workingProfileId)} onResult={(message, failed) => { activate.reset(); setTransfer({ message, failed }); }} />
+          <ProfileTransfer disabled={busy || Boolean(workingProfileId)} onResult={(message, failed) => { activate.reset(); setTransfer({ message, failed }); }} />
         </div>
         <Button type="button" variant="outline" disabled={Boolean(workingProfileId) || transferBusy} onClick={onClose}>Done</Button>
       </DialogFooter>
       {editor.payload && <ProfileEditorDialog
-        key={editor.key} state={state} profile={editingProfile} {...editor.control} finalFocus={liveProfile || !openedProfile ? undefined : newProfileButton}
-        onSave={onSave} onDelete={onDelete} onComplete={editor.control.onClose}
+        key={editor.key} profile={editingProfile} {...editor.control} finalFocus={liveProfile || !openedProfile ? undefined : newProfileButton}
       />}
     </AppDialog>
   );
@@ -138,28 +132,18 @@ function randomUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/** Its owner closes it when the profile is deleted, as the profile leaves `state`. */
-export function ProfileEditorDialog({
-  state,
-  profile,
-  startAfterSave = false,
-  onSave,
-  onDelete,
-  onComplete,
-  onClose,
-  ...control
-}: {
-  state: AppState;
+/**
+ * Saves `profile`, or a new one, and closes. Its owner closes it when the
+ * profile is deleted, as the profile leaves the window's state.
+ */
+export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, ...control }: {
   profile?: ConfidentialProfile;
   startAfterSave?: boolean;
-  onSave(profile: ConfidentialProfileInput, key?: string): Promise<void>;
-  onDelete(profileId: string): Promise<void>;
-  onComplete(): void;
 } & DialogControl): React.JSX.Element {
-  const busy = state.status === "verifying";
+  const { state } = useShell();
+  const frozen = state.status === "verifying";
   // Saving or connecting an account restarts protection that is on.
   const running = state.protection.action.operation === "stop";
-  const frozen = busy;
   const isNew = !profile;
   const [draft, setDraft] = useState<ConfidentialProfileInput>(() => {
     const provider = SERVICE_PROVIDERS[profile?.provider ?? DEFAULT_SERVICE_PROVIDER];
@@ -173,11 +157,11 @@ export function ProfileEditorDialog({
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [authMethod, setAuthMethod] = useState<"account" | "apiKey">(profile?.auth.kind === "apiKey" ? "apiKey" : "account");
   const [error, setError] = useState<string>();
-  const reportError = useCallback((failure: unknown) => setError(errorMessage(failure)), []);
+  const reportError = (failure: unknown) => setError(errorMessage(failure));
   const confirm = useConfirm();
   const client = useQueryClient();
   const setState = useSetAppState();
-  const account = useAccountLogin(desktopApi, reportError);
+  const account = useAccountLogin(reportError);
   const { copy, isCopied, status: copyStatus } = useCopy(reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
@@ -217,7 +201,6 @@ export function ProfileEditorDialog({
   const needsAccountLogin = provider.accountLogin && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
-
   const chooseService = async (next: ServiceProvider) => {
     if (!await account.cancel()) return;
     setSelectedWorkspaceId(undefined);
@@ -249,7 +232,7 @@ export function ProfileEditorDialog({
       });
       if (!confirmed) return;
       if (needsStop) setState(await desktopApi.stop());
-      await onDelete(draft.id);
+      setState(await desktopApi.deleteProfile(draft.id));
       await account.cancel();
     },
     onMutate: () => setError(undefined),
@@ -263,7 +246,7 @@ export function ProfileEditorDialog({
       if (startAfterSave) setState(await desktopApi.start(saved.config));
     },
     onMutate: () => setError(undefined),
-    onSuccess: onComplete,
+    onSuccess: onClose,
     onError: reportError,
   });
   // Signs in, and saves at once when the sign-in leaves nothing to choose:
@@ -294,8 +277,10 @@ export function ProfileEditorDialog({
   const save = useMutation({
     mutationFn: async () => {
       if (running && profile?.id === state.activeProfileId && !await confirm(reconnectQuestion)) return;
-      await onSave(draft, authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined);
-      onComplete();
+      const key = authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined;
+      const saved = await desktopApi.saveConfiguration(draft, state.config.requireProductionOs, key);
+      setState(startAfterSave ? await desktopApi.start(saved.config) : saved);
+      onClose();
     },
     onMutate: () => setError(undefined),
     onError: reportError,
@@ -356,7 +341,7 @@ export function ProfileEditorDialog({
                     <CallbackForm key={login.id} disabled={account.working} onContinue={account.complete} />
                   </details>}
                 </div> : selectedAccount ? <>
-                  <AccountTools key={login?.id ?? draft.id} api={desktopApi} provider={draft.provider}
+                  <AccountTools key={login?.id ?? draft.id} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
                     scope={accountScope} images={selectedAccount.images} onSignIn={signIn}
                     credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
@@ -388,7 +373,7 @@ export function ProfileEditorDialog({
         <DialogFooter>
           {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => remove.mutate()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || busy ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || frozen ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
         </DialogFooter>
       </form>
     </AppDialog>

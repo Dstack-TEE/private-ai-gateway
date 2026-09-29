@@ -2,14 +2,14 @@ import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { AppDialog, AppDialogBody, DoneFooter, type DialogControl } from "../components/app-dialog";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
-import type { AppState, VerificationCheck } from "../../shared/contracts";
+import type { AppState, Tone, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
+import { useShell } from "../lib/shell";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
 import { VerificationVerdict } from "../components/verification-verdict";
 import { cn } from "../lib/utils";
 import { toneTextClass } from "../lib/tone";
-import type { Tone } from "../../shared/contracts";
 
 const CHECK_ICON_CLASS = "grid size-4.5 flex-none place-items-center rounded-full";
 const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: string; tone: Tone }> = {
@@ -36,7 +36,8 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-export function PrivacyDialog({ state, ...control }: { state: AppState } & DialogControl): React.JSX.Element {
+export function PrivacyDialog(control: DialogControl): React.JSX.Element {
+  const { state } = useShell();
   // Why protection failed; the window shows only the title.
   const failure = state.protection.tone === "danger" ? state.endpointError ?? state.error : undefined;
   return <AppDialog {...control} title="Privacy verification" className="sm:max-w-2xl">

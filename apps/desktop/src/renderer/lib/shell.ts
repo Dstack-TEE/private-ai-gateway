@@ -8,14 +8,17 @@ export type AppDialog =
   | { kind: "setup-profile" | "privacy" | "local-api" | "local-api-example" | "notifications" | "web-ui" }
   | { kind: "usage-proof"; activity: RequestActivity };
 
-/** What the window around the pages (`AppLayout`) shares with them. */
+/** What the window around the pages (`AppLayout`) shares with its pages and dialogs. */
 export interface Shell {
   state: AppState;
   agents: ReturnType<typeof useAgents>;
   updates: ReturnType<typeof useUpdates>;
-  clientKey: string;
+  /** Undefined until it has been read; empty while it is unavailable. */
+  clientKey: string | undefined;
   clientKeyVisible: boolean;
   toggleClientKey(): void;
+  /** Replaces the key and shows the new one; the caller presents a failure. */
+  rotateClientKey(): Promise<void>;
   /** A settings change is applying; controls that change settings wait. */
   applying: boolean;
   startingBackend: boolean;
@@ -23,8 +26,8 @@ export interface Shell {
   /** Protection is starting or stopping at the window's request. */
   protectionPending: boolean;
   toggleProtection(): void;
-  /** Asks first when protection must stop; its row runs it as `OS_POLICY_CHANGE`. */
-  changeRequireProductionOs(required: boolean): Promise<void>;
+  /** Asks first when protection must stop. */
+  changeRequireProductionOs(required: boolean): void;
   resetSettings(): void;
   /** A dialog request never replaces an open dialog, only one that is animating out. */
   openDialog(dialog: AppDialog): void;
@@ -32,9 +35,6 @@ export interface Shell {
   openProfiles(): void;
   openAboutLink(target: AboutLink): void;
 }
-
-/** The mutation key of an OS policy change, which makes the window `applying`. */
-export const OS_POLICY_CHANGE = ["os-policy-change"];
 
 export const ShellContext = createContext<Shell | null>(null);
 

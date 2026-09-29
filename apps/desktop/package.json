@@ -24,7 +24,7 @@
     "dist:app-store": "node scripts/dist.mjs --distribution mac-app-store",
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "test:agents": "node --test scripts/agent-integrations.test.mjs",
-    "test:state": "node --test scripts/app-state.test.mjs",
+    "test:state": "node --test scripts/app-state.test.mjs scripts/create-api.test.mjs",
     "test:dialog-queue": "node --test scripts/dialog-queue.test.mjs",
     "test:error-message": "node --test scripts/error-message.test.mjs",
     "test:local-api-example": "node --test scripts/local-api-example.test.mjs",

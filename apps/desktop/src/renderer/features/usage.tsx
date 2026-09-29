@@ -1,7 +1,7 @@
 import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { usageFilters, usagePageQuery } from "../lib/page-queries";
+import { usageFilters, usagePageQuery } from "../lib/queries";
 import { errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
 import { Ban, Check, ChevronLeft, ChevronRight, Copy, ShieldCheck, ShieldX } from "lucide-react";

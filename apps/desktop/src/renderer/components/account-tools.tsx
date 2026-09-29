@@ -1,6 +1,6 @@
 import { useId } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
-import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
+import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, ServiceProvider } from "../../shared/contracts";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
@@ -10,14 +10,17 @@ import { useReportFailure } from "./confirm";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
-import { distributionCapabilities } from "../lib/environment";
+import { desktopApi, distributionCapabilities } from "../lib/environment";
 
-type Props = {
-  api: Pick<DesktopApi, "getAccountBalance" | "openOrganization" | "openTopUp">;
+/** Whose balance: the account behind a profile's credential, or behind a sign-in. */
+type BalanceIdentity = {
   provider: ServiceProvider;
   target: AccountBalanceTarget;
-  scope?: AccountScope;
   credentialRef?: string;
+};
+
+type Props = BalanceIdentity & {
+  scope?: AccountScope;
   images?: AccountImages;
   onSignIn?(): void;
   /** Presents a failure to open an account page. */
@@ -25,25 +28,15 @@ type Props = {
   disabled?: boolean;
 };
 
-type BalanceIdentity = Pick<Props, "provider" | "target" | "credentialRef">;
-type BalanceQueryProps = BalanceIdentity & {
-  api: Pick<DesktopApi, "getAccountBalance">;
-};
-type BalanceProps = BalanceIdentity & {
-  api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  enabled: boolean;
-};
-
-function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provider" | "target" | "credentialRef">) {
+function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
   const id = target.kind === "login" ? target.id : target.profileId;
   return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
 
-function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: BalanceQueryProps & { enabled?: boolean }) {
-  const cacheKey = balanceCacheKey({ provider, target, credentialRef });
+function useAccountBalance({ enabled = true, ...identity }: BalanceIdentity & { enabled?: boolean }) {
   return useQuery({
-    queryKey: ["account-balance", cacheKey],
-    queryFn: () => api.getAccountBalance(target),
+    queryKey: ["account-balance", balanceCacheKey(identity)],
+    queryFn: () => desktopApi.getAccountBalance(identity.target),
     enabled,
     refetchInterval: enabled ? 60_000 : false,
     // Returning from the billing page shows the balance it changed.
@@ -55,13 +48,13 @@ function useAccountBalance({ api, provider, target, credentialRef, enabled = tru
 }
 
 /** Compact account balance for a profile whose credential is already in active use. */
-export function AccountBalanceValue(props: BalanceProps) {
+export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean }) {
   const { data: balance, isFetching } = useAccountBalance(props);
   const reportFailure = useReportFailure();
   const { opening, openPage } = useAccountPage((error) => reportFailure("Could not open billing", error));
   if (!balance) return null;
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
-    onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;
+    onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(props.provider, scopeSlug))} />;
 }
 
 /** Changing account or credential must never display the previous account's balance. */
@@ -70,11 +63,11 @@ export function AccountTools(props: Props) {
   return <AccountDetailsView key={cacheKey} {...props} />;
 }
 
-function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
-  const { data: balance, isFetching: busy } = useAccountBalance({ api, provider, target, credentialRef });
+function AccountDetailsView({ provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
+  const { data: balance, isFetching: busy } = useAccountBalance({ provider, target, credentialRef });
   const { opening, openPage } = useAccountPage(onError, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
+  const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => desktopApi.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
   const name = owner ?? "Account";
@@ -86,7 +79,7 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
       </ItemContent>
       <ItemActions>
         {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
-          onOpen={(scopeSlug) => openPage(() => api.openTopUp(provider, scopeSlug))} />}
+          onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(provider, scopeSlug))} />}
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
     </Item>

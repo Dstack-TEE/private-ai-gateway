@@ -14,12 +14,14 @@ import { AuthoredError, errorMessage } from "../lib/error-message";
 import { localAddressKind } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
 import { useCopy } from "../hooks/use-copy";
-import { DEFAULT_WEB_UI_CONFIG, WEB_UI_PASSWORD_MIN_LENGTH as MIN_PASSWORD_LENGTH, type AppState, type WebUiConfig, type WebUiStatus } from "../../shared/contracts";
+import { useShell } from "../lib/shell";
+import { useSetAppState } from "../lib/use-app-state";
+import { DEFAULT_WEB_UI_CONFIG, WEB_UI_PASSWORD_MIN_LENGTH as MIN_PASSWORD_LENGTH, type WebUiConfig, type WebUiStatus } from "../../shared/contracts";
 
 const PASSWORD_LABEL = "Web UI password";
 
 /** The saved settings behind a status, without listener results. */
-export function webUiConfig({ enabled, listenAddress, allowNetworkAccess, port, clientHost }: WebUiStatus): WebUiConfig {
+function webUiConfig({ enabled, listenAddress, allowNetworkAccess, port, clientHost }: WebUiStatus): WebUiConfig {
   return { enabled, listenAddress, allowNetworkAccess, port, clientHost };
 }
 
@@ -28,18 +30,9 @@ function sameConfig(left: WebUiConfig, right: WebUiConfig): boolean {
     && left.port === right.port && (left.clientHost ?? "") === (right.clientHost ?? "");
 }
 
-export function WebUiDialog({
-  state,
-  onSave,
-  onSetPassword,
-  onClose,
-  ...control
-}: {
-  state: AppState;
-  onSave(config: WebUiConfig): Promise<void>;
-  onSetPassword(password: string): Promise<void>;
-} & DialogControl): React.JSX.Element {
-  const status = state.webUi;
+export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.Element {
+  const status = useShell().state.webUi;
+  const setState = useSetAppState();
   const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(status));
   // Browsers never see the password; the desktop app and CLI manage it.
   const client = useQueryClient();
@@ -99,11 +92,11 @@ export function WebUiDialog({
         confirmLabel: "Turn Off",
       })) return false;
       if (passwordChanged) {
-        await onSetPassword(passwordDraft);
+        setState(await desktopApi.setWebUiPassword(passwordDraft));
         client.setQueryData(["web-ui-password"], passwordDraft);
         setPasswordDraft(undefined);
       }
-      if (configChanged) await onSave(config);
+      if (configChanged) setState(await desktopApi.saveWebUi(config));
       return true;
     },
     onMutate: () => setError(undefined),
@@ -121,7 +114,7 @@ export function WebUiDialog({
             <SettingsList>
               <SettingsToggle label="Web UI" checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
             </SettingsList>
-            <ListenerFields api={desktopApi} idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
+            <ListenerFields idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
             {!web && <>
               <FieldSeparator />
               <Field>

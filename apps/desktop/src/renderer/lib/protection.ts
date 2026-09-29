@@ -14,3 +14,7 @@ export function hasLiveVerification(state: AppState): boolean {
   // The runtime admits a session only after sidecar verification and catalog loading.
   return state.protection.phase === "protected" && state.identity?.trustLevel === "hardware_verified";
 }
+
+export function activeProfile(state: AppState): ConfidentialProfile | undefined {
+  return state.profiles.find((profile) => profile.id === state.activeProfileId);
+}

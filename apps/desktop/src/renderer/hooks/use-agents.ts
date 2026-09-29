@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { keepPreviousData, useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentStatus, AppState, DesktopApi } from "../../shared/contracts";
+import type { AgentStatus, AppState } from "../../shared/contracts";
 import { useConfirm, useReportFailure } from "../components/confirm";
 import { agentAccessMutation, agentIntegrationsLocked, completeAgentStatuses, readAgentIntegrations, type AgentIntegrations } from "../lib/agent-integrations";
+import { desktopApi, distributionCapabilities } from "../lib/environment";
+import { useShell } from "../lib/shell";
 
 const connectionKey = (agentId: string) => ["agent-connection", agentId];
 /** The agent whose background service keeps the settings it started with. */
 export const SERVICE_AGENT = "codex";
+/** A sandboxed app reads Home only once the user grants access. */
+const requiresAuthorization = distributionCapabilities.sandboxHomeAccess;
 
 /**
  * The agents the backend detects. They change with the backend's
@@ -18,22 +22,21 @@ export const SERVICE_AGENT = "codex";
  * That ends running Codex sessions, so it asks first; the next Codex run
  * starts it again with the new settings.
  */
-export function useAgents(api: DesktopApi, state: AppState, backendReady: boolean, requiresAuthorization: boolean) {
+export function useAgents(state: AppState, backendReady: boolean) {
   const client = useQueryClient();
   const confirm = useConfirm();
-  const reportFailure = useReportFailure();
   const { mutate: stopService } = useMutation({
-    mutationFn: () => api.stopAgentService(SERVICE_AGENT),
-    onError: (failure) => reportFailure("Could not stop Codex's background service", failure),
+    mutationFn: () => desktopApi.stopAgentService(SERVICE_AGENT),
+    meta: { errorTitle: "Could not stop Codex's background service" },
   });
   // One question at a time: a change made while it asks doesn't ask again.
   const offeringServiceStop = useRef(false);
-  const offerServiceStop = useCallback(async (agentId: string) => {
+  const offerServiceStop = async (agentId: string) => {
     if (agentId !== SERVICE_AGENT || offeringServiceStop.current) return;
     offeringServiceStop.current = true;
     try {
       // A service that can't be checked counts as not running, as in the backend.
-      if (!await api.agentServiceRunning(agentId).catch(() => false)) return;
+      if (!await desktopApi.agentServiceRunning(agentId).catch(() => false)) return;
       if (await confirm({
         title: "Restart Codex to apply?",
         message: "Codex's background service still has the previous settings. Stopping it ends running Codex sessions; it starts again the next time you open Codex.",
@@ -44,10 +47,10 @@ export function useAgents(api: DesktopApi, state: AppState, backendReady: boolea
     } finally {
       offeringServiceStop.current = false;
     }
-  }, [api, confirm, stopService]);
+  };
   const access = useMutation({
-    ...agentAccessMutation(api, requiresAuthorization, client),
-    onError: (failure) => reportFailure("Could not grant agent access", failure),
+    ...agentAccessMutation(desktopApi, requiresAuthorization, client),
+    meta: { errorTitle: "Could not grant agent access" },
   });
   const authorizing = access.isPending;
   // Nothing is read until the backend answers. While it is unavailable,
@@ -55,29 +58,30 @@ export function useAgents(api: DesktopApi, state: AppState, backendReady: boolea
   const backendUnavailable = state.backendConnected === false;
   const { data, error } = useQuery({
     queryKey: ["agents", state.backendInstance, state.agentsRevision, state.catalog?.revision, state.protection.phase === "protected"],
-    queryFn: () => readAgentIntegrations(api, requiresAuthorization),
+    queryFn: () => readAgentIntegrations(desktopApi, requiresAuthorization),
     enabled: !authorizing && backendReady,
     placeholderData: keepPreviousData,
     meta: { errorTitle: "Could not detect agents" },
   });
-  useEffect(() => api.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [api, client]);
+  useEffect(() => desktopApi.onAgentsChange(() => { void client.invalidateQueries({ queryKey: ["agents"] }); }), [client]);
   const accessStatus = requiresAuthorization ? data?.accessStatus : "authorized";
   const changing = useIsMutating({ mutationKey: ["agent-connection"] }) > 0;
-  const { mutate: requestAccess } = access;
-  return useMemo(() => ({
+  return {
     agents: completeAgentStatuses(data?.agents ?? []),
     accessStatus,
     authorizing,
+    /** Why the agents can't be listed yet: access is being checked, required or granted. */
+    detectionLabel: accessStatus === "authorized" ? undefined : authorizing ? "Waiting for access" : accessStatus ? "Access required" : "Checking access",
     /** An agent connection is changing. */
     changing,
     controlsLocked: agentIntegrationsLocked(accessStatus, authorizing) || backendUnavailable,
     /** The agents can't be read: the read failed, or the backend is unavailable. */
     problem: Boolean(error) || backendUnavailable,
     requestAccess: () => {
-      if (requiresAuthorization && !authorizing) requestAccess();
+      if (requiresAuthorization && !authorizing) access.mutate();
     },
     offerServiceStop,
-  }), [data, error, backendUnavailable, accessStatus, authorizing, changing, requiresAuthorization, requestAccess, offerServiceStop]);
+  };
 }
 
 /**
@@ -85,13 +89,14 @@ export function useAgents(api: DesktopApi, state: AppState, backendReady: boolea
  * another (the mutation scope), each with the backend's own preview; after
  * each, `offerServiceStop` (from `useAgents`) may offer to stop its service.
  */
-export function useAgentConnection(api: DesktopApi, agent: AgentStatus, offerServiceStop: (agentId: string) => Promise<void>) {
+export function useAgentConnection(agent: AgentStatus) {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
+  const { agents: { offerServiceStop } } = useShell();
   const mutation = useMutation({
     mutationKey: connectionKey(agent.id),
     scope: { id: `agent-connection:${agent.id}` },
-    mutationFn: (connect: boolean) => api.setAgentConnection(agent.id, connect),
+    mutationFn: (connect: boolean) => desktopApi.setAgentConnection(agent.id, connect),
     onSuccess: (status) => {
       client.setQueriesData<AgentIntegrations>({ queryKey: ["agents"] }, (current) => current && ({
         ...current,
