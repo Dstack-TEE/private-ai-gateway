@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use aci_verify::decode_hex_32;
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -112,31 +113,27 @@ fn validate_sha256_secret_policy(
 }
 
 fn parse_sha256_policy(name: &str, expected: Option<&str>) -> Result<Option<[u8; 32]>, String> {
-    let Some(expected) = expected else {
-        return Ok(None);
-    };
-    let expected = expected
-        .trim()
-        .strip_prefix("sha256:")
-        .unwrap_or(expected.trim());
-    let expected_bytes =
-        hex::decode(expected).map_err(|err| format!("invalid {name}_sha256: {err}"))?;
-    expected_bytes
-        .try_into()
-        .map(Some)
-        .map_err(|bytes: Vec<u8>| {
-            format!(
-                "invalid {name}_sha256: expected 32 bytes, got {}",
-                bytes.len()
-            )
+    expected
+        .map(|value| {
+            let value = value.trim();
+            decode_hex_32(value.strip_prefix("sha256:").unwrap_or(value))
+                .map_err(|err| format!("invalid {name}_sha256: {err}"))
         })
+        .transpose()
 }
 
 fn validate_inference_auth_policy(
     privatemode_configured: bool,
     middleware_configured: bool,
     inference_token_sha256: Option<[u8; 32]>,
+    admin_token: Option<&str>,
 ) -> Result<(), String> {
+    // Clients hold the inference token, so it must not also unlock the admin API.
+    if let (Some(expected), Some(admin_token)) = (inference_token_sha256, admin_token) {
+        if <[u8; 32]>::from(Sha256::digest(admin_token.as_bytes())) == expected {
+            return Err("inference token must be distinct from admin_token".to_string());
+        }
+    }
     if middleware_configured && inference_token_sha256.is_some() {
         return Err(
             "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"
@@ -552,6 +549,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway_config.privatemode_proxy.is_some(),
         gateway_config.middleware.is_some(),
         inference_token_sha256,
+        admin_token.as_deref(),
     )
     .map_err(invalid_input)?;
     validate_client_e2ee_policy(
@@ -1071,14 +1069,19 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn privatemode_static_policy_requires_downstream_inference_auth() {
-        assert!(validate_inference_auth_policy(false, false, None).is_ok());
-        assert!(validate_inference_auth_policy(false, false, Some([7; 32])).is_ok());
-        assert!(validate_inference_auth_policy(true, false, Some([7; 32])).is_ok());
-        let err = validate_inference_auth_policy(true, false, None).unwrap_err();
+        assert!(validate_inference_auth_policy(false, false, None, None).is_ok());
+        assert!(validate_inference_auth_policy(false, false, Some([7; 32]), None).is_ok());
+        assert!(validate_inference_auth_policy(true, false, Some([7; 32]), Some("admin")).is_ok());
+        let err = validate_inference_auth_policy(true, false, None, None).unwrap_err();
         assert_eq!(err, "privatemode_proxy requires inference_token_sha256");
 
-        assert!(validate_inference_auth_policy(true, true, None).is_ok());
-        let err = validate_inference_auth_policy(true, true, Some([7; 32])).unwrap_err();
+        let shared: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"shared").into();
+        let err =
+            validate_inference_auth_policy(true, false, Some(shared), Some("shared")).unwrap_err();
+        assert_eq!(err, "inference token must be distinct from admin_token");
+
+        assert!(validate_inference_auth_policy(true, true, None, None).is_ok());
+        let err = validate_inference_auth_policy(true, true, Some([7; 32]), None).unwrap_err();
         assert_eq!(
             err,
             "inference_token_sha256 cannot be used with middleware; middleware authorizes each client bearer"

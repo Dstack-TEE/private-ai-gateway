@@ -192,18 +192,7 @@ fn privatemode_route_must_match_the_static_proxy_deployment() {
         "provider-model",
     );
     route.base_url = deployment.base_url().to_string();
-    let mut options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::None,
-        accepted_subjects: Vec::new(),
-        accepted_image_digests: Vec::new(),
-        accepted_dstack_kms_root_public_keys: Vec::new(),
-        pccs_url: None,
-        verifier_cache_seconds: 300,
-        connect_timeout_seconds: 10,
-        read_timeout_seconds: 600,
-        verifier_request_timeout_seconds: 60,
-        privatemode_proxy: None,
-    };
+    let mut options = runtime_options(UpstreamVerifierMode::None);
 
     let err = match build_state(&[route.clone()], &options) {
         Ok(_) => panic!("Privatemode route without static deployment must fail"),
@@ -224,6 +213,21 @@ fn privatemode_route_must_match_the_static_proxy_deployment() {
     assert!(err
         .to_string()
         .contains("does not match static proxy endpoint"));
+}
+
+fn runtime_options(verifier_mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
+    UpstreamRuntimeOptions {
+        verifier_mode,
+        accepted_subjects: Vec::new(),
+        accepted_image_digests: Vec::new(),
+        accepted_dstack_kms_root_public_keys: Vec::new(),
+        pccs_url: None,
+        verifier_cache_seconds: 300,
+        connect_timeout_seconds: 10,
+        read_timeout_seconds: 600,
+        verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
+    }
 }
 
 #[async_trait]
@@ -326,18 +330,7 @@ fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstre
             "secret-model",
         ),
     ];
-    let options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::AciService,
-        accepted_subjects: Vec::new(),
-        accepted_image_digests: Vec::new(),
-        accepted_dstack_kms_root_public_keys: Vec::new(),
-        pccs_url: None,
-        verifier_cache_seconds: 300,
-        connect_timeout_seconds: 10,
-        read_timeout_seconds: 600,
-        verifier_request_timeout_seconds: 60,
-        privatemode_proxy: None,
-    };
+    let options = runtime_options(UpstreamVerifierMode::AciService);
 
     let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
         .expect("plain OpenAI-compatible upstreams should not require ACI service policy");
@@ -418,18 +411,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
     })));
     let manager = UpstreamConfigManager {
         path: PathBuf::from("/tmp/upstreams.json"),
-        options: UpstreamRuntimeOptions {
-            verifier_mode: UpstreamVerifierMode::None,
-            accepted_subjects: Vec::new(),
-            accepted_image_digests: Vec::new(),
-            accepted_dstack_kms_root_public_keys: Vec::new(),
-            pccs_url: None,
-            verifier_cache_seconds: 300,
-            connect_timeout_seconds: 10,
-            read_timeout_seconds: 600,
-            verifier_request_timeout_seconds: 60,
-            privatemode_proxy: None,
-        },
+        options: runtime_options(UpstreamVerifierMode::None),
         state,
         update_lock: Arc::new(Mutex::new(())),
         session_sink: Arc::new(RwLock::new(None)),

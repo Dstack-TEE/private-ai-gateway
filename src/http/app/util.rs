@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 use crate::aggregator::service::ReceiptOwner;
 
 use super::error_responses::{admin_not_found_response, error_response};
-use super::AppState;
+use super::{AppState, InferenceAccess};
 
 pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?.to_str().ok()?;
@@ -151,25 +151,34 @@ pub(super) fn is_connection_error(err: &std::io::Error) -> bool {
     )
 }
 
-pub(super) fn enforce_inference(state: &AppState, headers: &HeaderMap) -> Option<Response> {
-    let expected = state.inference_access.token_sha256?;
-    let Some(token) = extract_bearer(headers) else {
-        return Some(error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "inference bearer token required",
-        ));
-    };
-    let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    if bool::from(actual.ct_eq(&expected)) {
-        None
-    } else {
-        Some(error_response(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "invalid inference bearer token",
-        ))
+pub(super) fn enforce_inference(access: InferenceAccess, headers: &HeaderMap) -> Option<Response> {
+    if let Some(expected) = access.token_sha256 {
+        let Some(token) = extract_bearer(headers) else {
+            return Some(error_response(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "inference bearer token required",
+            ));
+        };
+        let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if !bool::from(actual.ct_eq(&expected)) {
+            return Some(error_response(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "invalid inference bearer token",
+            ));
+        }
     }
+    let e2ee_v2 = headers.get("x-e2ee-version").and_then(|v| v.to_str().ok()) == Some("2")
+        && !headers.contains_key("x-signing-algo");
+    if access.require_client_e2ee && !e2ee_v2 {
+        return Some(error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_required",
+            "this deployment requires attested client E2EE v2",
+        ));
+    }
+    None
 }
 
 #[cfg(test)]

@@ -40,3 +40,6 @@ jobs:
 
       - name: Compile Python helpers
         run: python3 -m compileall scripts
+
+      - name: Run Python helper tests
+        run: uv run --locked python -m unittest discover -s scripts/live_e2e/tests -t .

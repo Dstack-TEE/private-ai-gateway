@@ -37,6 +37,7 @@ pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
 pub use openai::OpenAICompatibleBackend;
+pub(crate) use privatemode::readiness_client;
 pub use privatemode::{
     PrivatemodeDeploymentConfigError, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
 };

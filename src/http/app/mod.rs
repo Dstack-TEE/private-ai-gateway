@@ -63,7 +63,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -173,7 +173,6 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
-    pub inference_access: InferenceAccess,
     middleware: Option<Arc<Middleware>>,
 }
 
@@ -236,7 +235,6 @@ fn build_router_inner(
         service,
         upstream_config,
         admin_token,
-        inference_access,
         middleware,
     };
     Router::new()
@@ -249,7 +247,7 @@ fn build_router_inner(
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
+            inference_access,
             inference_auth_middleware,
         ))
         .route("/", get(root))
@@ -292,26 +290,12 @@ fn build_router_inner(
 }
 
 async fn inference_auth_middleware(
-    State(state): State<AppState>,
+    State(access): State<InferenceAccess>,
     req: Request,
     next: Next,
 ) -> Response {
-    if let Some(response) = enforce_inference(&state, req.headers()) {
+    if let Some(response) = enforce_inference(access, req.headers()) {
         return response;
-    }
-    if state.inference_access.require_client_e2ee
-        && (req
-            .headers()
-            .get("x-e2ee-version")
-            .and_then(|v| v.to_str().ok())
-            != Some("2")
-            || req.headers().contains_key("x-signing-algo"))
-    {
-        return error_responses::error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_required",
-            "this deployment requires attested client E2EE v2",
-        );
     }
     next.run(req).await
 }

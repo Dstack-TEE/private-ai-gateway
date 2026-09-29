@@ -27,6 +27,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::aggregator::service::UpstreamVerificationRequest;
+
 pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 
@@ -34,6 +37,7 @@ mod aci_service;
 mod appraisal;
 mod dstack;
 mod external;
+mod privatemode;
 mod providers;
 mod quote;
 mod report;
@@ -51,16 +55,34 @@ pub use appraisal::{
 };
 pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, VerifiedEventLog};
 pub use external::ProviderVerifierConfigError;
+pub use privatemode::PrivatemodeProviderVerifier;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
-    PrivatemodeProviderVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
-    TinfoilProviderVerifier,
+    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
 };
 pub use quote::QuoteStepError;
 pub use report::{
     validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
 };
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
+
+/// A verified event cached by a provider verifier, re-labelled per request.
+#[derive(Clone, Debug)]
+struct CachedProviderEvent {
+    expires_at: u64,
+    event: UpstreamVerifiedEvent,
+}
+
+impl CachedProviderEvent {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let mut event = self.event.clone();
+        event.upstream_name = request.upstream_name.clone();
+        event.model_id = request.model_id.clone();
+        event.url_origin = request.url_origin.clone();
+        event.required = request.required;
+        event
+    }
+}
 
 fn current_unix_secs() -> u64 {
     SystemTime::now()

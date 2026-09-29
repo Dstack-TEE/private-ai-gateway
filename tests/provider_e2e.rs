@@ -48,7 +48,7 @@ use private_ai_gateway::aci::receipt::{
 use private_ai_gateway::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
     OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
-    UpstreamBackend, UpstreamRequest,
+    UpstreamBackend, UpstreamError, UpstreamRequest,
 };
 use private_ai_gateway::aci::verifier::{PrivatemodeProviderVerifier, StaticUpstreamVerifier};
 use private_ai_gateway::aggregator::service::{
@@ -431,7 +431,6 @@ struct PrivatemodeTestDeployment {
     base_url: String,
     manifest_dir: PathBuf,
     manifest_log_path: PathBuf,
-    manifest_path: PathBuf,
     credential_path: PathBuf,
     manifest_digest: String,
     credential_digest: String,
@@ -478,7 +477,6 @@ impl PrivatemodeTestDeployment {
             base_url,
             manifest_dir,
             manifest_log_path,
-            manifest_path,
             credential_path,
             manifest_digest,
             credential_digest,
@@ -499,6 +497,12 @@ impl PrivatemodeTestDeployment {
             cache_ttl_seconds,
         )
         .unwrap()
+    }
+
+    fn backend(&self) -> PrivatemodeProviderBackend {
+        PrivatemodeProviderBackend::new_with_timeouts(self.deployment.clone(), 2, 10)
+            .unwrap()
+            .with_name("privatemode-provider")
     }
 
     fn verification_request(&self, model_id: &str) -> UpstreamVerificationRequest {
@@ -1143,17 +1147,12 @@ async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_bindi
     )
     .expect_err("the measured credential digest must bind the mounted secret");
     assert!(err.to_string().contains("does not match configured digest"));
-    let backend = PrivatemodeProviderBackend::new_with_timeouts(fixture.deployment.clone(), 2, 10)
-        .unwrap()
-        .with_name("privatemode-provider");
+    let backend = fixture.backend();
     let event = fixture
         .verifier(10, 300)
         .verify(fixture.verification_request("provider-model"))
         .await;
     assert_eq!(event.result.as_str(), "verified");
-    // The event retains the observed bytes even if the proxy log changes after
-    // verification.
-    std::fs::write(&fixture.manifest_path, b"tampered after verification").unwrap();
     assert_eq!(event.url_origin.as_deref(), Some(base_url.as_str()));
     assert!(matches!(
         event.channel_bindings.as_slice(),
@@ -1194,6 +1193,49 @@ async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_bindi
     assert!(err.to_string().contains("does not encrypt that handler"));
     assert_eq!(plaintext_path_hits.load(Ordering::SeqCst), 0);
 
+    // Any event that does not describe this measured deployment is refused
+    // before the proxy is contacted.
+    let binding = |image: &str, credential: &str| {
+        vec![ChannelBinding::ProxyImageSha256 {
+            provider: "privatemode".to_string(),
+            proxy_image_digest: image.to_string(),
+            credential_sha256: credential.to_string(),
+        }]
+    };
+    let variant = |mutate: &dyn Fn(&mut UpstreamVerifiedEvent)| {
+        let mut bad = event.clone();
+        mutate(&mut bad);
+        bad
+    };
+    let other_digest = "44".repeat(32);
+    let other_image = format!("sha256:{other_digest}");
+    let events = [
+        variant(&|e| e.result = VerificationResult::Failed),
+        variant(&|e| e.provider_type = Some("tinfoil".to_string())),
+        variant(&|e| e.url_origin = Some("http://other-proxy:8080".to_string())),
+        variant(&|e| e.channel_bindings.clear()),
+        variant(&|e| e.channel_bindings.push(e.channel_bindings[0].clone())),
+        variant(&|e| e.channel_bindings = binding(&other_image, &fixture.credential_digest)),
+        variant(&|e| e.channel_bindings = binding(&fixture.image_digest, &other_digest)),
+    ];
+    for bad in &events {
+        let buffered = backend
+            .forward_verified_prepared(backend.prepare(request()).unwrap(), bad)
+            .await;
+        assert!(matches!(
+            buffered,
+            Err(UpstreamError::ChannelBindingMismatch(_))
+        ));
+        let streaming = backend
+            .forward_stream_verified_prepared(backend.prepare(request()).unwrap(), bad)
+            .await;
+        assert!(matches!(
+            streaming,
+            Err(UpstreamError::ChannelBindingMismatch(_))
+        ));
+    }
+    assert!(provider_calls.lock().unwrap().is_empty());
+
     let response = backend
         .forward_verified_prepared(backend.prepare(request()).unwrap(), &event)
         .await
@@ -1231,9 +1273,7 @@ async fn privatemode_never_follows_cross_origin_redirects() {
     assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
 
     let verified = fixture.verified_event();
-    let backend = PrivatemodeProviderBackend::new_with_timeouts(fixture.deployment.clone(), 2, 10)
-        .unwrap()
-        .with_name("privatemode-provider");
+    let backend = fixture.backend();
     let request = || UpstreamRequest {
         body: PROVIDER_CHAT_REQUEST.to_vec(),
         ..Default::default()
@@ -1539,31 +1579,19 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
             .await
             .unwrap();
 
-        match result {
+        let (status, route, failed_attempts, session_id) = match result {
             MiddlewareForwardResult::Forwarded(forward) => {
                 assert!(!stream);
-                assert_eq!(forward.upstream_status, 200);
-                assert_eq!(forward.selected_route, "privatemode-provider:public-model");
-                assert_eq!(forward.failed_attempts.len(), 1);
-                assert_eq!(
-                    forward.failed_attempts[0].route_id,
-                    "privatemode-provider:public-model"
-                );
-                assert_eq!(forward.failed_attempts[0].status, 429);
                 assert_eq!(forward.upstream_body, CHAT_RESPONSE);
-                assert!(forward.session_id.is_some());
+                (
+                    forward.upstream_status,
+                    forward.selected_route,
+                    forward.failed_attempts,
+                    forward.session_id,
+                )
             }
             MiddlewareForwardResult::Stream(mut forward) => {
                 assert!(stream);
-                assert_eq!(forward.upstream_status, 200);
-                assert_eq!(forward.selected_route, "privatemode-provider:public-model");
-                assert_eq!(forward.failed_attempts.len(), 1);
-                assert_eq!(
-                    forward.failed_attempts[0].route_id,
-                    "privatemode-provider:public-model"
-                );
-                assert_eq!(forward.failed_attempts[0].status, 429);
-                assert!(forward.session_id.is_some());
                 while let Some(chunk) = forward.body.next().await {
                     chunk.unwrap();
                 }
@@ -1572,9 +1600,24 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     "the committed stream drafts one receipt"
                 );
                 assert!(journal.take().is_none(), "no duplicate receipt was drafted");
+                (
+                    forward.upstream_status,
+                    forward.selected_route,
+                    forward.failed_attempts,
+                    forward.session_id,
+                )
             }
             _ => panic!("the delayed Privatemode retry must commit its second response"),
-        }
+        };
+        assert_eq!(status, 200);
+        assert_eq!(route, "privatemode-provider:public-model");
+        assert_eq!(failed_attempts.len(), 1);
+        assert_eq!(
+            failed_attempts[0].route_id,
+            "privatemode-provider:public-model"
+        );
+        assert_eq!(failed_attempts[0].status, 429);
+        assert!(session_id.is_some());
 
         assert_eq!(
             readiness_checks.load(Ordering::SeqCst),

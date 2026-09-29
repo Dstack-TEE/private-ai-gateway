@@ -509,23 +509,32 @@ async fn required_client_e2ee_rejects_plaintext_before_reading_the_body() {
     );
     assert!(!body_polled.load(Ordering::SeqCst));
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("x-e2ee-version", "2")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()["error"]
-            ["type"],
-        "e2ee_invalid_version"
-    );
+    // The legacy signing header selects the pre-ACI path, not E2EE v2.
+    for (headers, expected) in [
+        (
+            &[("x-e2ee-version", "2"), ("x-signing-algo", "ecdsa")][..],
+            "e2ee_required",
+        ),
+        (&[("x-e2ee-version", "2")][..], "e2ee_invalid_version"),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from("{}")).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body_bytes(response.into_body()).await).unwrap()
+                ["error"]["type"],
+            expected
+        );
+    }
 }
 
 #[tokio::test]

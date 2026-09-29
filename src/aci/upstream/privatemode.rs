@@ -11,15 +11,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use aci_verify::decode_hex_32;
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::{
     OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
     UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
+use crate::aci::digest::sha256_bare_hex;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 
 const PROVIDER: &str = "privatemode";
@@ -92,6 +93,22 @@ pub(crate) struct ObservedPrivatemodeManifest {
     pub(crate) observed_at: String,
 }
 
+impl ObservedPrivatemodeManifest {
+    pub(crate) fn evidence(&self) -> Value {
+        serde_json::json!({
+            "type": "privatemode_manifest_observation",
+            "observation": "latest_proxy_fetch_log",
+            "bound_to_active_secret": false,
+            "observed_at": self.observed_at,
+            "digest": format!("sha256:{}", self.sha256),
+            "data": format!(
+                "data:application/json;base64,{}",
+                BASE64.encode(&self.bytes)
+            ),
+        })
+    }
+}
+
 impl PrivatemodeProxyDeployment {
     pub fn new(
         base_url: impl Into<String>,
@@ -124,7 +141,7 @@ impl PrivatemodeProxyDeployment {
         }
         let credential_sha256 = normalize_sha256_hex(accepted_credential_sha256.as_ref())
             .map_err(PrivatemodeDeploymentConfigError::InvalidCredentialDigest)?;
-        let actual_credential_sha256 = sha256_hex(&credential);
+        let actual_credential_sha256 = sha256_bare_hex(&credential);
         if actual_credential_sha256 != credential_sha256 {
             return Err(PrivatemodeDeploymentConfigError::CredentialDigestMismatch {
                 actual: actual_credential_sha256,
@@ -225,57 +242,42 @@ impl PrivatemodeProxyDeployment {
             );
         }
         Ok(ObservedPrivatemodeManifest {
-            sha256: sha256_hex(&bytes),
+            sha256: sha256_bare_hex(&bytes),
             observed_at: observed_at.to_string(),
             bytes,
         })
     }
 
-    pub(crate) fn manifest_evidence(&self, manifest: &ObservedPrivatemodeManifest) -> Value {
-        serde_json::json!({
-            "type": "privatemode_manifest_observation",
-            "observation": "latest_proxy_fetch_log",
-            "bound_to_active_secret": false,
-            "observed_at": manifest.observed_at,
-            "digest": format!("sha256:{}", manifest.sha256),
-            "data": format!(
-                "data:application/json;base64,{}",
-                BASE64.encode(&manifest.bytes)
-            ),
-        })
+    /// The only binding a verified event for this deployment may carry.
+    pub(crate) fn channel_binding(&self) -> ChannelBinding {
+        ChannelBinding::ProxyImageSha256 {
+            provider: PROVIDER.to_string(),
+            proxy_image_digest: self.proxy_image_digest.clone(),
+            credential_sha256: self.credential_sha256.clone(),
+        }
     }
+}
 
-    pub fn proxy_image_digest(&self) -> &str {
-        &self.proxy_image_digest
-    }
+/// Streams may idle between tokens, so forwarding bounds reads, not the whole
+/// response.
+fn forwarding_client(
+    connect_timeout_seconds: u64,
+    read_timeout_seconds: u64,
+) -> Result<reqwest::Client, UpstreamError> {
+    sidecar_client(connect_timeout_seconds)
+        .read_timeout(Duration::from_secs(read_timeout_seconds))
+        .build()
+        .map_err(|err| UpstreamError::Transport(err.to_string()))
+}
 
-    pub fn credential_sha256(&self) -> &str {
-        &self.credential_sha256
-    }
-
-    /// Streams may idle between tokens, so forwarding bounds reads, not the
-    /// whole response.
-    pub(crate) fn forwarding_client(
-        &self,
-        connect_timeout_seconds: u64,
-        read_timeout_seconds: u64,
-    ) -> Result<reqwest::Client, UpstreamError> {
-        sidecar_client(connect_timeout_seconds)
-            .read_timeout(Duration::from_secs(read_timeout_seconds))
-            .build()
-            .map_err(|err| UpstreamError::Transport(err.to_string()))
-    }
-
-    pub(crate) fn readiness_client(
-        &self,
-        connect_timeout_seconds: u64,
-        request_timeout_seconds: u64,
-    ) -> Result<reqwest::Client, UpstreamError> {
-        sidecar_client(connect_timeout_seconds)
-            .timeout(Duration::from_secs(request_timeout_seconds))
-            .build()
-            .map_err(|err| UpstreamError::Transport(err.to_string()))
-    }
+pub(crate) fn readiness_client(
+    connect_timeout_seconds: u64,
+    request_timeout_seconds: u64,
+) -> Result<reqwest::Client, UpstreamError> {
+    sidecar_client(connect_timeout_seconds)
+        .timeout(Duration::from_secs(request_timeout_seconds))
+        .build()
+        .map_err(|err| UpstreamError::Transport(err.to_string()))
 }
 
 /// Plaintext goes only to the pinned sidecar: never through an ambient HTTP
@@ -298,7 +300,7 @@ impl PrivatemodeProviderBackend {
         connect_timeout_seconds: u64,
         read_timeout_seconds: u64,
     ) -> Result<Self, UpstreamError> {
-        let client = deployment.forwarding_client(connect_timeout_seconds, read_timeout_seconds)?;
+        let client = forwarding_client(connect_timeout_seconds, read_timeout_seconds)?;
         let inner = OpenAICompatibleBackend::new_with_timeouts(
             deployment.base_url(),
             connect_timeout_seconds,
@@ -332,20 +334,7 @@ impl PrivatemodeProviderBackend {
                 self.url_origin()
             )));
         }
-        let [ChannelBinding::ProxyImageSha256 {
-            provider,
-            proxy_image_digest,
-            credential_sha256,
-        }] = event.channel_bindings.as_slice()
-        else {
-            return Err(binding_mismatch(
-                "Privatemode verification must produce exactly one proxy_image_sha256 binding",
-            ));
-        };
-        if provider != PROVIDER
-            || proxy_image_digest != self.deployment.proxy_image_digest()
-            || credential_sha256 != self.deployment.credential_sha256()
-        {
+        if event.channel_bindings != [self.deployment.channel_binding()] {
             return Err(binding_mismatch(
                 "Privatemode event does not match the measured proxy deployment",
             ));
@@ -378,18 +367,7 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
         self.inner.url_origin()
     }
 
-    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
-        self.inner.prepare(req)
-    }
-
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        Err(verification_required())
-    }
-
-    async fn forward_prepared(
-        &self,
-        _req: PreparedUpstreamRequest,
-    ) -> Result<UpstreamResponse, UpstreamError> {
         Err(verification_required())
     }
 
@@ -401,20 +379,6 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
         self.enforce_encrypted_path(&req)?;
         self.enforce_proxy_binding(event)?;
         self.inner.forward_prepared(req).await
-    }
-
-    async fn forward_stream(
-        &self,
-        _req: UpstreamRequest,
-    ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        Err(verification_required())
-    }
-
-    async fn forward_stream_prepared(
-        &self,
-        _req: PreparedUpstreamRequest,
-    ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        Err(verification_required())
     }
 
     async fn forward_stream_verified_prepared(
@@ -448,16 +412,8 @@ fn normalize_origin(value: &str) -> Result<String, PrivatemodeDeploymentConfigEr
 }
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
-    let value = value.trim().strip_prefix("sha256:").unwrap_or(value.trim());
-    let bytes = hex::decode(value).map_err(|err| err.to_string())?;
-    if bytes.len() != 32 {
-        return Err(format!("expected 32 bytes, got {}", bytes.len()));
-    }
-    Ok(hex::encode(bytes))
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    let value = value.trim();
+    decode_hex_32(value.strip_prefix("sha256:").unwrap_or(value)).map(hex::encode)
 }
 
 fn binding_mismatch(message: impl Into<String>) -> UpstreamError {

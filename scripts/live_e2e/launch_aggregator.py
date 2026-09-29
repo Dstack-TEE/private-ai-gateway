@@ -18,6 +18,7 @@ from .common import (
     ROOT,
     Provider,
     public_base_url,
+    write_bytes,
     write_json,
 )
 
@@ -76,8 +77,10 @@ class AggregatorProcess:
         write_json(self.gateway_config_path, gateway_config, mode=0o600)
         if "privatemode_proxy" in gateway_config:
             first = next(p for p in self.providers if p.provider == "privatemode")
-            privatemode_credential_path.write_text(
-                self.env[first.api_key_env], encoding="utf-8"
+            write_bytes(
+                privatemode_credential_path,
+                self.env[first.api_key_env].encode("utf-8"),
+                mode=0o600,
             )
         if self.artifact_dir:
             write_json(
@@ -180,44 +183,35 @@ def build_gateway_config(
     credential = env.get(first.api_key_env)
     if not credential:
         raise RuntimeError(f"missing API key env var {first.api_key_env}")
-    required = {
-        "manifest_log_path": first.privatemode_manifest_log_path,
-        "credential_path": str(privatemode_credential_path),
-        "credential_sha256": hashlib.sha256(
-            credential.encode("utf-8")
-        ).hexdigest(),
-        "proxy_image_digest": first.privatemode_proxy_image_digest,
-    }
-    missing = [name for name, value in required.items() if value is None]
-    if missing:
+    if first.privatemode_manifest_log_path is None or first.privatemode_proxy_image_digest is None:
         raise RuntimeError(
-            f"Privatemode live E2E is missing static fields: {', '.join(missing)}"
+            "Privatemode entries need privatemode_manifest_log_path and "
+            "privatemode_proxy_image_digest"
         )
-    expected = (
-        first.base_url,
-        first.privatemode_manifest_log_path,
-        first.privatemode_proxy_image_digest,
-    )
-    if any(
-        (
+
+    def deployment(provider: Provider) -> tuple[str | None, ...]:
+        return (
             provider.base_url,
+            provider.api_key_env,
             provider.privatemode_manifest_log_path,
             provider.privatemode_proxy_image_digest,
         )
-        != expected
-        for provider in privatemode[1:]
-    ):
-        raise RuntimeError(
-            "all Privatemode routes must share one static proxy deployment"
-        )
-    gateway_config["inference_token_sha256"] = hashlib.sha256(
-        inference_token.encode("utf-8")
-    ).hexdigest()
+
+    if any(deployment(provider) != deployment(first) for provider in privatemode[1:]):
+        raise RuntimeError("all Privatemode routes must share one static proxy deployment")
+    gateway_config["inference_token_sha256"] = sha256_hex(inference_token)
     gateway_config["privatemode_proxy"] = {
         "base_url": first.base_url,
-        **required,
+        "manifest_log_path": first.privatemode_manifest_log_path,
+        "credential_path": str(privatemode_credential_path),
+        "credential_sha256": sha256_hex(credential),
+        "proxy_image_digest": first.privatemode_proxy_image_digest,
     }
     return gateway_config
+
+
+def sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def build_upstream_config(

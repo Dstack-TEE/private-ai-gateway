@@ -93,8 +93,7 @@ fn privatemode_deployment_contract_is_pinned() {
             &[
                 "PRIVATEMODE_CREDENTIAL_SHA256=$(",
                 r#"printf '%s' "$PRIVATEMODE_API_KEY""#,
-                "PRIVATE_AI_GATEWAY_ADMIN_TOKEN", "PRIVATE_AI_GATEWAY_INFERENCE_TOKEN",
-                "PRIVATEMODE_API_KEY",
+                "was embedded in the rendered Compose",
             ],
             &[],
         ),
