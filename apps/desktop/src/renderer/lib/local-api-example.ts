@@ -1,3 +1,5 @@
+import { quote } from "shell-quote";
+
 export type ExampleLanguage = "curl" | "python" | "javascript";
 
 export function localApiExample(language: ExampleLanguage, endpoint: string, model: string, apiKey?: string): string {
@@ -6,11 +8,11 @@ export function localApiExample(language: ExampleLanguage, endpoint: string, mod
   const payload = JSON.stringify({ model, messages: [{ role: "user", content: "Hello" }] }, null, 2);
   const baseUrl = JSON.stringify(new URL("/v1", endpoint).toString());
   if (language === "curl") {
-    const quotedUrl = `'${url.toString().replaceAll("'", "'\\''")}'`;
     return [
-      `curl --fail-with-body --max-time 60 --request POST ${quotedUrl} \\`,
-      apiKey ? `  --header 'Authorization: Bearer ${apiKey.replaceAll("'", "'\\''")}' \\` : '  --header "Authorization: Bearer ${PAP_API_KEY:?Set PAP_API_KEY to your local client key}" \\',
-      "  --header 'Content-Type: application/json' \\",
+      `${quote(["curl", "--fail-with-body", "--max-time", "60", "--request", "POST", url.toString()])} \\`,
+      // Without a key, the shell supplies it from PAP_API_KEY or stops with the hint.
+      apiKey ? `  ${quote(["--header", `Authorization: Bearer ${apiKey}`])} \\` : '  --header "Authorization: Bearer ${PAP_API_KEY:?Set PAP_API_KEY to your local client key}" \\',
+      `  ${quote(["--header", "Content-Type: application/json"])} \\`,
       "  --data @- <<'JSON'",
       payload,
       "JSON",
