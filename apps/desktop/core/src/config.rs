@@ -682,13 +682,7 @@ pub fn normalize_url(value: &str) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let loopback = match url.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
-    };
-    if url.scheme() != "https" && !loopback {
+    if url.scheme() != "https" && !is_loopback(&url) {
         return Err(
             "Gateway URL must use HTTPS unless it points to localhost or a loopback address"
                 .to_string(),
@@ -703,6 +697,16 @@ pub fn normalize_url(value: &str) -> Result<String, String> {
     let path = url.path().trim_end_matches('/').to_string();
     url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+/// Whether a URL names this device: `localhost` or a loopback address.
+pub fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// The JSON Schema of `config.toml`, generated from [`Config`].

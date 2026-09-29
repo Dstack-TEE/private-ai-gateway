@@ -63,44 +63,21 @@ impl Listener {
         let dir = endpoint.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
         })?;
-        ensure_private_dir(dir).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot prepare IPC runtime directory {}: {error}",
-                    dir.display()
-                ),
-            )
-        })?;
-        remove_stale_socket(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot clean IPC endpoint {}: {error}", endpoint.display()),
-            )
-        })?;
+        let failed = |what: &str, path: &Path| {
+            let what = format!("cannot {what} {}", path.display());
+            move |error: io::Error| io::Error::new(error.kind(), format!("{what}: {error}"))
+        };
+        ensure_private_dir(dir).map_err(failed("prepare IPC runtime directory", dir))?;
+        remove_stale_socket(&endpoint).map_err(failed("clean IPC endpoint", &endpoint))?;
 
-        let inner = UnixListener::bind(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot bind IPC endpoint {}: {error}", endpoint.display()),
-            )
-        })?;
+        let inner =
+            UnixListener::bind(&endpoint).map_err(failed("bind IPC endpoint", &endpoint))?;
         if let Err(error) = fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&endpoint);
-            return Err(io::Error::new(
-                error.kind(),
-                format!("cannot secure IPC endpoint {}: {error}", endpoint.display()),
-            ));
+            return Err(failed("secure IPC endpoint", &endpoint)(error));
         }
-        let socket_identity = FileIdentity::read(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot inspect IPC endpoint {}: {error}",
-                    endpoint.display()
-                ),
-            )
-        })?;
+        let socket_identity =
+            FileIdentity::read(&endpoint).map_err(failed("inspect IPC endpoint", &endpoint))?;
         Ok(Self {
             inner,
             endpoint,
