@@ -41,9 +41,9 @@ use uuid::Uuid;
 
 use crate::Error;
 
-use desktop_core::account::{account_return_url, LoginPresentation};
+use desktop_core::account::LoginPresentation;
 #[cfg(test)]
-use desktop_core::account::{organization_url, top_up_url};
+use desktop_core::account::{account_return_url, organization_url, top_up_url};
 use desktop_core::contracts::{
     AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
     ConfidentialProfileInput, ProfileAuth, ServiceProvider,
@@ -58,8 +58,12 @@ const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// The loopback redirect URI for a callback listener bound to `address`.
-fn callback_url(address: SocketAddr) -> String {
-    format!("http://{address}{CALLBACK_PATH}")
+fn callback_url(address: SocketAddr) -> Result<Url, ()> {
+    let mut url = Url::parse("http://localhost").map_err(|_| ())?;
+    url.set_ip_host(address.ip())?;
+    url.set_port(Some(address.port()))?;
+    url.set_path(CALLBACK_PATH);
+    Ok(url)
 }
 
 #[derive(Clone)]
@@ -302,7 +306,7 @@ impl PendingLogin {
                 "Account: This callback URL does not match the current sign-in.",
             ));
         }
-        let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
+        let uri: Uri = url[url::Position::BeforePath..url::Position::AfterQuery]
             .parse()
             .map_err(|_| Error::account("Account: Invalid callback URL."))?;
         let mut headers = HeaderMap::new();
@@ -367,7 +371,10 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
         ServiceProvider::Phala => {
             let data = response(
                 client
-                    .post(format!("{PHALA_API}/api/v1/auth/device/code"))
+                    .post(desktop_core::endpoint(
+                        PHALA_API,
+                        &["api", "v1", "auth", "device", "code"],
+                    )?)
                     .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key"})),
             )
             .await?;
@@ -393,8 +400,11 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             (url, Some(code), worker, None)
         }
         ServiceProvider::Redpill => {
-            let discovery =
-                response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
+            let discovery = response(client.get(desktop_core::endpoint(
+                ISSUER,
+                &[".well-known", "openid-configuration"],
+            )?))
+            .await?;
             validate_discovery(&discovery)?;
             // RFC 8252 §7.3: a loopback redirect on an OS-assigned port, which
             // the authorization server must accept for any port.
@@ -409,6 +419,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?,
                 address,
             )?;
+            let userinfo = desktop_core::endpoint(ISSUER, &["oauth", "userinfo"])?;
             let (url, state, verifier) = authorization_request(&oauth);
             let (sender, receiver) = oneshot::channel();
             let callback = Arc::new(CallbackState {
@@ -425,7 +436,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                         &oauth,
                         code,
                         verifier,
-                        &format!("{ISSUER}/oauth/userinfo"),
+                        userinfo.as_str(),
                         ACCOUNT_URL,
                     )
                     .await

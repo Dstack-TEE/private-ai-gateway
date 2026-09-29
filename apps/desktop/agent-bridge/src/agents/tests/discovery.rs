@@ -448,7 +448,7 @@ fn helper_command_quotes_hostile_paths_for_the_shell() {
         let hostile = Path::new(r"C:\Users\O'Brien %USERPROFILE% ! &\helper.exe");
         let provider = pi_provider(
             &catalog(),
-            ENDPOINT,
+            &api_url(ENDPOINT).unwrap(),
             &credential_helper_command(hostile, Agent::Pi).unwrap(),
         )
         .unwrap();

@@ -1,5 +1,6 @@
-//! Format-preserving edits on agent config files: JSON (key order kept) and
-//! TOML (comments and layout kept via `toml_edit`). A path is a key sequence;
+//! Format-preserving edits on agent config files: JSON and JSON5 (everything
+//! but the edited value kept via the `jsonc-parser` CST) and TOML (comments
+//! and layout kept via `toml_edit`). A path is a key sequence;
 //! containers along it are created on demand and pruned again when a removal
 //! leaves them empty, so a disconnect leaves no empty shells behind.
 
@@ -139,7 +140,8 @@ impl ConfigValue {
 
 #[derive(Clone, Debug)]
 pub enum ConfigDoc {
-    Json(Value),
+    // JSON source, edited through the CST like JSON5 but parsed strictly.
+    Json(String),
     // Store source, not Rc-backed CST nodes: clones are independent and Send.
     Json5(String),
     Toml(DocumentMut),
@@ -156,15 +158,9 @@ impl ConfigDoc {
                 Ok(Self::Json5(text.to_string()))
             }
             Format::Json => {
-                if text.trim().is_empty() {
-                    return Ok(Self::Json(Value::Object(Map::new())));
-                }
-                let value: Value =
-                    serde_json::from_str(text).map_err(|_| "not valid JSON".to_string())?;
-                if !value.is_object() {
-                    return Err("not a JSON object".to_string());
-                }
-                Ok(Self::Json(value))
+                let text = if text.trim().is_empty() { "{}\n" } else { text };
+                json_root(text)?;
+                Ok(Self::Json(text.to_string()))
             }
             Format::Toml => text
                 .parse::<DocumentMut>()
@@ -182,10 +178,7 @@ impl ConfigDoc {
 
     pub fn render(&self) -> Result<String, String> {
         match self {
-            Self::Json5(text) => Ok(text.clone()),
-            Self::Json(value) => serde_json::to_string_pretty(value)
-                .map(|text| text + "\n")
-                .map_err(|error| error.to_string()),
+            Self::Json5(text) | Self::Json(text) => Ok(text.clone()),
             Self::Toml(doc) => Ok(doc.to_string()),
             Self::Yaml(doc) => {
                 let text = doc.to_string();
@@ -202,7 +195,7 @@ impl ConfigDoc {
                 let value = recorded(json5_value(text).ok()?);
                 ConfigValue::from_json(json_get(&value, path)?)
             }
-            Self::Json(root) => ConfigValue::from_json(json_get(root, path)?),
+            Self::Json(text) => ConfigValue::from_json(json_get(&json_value(text).ok()?, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
             Self::Yaml(file) => {
                 let document = file.documents().next()?;
@@ -213,6 +206,14 @@ impl ConfigDoc {
                 };
                 yaml_value(node)
             }
+        }
+    }
+
+    /// The value of a JSON document; other formats have none.
+    pub fn as_json(&self) -> Option<Value> {
+        match self {
+            Self::Json(text) => json_value(text).ok(),
+            _ => None,
         }
     }
 
@@ -228,7 +229,9 @@ impl ConfigDoc {
             Self::Json5(text) => json5_value(text)
                 .ok()
                 .is_some_and(|root| json_get(&root, path).is_some()),
-            Self::Json(root) => json_get(root, path).is_some(),
+            Self::Json(text) => json_value(text)
+                .ok()
+                .is_some_and(|root| json_get(&root, path).is_some()),
             Self::Toml(doc) => toml_get(doc.as_item(), path).is_some(),
             Self::Yaml(file) => file
                 .documents()
@@ -243,8 +246,8 @@ impl ConfigDoc {
             Self::Json5(text) => {
                 *text = edit_json5(text, path, Some(value.to_json()))?;
             }
-            Self::Json(root) => {
-                json_container(root, parents)?.insert(leaf.to_string(), value.to_json());
+            Self::Json(text) => {
+                *text = edit_json(text, path, Some(value.to_json()))?;
             }
             Self::Toml(doc) => {
                 toml_container(doc.as_item_mut(), parents)?.insert(leaf, value.to_toml()?);
@@ -282,7 +285,9 @@ impl ConfigDoc {
             Self::Json5(text) => json5_value(text)
                 .ok()
                 .is_some_and(|root| json_get(&root, path).is_some_and(Value::is_object)),
-            Self::Json(root) => json_get(root, path).is_some_and(Value::is_object),
+            Self::Json(text) => json_value(text)
+                .ok()
+                .is_some_and(|root| json_get(&root, path).is_some_and(Value::is_object)),
             Self::Toml(doc) => {
                 toml_get(doc.as_item(), path).is_some_and(|item| item.as_table_like().is_some())
             }
@@ -304,12 +309,13 @@ impl ConfigDoc {
                 *text = edit_json5(text, path, None)?;
                 None
             }
-            Self::Json(root) => json_get_mut(root, parents)
-                .and_then(Value::as_object_mut)
-                .map(|map| {
-                    map.remove(leaf);
-                    map.is_empty()
-                }),
+            Self::Json(text) => {
+                // Strict JSON has no comments, so an emptied object holds nothing.
+                *text = edit_json(text, path, None)?;
+                json_value(text)
+                    .ok()
+                    .and_then(|root| json_get(&root, parents)?.as_object().map(Map::is_empty))
+            }
             Self::Toml(doc) => toml_get_mut(doc.as_item_mut(), parents)
                 .and_then(|item| item.as_table_like_mut())
                 .map(|table| {
@@ -375,22 +381,22 @@ fn json5_root(text: &str) -> Result<CstRootNode, String> {
     let root = CstRootNode::parse(text, &json5_options())
         .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
     if let Some(value) = root.value() {
-        validate_unique_keys(&value)?;
+        validate_unique_keys(&value, "JSON5")?;
     }
     Ok(root)
 }
 
-fn validate_unique_keys(node: &jsonc_parser::cst::CstNode) -> Result<(), String> {
+fn validate_unique_keys(node: &jsonc_parser::cst::CstNode, format: &str) -> Result<(), String> {
     if let Some(object) = node.as_object() {
         let mut keys = std::collections::HashSet::new();
         for property in object.properties() {
             let name = property
                 .name()
-                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+                .ok_or_else(|| format!("unsupported {format} property name"))?;
             let key = name
                 .decoded_value()
                 .ok()
-                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+                .ok_or_else(|| format!("unsupported {format} property name"))?;
             // The CST parser's loose-word mode is wider than JSON5. Accept a
             // conservative identifier subset; quoted Unicode keys remain valid.
             if matches!(name, jsonc_parser::cst::ObjectPropName::Word(_))
@@ -408,12 +414,14 @@ fn validate_unique_keys(node: &jsonc_parser::cst::CstNode) -> Result<(), String>
                 );
             }
             if !keys.insert(key) {
-                return Err("duplicate JSON5 property names are unsafe to edit".to_string());
+                return Err(format!(
+                    "duplicate {format} property names are unsafe to edit"
+                ));
             }
         }
     }
     for child in node.children() {
-        validate_unique_keys(&child)?;
+        validate_unique_keys(&child, format)?;
     }
     Ok(())
 }
@@ -434,12 +442,60 @@ fn cst_input(value: Value) -> CstInputValue {
     }
 }
 
+/// The JSON value of a strict JSON source; serde_json reads it, as it reads
+/// connection records.
+fn json_value(text: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(text).map_err(|_| "not valid JSON".to_string())?;
+    if !value.is_object() {
+        return Err("not a JSON object".to_string());
+    }
+    Ok(value)
+}
+
+fn json_root(text: &str) -> Result<CstRootNode, String> {
+    json_value(text)?;
+    let root = CstRootNode::parse(
+        text,
+        &jsonc_parser::ParseOptions {
+            allow_comments: false,
+            allow_trailing_commas: false,
+            allow_loose_object_property_names: false,
+            allow_missing_commas: false,
+            allow_single_quoted_strings: false,
+            allow_hexadecimal_numbers: false,
+            allow_unary_plus_numbers: false,
+        },
+    )
+    .map_err(|_| "not valid JSON".to_string())?;
+    if let Some(value) = root.value() {
+        validate_unique_keys(&value, "JSON")?;
+    }
+    Ok(root)
+}
+
+fn edit_json(text: &str, path: &[&str], value: Option<Value>) -> Result<String, String> {
+    let updated = edit_cst(json_root(text)?, text, path, value)?;
+    json_value(&updated)?;
+    Ok(updated)
+}
+
 fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String, String> {
+    let updated = edit_cst(json5_root(text)?, text, path, value)?;
+    json5_value(&updated)?;
+    Ok(updated)
+}
+
+/// Sets or removes the value at `path`; the rest of the source stays as it is.
+fn edit_cst(
+    root: CstRootNode,
+    text: &str,
+    path: &[&str],
+    value: Option<Value>,
+) -> Result<String, String> {
     let (leaf, parents) = split_leaf(path)?;
-    let root = json5_root(text)?;
     let mut object = root
         .object_value()
-        .ok_or_else(|| "not a JSON5 object".to_string())?;
+        .ok_or_else(|| "not a JSON object".to_string())?;
     for key in parents {
         object = if value.is_some() {
             object
@@ -460,9 +516,7 @@ fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String,
         (Some(property), None) => property.remove(),
         (None, None) => {}
     }
-    let updated = root.to_string();
-    json5_value(&updated)?;
-    Ok(updated)
+    Ok(root.to_string())
 }
 
 fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
@@ -558,25 +612,6 @@ fn not_a_table(path: &[&str]) -> String {
 
 fn json_get<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
     path.iter().try_fold(root, |node, key| node.get(*key))
-}
-
-fn json_get_mut<'a>(root: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
-    path.iter().try_fold(root, |node, key| node.get_mut(*key))
-}
-
-fn json_container<'a>(
-    root: &'a mut Value,
-    path: &[&str],
-) -> Result<&'a mut Map<String, Value>, String> {
-    let mut node = root;
-    for key in path {
-        node = node
-            .as_object_mut()
-            .ok_or_else(|| not_a_table(path))?
-            .entry(*key)
-            .or_insert_with(|| Value::Object(Map::new()));
-    }
-    node.as_object_mut().ok_or_else(|| not_a_table(path))
 }
 
 fn toml_get<'a>(root: &'a Item, path: &[&str]) -> Option<&'a Item> {

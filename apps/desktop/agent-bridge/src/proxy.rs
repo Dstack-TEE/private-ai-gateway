@@ -31,8 +31,8 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::{RawQuery, State},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    extract::State,
+    http::{header, uri::PathAndQuery, HeaderMap, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -458,7 +458,7 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
 async fn relay(
     state: Arc<ProxyState>,
     headers: HeaderMap,
-    query: Option<String>,
+    uri: Uri,
     body: Body,
     surface: Surface,
     path: &'static str,
@@ -544,7 +544,9 @@ async fn relay(
         &agent,
         surface,
         path,
-        query.as_deref(),
+        uri.path_and_query()
+            .cloned()
+            .unwrap_or_else(|| PathAndQuery::from_static(path)),
         &headers,
         bytes,
         model,
@@ -603,7 +605,7 @@ async fn forward(
     agent: &str,
     surface: Surface,
     path: &str,
-    query: Option<&str>,
+    target: PathAndQuery,
     headers: &HeaderMap,
     body: Bytes,
     model: Option<String>,
@@ -611,10 +613,6 @@ async fn forward(
 ) -> Response {
     let request_id = new_id();
     let dropped = hop_by_hop_names(headers);
-    let target = match query {
-        Some(query) => format!("{path}?{query}"),
-        None => path.to_string(),
-    };
     let mut request = Request::builder().method("POST").uri(target);
     for (name, value) in headers {
         let name = name.as_str();

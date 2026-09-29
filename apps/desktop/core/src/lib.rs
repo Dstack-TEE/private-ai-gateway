@@ -40,3 +40,45 @@ pub fn now_secs() -> u64 {
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
+
+/// `base` with `segments` appended to its path, each percent-encoded as one
+/// segment. `url` drops `.` and `..` segments, so they are refused.
+pub fn endpoint(base: &str, segments: &[&str]) -> Result<url::Url, String> {
+    let mut url =
+        url::Url::parse(base).map_err(|error| format!("invalid URL {base:?}: {error}"))?;
+    if let Some(segment) = segments
+        .iter()
+        .find(|segment| matches!(**segment, "" | "." | ".."))
+    {
+        return Err(format!("{segment:?} is not a URL path segment"));
+    }
+    url.path_segments_mut()
+        .map_err(|()| format!("URL {base:?} cannot have a path"))?
+        .pop_if_empty()
+        .extend(segments);
+    Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_segments_cannot_leave_their_path() {
+        assert_eq!(
+            endpoint("https://gateway.example/base/", &["v1", "a/b?c"])
+                .unwrap()
+                .as_str(),
+            "https://gateway.example/base/v1/a%2Fb%3Fc"
+        );
+        assert_eq!(
+            endpoint("http://[::1]:4190", &["v1"]).unwrap().as_str(),
+            "http://[::1]:4190/v1"
+        );
+        for segment in ["", ".", ".."] {
+            assert!(endpoint("https://gateway.example", &["v1", segment]).is_err());
+        }
+        assert!(endpoint("not a url", &["v1"]).is_err());
+        assert!(endpoint("mailto:someone@example.com", &["v1"]).is_err());
+    }
+}

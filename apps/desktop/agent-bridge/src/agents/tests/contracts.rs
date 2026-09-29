@@ -419,10 +419,13 @@ fn opencode_process_overrides_follow_official_merge_order() {
             &global.join("opencode.jsonc"),
             "{/* preserved */\"model\":\"other/model\"}",
         );
-        let expected = ConfigDoc::Json(json!({
-            "model": "private-ai-proxy/test",
-            "provider": {"private-ai-proxy": {"name": "Gateway"}}
-        }));
+        let expected = ConfigDoc::Json(
+            json!({
+                "model": "private-ai-proxy/test",
+                "provider": {"private-ai-proxy": {"name": "Gateway"}}
+            })
+            .to_string(),
+        );
         if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
             write(&dir.join("opencode.json"), "{\"model\":\"other/dir-json\"}");
             write(
@@ -491,10 +494,13 @@ fn opencode_process_overrides_follow_official_merge_order() {
 #[test]
 fn opencode_2_provider_entry_in_the_owned_file_is_refused() {
     let sandbox = sandbox("opencode-2-provider");
-    let projected = ConfigDoc::Json(json!({
-        "provider": {"private-ai-proxy": {"name": "Gateway"}},
-        "providers": {"private-ai-proxy": {"settings": {"baseURL": "http://127.0.0.1:1/v1"}}}
-    }));
+    let projected = ConfigDoc::Json(
+        json!({
+            "provider": {"private-ai-proxy": {"name": "Gateway"}},
+            "providers": {"private-ai-proxy": {"settings": {"baseURL": "http://127.0.0.1:1/v1"}}}
+        })
+        .to_string(),
+    );
     let error = sandbox
         .projector
         .check_opencode_merge(&projected, false)
@@ -672,7 +678,12 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
         1,
     )
     .unwrap();
-    let provider = opencode_provider(&catalog, ENDPOINT, Path::new("token"));
+    let api = api_url(ENDPOINT).unwrap();
+    let provider = opencode_provider(&catalog, &api, Path::new("/data/token")).unwrap();
+    assert_eq!(provider["options"]["apiKey"], "{file:/data/token}");
+    for path in ["/data/{env:HOME}/token", "/data/a}b/token"] {
+        assert!(opencode_provider(&catalog, &api, Path::new(path)).is_err());
+    }
     assert!(provider["models"]["context-only"].get("limit").is_none());
     assert!(provider["models"]["output-only"].get("limit").is_none());
     assert_eq!(

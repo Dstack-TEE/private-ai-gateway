@@ -34,6 +34,8 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     config::{CONFIG_FILE, CREDENTIALS_FILE, SCHEMA_FILE},
     paths::{app_data_dir, config_dir, legacy_config_dir},
@@ -42,7 +44,7 @@ use crate::{
 
 /// Moved in this order, so `credentials.toml` leaves the old directory last.
 const FILES: [&str; 2] = [CONFIG_FILE, CREDENTIALS_FILE];
-/// In the data directory: `<file> <size> <modified>` for each reported old file.
+/// In the data directory: the [`Stamp`] of each reported old file, as JSON.
 const REPORTED_FILE: &str = "legacy-settings-reported";
 
 /// What the old directory still holds.
@@ -291,20 +293,59 @@ fn copy(old: &Path, new: &Path, name: &str, content: &[u8]) -> io::Result<()> {
 }
 
 /// The old files reported so far, as they were then.
-struct Reported(String);
+#[derive(Default)]
+struct Reported {
+    stamps: Vec<Stamp>,
+    /// A record from an earlier version: `<file> <size> <modified>` lines, which
+    /// are only compared with [`Stamp::legacy_line`]; the next check rewrites
+    /// it as JSON.
+    legacy: Option<String>,
+}
 
 fn reported(data_dir: &Path) -> Reported {
-    Reported(fs::read_to_string(data_dir.join(REPORTED_FILE)).unwrap_or_default())
+    let Ok(text) = fs::read_to_string(data_dir.join(REPORTED_FILE)) else {
+        return Reported::default();
+    };
+    match serde_json::from_str(&text) {
+        Ok(stamps) => Reported {
+            stamps,
+            legacy: None,
+        },
+        Err(_) => Reported {
+            stamps: Vec::new(),
+            legacy: Some(text),
+        },
+    }
 }
 
 impl Reported {
     fn matches(&self, path: &Path, name: &str) -> bool {
-        stamp(path, name).is_some_and(|stamp| self.0.lines().any(|line| line == stamp))
+        stamp(path, name).is_some_and(|stamp| {
+            self.stamps.contains(&stamp)
+                || self
+                    .legacy
+                    .as_deref()
+                    .is_some_and(|text| text.lines().any(|line| line == stamp.legacy_line()))
+        })
     }
 }
 
-/// `<file> <size> <modified>` of an old file, which changes when it is written.
-fn stamp(path: &Path, name: &str) -> Option<String> {
+/// An old file's size and modification time, which change when it is written.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Stamp {
+    file: String,
+    size: u64,
+    /// Nanoseconds since the Unix epoch.
+    modified: u128,
+}
+
+impl Stamp {
+    fn legacy_line(&self) -> String {
+        format!("{} {} {}", self.file, self.size, self.modified)
+    }
+}
+
+fn stamp(path: &Path, name: &str) -> Option<Stamp> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata
         .modified()
@@ -312,32 +353,41 @@ fn stamp(path: &Path, name: &str) -> Option<String> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    Some(format!("{name} {} {modified}", metadata.len()))
+    Some(Stamp {
+        file: name.to_string(),
+        size: metadata.len(),
+        modified,
+    })
 }
 
 /// Reports old files the new directory overrides, unless they were reported
 /// as they are now.
 fn report(from: &Path, to: &Path, data_dir: &Path, kept: &[&'static str]) -> Vec<String> {
     let reported = reported(data_dir);
-    if kept
+    let known = kept
         .iter()
-        .all(|name| reported.matches(&from.join(name), name))
-    {
+        .all(|name| reported.matches(&from.join(name), name));
+    if known && reported.legacy.is_none() {
         return Vec::new();
     }
-    let notice = kept_notice(from, to, kept);
-    tracing::warn!("{notice}");
-    let record: String = kept
+    let stamps: Vec<Stamp> = kept
         .iter()
         .filter_map(|name| stamp(&from.join(name), name))
-        .map(|stamp| stamp + "\n")
         .collect();
-    if let Err(error) = private_fs::write_atomic(&data_dir.join(REPORTED_FILE), &record, None) {
+    let written = serde_json::to_string(&stamps)
+        .map_err(io::Error::other)
+        .and_then(|record| private_fs::write_atomic(&data_dir.join(REPORTED_FILE), &record, None));
+    if let Err(error) = written {
         tracing::warn!(
             "Cannot record that {} was reported: {error}",
             from.display()
         );
     }
+    if known {
+        return Vec::new();
+    }
+    let notice = kept_notice(from, to, kept);
+    tracing::warn!("{notice}");
     vec![format!("Settings: {notice}")]
 }
 
@@ -468,6 +518,21 @@ mod tests {
         let (_, notices) = relocate(&dirs);
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert_eq!(text(dirs.new.join(CONFIG_FILE)), "appearance = \"light\"\n");
+    }
+
+    #[test]
+    fn a_record_from_an_earlier_version_is_honored_and_rewritten_as_json() {
+        let dirs = dirs();
+        fs::create_dir_all(&dirs.new).unwrap();
+        fs::write(dirs.new.join(CONFIG_FILE), "appearance = \"light\"\n").unwrap();
+        let old = stamp(&dirs.old.join(CONFIG_FILE), CONFIG_FILE).unwrap();
+        let record = dirs.data.join(REPORTED_FILE);
+        fs::write(&record, format!("{}\n", old.legacy_line())).unwrap();
+
+        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
+        let rewritten: Vec<Stamp> = serde_json::from_str(&text(record)).unwrap();
+        assert_eq!(rewritten, [old]);
+        assert_eq!(relocate(&dirs), (dirs.new.clone(), Vec::new()));
     }
 
     #[test]

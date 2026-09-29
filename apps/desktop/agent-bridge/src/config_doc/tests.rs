@@ -83,7 +83,7 @@ fn toml_lists_and_numbers_round_trip_and_prune() {
 
 #[test]
 fn json_numbers_are_typed() {
-    let mut doc = ConfigDoc::parse(Format::Json, "{}").unwrap();
+    let mut doc = ConfigDoc::parse(Format::Json, "").unwrap();
     doc.set_value(&["limit", "context"], &ConfigValue::Number(4096))
         .unwrap();
     assert_eq!(
@@ -94,6 +94,60 @@ fn json_numbers_are_typed() {
         doc.get_value(&["limit", "context"]),
         Some(ConfigValue::Number(4096))
     );
+}
+
+#[test]
+fn json_edits_keep_every_untouched_byte() {
+    let source = "{\r\n    \"z\" :  \"\\u00e9\",\r\n    \"price\": 0.049999999999999996,\r\n    \"env\": {\"KEEP\": \"1\"},\r\n    \"model\": \"other\"\r\n}  \r\n";
+    let original = ConfigDoc::parse(Format::Json, source).unwrap();
+    assert_eq!(original.render().unwrap(), source);
+
+    // Setting a value changes only that value.
+    let mut doc = original.clone();
+    doc.set_str(&["model"], "private-ai-proxy/x").unwrap();
+    assert_eq!(
+        doc.render().unwrap(),
+        source.replace("\"other\"", "\"private-ai-proxy/x\"")
+    );
+    doc.set_str(&["model"], "other").unwrap();
+    assert_eq!(doc.render().unwrap(), source);
+
+    // A new nested key is appended, and removing it prunes the containers it
+    // created, restoring the source byte for byte.
+    doc.set_value(
+        &["provider", "private-ai-proxy", "options"],
+        &ConfigValue::Json(serde_json::json!({"baseURL": "http://127.0.0.1:1/v1"})),
+    )
+    .unwrap();
+    let edited = doc.render().unwrap();
+    assert!(
+        edited.starts_with(&source[..source.find("\r\n}").unwrap()]),
+        "{edited}"
+    );
+    assert_eq!(
+        doc.get_str(&["provider", "private-ai-proxy", "options", "baseURL"])
+            .as_deref(),
+        Some("http://127.0.0.1:1/v1")
+    );
+    doc.remove(&["provider", "private-ai-proxy", "options"])
+        .unwrap();
+    assert_eq!(doc.render().unwrap(), source);
+    doc.remove(&["env", "KEEP"]).unwrap();
+    assert!(!doc.contains(&["env"]));
+
+    assert_eq!(
+        ConfigDoc::parse(Format::Json, "{\"a\":{\"b\":1,\"b\":2}}").unwrap_err(),
+        "duplicate JSON property names are unsafe to edit"
+    );
+    for source in [
+        "{\"a\":1,\"a\":2}",
+        "{/* c */}",
+        "{\"a\":1,}",
+        "[]",
+        "{a:1}",
+    ] {
+        assert!(ConfigDoc::parse(Format::Json, source).is_err(), "{source}");
+    }
 }
 
 #[test]

@@ -67,11 +67,24 @@ mod platform {
         Ok(windows_launch_path(path))
     }
 
+    // Windows paths cannot contain `"`, so quoting the whole path is complete.
     #[cfg(any(target_os = "windows", test))]
     fn windows_launch_path(path: &Path) -> String {
         format!("\"{}\"", path.display())
     }
 
+    /// The executable as the first argument of a desktop entry's `Exec` key,
+    /// which auto-launch writes verbatim. No maintained crate writes `Exec`
+    /// values (freedesktop-desktop-entry and freedesktop_entry_parser only
+    /// parse them), so this follows the Desktop Entry Specification 1.5:
+    /// - "The Exec key": the argument is quoted, and `"`, `` ` ``, `$` and `\`
+    ///   inside the quotes get a backslash; `%` is written `%%`; the program
+    ///   name cannot contain `=`.
+    /// - "Possible value types": the string escapes (`\n`, `\t`, `\r`, `\\`)
+    ///   apply before that quoting, so each backslash is doubled again: a
+    ///   literal `\` is `\\\\` and a literal `$` is `\\$`. Other control
+    ///   characters cannot be written. Values of type string are specified as
+    ///   ASCII; other characters pass through as UTF-8, which GLib and KDE read.
     #[cfg(target_os = "linux")]
     fn launch_path(path: &Path) -> Result<String, auto_launch::Error> {
         let path = path.to_str().ok_or_else(|| {
@@ -80,23 +93,26 @@ mod platform {
                 "Application path is not valid UTF-8",
             )
         })?;
-        if path.contains('=') || path.contains('\0') {
+        if path.contains('=')
+            || path
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Application path cannot contain '=' or NUL in a desktop entry",
+                "Application path cannot contain '=' or control characters in a desktop entry",
             )
             .into());
         }
         let mut escaped = String::with_capacity(path.len() + 2);
         escaped.push('"');
-        // Desktop entry string escaping is applied before Exec argument unquoting.
         for character in path.chars() {
             match character {
                 '\n' => escaped.push_str("\\n"),
                 '\r' => escaped.push_str("\\r"),
                 '\t' => escaped.push_str("\\t"),
                 '\\' => escaped.push_str("\\\\\\\\"),
-                '"' => escaped.push_str("\\\\\\\""),
+                '"' => escaped.push_str("\\\\\""),
                 '`' => escaped.push_str("\\\\`"),
                 '$' => escaped.push_str("\\\\$"),
                 '%' => escaped.push_str("%%"),
@@ -132,6 +148,7 @@ mod platform {
         #[cfg(target_os = "linux")]
         #[test]
         fn escapes_linux_desktop_exec_path() {
+            // Each expected value is the `Exec` text in the desktop file.
             let cases = [
                 (
                     "/usr/bin/private-ai-proxy-desktop",
@@ -141,21 +158,26 @@ mod platform {
                     "/opt/Private AI Proxy/app",
                     r#""/opt/Private AI Proxy/app""#,
                 ),
+                // The specification's own examples: `\\\\` and `\\$`.
+                (r"/opt/back\slash", r#""/opt/back\\\\slash""#),
+                ("/opt/$cash", r#""/opt/\\$cash""#),
+                (r#"/opt/quo"te"#, r#""/opt/quo\\"te""#),
+                ("/opt/`tick`", r#""/opt/\\`tick\\`""#),
+                ("/opt/100%/%u", r#""/opt/100%%/%%u""#),
+                // Other reserved characters only need the quotes.
+                ("/opt/it's <a>;&|~*?#()", r#""/opt/it's <a>;&|~*?#()""#),
+                ("/home/José/私/app", r#""/home/José/私/app""#),
                 (
-                    r#"/opt/$cash/`tick`/back\slash/quo"te/%app"#,
-                    r#""/opt/\\$cash/\\`tick\\`/back\\\\slash/quo\\\"te/%%app""#,
+                    "/opt/line\nreturn\rtab\tapp",
+                    r#""/opt/line\nreturn\rtab\tapp""#,
                 ),
             ];
-
             for (path, expected) in cases {
-                assert_eq!(launch_path(Path::new(path)).unwrap(), expected);
+                assert_eq!(launch_path(Path::new(path)).unwrap(), expected, "{path}");
             }
-            assert!(launch_path(Path::new("/opt/app=name")).is_err());
-            assert!(launch_path(Path::new("/opt/app\0name")).is_err());
-            assert_eq!(
-                launch_path(Path::new("/opt/line\nreturn\rtab\tapp")).unwrap(),
-                r#""/opt/line\nreturn\rtab\tapp""#
-            );
+            for path in ["/opt/app=name", "/opt/app\0name", "/opt/app\u{1b}name"] {
+                assert!(launch_path(Path::new(path)).is_err(), "{path:?}");
+            }
         }
 
         #[test]

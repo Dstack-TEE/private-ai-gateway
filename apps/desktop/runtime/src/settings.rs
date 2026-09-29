@@ -41,7 +41,7 @@ use desktop_core::{
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use toml_edit::{DocumentMut, Item, TableLike};
+use toml_edit::{Decor, DocumentMut, Item, RawString, Table, TableLike};
 
 const CREDENTIALS_HEADER: &str =
     "# Private AI Proxy credentials: provider API keys and the web UI password,
@@ -174,7 +174,7 @@ impl Settings {
     fn create_missing(&self) -> Result<(), String> {
         let path = self.dir.join(CONFIG_FILE);
         if self.import_error.is_none() && !path.exists() {
-            private_fs::write_atomic(&path, CONFIG_HEADER, Some(None))
+            private_fs::write_atomic(&path, &new_file(CONFIG_HEADER), Some(None))
                 .map_err(|error| format!("Cannot create {}: {error}", path.display()))?;
         }
         let schema = config::schema();
@@ -441,7 +441,7 @@ pub(crate) fn write<T: Serialize>(
     let current = read(&path, name == CREDENTIALS_FILE)
         .map_err(|error| format!("Cannot read {name}: {error}"))?;
     // The file's own errors name it with a position; the user fixes them.
-    let text = edit(current.as_deref().unwrap_or(header), &from, &to).map_err(|()| {
+    let text = edit(current.as_deref(), header, &from, &to).map_err(|()| {
         Error::invalid_state(match current.as_deref().map(parse) {
             Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
             _ => format!("{name} is not valid TOML. Fix it before changing settings."),
@@ -497,36 +497,132 @@ pub(crate) fn write<T: Serialize>(
     Ok(())
 }
 
-/// Applies the change from `from` to `to` to a file's text. The file's
-/// header, its leading comment block up to a blank line (as in a new file),
-/// stays at the top; comments directly above a key belong to that key.
-fn edit(text: &str, from: &DocumentMut, to: &DocumentMut) -> Result<String, ()> {
-    let (header, body) = split_header(text);
-    let mut document: DocumentMut = body.parse().map_err(|_| ())?;
+/// Applies the change from `from` to `to` to a file (`None` when it does not
+/// exist yet). The file's header, its leading comments up to a blank line (as
+/// in a new file), moves to the document's own decor, which `toml_edit`
+/// renders first, so it stays on top whatever keys are added or removed;
+/// comments directly above a key belong to that key.
+fn edit(
+    current: Option<&str>,
+    header: &str,
+    from: &DocumentMut,
+    to: &DocumentMut,
+) -> Result<String, ()> {
+    let (mut document, header) = match current {
+        Some(text) => {
+            let mut document: DocumentMut = text.parse().map_err(|_| ())?;
+            let header = take_header(&mut document);
+            (document, header)
+        }
+        None => (DocumentMut::new(), header.to_string()),
+    };
     patch(document.as_table_mut(), from.as_table(), to.as_table());
-    let body = document.to_string();
-    Ok(if header.trim().is_empty() {
-        body
-    } else if body.is_empty() || header.ends_with("\n\n") {
-        format!("{header}{body}")
+    let header = if header.trim().is_empty() {
+        String::new()
+    } else if document.to_string().is_empty() || header.ends_with("\n\n") {
+        header
     } else {
-        format!("{}\n\n{body}", header.trim_end())
-    })
+        format!("{}\n\n", header.trim_end())
+    };
+    document.decor_mut().set_prefix(header);
+    Ok(document.to_string())
 }
 
-fn split_header(text: &str) -> (&str, &str) {
-    let (mut header_end, mut offset) = (0, 0);
-    for line in text.split_inclusive('\n') {
-        let line_text = line.trim();
-        if !line_text.is_empty() && !line_text.starts_with('#') {
-            return text.split_at(header_end);
+/// A new settings file: its header comments and nothing else.
+fn new_file(header: &str) -> String {
+    let mut document = DocumentMut::new();
+    document.decor_mut().set_prefix(header);
+    document.to_string()
+}
+
+/// Removes the header from the decor of the document's first item, or from
+/// its trailing comments when it has no items, and returns it.
+fn take_header(document: &mut DocumentMut) -> String {
+    if document.as_table().is_empty() {
+        let header = raw(document.trailing()).to_string();
+        document.set_trailing("");
+        return header;
+    }
+    let mut header = String::new();
+    let mut take = |decor: &mut Decor| {
+        let prefix = decor.prefix().map(raw).unwrap_or_default().to_string();
+        // A parsed prefix holds only comments and whitespace; the header is
+        // its lines up to and including the last blank one.
+        let mut end = 0;
+        let mut offset = 0;
+        for line in prefix.split_inclusive('\n') {
+            offset += line.len();
+            if line.ends_with('\n') && line.trim().is_empty() {
+                end = offset;
+            }
         }
-        offset += line.len();
-        if line_text.is_empty() {
-            header_end = offset;
+        header = prefix[..end].to_string();
+        decor.set_prefix(&prefix[end..]);
+    };
+    // TOML puts every root key before the first table header.
+    let root = document.as_table_mut();
+    if !first_key_decor(root, &mut take) {
+        let mut first = None;
+        visit_headers(root, &mut |table| {
+            if let Some(position) = table.position() {
+                first = Some(first.map_or(position, |first: isize| first.min(position)));
+            }
+        });
+        visit_headers(root, &mut |table| {
+            if first.is_some() && table.position() == first {
+                take(table.decor_mut());
+            }
+        });
+    }
+    header
+}
+
+fn raw(text: &RawString) -> &str {
+    text.as_str().unwrap_or_default()
+}
+
+/// Calls `f` with the decor of the first root key, which `toml_edit` renders
+/// first; a dotted key's is on its last part.
+fn first_key_decor(table: &mut dyn TableLike, f: &mut dyn FnMut(&mut Decor)) -> bool {
+    let Some((key, dotted)) = table.iter().find_map(|(key, item)| match item {
+        Item::Value(_) => Some((key.to_string(), false)),
+        Item::Table(child) if child.is_dotted() => Some((key.to_string(), true)),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if dotted {
+        table
+            .get_mut(&key)
+            .and_then(Item::as_table_like_mut)
+            .is_some_and(|child| first_key_decor(child, f))
+    } else {
+        table
+            .key_mut(&key)
+            .map(|mut key| f(key.leaf_decor_mut()))
+            .is_some()
+    }
+}
+
+/// Calls `f` with every table that has a `[header]` or `[[header]]`.
+fn visit_headers(table: &mut Table, f: &mut dyn FnMut(&mut Table)) {
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                if !child.is_implicit() && !child.is_dotted() {
+                    f(child);
+                }
+                visit_headers(child, f);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    f(child);
+                    visit_headers(child, f);
+                }
+            }
+            _ => {}
         }
     }
-    (text, "")
 }
 
 /// Reads a settings file; `credentials.toml` is read without following symlinks.

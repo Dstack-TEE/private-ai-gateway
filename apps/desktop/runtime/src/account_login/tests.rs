@@ -329,6 +329,33 @@ async fn pasted_callback_is_bound_to_session_and_consumed_once() {
 }
 
 #[test]
+fn callback_pages_need_no_escaping() {
+    // The pages include these unescaped, as compile-time constants.
+    use desktop_core::brand::{APP_IDENTIFIER, BYLINE, PRODUCT_NAME};
+    for text in [APP_IDENTIFIER, BYLINE, PRODUCT_NAME] {
+        assert!(!text.contains(['&', '<', '>', '"', '\'']), "{text}");
+    }
+    // The icon's base64 goes inside a double-quoted attribute unescaped.
+    assert!(STANDARD
+        .encode(CALLBACK_ICON)
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')));
+    for accepted in [true, false] {
+        let page = callback_page(accepted);
+        assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>\n"));
+        assert!(page.contains("<img src=\"data:image/png;base64,iVBORw0KGgo"));
+        assert!(page.contains(&format!(
+            "<title>{}",
+            if accepted {
+                "Authorization received"
+            } else {
+                "Account connection could not complete"
+            }
+        )));
+    }
+}
+
+#[test]
 fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
     let address = "127.0.0.1:50123".parse().unwrap();
     let mut headers = HeaderMap::new();
@@ -390,7 +417,10 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
             async move {
                 assert_eq!(form["grant_type"], "authorization_code");
                 assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
-                assert_eq!(form["redirect_uri"], callback_url(callback_address));
+                assert_eq!(
+                    form["redirect_uri"],
+                    callback_url(callback_address).unwrap().as_str()
+                );
                 assert_eq!(form["code"], "one-use");
                 let verifier = Sha256::digest(form["code_verifier"].as_bytes());
                 assert_eq!(
@@ -440,7 +470,10 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
     assert_eq!(query["response_type"], "code");
     assert_eq!(query["response_mode"], "query");
     assert_eq!(query["client_id"], REDPILL_CLIENT_ID);
-    assert_eq!(query["redirect_uri"], callback_url(callback_address));
+    assert_eq!(
+        query["redirect_uri"],
+        callback_url(callback_address).unwrap().as_str()
+    );
     assert_eq!(query["scope"], "openid profile user:org:read");
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["state"], *state.secret());

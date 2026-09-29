@@ -6,6 +6,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use url::{Host, Url};
+
 use crate::contracts::ListenConfig;
 
 #[derive(Clone, Debug)]
@@ -37,17 +39,26 @@ pub fn resolve(mut config: ListenConfig) -> Result<ResolvedListen, String> {
         .unwrap_or(&config.listen_address);
     Ok(ResolvedListen {
         bind: SocketAddr::new(address, config.port),
-        endpoint: format!("http://{}:{}", url_host(host), config.port),
+        endpoint: http_endpoint(host, config.port)?,
         config,
     })
 }
 
-/// Brackets IPv6 literals for use in URLs and `Host` headers.
+/// `http://<host>:<port>`; `url` leaves out the port when it is 80.
+pub fn http_endpoint(host: &str, port: u16) -> Result<String, String> {
+    let invalid = || format!("Cannot form a URL for host {host}");
+    let mut url = Url::parse("http://localhost").map_err(|_| invalid())?;
+    url.set_host(Some(&url_host(host))).map_err(|_| invalid())?;
+    url.set_port(Some(port)).map_err(|()| invalid())?;
+    Ok(url.origin().ascii_serialization())
+}
+
+/// A host as URLs and `Host` headers write it: IPv6 literals in brackets.
 pub fn url_host(host: &str) -> String {
-    if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => Host::<&str>::Ipv4(ip).to_string(),
+        Ok(IpAddr::V6(ip)) => Host::<&str>::Ipv6(ip).to_string(),
+        Err(_) => host.to_string(),
     }
 }
 
@@ -121,5 +132,30 @@ mod tests {
         assert!(resolve(config("localhost", true, None))
             .unwrap_err()
             .contains("IPv4 or IPv6"));
+        assert_eq!(url_host("::1"), "[::1]");
+        assert_eq!(url_host("[::1]"), "[::1]");
+        assert_eq!(url_host("studio.local"), "studio.local");
+    }
+
+    /// Unusual addresses are written in `url`'s canonical form: the default
+    /// port is left out and IPv6 literals are compressed and lowercased.
+    #[test]
+    fn endpoints_are_canonical_urls() {
+        let endpoint = |address: &str, port, client_host: Option<&str>| {
+            let mut config = config(address, true, client_host);
+            config.port = port;
+            resolve(config).unwrap().endpoint
+        };
+        assert_eq!(endpoint("127.0.0.1", 4190, None), "http://127.0.0.1:4190");
+        assert_eq!(endpoint("127.0.0.1", 80, None), "http://127.0.0.1");
+        assert_eq!(endpoint("0:0:0:0:0:0:0:1", 4190, None), "http://[::1]:4190");
+        assert_eq!(
+            endpoint("::", 4190, Some("FD00:0:0:0:0:0:0:2")),
+            "http://[fd00::2]:4190"
+        );
+        assert_eq!(
+            endpoint("0.0.0.0", 8080, Some("Studio.Local")),
+            "http://studio.local:8080"
+        );
     }
 }

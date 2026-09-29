@@ -210,7 +210,7 @@ pub async fn check(
             installation,
             release_root(configured)?.as_str(),
             &version.to_string(),
-        ),
+        )?,
         None => (Vec::new(), None),
     };
     Ok(UpdateNotice {
@@ -261,12 +261,13 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
 }
 
 /// `root` and `version` come from the compiled feed and a parsed SemVer, so the
-/// steps contain no text from the downloaded manifest.
+/// steps contain no text from the downloaded manifest. Commands are POSIX
+/// shell words joined by `shlex`.
 fn upgrade_steps(
     installation: Installation,
     root: &str,
     version: &str,
-) -> (Vec<String>, Option<String>) {
+) -> Result<(Vec<String>, Option<String>), String> {
     let platform = if cfg!(windows) {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -280,41 +281,53 @@ fn upgrade_steps(
         "x64"
     };
     // Mirrors artifactName() in scripts/release-artifacts.mjs.
-    let asset = |cli: bool, suffix: &str| {
+    let name = |cli: bool, suffix: &str| {
         let kind = if cli { "-cli" } else { "" };
-        format!(
-            "{root}desktop-v{version}/private-ai-proxy{kind}-{version}-{platform}-{arch}{suffix}"
-        )
+        format!("private-ai-proxy{kind}-{version}-{platform}-{arch}{suffix}")
     };
-    let stop = "private-ai-proxy --yes service stop".to_string();
-    match installation {
+    let tag = format!("desktop-v{version}");
+    let asset =
+        |name: &str| -> Result<String, String> { Ok(crate::endpoint(root, &[&tag, name])?.into()) };
+    let command = |words: &[&str]| {
+        shlex::try_join(words.iter().copied())
+            .map_err(|_| "Cannot write the upgrade command".to_string())
+    };
+    let stop = command(&["private-ai-proxy", "--yes", "service", "stop"])?;
+    Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
         Installation::DesktopPacman => (
             vec![
                 stop,
-                format!("sudo pacman -U {}", asset(false, ".pkg.tar.zst")),
+                command(&[
+                    "sudo",
+                    "pacman",
+                    "-U",
+                    &asset(&name(false, ".pkg.tar.zst"))?,
+                ])?,
             ],
             None,
         ),
         Installation::Pacman => (
             vec![
                 stop,
-                format!("sudo pacman -U {}", asset(true, ".pkg.tar.zst")),
+                command(&["sudo", "pacman", "-U", &asset(&name(true, ".pkg.tar.zst"))?])?,
             ],
             None,
         ),
         Installation::Rpm => (
-            vec![stop, format!("sudo rpm -U {}", asset(true, ".rpm"))],
+            vec![
+                stop,
+                command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
+            ],
             None,
         ),
         Installation::Deb => {
-            let url = asset(true, ".deb");
-            let file = url.rsplit('/').next().unwrap_or_default().to_owned();
+            let file = name(true, ".deb");
             (
                 vec![
                     stop,
-                    format!("curl -fLO {url}"),
-                    format!("sudo apt install ./{file}"),
+                    command(&["curl", "-fLO", &asset(&file)?])?,
+                    command(&["sudo", "apt", "install", &format!("./{file}")])?,
                 ],
                 None,
             )
@@ -322,15 +335,23 @@ fn upgrade_steps(
         Installation::Npm => (
             vec![
                 stop,
-                format!("npm install --global private-ai-proxy@{version}"),
+                command(&[
+                    "npm",
+                    "install",
+                    "--global",
+                    &format!("private-ai-proxy@{version}"),
+                ])?,
             ],
             None,
         ),
         Installation::Portable => (
             Vec::new(),
-            Some(asset(true, if cfg!(windows) { ".zip" } else { ".tar.gz" })),
+            Some(asset(&name(
+                true,
+                if cfg!(windows) { ".zip" } else { ".tar.gz" },
+            ))?),
         ),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -448,6 +469,9 @@ mod tests {
         let root = release_root(FEED).expect("valid feed");
         let root = root.as_str();
         assert_eq!(root, "https://example.test/o/r/releases/download/");
+        let upgrade_steps = |installation, root, version| {
+            super::upgrade_steps(installation, root, version).unwrap()
+        };
         let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
             npm,

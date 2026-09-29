@@ -108,7 +108,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         generated_catalog(
             PROVIDER_PATH,
             json!({
-                "baseUrl": format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
+                "baseUrl": api_url(inputs.endpoint)?,
                 "api": "openai-completions",
                 "apiKey": reference,
                 "models": models,
@@ -656,12 +656,13 @@ mod tests {
             json!({"env":{"KEY":{"source":"exec","provider":PROVIDER,"id":"another"}}}),
             json!({"env":{"KEY":{"source":"file","provider":PROVIDER,"id":"openclaw"}}}),
         ] {
-            let doc = ConfigDoc::Json(root);
+            let doc = ConfigDoc::Json(root.to_string());
             let before = doc.render().unwrap();
             assert!(validate_config(&doc, None).is_err());
             assert_eq!(doc.render().unwrap(), before);
         }
-        let doc = ConfigDoc::Json(json!({"agents":{"defaults":{"model":"external/model"}}}));
+        let doc =
+            ConfigDoc::Json(json!({"agents":{"defaults":{"model":"external/model"}}}).to_string());
         assert!(validate_config(&doc, None).is_ok());
         assert!(validate_selection(&doc, &ConnectOptions::default()).is_ok());
         assert!(validate_selection(
@@ -727,7 +728,7 @@ mod tests {
             .unwrap()
             .contains("// Keep the user's routing policy."));
 
-        let mut drifted = ConfigDoc::Json(json!({}));
+        let mut drifted = ConfigDoc::Json(json!({}).to_string());
         let fields = projection(temp.path(), &ConnectOptions::default());
         let record = project(&mut drifted, &fields, None, Agent::OpenClaw)
             .unwrap()

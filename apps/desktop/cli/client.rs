@@ -8,8 +8,10 @@
 use std::sync::{Arc, RwLock};
 
 use crate::aci::tls::{error_chain, observing_spki_client, SpkiObservations};
+use desktop_core::endpoint;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
+use url::Url;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Generous read timeout: chat responses stream for a while.
@@ -25,6 +27,13 @@ pub fn random_nonce_hex() -> String {
 /// Strip a trailing `/` so URL joins stay canonical.
 pub fn normalize_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
+}
+
+/// The attestation report's URL, which carries the request nonce.
+pub fn attestation_url(base_url: &str, nonce: &str) -> Result<Url, String> {
+    let mut url = endpoint(base_url, &["v1", "aci", "attestation"])?;
+    url.query_pairs_mut().append_pair("nonce", nonce);
+    Ok(url)
 }
 
 /// The URL's host in the form the TLS verifier keys pins and observations
@@ -301,16 +310,8 @@ impl AciClient {
 
     /// Fetch the attestation report. The caller classifies a failure with
     /// [`ServiceError::from_request`].
-    pub async fn fetch_attestation(
-        &self,
-        base_url: &str,
-        nonce: &str,
-    ) -> Result<HttpResult, reqwest::Error> {
-        self.read_get(
-            &format!("{base_url}/v1/aci/attestation?nonce={nonce}"),
-            None,
-        )
-        .await
+    pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, reqwest::Error> {
+        self.read_get(url.as_str(), None).await
     }
 
     pub async fn fetch_receipt(
@@ -326,12 +327,10 @@ impl AciClient {
                 "receipt id {receipt_id:?} is not a URL-safe id"
             )));
         }
-        self.get_limited(
-            &format!("{base_url}/v1/aci/receipts/{receipt_id}"),
-            bearer,
-            MAX_RECEIPT_BYTES,
-        )
-        .await
+        let url =
+            endpoint(base_url, &["v1", "aci", "receipts", receipt_id]).map_err(GetError::Failed)?;
+        self.get_limited(url.as_str(), bearer, MAX_RECEIPT_BYTES)
+            .await
     }
 
     /// Fetch one attested session; the path takes the session id exactly as
@@ -344,8 +343,8 @@ impl AciClient {
         if !is_url_safe_id(session_id) {
             return Err(format!("session id {session_id:?} is not a URL-safe id"));
         }
-        self.get(&format!("{base_url}/v1/aci/sessions/{session_id}"), None)
-            .await
+        let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
+        self.get(url.as_str(), None).await
     }
 
     pub async fn fetch_models(
@@ -353,7 +352,8 @@ impl AciClient {
         base_url: &str,
         bearer: Option<&str>,
     ) -> Result<HttpResult, String> {
-        self.get(&format!("{base_url}/v1/models"), bearer).await
+        let url = endpoint(base_url, &["v1", "models"])?;
+        self.get(url.as_str(), bearer).await
     }
 
     /// POST a chat completion and read the whole body, capturing the exact
@@ -366,10 +366,10 @@ impl AciClient {
         body: Vec<u8>,
         mut on_chunk: impl FnMut(&[u8]),
     ) -> Result<HttpResult, String> {
-        let url = format!("{base_url}/v1/chat/completions");
+        let url = endpoint(base_url, &["v1", "chat", "completions"])?;
         let mut req = self
             .http()
-            .post(&url)
+            .post(url.as_str())
             .header("content-type", "application/json")
             .header("accept", "text/event-stream, application/json")
             .body(body);
@@ -426,6 +426,23 @@ mod tests {
         assert_eq!(nonce.len(), 64);
         assert!(nonce.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(nonce, random_nonce_hex());
+    }
+
+    #[test]
+    fn the_nonce_is_one_encoded_query_value() {
+        let url = attestation_url("https://gateway.example/base", "a&nonce=b#c d").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://gateway.example/base/v1/aci/attestation?nonce=a%26nonce%3Db%23c+d"
+        );
+        assert_eq!(url.query_pairs().count(), 1);
+        assert_eq!(url.fragment(), None);
+        assert_eq!(
+            attestation_url("https://[::1]:8443", "00ff")
+                .unwrap()
+                .as_str(),
+            "https://[::1]:8443/v1/aci/attestation?nonce=00ff"
+        );
     }
 
     #[test]

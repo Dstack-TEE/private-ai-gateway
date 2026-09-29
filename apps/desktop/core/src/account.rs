@@ -22,17 +22,22 @@ pub struct LoginPresentation {
 }
 
 /// The deep link that brings the desktop app forward after browser sign-in.
+pub const ACCOUNT_RETURN_URL: &str = concat!(crate::app_identifier!(), "://oauth/return");
+
 pub fn account_return_url() -> String {
-    format!("{}://oauth/return", crate::brand::APP_IDENTIFIER)
+    ACCOUNT_RETURN_URL.to_string()
 }
 
 pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Result<String, String> {
     let slug = validated_scope_slug(scope_slug)?;
-    match provider {
-        ServiceProvider::Phala => Ok(format!("https://cloud.phala.com/{slug}/billing")),
-        ServiceProvider::Redpill => Ok(format!("https://redpill.ai/{slug}/credits")),
-        ServiceProvider::Custom => Err("Billing is only available for Phala and RedPill".into()),
-    }
+    let (base, page) = match provider {
+        ServiceProvider::Phala => ("https://cloud.phala.com", "billing"),
+        ServiceProvider::Redpill => ("https://redpill.ai", "credits"),
+        ServiceProvider::Custom => {
+            return Err("Billing is only available for Phala and RedPill".into())
+        }
+    };
+    Ok(crate::endpoint(base, &[slug, page])?.into())
 }
 
 /// Where a provider's API keys are managed.
@@ -45,10 +50,8 @@ pub const fn api_key_page(provider: ServiceProvider) -> Option<&'static str> {
 }
 
 pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
-    Ok(format!(
-        "https://redpill.ai/{}",
-        validated_scope_slug(organization_slug)?
-    ))
+    let slug = validated_scope_slug(organization_slug)?;
+    Ok(crate::endpoint("https://redpill.ai", &[slug])?.into())
 }
 
 fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
