@@ -1,5 +1,8 @@
 # Private AI Gateway
 
+[![npm](https://img.shields.io/npm/v/private-ai-proxy?label=npm)](https://www.npmjs.com/package/private-ai-proxy)
+[![License](https://img.shields.io/github/license/Dstack-TEE/private-ai-gateway)](LICENSE)
+
 **Call the LLM APIs you already know. Verify that no one can read your data
 before you send it.**
 

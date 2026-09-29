@@ -1,5 +1,9 @@
 # Private AI Proxy
 
+<a href="https://apps.apple.com/app/private-ai-proxy/id6814051406"><img alt="Download on the Mac App Store" src="https://toolbox.marketingtools.apple.com/api/badges/download-on-the-mac-app-store/black/en-us?size=250x83" height="40"></a>
+
+[![npm](https://img.shields.io/npm/v/private-ai-proxy?label=npm)](https://www.npmjs.com/package/private-ai-proxy)
+
 Private AI Proxy is the local client for confidential AI services. It
 verifies an ACI service, exposes a machine-local API, and projects that API into
 supported coding agents without giving those agents the provider credential.
