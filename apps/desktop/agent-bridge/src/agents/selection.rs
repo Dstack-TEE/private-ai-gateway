@@ -70,6 +70,14 @@ impl Journal {
         Ok(())
     }
 
+    /// The journal as the record `project` and `restore` read.
+    fn record(&self) -> Connection {
+        Connection {
+            fields: self.fields.clone(),
+            ..Connection::default()
+        }
+    }
+
     /// Whether a dsh credential journal wrote `token`.
     pub(super) fn wrote_token(&self, token: &str) -> bool {
         let token = ConfigValue::Str(token.to_string());
@@ -204,10 +212,7 @@ pub(super) fn prepare(
         )],
         File::DshCredentials => return Ok(None),
     };
-    let prior = prior.map(|journal| Connection {
-        fields: journal.fields.clone(),
-        ..Connection::default()
-    });
+    let prior = prior.map(Journal::record);
     let edit = project(&mut doc, &fields, prior.as_ref(), agent)?;
     let journal = Journal {
         file,
@@ -224,13 +229,13 @@ pub(super) fn prepare(
     }))
 }
 
-/// Store the connection's token in dsh's credential store. A store the
-/// connection creates is owned whole; in the user's store the token is an
-/// exact field.
 fn text_digest(text: &str) -> String {
     hex::encode(Sha256::digest(text))
 }
 
+/// Store the connection's token in dsh's credential store. A store the
+/// connection creates is owned whole; in the user's store the token is an
+/// exact field, journaled only as its digest.
 pub(super) fn prepare_token(
     config: &Path,
     prior: Option<&Journal>,
@@ -253,10 +258,7 @@ pub(super) fn prepare_token(
         ),
     };
     let field = set(&["refs", dsh::TOKEN_REF], token).exact();
-    let prior = prior.map(|journal| Connection {
-        fields: journal.fields.clone(),
-        ..Connection::default()
-    });
+    let prior = prior.map(Journal::record);
     let edit = project(&mut doc, &[field], prior.as_ref(), Agent::Dsh)?;
     let after = doc.render()?;
     let mut fields = edit.record.ok_or("Missing credential journal")?.fields;
@@ -298,11 +300,7 @@ pub(super) fn restoration(
         return Ok(None);
     };
     let mut doc = ConfigDoc::parse(journal.file.format(), &text)?;
-    let record = Connection {
-        fields: journal.fields.clone(),
-        ..Connection::default()
-    };
-    let edit = restore(&mut doc, &record, secrets).map_err(|error| error.to_string())?;
+    let edit = restore(&mut doc, &journal.record(), secrets).map_err(|error| error.to_string())?;
     let after = doc.render()?;
     Ok(Some(Edit {
         path,

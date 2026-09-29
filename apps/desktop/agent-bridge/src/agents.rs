@@ -166,7 +166,7 @@ impl Connection {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct OwnedField {
     path: Vec<String>,
     /// What the connection wrote; `None` when it made the key absent.
@@ -435,7 +435,7 @@ impl Projector {
             path.as_ref()
                 .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
         }
-        let (text, read_error) = self.config_text_at(agent, &path);
+        let (text, read_error) = self.config_text_at(&path);
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }

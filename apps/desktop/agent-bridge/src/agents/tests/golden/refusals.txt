@@ -1,0 +1,166 @@
+# codex refuses invalid TOML
+write .codex/config.toml (600) sha256:6d2b7a2276c0
+connect codex model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused InvalidConfiguration: The Codex config at $HOME/.codex/config.toml is not valid TOML; fix it before connecting
+# codex refuses AWS authentication
+write .codex/config.toml (600) sha256:ea38a57dde5b
+connect codex model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused AuthenticationConflict: Codex's private_ai_proxy provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten
+# claude-code refuses invalid JSON
+write .claude/settings.json (600) sha256:5a862879abf6
+connect claude-code model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused InvalidConfiguration: The Claude Code config at $HOME/.claude/settings.json is not valid JSON; fix it before connecting
+# claude-code refuses an unmanaged model picker
+write .claude/settings.json (600) sha256:8be771e95388
+connect claude-code model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Claude Code provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
+# opencode refuses an unmanaged null provider
+write .config/opencode/opencode.json (600) sha256:49956cb64b6b
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenCode provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
+# opencode refuses an unmanaged provider with credentials
+write .config/opencode/opencode.json (600) sha256:db7f631510da
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenCode provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
+# opencode refuses an OpenCode 2 provider
+write .config/opencode/opencode.json (600) sha256:35fcebb6700e
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's merged config changes the gateway-owned field /providers/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json without changing unrelated providers, or Disconnect to restore the original config.
+# opencode refuses an OpenCode 2 provider in another layer
+write .config/opencode/opencode.jsonc (600) sha256:626f0280629a
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's merged config changes the gateway-owned field /providers/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json, $HOME/.config/opencode/opencode.jsonc without changing unrelated providers, or Disconnect to restore the original config.
+# opencode refuses disabled providers
+write .config/opencode/opencode.json (600) sha256:9795b437eeb6
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's enabled_providers/disabled_providers exclude private-ai-proxy or are invalid. Resolve those filters in OpenCode; they will not be overwritten
+# opencode refuses an invalid layer
+write .config/opencode/config.json (600) sha256:40b5cafe045b
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Cannot verify OpenCode config merge: $HOME/.config/opencode/config.json is not valid JSONC. Access is disabled; fix that file or Disconnect to restore the original config.
+# pi refuses an unmanaged null provider
+write .pi/agent/models.json (600) sha256:cb9dbb2a22e7
+connect pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Pi provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
+# pi refuses an unmanaged provider with credentials
+write .pi/agent/models.json (600) sha256:38edf22d91b3
+connect pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Pi provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
+# pi refuses a stored key
+write .pi/agent/auth.json (600) sha256:0816fadce64f
+connect pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused AuthenticationConflict: Pi has a stored credential for private-ai-proxy that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged
+# pi refuses an invalid auth file
+write .pi/agent/auth.json (600) sha256:4f53cda18c2b
+connect pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused InvalidConfiguration: Cannot inspect native credential conflicts at $HOME/.pi/agent/auth.json; expected an object
+# hermes refuses an unmanaged provider
+write .hermes/config.yaml (600) sha256:a39aefda6088
+connect hermes model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten
+# hermes refuses an explicit key
+write .hermes/config.yaml (600) sha256:a48366f2feac
+connect hermes model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused AuthenticationConflict: Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes
+# hermes refuses a fallback model
+write .hermes/config.yaml (600) sha256:8e830582c7d7
+connect hermes model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased
+# hermes refuses a named credential pool
+write .hermes/auth.json (600) sha256:5d5a7993fd7b
+connect hermes model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused AuthenticationConflict: Hermes has a private-ai-proxy credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged
+# openclaw refuses an include
+write .openclaw/openclaw.json (600) sha256:a79f24316104
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused InvalidConfiguration: The OpenClaw config at $HOME/.openclaw/openclaw.json is invalid or unsupported JSON5 syntax; fix it before connecting
+# openclaw refuses a nested include
+write .openclaw/openclaw.json (600) sha256:3ee2b6396f35
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw configurations with $include are not supported; use a native standalone config
+# openclaw refuses a remote gateway
+write .openclaw/openclaw.json (600) sha256:fdc1f7f36225
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw remote gateways are not native-host projections
+# openclaw refuses an existing provider
+write .openclaw/openclaw.json (600) sha256:31043bca1457
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw models.providers.private-ai-proxy already exists outside this connection
+# openclaw refuses a null secret provider
+write .openclaw/openclaw.json (600) sha256:0c71ee5aa42f
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw secrets.providers.private-ai-proxy already exists outside this connection
+# openclaw refuses a provider alias
+write .openclaw/openclaw.json (600) sha256:ac688718a45a
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw has a conflicting alias for the managed provider
+# openclaw refuses another exec SecretRef
+write .openclaw/openclaw.json (600) sha256:17b0ffd0cfbb
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenClaw token provider supports only its single local token SecretRef
+# openclaw refuses another file SecretRef
+write .openclaw/openclaw.json (600) sha256:5f69b09e2cd3
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenClaw token provider supports only its single local token SecretRef
+# openclaw refuses a scalar default model
+write .openclaw/openclaw.json (600) sha256:8e2751144262
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Selecting an OpenClaw primary requires object-shaped agents.defaults.model; scalar models are not migrated
+# openclaw refuses a legacy config
+write .openclaw/clawdbot.json (600) sha256:44136fa355b3
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw legacy config discovery is ambiguous; set OPENCLAW_CONFIG_PATH explicitly
+# oh-my-pi refuses a legacy models.json
+write .omp/agent/models.json (600) sha256:537c7e0751e3
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Oh My Pi has a legacy models.json. Complete its native YAML migration before connecting; this app will not migrate or overwrite it
+# oh-my-pi refuses an unmanaged provider
+write .omp/agent/models.yml (600) sha256:a99dffa84de7
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten
+# oh-my-pi refuses a null provider
+write .omp/agent/models.yml (600) sha256:7d081ba04eaa
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten
+# oh-my-pi refuses a provider list
+write .omp/agent/models.yml (600) sha256:76ade74b72b7
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Oh My Pi providers must be a mapping
+# oh-my-pi refuses duplicate keys
+write .omp/agent/models.yml (600) sha256:d76fa331b4ba
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Oh My Pi requires a plain YAML mapping; aliases, merge keys, custom tags and duplicate keys cannot be safely projected
+# oh-my-pi refuses a merge key
+write .omp/agent/models.yml (600) sha256:6efddb29712e
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Oh My Pi requires a plain YAML mapping; aliases, merge keys, custom tags and duplicate keys cannot be safely projected
+# oh-my-pi refuses two documents
+write .omp/agent/models.yml (600) sha256:4a27eaa334c8
+connect oh-my-pi model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: Oh My Pi requires a single YAML document
+# dsh refuses a profile's own providers
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:12b1d8460e8b
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml configures its own dsh model providers, which connecting would hide from every profile. Move that `id: llm-pi-ai` item to $HOME/.dsh/cordis.patch.yml, then connect again
+# dsh refuses a profile disabling credentials
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:8b6fb084e02e
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml: it disables the `credentials` row; remove `disabled` there
+# dsh refuses a profile moving the store
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:1ea9c9887478
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml: it moves dsh's credential store (`credentials` config); remove that config
+# dsh refuses an inserted default model
+write .dsh/cordis.patch.yml (600) sha256:48cd0e1b4554
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml: it inserts another `agent-default-model` row, which would take the connection's place; remove that insert
+# dsh refuses duplicate ids
+write .dsh/cordis.patch.yml (600) sha256:1d3557db755d
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml: The list has more than one item with id: llm-pi-ai
+# dsh refuses a flow list
+write .dsh/cordis.patch.yml (600) sha256:acade540f720
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: the list cannot be edited safely: its list is written in flow style ([...]); write it as a block list (- item)
+# dsh refuses a flow item
+write .dsh/cordis.patch.yml (600) sha256:ff58816e4ce3
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: its `id: agent-default-model` item is written in flow style ({...}); write it as a block mapping
+# dsh refuses no final newline
+write .dsh/cordis.patch.yml (600) sha256:610aab4a9eb4
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: the list cannot be edited safely: it does not end with a newline; add one
+# dsh refuses a reasoning effort
+write .dsh/cordis.patch.yml (600) sha256:ee595193bcda
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: its `id: agent-default-model` item sets `config.reasoningEffort`, which cannot be removed and put back exactly; remove it
+# dsh refuses an existing provider
+write .dsh/cordis.patch.yml (600) sha256:0ed67fb9cbd7
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: its `id: llm-pi-ai` item already has `config.providers.private-ai-proxy`, a structured value that cannot be replaced and put back exactly
+# dsh refuses a foreign token
+write .dsh/.credentials.yaml (600) sha256:ca071dbc1f05
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: dsh's credential store $HOME/.dsh/.credentials.yaml already holds PRIVATE_AI_PROXY_DSH_TOKEN; remove it there before connecting
+# dsh refuses an indented list
+write .dsh/cordis.patch.yml (600) sha256:a0bd06d3ad1f
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml cannot be changed safely: the list cannot be edited safely: its list is indented; start each `- ` item at the beginning of the line
+# dsh refuses search under another id
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:a4abdee53b1a
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml: it inserts another `@deepseek-ai/dsh-web-search-deepseek` row, which would take the connection's place; remove that insert
+# dsh refuses acp disabled
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:055d0eac0023
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml: it disables the `acp` row; remove `disabled` there
+# dsh refuses acp under another id
+write .dsh/profiles/web/cordis.patch.yml (600) sha256:c97239c2ac7d
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/profiles/web/cordis.patch.yml: it inserts another `@deepseek-ai/dsh-acp` row, which would take the connection's place; remove that insert
+# dsh refuses an inserted acp
+write .dsh/cordis.patch.yml (600) sha256:9ba774880e04
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: $HOME/.dsh/cordis.patch.yml: it inserts another `acp` row, which would take the connection's place; remove that insert
+# dsh refuses legacy settings
+write .dsh/settings.yaml (600) sha256:e03acadcac73
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: dsh has not imported its legacy settings at $HOME/.dsh/settings.yaml yet; start dsh once so it imports them, then connect
+# dsh refuses a store version
+write .dsh/.credentials.yaml (600) sha256:16e0d1afd6e9
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: dsh's credential store $HOME/.dsh/.credentials.yaml is not a version 1 store; start dsh once so it upgrades or reports it
+# dsh refuses a readable store
+write .dsh/.credentials.yaml sha256:520c4a819948
+connect dsh model="phala/qwen" catalog=0bf0a8e4: refused ConfigurationConflict: dsh's credential store $HOME/.dsh/.credentials.yaml must be private to you; run chmod 600 on it
+# unknown models are refused
+connect claude-code model="claude-sonnet-4-6" catalog=0bf0a8e4: refused IncompatibleModel: The selected model is unavailable on this agent's API for the current profile. Choose a supported model in the agent and retry.
+connect codex model="missing/model" catalog=0bf0a8e4: refused IncompatibleModel: The selected model is unavailable on this agent's API for the current profile. Choose a supported model in the agent and retry.
+connect hermes model=" " catalog=0bf0a8e4: refused IncompatibleModel: The selected model is unavailable on this agent's API for the current profile. Choose a supported model in the agent and retry.

@@ -20,10 +20,7 @@ impl Field {
     /// items are exact.
     pub(super) fn in_entry(self, id: &str) -> Self {
         Field {
-            entry: Some(EntryKey {
-                key: "id".to_string(),
-                id: id.to_string(),
-            }),
+            entry: Some(EntryKey::id(id)),
             exact: true,
             ..self
         }
@@ -150,63 +147,55 @@ pub(super) fn agent_credential_command(
     }
 }
 
+/// Whether the recorded credential command differs from what this
+/// installation writes. Only the helper-bearing field counts, not provider
+/// metadata; OpenCode and dsh reference the token itself, and OpenClaw is
+/// checked with its token path by the projector.
 pub(super) fn stale_helper(
     agent: Agent,
     record: &Connection,
     exe: &Path,
     token_path: Option<&Path>,
 ) -> bool {
-    if agent == Agent::Codex {
-        let expected_args = if let Some(path) = token_path {
-            vec![path.display().to_string()]
-        } else {
-            vec!["--agent-token".into(), "codex".into()]
-        };
-        if record.fields.iter().any(|field| {
-            field.path == owned(&["model_providers", "private_ai_proxy", "auth", "args"])
-                && field.value != Some(ConfigValue::List(expected_args.clone()))
-        }) {
-            return true;
-        }
-    }
+    let command = || agent_credential_command(exe, agent, token_path).ok();
     let (path, expected) = match agent {
-        Agent::Codex => (
-            &["model_providers", "private_ai_proxy", "auth", "command"][..],
-            if token_path.is_some() {
-                Some("/bin/cat".into())
-            } else {
-                exe.to_str().map(str::to_string)
-            },
-        ),
-        Agent::ClaudeCode => (
-            &["apiKeyHelper"][..],
-            agent_credential_command(exe, agent, token_path).ok(),
-        ),
-        Agent::Pi => (
+        Agent::Codex => {
+            let args = match token_path {
+                Some(path) => vec![path.display().to_string()],
+                None => vec!["--agent-token".into(), "codex".into()],
+            };
+            if record.fields.iter().any(|field| {
+                field.path == owned(&["model_providers", "private_ai_proxy", "auth", "args"])
+                    && field.value != Some(ConfigValue::List(args.clone()))
+            }) {
+                return true;
+            }
+            (
+                &["model_providers", "private_ai_proxy", "auth", "command"][..],
+                match token_path {
+                    Some(_) => Some("/bin/cat".into()),
+                    None => exe.to_str().map(str::to_string),
+                },
+            )
+        }
+        Agent::ClaudeCode => (&["apiKeyHelper"][..], command()),
+        Agent::Hermes => (&["providers", "private-ai-proxy", "key_cmd"][..], command()),
+        Agent::Pi | Agent::OhMyPi => (
             &["providers", "private-ai-proxy"][..],
-            agent_credential_command(exe, agent, token_path)
-                .ok()
-                .map(|command| format!("!{command}")),
+            command().map(|command| format!("!{command}")),
         ),
-        Agent::Hermes => (
-            &["providers", "private-ai-proxy", "key_cmd"][..],
-            agent_credential_command(exe, agent, token_path).ok(),
-        ),
-        Agent::OpenCode => return false,
-        Agent::OpenClaw => return false, // Validated with the token path by Projector.
-        Agent::OhMyPi => return oh_my_pi::stale_helper(record, exe, token_path),
-        // The token itself is stored; status compares it with the token file.
-        Agent::Dsh => return false,
+        Agent::OpenCode | Agent::OpenClaw | Agent::Dsh => return false,
     };
-    // Only inspect the helper-bearing field we recorded, not provider metadata.
     record.fields.iter().any(|field| {
         if field.path != owned(path) {
             return false;
         }
+        // Pi and omp record the provider object, the others the command.
+        let provider = matches!(agent, Agent::Pi | Agent::OhMyPi);
         let command = match &field.value {
-            Some(ConfigValue::Str(command)) if agent != Agent::Pi => Some(command.as_str()),
-            Some(ConfigValue::Json(provider)) if agent == Agent::Pi => {
-                provider.get("apiKey").and_then(serde_json::Value::as_str)
+            Some(ConfigValue::Str(command)) if !provider => Some(command.as_str()),
+            Some(ConfigValue::Json(value)) if provider => {
+                value.get("apiKey").and_then(serde_json::Value::as_str)
             }
             _ => None,
         };
@@ -390,15 +379,11 @@ pub(super) fn project(
                 None => doc.remove(&path)?,
             }
             edit.changes.push(if sensitive {
-                ConfigChange {
-                    key: path.join("."),
-                    before: current.as_ref().map(|_| "Existing secret".to_string()),
-                    after: field
-                        .value
-                        .as_ref()
-                        .map(|_| "Managed local credential".to_string()),
-                    sensitive: true,
-                }
+                secret_change(
+                    path.join("."),
+                    current.as_ref().map(|_| "Existing secret"),
+                    field.value.as_ref().map(|_| MANAGED_CREDENTIAL),
+                )
             } else {
                 preview_change(
                     &path,
@@ -412,11 +397,7 @@ pub(super) fn project(
             path: field.path.clone(),
             value: field.value.clone(),
             previous,
-            entry: None,
-            exact: false,
-            source: None,
-            hashed: false,
-            container: false,
+            ..OwnedField::default()
         });
     }
     Ok(edit)
@@ -503,15 +484,12 @@ fn project_entry(
         owned_fields(edit).push(OwnedField {
             path: field.path,
             value: field.value,
-            previous: None,
             entry: Some(OwnedEntry {
                 key: key.clone(),
                 created: true,
             }),
             exact: true,
-            source: None,
-            hashed: false,
-            container: false,
+            ..OwnedField::default()
         });
     }
     Ok(())
@@ -638,13 +616,10 @@ fn project_exact(
         }
         owned_fields(edit).push(OwnedField {
             path: field.path,
-            value: None,
-            previous: None,
             entry,
             exact: true,
-            source: None,
-            hashed: false,
             container: true,
+            ..OwnedField::default()
         });
         return Ok(());
     }
@@ -689,12 +664,7 @@ fn project_exact(
             None => target.remove_exact(&path)?,
         }
         let mut change = if is_sensitive(&field.path) {
-            ConfigChange {
-                key: name,
-                before: None,
-                after: Some("Managed local credential".to_string()),
-                sensitive: true,
-            }
+            secret_change(name, None, Some(MANAGED_CREDENTIAL))
         } else {
             preview_change(
                 &path,
@@ -715,8 +685,7 @@ fn project_exact(
         entry,
         exact: true,
         source,
-        hashed: false,
-        container: false,
+        ..OwnedField::default()
     });
     Ok(())
 }
@@ -869,12 +838,9 @@ pub(super) fn restore(
             {
                 Some(value) => (
                     Some(ConfigValue::Str(value)),
-                    Some("Previous secret restored".to_string()),
+                    Some("Previous secret restored"),
                 ),
-                None => (
-                    None,
-                    Some("Previous secret unavailable; left unset".to_string()),
-                ),
+                None => (None, Some("Previous secret unavailable; left unset")),
             },
             None => (None, None),
         };
@@ -884,16 +850,13 @@ pub(super) fn restore(
         }
         .map_err(|_| AgentError::RestorationFailed)?;
         changes.push(if sensitive {
-            ConfigChange {
-                key: path.join("."),
-                before: current
-                    .as_ref()
-                    .map(|_| "Managed local credential".to_string()),
-                after: after_label,
-                sensitive: true,
-            }
+            secret_change(
+                path.join("."),
+                current.as_ref().map(|_| MANAGED_CREDENTIAL),
+                after_label,
+            )
         } else {
-            change(&path, current, restored)
+            preview_change(&path, current, restored, None)
         });
     }
     // Containers go last, innermost first, and only while nothing is left in them.
@@ -913,15 +876,13 @@ pub(super) fn restore(
         };
         if let Some(removed) = removed {
             removed.map_err(|_| AgentError::RestorationFailed)?;
-            changes.push(change(&path, empty, None));
+            changes.push(preview_change(&path, empty, None, None));
         }
     }
     Ok(Edit {
-        selection: None,
         changes,
-        record: None,
-        pending_secrets: Vec::new(),
         consumed_secrets,
+        ..Edit::default()
     })
 }
 
@@ -948,27 +909,25 @@ fn restore_exact(
     }
     .map_err(|_| AgentError::RestorationFailed)?;
     Ok(Some(if is_sensitive(&field.path) {
-        ConfigChange {
-            key: path.join("."),
-            before: Some("Managed local credential".to_string()),
-            after: None,
-            sensitive: true,
-        }
+        secret_change(path.join("."), Some(MANAGED_CREDENTIAL), None)
     } else {
-        change(&path, current, restored)
+        preview_change(&path, current, restored, None)
     }))
 }
 
-pub(super) fn change(
-    path: &[&str],
-    before: Option<ConfigValue>,
-    after: Option<ConfigValue>,
+pub(super) const MANAGED_CREDENTIAL: &str = "Managed local credential";
+
+/// A change to a credential: its values are never shown.
+pub(super) fn secret_change(
+    key: String,
+    before: Option<&str>,
+    after: Option<&str>,
 ) -> ConfigChange {
     ConfigChange {
-        key: path.join("."),
-        before: before.map(|value| value.display()),
-        after: after.map(|value| value.display()),
-        sensitive: false,
+        key,
+        before: before.map(str::to_string),
+        after: after.map(str::to_string),
+        sensitive: true,
     }
 }
 
@@ -1048,10 +1007,9 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::OpenCode => doc
             .get_str(&["model"])
             .and_then(|value| value.strip_prefix("private-ai-proxy/").map(str::to_string)),
-        Agent::Pi => None,
         Agent::Hermes => doc.get_str(&["model", "default"]),
         Agent::OpenClaw => openclaw::selected_model(doc),
-        Agent::OhMyPi => None,
+        Agent::Pi | Agent::OhMyPi => None,
         Agent::Dsh => dsh::selected_model(doc),
     }
 }

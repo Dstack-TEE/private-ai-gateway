@@ -61,12 +61,7 @@ impl AgentIntegration for Agent {
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
-                .and_then(|path| {
-                    path.to_str()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                })
+                .and_then(nonblank)
                 .unwrap_or_else(|| hermes_native_dir(home, tool_env))
                 .join("config.yaml"),
         }

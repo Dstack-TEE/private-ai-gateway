@@ -371,59 +371,6 @@ fn hermes_windows_installed_command_round_trip() {
     assert!(credential_helper_command(Path::new("bad\0path"), Agent::Hermes).is_err());
 }
 
-#[test]
-fn invalid_recovery_never_guesses_paths_or_displays_structured_secrets() {
-    for structured in [false, true] {
-        let sandbox = sandbox(if structured {
-            "invalid-structured"
-        } else {
-            "invalid-path"
-        });
-        connect(&sandbox);
-        let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
-        let before = fs::read(&path).unwrap();
-        let mut store = sandbox.projector.load_store().unwrap();
-        let record = store.get_mut("claude-code").unwrap();
-        record.config_path = PathBuf::new();
-        if structured {
-            record.fields[0].previous = Some(Previous::Plain(ConfigValue::Json(
-                json!({"apiKey":"sk-test-hidden"}),
-            )));
-        }
-        write(
-            &sandbox.projector.store_path(),
-            &serde_json::to_string(&store).unwrap(),
-        );
-        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        assert!(!agent_status(&statuses, Agent::ClaudeCode).authorized && tokens.is_empty());
-        let options = ConnectOptions::default();
-        let preview = sandbox
-            .projector
-            .preview(Agent::ClaudeCode, false, None, &options)
-            .unwrap();
-        assert!(preview.changes.is_empty());
-        assert!(!serde_json::to_string(&preview)
-            .unwrap()
-            .contains("sk-test-hidden"));
-        assert!(sandbox
-            .projector
-            .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
-            .is_err());
-        assert!(sandbox
-            .projector
-            .tokens
-            .read("claude-code")
-            .unwrap()
-            .is_none());
-        assert!(sandbox
-            .projector
-            .load_store()
-            .unwrap()
-            .contains_key("claude-code"));
-        assert_eq!(fs::read(path).unwrap(), before);
-    }
-}
-
 /// POSIX quoting round-trips through shlex and, where available, sh.
 /// This does not prove which shell the Windows Claude CLI selects.
 #[test]

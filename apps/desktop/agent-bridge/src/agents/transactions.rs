@@ -17,7 +17,7 @@ impl Projector {
                 .load_store()
                 .map_err(|_| AgentError::RecordUnavailable)?;
             let path = self.action_path(agent, store.get(agent.id()), connect);
-            let (text, read_error) = self.config_text_at(agent, &path);
+            let (text, read_error) = self.config_text_at(&path);
             if revision(
                 agent,
                 connect,
@@ -275,7 +275,7 @@ impl Projector {
                 }
             }
         }
-        let text = self.read_config_at(agent, path)?;
+        let text = self.read_config_at(path)?;
         let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
             .map_err(|reason| {
                 AgentError::InvalidConfiguration(format!(
@@ -292,10 +292,6 @@ impl Projector {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.
             Edit {
-                selection: None,
-                changes: Vec::new(),
-                record: None,
-                pending_secrets: Vec::new(),
                 consumed_secrets: record
                     .fields
                     .iter()
@@ -304,6 +300,7 @@ impl Projector {
                         _ => None,
                     })
                     .collect(),
+                ..Edit::default()
             }
         };
         if !edit.changes.is_empty() {

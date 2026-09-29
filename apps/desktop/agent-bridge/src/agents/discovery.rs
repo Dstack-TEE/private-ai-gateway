@@ -5,17 +5,20 @@ pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
         tool_env
             .then(|| env_path("LOCALAPPDATA"))
             .flatten()
-            .and_then(|path| {
-                path.to_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-            })
+            .and_then(nonblank)
             .unwrap_or_else(|| home.join("AppData").join("Local"))
             .join("hermes")
     } else {
         home.join(".hermes")
     }
+}
+
+/// A path override that is not blank, trimmed as Hermes reads it.
+pub(super) fn nonblank(path: PathBuf) -> Option<PathBuf> {
+    path.to_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 pub(super) fn read_auth_document(path: &Path) -> Result<serde_json::Value, AgentError> {

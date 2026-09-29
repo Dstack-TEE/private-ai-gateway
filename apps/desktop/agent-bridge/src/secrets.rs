@@ -33,6 +33,15 @@ impl MemoryStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Every entry and its value (golden transcripts record them).
+    #[cfg(test)]
+    pub fn entries(&self) -> Vec<(String, String)> {
+        self.0
+            .lock()
+            .map(|map| map.clone().into_iter().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl SecretStore for MemoryStore {
