@@ -1,9 +1,8 @@
 import { useEffect, useId, useRef } from "react";
 import { QueryObserver, queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AccountLoginDetails, ConfidentialProfileInput, DesktopApi, LoginPresentation } from "../../shared/contracts";
+import type { AccountLoginDetails, ConfidentialProfileInput, LoginPresentation } from "../../shared/contracts";
+import { desktopApi } from "./environment";
 import { AuthoredError } from "./error-message";
-
-type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
 
 export interface Authorization {
   login: LoginPresentation;
@@ -15,7 +14,7 @@ export interface Authorization {
  * Starting, cancelling and completing it run one after another (the mutation
  * scope); failures go to `onError`.
  */
-export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void) {
+export function useAccountLogin(onError: (error: unknown) => void) {
   const client = useQueryClient();
   const scope = { id: `account-login:${useId()}` };
   // The authorization to discard when the form closes, including one that
@@ -30,22 +29,22 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
       stopWaiting.current?.();
       const login = pending.current;
       pending.current = undefined;
-      if (login) void api.cancelAccountLogin(login.id).catch(() => console.error("Could not discard account authorization"));
+      if (login) void desktopApi.cancelAccountLogin(login.id).catch(() => console.error("Could not discard account authorization"));
     };
-  }, [api]);
+  }, []);
 
   const discard = async () => {
     stopWaiting.current?.();
     const login = pending.current;
-    if (login) await api.cancelAccountLogin(login.id);
+    if (login) await desktopApi.cancelAccountLogin(login.id);
     pending.current = undefined;
   };
   const start = useMutation({
     scope,
     mutationFn: async (profile: ConfidentialProfileInput) => {
       await discard();
-      const login = await api.beginAccountLogin(profile);
-      if (closed.current) await api.cancelAccountLogin(login.id);
+      const login = await desktopApi.beginAccountLogin(profile);
+      if (closed.current) await desktopApi.cancelAccountLogin(login.id);
       else pending.current = login;
       return login;
     },
@@ -56,7 +55,7 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
     scope,
     mutationFn: (callbackUrl: string) => {
       if (!pending.current) throw new AuthoredError("Account connection is no longer active");
-      return api.completeAccountLogin(pending.current.id, callbackUrl);
+      return desktopApi.completeAccountLogin(pending.current.id, callbackUrl);
     },
     onError,
   });
@@ -68,7 +67,7 @@ export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void
   // keeps polling while the window is in the background.
   const poll = (id: string | undefined) => queryOptions({
     queryKey: ["account-login", id],
-    queryFn: id ? () => api.pollAccountLogin(id) : skipToken,
+    queryFn: id ? () => desktopApi.pollAccountLogin(id) : skipToken,
     refetchInterval: (query) => query.state.data || query.state.error ? false : 1_000,
     refetchIntervalInBackground: true,
     retry: false,

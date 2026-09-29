@@ -17,10 +17,14 @@ export function usagePageQuery(query: UsageQuery) {
   });
 }
 
-export function cliRegistrationQuery() {
-  return queryOptions({
-    queryKey: ["cli-registration"],
-    queryFn: () => desktopApi.getCliRegistration(),
-    meta: { errorTitle: "Could not read the pap command" },
-  });
-}
+export const cliRegistrationQuery = queryOptions({
+  queryKey: ["cli-registration"],
+  queryFn: () => desktopApi.getCliRegistration(),
+  meta: { errorTitle: "Could not read the pap command" },
+});
+
+export const clientKeyQuery = queryOptions({
+  queryKey: ["client-key"],
+  queryFn: () => desktopApi.getClientKey(),
+  meta: { errorTitle: "Could not read the Local API key" },
+});

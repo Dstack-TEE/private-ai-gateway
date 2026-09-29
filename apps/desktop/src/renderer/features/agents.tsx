@@ -11,11 +11,10 @@ import { Button } from "../components/ui/button";
 import { StateLabel } from "../components/state-label";
 import { AgentAttention } from "../components/agent-attention";
 import ohMyPiIcon from "../assets/oh-my-pi.svg";
-import type { Tone } from "../../shared/contracts";
 import { Item, ItemActions, ItemContent, ItemTitle } from "../components/ui/item";
 import { SettingsItem, SettingsSection } from "../components/settings";
 import { SwitchControl } from "../components/controls";
-import type { AgentAccessStatus, AgentStatus } from "../../shared/contracts";
+import type { AgentAccessStatus, AgentStatus, Tone } from "../../shared/contracts";
 import { EmptyState } from "../components/detail";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { desktopApi } from "../lib/environment";
@@ -49,37 +48,25 @@ function AgentMark({ agent }: { agent: Pick<AgentStatus, "id" | "name"> }): Reac
 
 export function AgentsPage(): React.JSX.Element {
   const { agents: integrations, applying } = useShell();
-  const { agents, accessStatus, authorizing, problem } = integrations;
-  const connected = agents.filter((agent) => agent.installed && agent.connected).length;
-  const detectionLabel = accessStatus === "authorized"
-    ? undefined
-    : authorizing
-      ? "Waiting for access"
-      : accessStatus
-        ? "Access required"
-        : "Checking access";
+  const { agents, accessStatus, authorizing, detectionLabel, problem } = integrations;
   const locked = applying || integrations.controlsLocked;
+  // Until access is granted and detection works, every agent is listed, locked.
+  const label = detectionLabel ?? (problem ? "Detection unavailable" : undefined);
+  const installed = agents.filter((agent) => agent.installed);
   return (
     <div className="mx-auto min-h-full max-w-230">
       <AgentAccessNotice status={accessStatus} busy={authorizing} onAuthorize={integrations.requestAccess} />
-      <SettingsSection title={accessStatus === "authorized" && !problem ? "Detected" : "Agents"} detail={accessStatus === "authorized" && !problem ? `${connected} connected` : undefined}>
-        {accessStatus !== "authorized" ? agents.map((agent) => (
-          <AgentRow key={agent.id} agent={agent} detectionLabel={detectionLabel} disabled />
-        ))
-          : problem ? agents.map((agent) => (
-            <AgentRow key={agent.id} agent={agent} detectionLabel="Detection unavailable" disabled />
-          ))
-          : !agents.some((agent) => agent.installed) ? <EmptyState text="No agents detected" />
-          : agents.filter((agent) => agent.installed).map((agent) => (
-            <AgentRow key={agent.id} agent={agent} disabled={locked} />
-          ))}
+      <SettingsSection title={label ? "Agents" : "Detected"} detail={label ? undefined : `${installed.filter((agent) => agent.connected).length} connected`}>
+        {label ? agents.map((agent) => <AgentRow key={agent.id} agent={agent} detectionLabel={label} disabled />)
+          : installed.length === 0 ? <EmptyState text="No agents detected" />
+          : installed.map((agent) => <AgentRow key={agent.id} agent={agent} disabled={locked} />)}
       </SettingsSection>
-      {accessStatus === "authorized" && !problem && agents.some((agent) => !agent.installed) && <SettingsSection title="Not detected">
+      {!label && installed.length < agents.length && <SettingsSection title="Not detected">
         {agents.filter((agent) => !agent.installed).map((agent) => (
           <AgentRow key={agent.id} agent={agent} disabled={locked} />
         ))}
       </SettingsSection>}
-      {accessStatus === "authorized" && !problem && <p className="mx-0.5 mt-3 text-xs leading-5 text-muted-foreground">
+      {!label && <p className="mx-0.5 mt-3 text-xs leading-5 text-muted-foreground">
         Agents are detected by the configuration folder each one creates on first run, such as ~/.codex, however it was installed. Run a new agent once to list it here; an uninstalled agent stays listed while its folder remains.
       </p>}
     </div>
@@ -90,8 +77,8 @@ function AgentAccessNotice({ status, busy, onAuthorize }: {
   status?: AgentAccessStatus;
   busy: boolean;
   onAuthorize(): void;
-}): React.JSX.Element {
-  if (status === "authorized") return <></>;
+}): React.JSX.Element | null {
+  if (status === "authorized") return null;
   const again = status === "reauthorizationRequired";
   return <Alert role="status" className="mb-5 rounded-xl border-border bg-muted/35 px-3.5 py-2.5">
     <FolderLock size={16} aria-hidden="true" />
@@ -115,8 +102,7 @@ export function AgentRow({
   detectionLabel?: string;
   compact?: boolean;
 }): React.JSX.Element {
-  const { agents: { offerServiceStop } } = useShell();
-  const { pending: pendingConnection, change: onSelect } = useAgentConnection(desktopApi, agent, offerServiceStop);
+  const { pending: pendingConnection, change: onSelect } = useAgentConnection(agent);
   const name = agent.name;
   const presence: { label: string; tone: Tone } = detectionLabel
     ? { label: detectionLabel, tone: "neutral" }

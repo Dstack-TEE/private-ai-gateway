@@ -1,14 +1,14 @@
-import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { SERVICE_AGENT, useAgents } from "./hooks/use-agents";
 import { useAppState } from "./lib/use-app-state";
 import { useUpdates } from "./updates";
-import { INITIAL_STATE, type AboutLink, type AppState, type NavigationTarget } from "../shared/contracts";
+import { INITIAL_STATE, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
-import { unavailableState } from "./lib/protection";
-import { OS_POLICY_CHANGE, ShellContext, type AppDialog, type Shell } from "./lib/shell";
+import { activeProfile, unavailableState } from "./lib/protection";
+import { ShellContext, type AppDialog, type Shell } from "./lib/shell";
 import { ProfileEditorDialog, ProfilesDialog } from "./features/profiles";
 import { PrivacyDialog } from "./features/privacy";
 import { LocalApiDialog } from "./features/local-api";
@@ -19,9 +19,8 @@ import { NotificationsDialog } from "./components/notifications";
 import { useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
-import { localEndpoint } from "./lib/format";
 import { AuthoredError } from "./lib/error-message";
-import { cliRegistrationQuery } from "./lib/page-queries";
+import { cliRegistrationQuery, clientKeyQuery } from "./lib/queries";
 
 /** The signed-in window: the sidebar, the page header and the page. */
 export function AppLayout(): React.JSX.Element {
@@ -40,7 +39,7 @@ export function AppLayout(): React.JSX.Element {
     const timer = window.setTimeout(() => setAnnouncement(""), 1_500);
     return () => window.clearTimeout(timer);
   }, [announcement]);
-  return <AppearanceProvider api={desktopApi}>
+  return <AppearanceProvider>
     <Window />
     <span className="sr-only" role="status">{announcement}</span>
   </AppearanceProvider>;
@@ -49,26 +48,25 @@ export function AppLayout(): React.JSX.Element {
 function Window(): React.JSX.Element {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const updates = useUpdates(desktopApi, distributionCapabilities.nativeUpdates || distributionCapabilities.channel === "web");
+  const updates = useUpdates();
   const appState = useAppState(desktopApi);
-  const state = useMemo(() => appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE, [appState.error, appState.data]);
+  const state = appState.error ? unavailableState(appState.error) : appState.data ?? INITIAL_STATE;
   const setState = appState.setState;
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
-  const agents = useAgents(desktopApi, state, backendReady, distributionCapabilities.sandboxHomeAccess);
+  const agents = useAgents(state, backendReady);
   const confirm = useConfirm();
   const reportFailure = useReportFailure();
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();
   const { payload: shownDialog, key: dialogKey, show: openDialog } = dialog;
-  const clientKeyRead = useQuery({
-    queryKey: ["client-key"],
-    queryFn: () => desktopApi.getClientKey(),
-    enabled: backendReady,
-    meta: { errorTitle: "Could not read the Local API key" },
-  });
-  const clientKey = clientKeyRead.data ?? "";
+  const { data: clientKey } = useQuery({ ...clientKeyQuery, enabled: backendReady });
+  const [clientKeyVisible, setClientKeyVisible] = useState(false);
+  useEffect(() => desktopApi.onClientKeyChange((available) => {
+    if (available) void client.invalidateQueries({ queryKey: clientKeyQuery.queryKey });
+    else client.setQueryData(clientKeyQuery.queryKey, "");
+  }), [client]);
   // The shell registers the `pap` command at startup; its failure is reported once.
-  const { data: cliRegistration } = useQuery({ ...cliRegistrationQuery(), enabled: distributionCapabilities.cliRegistration, staleTime: Infinity });
+  const { data: cliRegistration } = useQuery({ ...cliRegistrationQuery, enabled: distributionCapabilities.cliRegistration, staleTime: Infinity });
   const cliStartupError = cliRegistration?.startupError;
   const reportedCliStartupError = useRef<string>(undefined);
   useEffect(() => {
@@ -76,24 +74,22 @@ function Window(): React.JSX.Element {
     reportedCliStartupError.current = cliStartupError;
     reportFailure("Could not register the pap command", new AuthoredError(cliStartupError));
   }, [cliStartupError, reportFailure]);
-  const [clientKeyVisible, setClientKeyVisible] = useState(false);
-  useEffect(() => desktopApi.onClientKeyChange((available) => {
-    if (available) void client.invalidateQueries({ queryKey: ["client-key"] });
-    else client.setQueryData(["client-key"], "");
-  }), [client]);
-  const changeRequireProductionOs = async (required: boolean) => {
-    if (state.protection.action.operation === "stop" && !await confirm({
-      title: required ? "Require production OS?" : "Allow development OS?",
-      message: "Protection stops before the policy changes.",
-      confirmLabel: "Stop and Change",
-    })) return;
-    setState(await desktopApi.setRequireProductionOs(required));
-  };
-  const changingOsPolicy = useIsMutating({ mutationKey: OS_POLICY_CHANGE }) > 0;
+
+  const osPolicy = useMutation({
+    mutationFn: async (required: boolean) => {
+      if (state.protection.action.operation === "stop" && !await confirm({
+        title: required ? "Require production OS?" : "Allow development OS?",
+        message: "Protection stops before the policy changes.",
+        confirmLabel: "Stop and Change",
+      })) return;
+      setState(await desktopApi.setRequireProductionOs(required));
+    },
+    meta: { errorTitle: "Could not change the OS policy" },
+  });
   const reset = useMutation({
     mutationFn: () => desktopApi.resetSettings(),
     onSuccess: setState,
-    onError: (error) => reportFailure("Could not reset settings", error),
+    meta: { errorTitle: "Could not reset settings" },
   });
   const protection = useMutation({
     mutationFn: (operation: "start" | "stop") => operation === "stop" ? desktopApi.stop() : desktopApi.start(state.config),
@@ -103,45 +99,18 @@ function Window(): React.JSX.Element {
   const backendStart = useMutation({
     mutationFn: () => desktopApi.startBackendService(),
     onSuccess: setState,
-    onError: (error) => reportFailure("Could not start the background service", error),
+    meta: { errorTitle: "Could not start the background service" },
   });
   /** A settings change is applying; controls that change settings wait. */
-  const applying = changingOsPolicy || reset.isPending;
-  const { mutate: resetMutate } = reset;
-  const { mutate: startBackend, isPending: startingBackend } = backendStart;
-  const { mutate: toggleProtection, isPending: protectionPending } = protection;
+  const applying = osPolicy.isPending || reset.isPending;
 
-  /** For dialogs that present the failure themselves. */
-  const applyState = async (action: () => Promise<AppState | void>): Promise<void> => {
-    const next = await action();
-    if (next) setState(next);
-  };
-
-  const rotateClientKey = async (): Promise<void> => {
-    try {
-      client.setQueryData(["client-key"], await desktopApi.rotateClientKey());
-      setClientKeyVisible(true);
-    } catch (error) {
-      setClientKeyVisible(false);
-      throw error;
-    }
-  };
-
-  // Protection needs a usable profile first: create one, or fix the active one.
+  // Protection needs a usable profile first: create one, or `repair` the active one.
   const starting = state.protection.phase === "starting";
-  const openProfileSetup = () => {
+  const openProfiles = (repair: boolean) => {
     if (starting) return;
-    openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: state.profiles.some((profile) => profile.id === state.activeProfileId) });
+    openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: repair && Boolean(activeProfile(state)) });
   };
 
-  const runAction = async (title: string, action: () => Promise<AppState | void>) => {
-    try {
-      const next = await action();
-      if (next) setState(next);
-    } catch (error) {
-      reportFailure(title, error);
-    }
-  };
   const resetSettings = async () => {
     // What a reset leaves alone; the web UI has no notifications or pap command.
     const kept = new Intl.ListFormat("en").format([
@@ -154,7 +123,7 @@ function Window(): React.JSX.Element {
       message: `${agents.accessStatus === "authorized" ? "Protection stops, agents disconnect and their configurations are restored," : "Protection stops"} and settings return to their defaults. ${kept} are unchanged.`,
       confirmLabel: "Reset Settings",
       destructive: true,
-    })) resetMutate();
+    })) reset.mutate();
   };
   // The state changes with every backend update, so the shell is not memoized.
   const shell: Shell = {
@@ -164,26 +133,34 @@ function Window(): React.JSX.Element {
     clientKey,
     clientKeyVisible,
     toggleClientKey: () => setClientKeyVisible((visible) => !visible),
-    applying,
-    startingBackend: startingBackend || starting,
-    startBackend: () => {
-      if (!startingBackend) startBackend();
+    rotateClientKey: async () => {
+      try {
+        client.setQueryData(clientKeyQuery.queryKey, await desktopApi.rotateClientKey());
+        setClientKeyVisible(true);
+      } catch (error) {
+        setClientKeyVisible(false);
+        throw error;
+      }
     },
-    protectionPending,
+    applying,
+    startingBackend: backendStart.isPending || starting,
+    startBackend: () => {
+      if (!backendStart.isPending) backendStart.mutate();
+    },
+    protectionPending: protection.isPending,
     toggleProtection: () => {
       const { action } = state.protection;
-      if (!action.enabled || protectionPending) return;
-      if (action.operation === "setUpProfile") openProfileSetup();
-      else toggleProtection(action.operation);
+      if (!action.enabled || protection.isPending) return;
+      if (action.operation === "setUpProfile") openProfiles(true);
+      else protection.mutate(action.operation);
     },
-    changeRequireProductionOs,
+    changeRequireProductionOs: (required) => {
+      if (!applying) osPolicy.mutate(required);
+    },
     resetSettings: () => void resetSettings(),
     openDialog,
-    openProfiles: () => {
-      if (starting) return;
-      openDialog(state.profiles.length === 0 ? { kind: "setup-profile" } : { kind: "profiles", repair: false });
-    },
-    openAboutLink: (target: AboutLink) => void runAction("Could not open the link", () => desktopApi.openAboutLink(target)),
+    openProfiles: () => openProfiles(false),
+    openAboutLink: (target) => void desktopApi.openAboutLink(target).catch((error: unknown) => reportFailure("Could not open the link", error)),
   };
 
   // A repeated request while one asks is ignored: one answer settles it.
@@ -214,8 +191,7 @@ function Window(): React.JSX.Element {
   type PageRequest = Exclude<NavigationTarget, "confirm-stop-all" | "confirm-codex-service-stop">;
   const deferredRequest = useRef<PageRequest | undefined>(undefined);
   const show = (target: PageRequest) => {
-    if (target === "profiles") shell.openProfiles();
-    else if (target === "profile-setup") openProfileSetup();
+    if (target === "profiles" || target === "profile-setup") openProfiles(target === "profile-setup");
     else void navigate({ to: `/${target}` });
   };
   const showRequested = useEffectEvent((target: NavigationTarget) => {
@@ -274,41 +250,13 @@ function Window(): React.JSX.Element {
       </section>
 
       <React.Fragment key={dialogKey}>
-        {shownDialog?.kind === "profiles" && <ProfilesDialog
-          state={state} repair={shownDialog.repair}
-          onActivate={(profileId) => applyState(() => desktopApi.activateProfile(profileId))}
-          onSave={(profile, key) => applyState(() => desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key))}
-          onDelete={(profileId) => applyState(() => desktopApi.deleteProfile(profileId))}
-          {...dialogControl}
-        />}
-        {shownDialog?.kind === "setup-profile" && <ProfileEditorDialog
-          state={state} startAfterSave
-          onSave={(profile, key) => applyState(async () => {
-            const saved = await desktopApi.saveConfiguration(profile, state.config.requireProductionOs, key);
-            return desktopApi.start(saved.config);
-          })}
-          onDelete={(profileId) => applyState(() => desktopApi.deleteProfile(profileId))}
-          onComplete={dialogControl.onClose} {...dialogControl}
-        />}
-        {shownDialog?.kind === "privacy" && <PrivacyDialog state={state} {...dialogControl} />}
-        {shownDialog?.kind === "local-api" && <LocalApiDialog
-          state={state} clientKey={clientKeyRead.data} clientKeyVisible={clientKeyVisible}
-          onToggleKey={() => setClientKeyVisible((visible) => !visible)}
-          onRotate={rotateClientKey}
-          onSave={(config) => applyState(() => desktopApi.saveLocalApiConfig(config))}
-          {...dialogControl}
-        />}
-        {shownDialog?.kind === "local-api-example" && <LocalApiExamplesDialog
-          apiKey={clientKey} endpoint={state.proxyUrl ?? localEndpoint(state.localApi)} models={state.catalog?.models ?? []}
-          {...dialogControl}
-        />}
-        {shownDialog?.kind === "notifications" && <NotificationsDialog api={desktopApi} {...dialogControl} />}
-        {shownDialog?.kind === "web-ui" && <WebUiDialog
-          state={state}
-          onSave={(config) => applyState(() => desktopApi.saveWebUi(config))}
-          onSetPassword={(password) => applyState(() => desktopApi.setWebUiPassword(password))}
-          {...dialogControl}
-        />}
+        {shownDialog?.kind === "profiles" && <ProfilesDialog repair={shownDialog.repair} {...dialogControl} />}
+        {shownDialog?.kind === "setup-profile" && <ProfileEditorDialog startAfterSave {...dialogControl} />}
+        {shownDialog?.kind === "privacy" && <PrivacyDialog {...dialogControl} />}
+        {shownDialog?.kind === "local-api" && <LocalApiDialog {...dialogControl} />}
+        {shownDialog?.kind === "local-api-example" && <LocalApiExamplesDialog {...dialogControl} />}
+        {shownDialog?.kind === "notifications" && <NotificationsDialog {...dialogControl} />}
+        {shownDialog?.kind === "web-ui" && <WebUiDialog {...dialogControl} />}
         {shownDialog?.kind === "usage-proof" && <UsageProofDialog activity={shownDialog.activity} {...dialogControl} />}
       </React.Fragment>
     </main>

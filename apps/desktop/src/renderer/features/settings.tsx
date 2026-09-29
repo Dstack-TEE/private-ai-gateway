@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { cliRegistrationQuery } from "../lib/page-queries";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { cliRegistrationQuery } from "../lib/queries";
 import { useReportFailure } from "../components/confirm";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
@@ -16,17 +16,17 @@ import type { LaunchPreference, WebUiStatus } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities as distribution, session } from "../lib/environment";
 import { parentDirectory, serviceHost } from "../lib/format";
 import { localAddressKind } from "../lib/local-api-config";
-import { profileIsAvailable } from "../lib/protection";
-import { OS_POLICY_CHANGE, useShell } from "../lib/shell";
+import { activeProfile, profileIsAvailable } from "../lib/protection";
+import { useShell } from "../lib/shell";
 
 function CliRegistrationControl(): React.JSX.Element {
   const client = useQueryClient();
   const reportFailure = useReportFailure();
-  const { data: registration } = useQuery(cliRegistrationQuery());
+  const { data: registration } = useQuery(cliRegistrationQuery);
   const mutation = useMutation({
     mutationFn: (installed: boolean) => desktopApi.setCliRegistration(installed),
-    onMutate: () => client.cancelQueries({ queryKey: ["cli-registration"] }),
-    onSuccess: (next) => { client.setQueryData(["cli-registration"], next); },
+    onMutate: () => client.cancelQueries({ queryKey: cliRegistrationQuery.queryKey }),
+    onSuccess: (next) => { client.setQueryData(cliRegistrationQuery.queryKey, next); },
     onError: (error, installed) => reportFailure(installed ? "Could not install the pap command" : "Could not remove the pap command", error),
   });
   const busy = mutation.isPending;
@@ -58,8 +58,7 @@ function webUiSummary(status: WebUiStatus): string {
 }
 
 function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JSX.Element {
-  const reportFailure = useReportFailure();
-  const mutation = useMutation({ mutationFn: onSignOut, onError: (error) => reportFailure("Could not sign out", error) });
+  const mutation = useMutation({ mutationFn: onSignOut, meta: { errorTitle: "Could not sign out" } });
   return <SettingsItem>
     <ItemContent>
       <ItemTitle>This browser</ItemTitle>
@@ -73,22 +72,24 @@ function SignOutControl({ onSignOut }: { onSignOut(): Promise<void> }): React.JS
   </SettingsItem>;
 }
 
+const launchPreferencesQuery = queryOptions({
+  queryKey: ["launch-preferences"],
+  queryFn: () => desktopApi.getLaunchPreferences(),
+  meta: { errorTitle: "Could not read launch preferences" },
+});
+
 function useLaunchPreferences() {
   const client = useQueryClient();
-  const reportFailure = useReportFailure();
-  const { data } = useQuery({
-    queryKey: ["launch-preferences"],
-    queryFn: () => desktopApi.getLaunchPreferences(),
-    meta: { errorTitle: "Could not read launch preferences" },
-  });
+  const { queryKey } = launchPreferencesQuery;
+  const { data } = useQuery(launchPreferencesQuery);
   useEffect(() => desktopApi.onLaunchPreferencesChange((next) => {
-    void client.cancelQueries({ queryKey: ["launch-preferences"] }).then(() => client.setQueryData(["launch-preferences"], next));
-  }), [client]);
+    void client.cancelQueries({ queryKey }).then(() => client.setQueryData(queryKey, next));
+  }), [client, queryKey]);
   const mutation = useMutation({
     mutationFn: ({ name, enabled }: { name: LaunchPreference; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
-    onMutate: () => client.cancelQueries({ queryKey: ["launch-preferences"] }),
-    onSuccess: (next) => { client.setQueryData(["launch-preferences"], next); },
-    onError: (failure) => reportFailure("Could not change the preference", failure),
+    onMutate: () => client.cancelQueries({ queryKey }),
+    onSuccess: (next) => { client.setQueryData(queryKey, next); },
+    meta: { errorTitle: "Could not change the preference" },
   });
   return {
     preferences: data,
@@ -97,26 +98,13 @@ function useLaunchPreferences() {
   };
 }
 
-function DevelopmentOsControl({ disabled }: { disabled: boolean }): React.JSX.Element {
-  const shell = useShell();
-  const required = shell.state.config.requireProductionOs;
-  const reportFailure = useReportFailure();
-  const mutation = useMutation({
-    mutationKey: OS_POLICY_CHANGE,
-    mutationFn: shell.changeRequireProductionOs,
-    onError: (error) => reportFailure("Could not change the OS policy", error),
-  });
-  return <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={disabled} onToggle={() => {
-    if (!shell.applying) mutation.mutate(!required);
-  }} />;
-}
-
 export function SettingsPage(): React.JSX.Element {
   const shell = useShell();
   const { state, updates } = shell;
   const launch = useLaunchPreferences();
   const locked = shell.applying || shell.agents.changing;
-  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
+  const profile = activeProfile(state);
+  const required = state.config.requireProductionOs;
   const starting = state.protection.phase === "starting";
   return (
     <div className="mx-auto min-h-full max-w-230">
@@ -133,11 +121,11 @@ export function SettingsPage(): React.JSX.Element {
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
           <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
-          <AppearanceControl api={desktopApi} />
+          <AppearanceControl />
           {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}
       </SettingsSection>
       <SettingsSection title="Connections">
-          <SettingsLink title="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={activeProfile ? `${activeProfile.name} · ${serviceHost(activeProfile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(activeProfile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
+          <SettingsLink title="Profiles" aria-haspopup="dialog" disabled={starting} onClick={shell.openProfiles} description={profile ? `${profile.name} · ${serviceHost(profile.remoteUrl)} · ${state.protection.phase === "protected" ? "Protected" : profileIsAvailable(profile, state) ? "Ready" : "Connect account or add an API key"}` : "No provider configured"} />
           <SettingsLink title="Local API" description="Listener and client access" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })} />
           {distribution.webUi && <SettingsLink title="Web UI" description={webUiSummary(state.webUi)} aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "web-ui" })} />}
           {session && <SignOutControl onSignOut={session.signOut} />}
@@ -147,8 +135,8 @@ export function SettingsPage(): React.JSX.Element {
         <CollapsibleTrigger render={<Button variant="ghost" className="mb-2" />}><ChevronRight className="group-aria-expanded/button:rotate-90" size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <DevelopmentOsControl disabled={locked} />
-          {distribution.nativeUpdates && <UpdateChannelControl api={desktopApi} updates={updates} />}
+          <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={locked} onToggle={() => shell.changeRequireProductionOs(!required)} />
+          {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
           {state.configFiles.configPath && <SettingsItem>
             <ItemContent>
@@ -156,7 +144,7 @@ export function SettingsPage(): React.JSX.Element {
               <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
             </ItemContent>
           </SettingsItem>}
-          <ExportDiagnostics api={desktopApi} />
+          <ExportDiagnostics />
           <SettingsLink title="Reset settings" disabled={locked} onClick={shell.resetSettings} />
           </SettingsList>
         </CollapsibleContent>

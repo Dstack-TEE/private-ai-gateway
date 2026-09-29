@@ -8,7 +8,6 @@ import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent }
 import { Separator } from "../components/ui/separator";
 import { IconButton } from "../components/controls";
 import type { UsageSummary } from "../../shared/contracts";
-import { desktopApi } from "../lib/environment";
 import { useShell } from "../lib/shell";
 import { LocalApiPanel } from "./local-api";
 import { EmptyState } from "../components/detail";
@@ -18,6 +17,7 @@ import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
 import { AccountBalanceValue } from "../components/account-tools";
 import { toneTextClass } from "../lib/tone";
+import { activeProfile } from "../lib/protection";
 import { cn } from "../lib/utils";
 
 const TLS_TRACKS = [
@@ -39,14 +39,8 @@ export function OverviewPage(): React.JSX.Element {
   const { state, agents } = shell;
   const protectedNow = state.protection.phase === "protected";
   const localAvailable = protectedNow && Boolean(state.proxyUrl);
-  const recent = protectedNow || state.sessionActive || state.reconnecting ? state.activity.slice(0, 10) : [];
-  const agentDetectionLabel = agents.accessStatus === "authorized"
-    ? undefined
-    : agents.authorizing
-      ? "Waiting for access"
-      : agents.accessStatus
-        ? "Access required"
-        : "Checking access";
+  const sessionShown = protectedNow || state.sessionActive || state.reconnecting;
+  const recent = sessionShown ? state.activity.slice(0, 10) : [];
   const previewAgents = agents.accessStatus === "authorized"
     ? agents.agents.filter((agent) => agent.installed).slice(0, 4)
     : agents.agents.slice(0, 4);
@@ -54,17 +48,12 @@ export function OverviewPage(): React.JSX.Element {
     <div className="mx-auto flex min-h-full max-w-240 flex-col @container/overview">
       <div className="grid grid-cols-2 items-stretch gap-4 @max-[600px]/overview:grid-cols-1">
       <StatusSurface />
-      <SessionSummary summary={state.sessionUsage} active={protectedNow || Boolean(state.sessionActive || state.reconnecting)} />
+      <SessionSummary summary={state.sessionUsage} active={sessionShown} />
       </div>
       {/* Local API and Agents fill the first column beside Recent usage; one column stacks them in order. */}
       <div className="mt-4 grid grid-cols-2 grid-rows-[auto_auto] gap-4 @max-[600px]/overview:grid-cols-1">
         <OverviewModule title="Local API" description="Use private AI in your tools." titleAdornment={<IconButton variant="ghost" size="icon-xs" label="Local API examples" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api-example" })}><CircleHelp aria-hidden="true" /></IconButton>} status={<StateLabel tone={localAvailable ? "success" : "neutral"} text={localAvailable ? "Available" : "Unavailable"} />} action={<IconButton label="Local API settings" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "local-api" })}><Settings size={16} /></IconButton>}>
-          <LocalApiPanel
-            proxyUrl={state.proxyUrl}
-            clientKey={shell.clientKey}
-            clientKeyVisible={shell.clientKeyVisible}
-            onToggleKey={shell.toggleClientKey}
-          />
+          <LocalApiPanel />
         </OverviewModule>
         <OverviewModule stretch={false} title="Agents" description="Use private AI in your agents." action={agents.accessStatus !== "authorized" || agents.authorizing
           ? <Button type="button" variant="outline" size="sm" className="relative min-w-20" disabled={!agents.accessStatus || agents.authorizing} aria-busy={agents.authorizing} aria-label="Enable agent access" onClick={agents.requestAccess}>
@@ -80,8 +69,8 @@ export function OverviewPage(): React.JSX.Element {
                 key={agent.id}
                 agent={agent}
                 compact
-                detectionLabel={agentDetectionLabel}
-                disabled={shell.applying || agents.controlsLocked || Boolean(agentDetectionLabel)}
+                detectionLabel={agents.detectionLabel}
+                disabled={shell.applying || agents.controlsLocked || Boolean(agents.detectionLabel)}
               />
             ))}
           </div>
@@ -113,7 +102,7 @@ function StatusSurface(): React.JSX.Element {
   const protection = state.protection;
   const protectedNow = protection.phase === "protected";
   const developmentMode = !state.config.requireProductionOs;
-  const activeProfile = state.profiles.find((profile) => profile.id === state.activeProfileId);
+  const profile = activeProfile(state);
   return (
     <Card size="sm" role="region" className={cn(
       "relative isolate min-h-36 min-w-0 transition-colors duration-200 ease-out motion-reduce:transition-none",
@@ -127,12 +116,12 @@ function StatusSurface(): React.JSX.Element {
         <div className="col-span-full row-start-2 flex min-w-0 items-center gap-2 self-end">
         {state.backendConnected === false ? <Button variant="outline" size="sm" disabled={shell.startingBackend} onClick={shell.startBackend}><RefreshCw className={shell.startingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{shell.startingBackend ? "Starting…" : "Start Background Service"}</Button> : <>
         {/* On the card's surface in both themes, without the outline button's light hover fill. */}
-        <Button id="overview-profile" variant="outline" size="sm" className="w-[min(140px,100%)] min-w-0 bg-card hover:bg-card dark:bg-card" aria-label={activeProfile ? `Profiles: ${activeProfile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={shell.openProfiles}>
-          {activeProfile ? <ServiceLogo provider={activeProfile.provider} className="size-5" /> : <Plus aria-hidden="true" />}
-          <span className="min-w-0 flex-1 truncate text-left">{activeProfile?.name ?? "Set Up"}</span>
-          {activeProfile && <ChevronDown aria-hidden="true" />}
+        <Button id="overview-profile" variant="outline" size="sm" className="w-[min(140px,100%)] min-w-0 bg-card hover:bg-card dark:bg-card" aria-label={profile ? `Profiles: ${profile.name}` : "Set Up Profile"} aria-haspopup="dialog" onClick={shell.openProfiles}>
+          {profile ? <ServiceLogo provider={profile.provider} className="size-5" /> : <Plus aria-hidden="true" />}
+          <span className="min-w-0 flex-1 truncate text-left">{profile?.name ?? "Set Up"}</span>
+          {profile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {activeProfile?.auth.kind === "oauth" && <AccountBalanceValue api={desktopApi} provider={activeProfile.provider} target={{ kind: "profile", profileId: activeProfile.id }} credentialRef={activeProfile.credentialRef} enabled={protectedNow} />}
+        {profile?.auth.kind === "oauth" && <AccountBalanceValue provider={profile.provider} target={{ kind: "profile", profileId: profile.id }} credentialRef={profile.credentialRef} enabled={protectedNow} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>

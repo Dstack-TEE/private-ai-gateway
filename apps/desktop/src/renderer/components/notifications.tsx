@@ -1,36 +1,37 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { DesktopApi, NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
+import type { NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
 import { SettingsList, SettingsToggle } from "./settings";
 import { AppDialog, AppDialogBody, type DialogControl } from "./app-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
 import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { errorMessage } from "../lib/error-message";
+import { desktopApi } from "../lib/environment";
 
 /**
  * The notification preferences and the system permission. The shell asks for
  * the permission once at startup while notifications are on; here it is asked
  * for again when the user turns notifications on or presses Allow.
  */
-function useNotificationSettings(api: DesktopApi) {
+function useNotificationSettings() {
   const client = useQueryClient();
   const { data, error: readError } = useQuery({
-    queryKey: ["notifications"], queryFn: () => api.getNotificationSettings(), staleTime: 0,
+    queryKey: ["notifications"], queryFn: () => desktopApi.getNotificationSettings(), staleTime: 0,
   });
   const refresh = () => client.invalidateQueries({ queryKey: ["notifications"] });
   // Resolves whether the system permission the change needs could be requested.
   const change = useMutation({
     mutationFn: async ({ key, enabled, current }: { key: keyof NotificationPreferences; enabled: boolean; current: NotificationConfiguration }) => {
-      await api.saveNotificationSettings({ ...current.preferences, [key]: enabled });
+      await desktopApi.saveNotificationSettings({ ...current.preferences, [key]: enabled });
       if (key !== "enabled" || !enabled || current.permission !== "notDetermined") return true;
-      return api.requestNotificationPermission().then(() => true, () => false);
+      return desktopApi.requestNotificationPermission().then(() => true, () => false);
     },
     onSettled: refresh,
   });
   const permission = useMutation({
     mutationFn: async () => {
-      if (data?.permission === "notDetermined") await api.requestNotificationPermission();
-      else await api.openNotificationSettings();
+      if (data?.permission === "notDetermined") await desktopApi.requestNotificationPermission();
+      else await desktopApi.openNotificationSettings();
     },
     onSettled: refresh,
   });
@@ -67,8 +68,8 @@ function NotificationPermissionNotice({ data, busy, permissionAction }: Pick<Ret
   </Alert>;
 }
 
-export function NotificationsDialog({ api, ...control }: { api: DesktopApi } & DialogControl) {
-  const notifications = useNotificationSettings(api);
+export function NotificationsDialog(control: DialogControl) {
+  const notifications = useNotificationSettings();
   const { data, error, busy, change } = notifications;
   return <AppDialog {...control} title="Notifications" className="sm:max-w-xl" dismissible={!busy}>
     <AppDialogBody className="flex flex-1 flex-col gap-4 py-1">
