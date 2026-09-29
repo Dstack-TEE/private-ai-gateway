@@ -189,7 +189,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
                 .map(|details| details.auth),
             Some(expected)
         );
-        assert!(runtime.state().unwrap().profiles.is_empty());
+        assert!(runtime.state().profiles.is_empty());
         let different_provider = ConfidentialProfileInput {
             provider: ServiceProvider::Redpill,
             remote_url: "https://tee.redpill.ai".into(),
@@ -238,7 +238,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
                 .to_string(),
             "Account connection is only available for Phala and RedPill"
         );
-        assert!(runtime.state().unwrap().profiles.is_empty());
+        assert!(runtime.state().profiles.is_empty());
         assert!(runtime.account_login.lock().await.is_none());
         assert!(!directory.path().join("settings/credentials.toml").exists());
     });
@@ -273,7 +273,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         .set_profile_key("profile-test", Some("old-secret"))
         .unwrap();
     runtime.publish_service_configuration(false).unwrap();
-    assert!(runtime.state().unwrap().api_key_saved);
+    assert!(runtime.state().api_key_saved);
     executor.block_on(runtime.cleanup_retired()).unwrap();
 
     // A revocation of the key still in use is dropped without contacting the provider.
@@ -303,7 +303,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     executor
         .block_on(runtime.delete_profile("profile-test".into()))
         .unwrap();
-    assert!(runtime.state().unwrap().profiles.is_empty());
+    assert!(runtime.state().profiles.is_empty());
     assert!(runtime.load_profile_key("profile-test").unwrap().is_none());
     let pending: Vec<_> = runtime
         .local_state
@@ -398,7 +398,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
             }],
         })
         .unwrap();
-    let state = runtime.state().unwrap();
+    let state = runtime.state();
     let imported = state
         .profiles
         .iter()
@@ -416,7 +416,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
         error.code(),
         desktop_core::protocol::ErrorCode::InvalidState
     );
-    let unchanged = runtime.state().unwrap();
+    let unchanged = runtime.state();
     assert_eq!(unchanged.active_profile_id, "ready");
     assert_eq!(unchanged.status, VerificationStatus::Verified);
     assert!(unchanged.session_active);
@@ -463,7 +463,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
     let starting = AppState {
         status: VerificationStatus::Verifying,
         session_active: true,
-        ..runtime.state().unwrap()
+        ..runtime.state()
     };
     runtime.manager.restore_snapshot(starting.clone());
 
@@ -478,7 +478,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
         .block_on(runtime.save_configuration(profile("new", "New"), true, Some("key".into())))
         .unwrap_err();
     assert_eq!(refused.code(), ErrorCode::Busy);
-    assert_eq!(runtime.state().unwrap().active_profile_id, "ready");
+    assert_eq!(runtime.state().active_profile_id, "ready");
     assert_eq!(runtime.settings.config().unwrap().active_profile, "ready");
 
     runtime.manager.restore_snapshot(AppState {
@@ -582,7 +582,7 @@ fn shutdown_blocks_later_configuration_changes() {
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit, true))
         .unwrap();
-    let state = runtime.state().unwrap();
+    let state = runtime.state();
     assert_eq!(state.status, VerificationStatus::Stopped);
     assert_eq!(
         runtime.start(state.config).unwrap_err(),
@@ -638,7 +638,7 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
         );
     });
     assert_eq!(
-        runtime.start(runtime.state().unwrap().config).unwrap_err(),
+        runtime.start(runtime.state().config).unwrap_err(),
         crate::Error::closing()
     );
 }
@@ -677,7 +677,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
 
         executor.block_on(runtime.shutdown(mode, true)).unwrap();
 
-        let state = runtime.state().unwrap();
+        let state = runtime.state();
         assert_eq!(state.status, VerificationStatus::Stopped);
         assert_eq!(state.reconnecting, preserved);
         assert_eq!(state.session_active, preserved);
@@ -734,9 +734,9 @@ fn finished_local_listener_can_restart_at_the_same_address() {
             .unwrap();
         // Stopping releases the port at once.
         runtime.endpoint.stop().await.unwrap();
-        runtime.restore_endpoint(resolved.clone()).unwrap();
+        runtime.restore_endpoint(&resolved).unwrap();
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
-        assert!(runtime.restore_endpoint(resolved.clone()).is_err());
+        assert!(runtime.restore_endpoint(&resolved).is_err());
         runtime.endpoint.stop().await.unwrap();
     });
 }
@@ -1159,7 +1159,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     runtime.recover_network().unwrap();
     assert!(runtime.recovery.needs_check());
     drop(operation);
-    let mut verifying = runtime.state().unwrap();
+    let mut verifying = runtime.state();
     verifying.status = VerificationStatus::Verifying;
     runtime.manager.restore_snapshot(verifying.clone());
     runtime.recovery.available.store(true, Ordering::Release);
@@ -1170,22 +1170,22 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     runtime.recover_network().unwrap();
     assert!(!runtime.recovery.needs_check());
     assert!(!runtime.proxy.session().verified);
-    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
-    assert!(runtime.state().unwrap().reconnecting);
+    assert_eq!(runtime.state().status, VerificationStatus::Stopped);
+    assert!(runtime.state().reconnecting);
     assert_eq!(
-        runtime.state().unwrap().session_id.as_deref(),
+        runtime.state().session_id.as_deref(),
         Some("network-session")
     );
-    assert_eq!(runtime.state().unwrap().protected_since, Some(123));
-    assert_eq!(runtime.state().unwrap().session_usage.requests, 7);
+    assert_eq!(runtime.state().protected_since, Some(123));
+    assert_eq!(runtime.state().session_usage.requests, 7);
     assert!(runtime.recovery.pending());
     runtime.stop().unwrap();
-    assert!(!runtime.state().unwrap().reconnecting);
-    assert!(runtime.state().unwrap().protected_since.is_none());
+    assert!(!runtime.state().reconnecting);
+    assert!(runtime.state().protected_since.is_none());
     assert!(!runtime.recovery.pending());
     runtime.recovery.available.store(true, Ordering::Release);
     runtime.recover_network().unwrap();
-    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
+    assert_eq!(runtime.state().status, VerificationStatus::Stopped);
 }
 
 #[test]
@@ -1215,16 +1215,16 @@ fn failed_and_noop_imports_preserve_recovery_and_monitor_state() {
     );
     assert!(runtime.recovery.pending());
     assert!(runtime.recovery.needs_check());
-    let snapshot = runtime.state().unwrap();
+    let snapshot = runtime.state();
     assert!(runtime.set_wake_monitor_available(false));
     assert!(!runtime.set_wake_monitor_available(false));
     runtime.manager.restore_snapshot(snapshot);
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+    assert_eq!(runtime.state().wake_monitor_available, Some(false));
     runtime.stop().unwrap();
     assert!(!runtime.recovery.needs_check());
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+    assert_eq!(runtime.state().wake_monitor_available, Some(false));
     assert!(runtime.set_wake_monitor_available(true));
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(true));
+    assert_eq!(runtime.state().wake_monitor_available, Some(true));
 }
 
 #[test]
@@ -1342,7 +1342,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             )
             .await
             .is_err());
-        let state = runtime.state().unwrap();
+        let state = runtime.state();
         assert_eq!(state.local_api, config);
         assert_eq!(state.proxy_url.as_deref(), Some(original.endpoint.as_str()));
         assert!(state.endpoint_error.is_none());

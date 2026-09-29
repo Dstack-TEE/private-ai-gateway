@@ -18,7 +18,7 @@ pub(crate) async fn dispatch(
     command: Command,
 ) -> Result<Value, protocol::Error> {
     match command {
-        Command::GetState {} => respond_state::<rpc::GetState, _>(runtime.state()),
+        Command::GetState {} => respond_state::<rpc::GetState, crate::Error>(Ok(runtime.state())),
         Command::Start { config } => respond_state::<rpc::Start, _>(runtime.start(config)),
         Command::Stop {} => respond_state::<rpc::Stop, _>(runtime.stop()),
         // Answered by `server::shutdown` under exclusive lifecycle admission.
@@ -197,10 +197,10 @@ fn respond<C: Call, E: Into<crate::Error>>(
 fn respond_found<C: Call>(
     result: Result<Option<C::Response>, crate::Error>,
 ) -> Result<Value, protocol::Error> {
-    respond::<C, _>(result?.ok_or(protocol::Error::new(
-        ErrorCode::NotFound,
-        "Usage record not found",
-    )))
+    encode::<C>(
+        result?
+            .ok_or_else(|| protocol::Error::new(ErrorCode::NotFound, "Usage record not found"))?,
+    )
 }
 
 fn absolute(path: String) -> Result<PathBuf, String> {

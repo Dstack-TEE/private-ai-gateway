@@ -156,14 +156,12 @@ impl RuntimeState {
     /// Verification is lost: the epoch moves so a catalog read still in
     /// flight can neither publish nor clear this state, and the identity must
     /// be reported again before anything opens. The status is an error unless
-    /// it is, or `blocked` makes it, a security block. The session goes on
-    /// while the user still intends it.
-    fn lose_verification(&mut self, blocked: bool) {
+    /// a security block holds. The session goes on while the user still
+    /// intends it.
+    fn lose_verification(&mut self) {
         self.epoch += 1;
         self.identity_ready = false;
-        if blocked {
-            self.state.status = VerificationStatus::Blocked;
-        } else if self.state.status != VerificationStatus::Blocked {
+        if self.state.status != VerificationStatus::Blocked {
             self.state.status = VerificationStatus::Error;
         }
         self.state.reconnecting = crate::recovery::connection_intended(&self.state);
@@ -174,7 +172,9 @@ impl RuntimeState {
     /// The verifier reported its identity, in a new epoch; the session stays
     /// closed until the catalog read through this identity is in too.
     fn identify(&mut self, identity: &IdentityEvent) {
-        apply_identity_event(&mut self.state, identity);
+        self.state.identity = Some(parse_identity(identity));
+        self.state.checks = parse_checks(Some(&identity.verification));
+        self.state.error = None;
         self.identity_ready = true;
         self.epoch += 1;
         self.state.status = VerificationStatus::Verifying;
@@ -330,7 +330,7 @@ impl SessionManager {
         };
         drop(runtime);
 
-        self.revoke_session(generation, 0, Some(session_id.clone()));
+        self.publish_unverified(generation, 0, Some(session_id.clone()));
         self.publish();
         let state = self.snapshot();
         let weak = Arc::downgrade(self);
@@ -478,7 +478,7 @@ impl SessionManager {
         let session_id = runtime.session_id.clone();
         drop(runtime);
 
-        self.revoke_session(generation, epoch, reconnecting.then_some(session_id));
+        self.publish_unverified(generation, epoch, reconnecting.then_some(session_id));
         let session_result = if reconnecting {
             Ok(())
         } else {
@@ -493,23 +493,34 @@ impl SessionManager {
         Ok(self.snapshot())
     }
 
-    /// What survives a stop or restart of the verifier: everything but the
-    /// verification itself (its status, progress, service URL, identity,
-    /// checks and error) and the session's clock and reconnect, which the
-    /// caller sets. The last verified catalog stays for agent projection.
+    /// What survives a stop or restart of the verifier: the settings and
+    /// their files, key status, the local endpoint, the session and its
+    /// activity, and the last verified catalog for agent projection. Anything
+    /// else, a new field included, starts from its default.
     fn carried(previous: &AppState) -> AppState {
         AppState {
-            backend_connected: None,
-            status: VerificationStatus::Stopped,
-            configuration_verification: false,
-            progress: None,
-            remote_url: None,
-            identity: None,
-            checks: Vec::new(),
-            protected_since: None,
-            reconnecting: false,
-            error: None,
-            ..previous.clone()
+            backend_instance: previous.backend_instance.clone(),
+            sequence: previous.sequence,
+            wake_monitor_available: previous.wake_monitor_available,
+            config: previous.config.clone(),
+            client_key_revision: previous.client_key_revision,
+            client_key_available: previous.client_key_available,
+            profiles: previous.profiles.clone(),
+            active_profile_id: previous.active_profile_id.clone(),
+            local_api: previous.local_api.clone(),
+            api_key_saved: previous.api_key_saved,
+            proxy_url: previous.proxy_url.clone(),
+            endpoint_error: previous.endpoint_error.clone(),
+            activity: previous.activity.clone(),
+            session_id: previous.session_id.clone(),
+            session_active: previous.session_active,
+            session_usage: previous.session_usage.clone(),
+            usage_revision: previous.usage_revision,
+            catalog: previous.catalog.clone(),
+            web_ui: previous.web_ui.clone(),
+            config_files: previous.config_files.clone(),
+            agents_revision: previous.agents_revision,
+            ..AppState::default()
         }
     }
 
@@ -921,18 +932,19 @@ impl SessionManager {
     ) {
         runtime.service = None;
         runtime.verification_only = false;
-        runtime.lose_verification(false);
+        runtime.lose_verification();
         let (epoch, session_id) = (runtime.epoch, runtime.session_id.clone());
         drop(runtime);
-        self.revoke_session(generation, epoch, Some(session_id));
+        self.publish_unverified(generation, epoch, Some(session_id));
         if let Some(mut task) = task {
             let _ = task.stop();
         }
         self.publish();
     }
 
-    /// Publishes an unverified proxy session, which forwards nothing.
-    fn revoke_session(&self, generation: u64, epoch: u64, session_id: Option<String>) {
+    /// Publishes the proxy session of `generation` unverified: it forwards
+    /// nothing until a verified catalog opens it.
+    fn publish_unverified(&self, generation: u64, epoch: u64, session_id: Option<String>) {
         self.proxy.publish(Session {
             generation,
             epoch,

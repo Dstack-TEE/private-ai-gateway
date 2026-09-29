@@ -35,15 +35,17 @@ impl SessionManager {
             VerifierEvent::Blocked { code, reason } => {
                 let rotating = code.as_deref() == Some("keyset_changed")
                     && runtime.state.status != VerificationStatus::Blocked;
-                runtime.lose_verification(!rotating);
                 if rotating {
                     retired_task = runtime.task.take();
+                } else {
+                    runtime.state.status = VerificationStatus::Blocked;
                 }
+                runtime.lose_verification();
                 runtime.state.error = Some(reason);
                 runtime.failure = None;
             }
             VerifierEvent::Fatal { error } => {
-                runtime.lose_verification(false);
+                runtime.lose_verification();
                 runtime.state.error = Some(error.to_string());
                 runtime.failure = Some(error);
             }
@@ -78,14 +80,6 @@ impl SessionManager {
         }
         Ok(())
     }
-}
-
-/// Record the verifier's identity and checks; the status is decided by the
-/// caller once the catalog is in.
-pub(super) fn apply_identity_event(state: &mut AppState, event: &IdentityEvent) {
-    state.identity = Some(parse_identity(event));
-    state.checks = parse_checks(Some(&event.verification));
-    state.error = None;
 }
 
 pub(super) fn parse_identity(event: &IdentityEvent) -> ServiceIdentity {

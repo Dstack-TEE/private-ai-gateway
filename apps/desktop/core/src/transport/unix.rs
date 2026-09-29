@@ -63,21 +63,19 @@ impl Listener {
         let dir = endpoint.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
         })?;
-        let failed = |what: &str, path: &Path| {
-            let what = format!("cannot {what} {}", path.display());
-            move |error: io::Error| io::Error::new(error.kind(), format!("{what}: {error}"))
-        };
-        ensure_private_dir(dir).map_err(failed("prepare IPC runtime directory", dir))?;
-        remove_stale_socket(&endpoint).map_err(failed("clean IPC endpoint", &endpoint))?;
+        ensure_private_dir(dir)
+            .map_err(|error| failed(error, "prepare IPC runtime directory", dir))?;
+        remove_stale_socket(&endpoint)
+            .map_err(|error| failed(error, "clean IPC endpoint", &endpoint))?;
 
-        let inner =
-            UnixListener::bind(&endpoint).map_err(failed("bind IPC endpoint", &endpoint))?;
+        let inner = UnixListener::bind(&endpoint)
+            .map_err(|error| failed(error, "bind IPC endpoint", &endpoint))?;
         if let Err(error) = fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&endpoint);
-            return Err(failed("secure IPC endpoint", &endpoint)(error));
+            return Err(failed(error, "secure IPC endpoint", &endpoint));
         }
-        let socket_identity =
-            FileIdentity::read(&endpoint).map_err(failed("inspect IPC endpoint", &endpoint))?;
+        let socket_identity = FileIdentity::read(&endpoint)
+            .map_err(|error| failed(error, "inspect IPC endpoint", &endpoint))?;
         Ok(Self {
             inner,
             endpoint,
@@ -96,6 +94,14 @@ impl Drop for Listener {
             }
         }
     }
+}
+
+/// `error` of what failed at `path`, keeping its kind.
+fn failed(error: io::Error, what: &str, path: &Path) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("cannot {what} {}: {error}", path.display()),
+    )
 }
 
 /// Connects to the endpoint of a backend running as this user.

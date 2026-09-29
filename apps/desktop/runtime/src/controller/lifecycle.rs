@@ -32,7 +32,7 @@ impl DesktopRuntime {
         if self.closing() {
             return Ok(());
         }
-        let state = self.manager.snapshot();
+        let state = self.state();
         if state.is_protected() && self.proxy.session().verified {
             self.recovery.reset_retry();
         }
@@ -73,13 +73,13 @@ impl DesktopRuntime {
         }
         if !local_service && !self.recovery.online() {
             self.recovery.wait();
-            self.manager.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.".into());
+            self.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.");
             return Ok(());
         }
         let resumed = (|| {
             if state.endpoint_error.is_some() {
                 let resolved = settings_config::resolve_local_api(state.local_api)?;
-                self.restore_endpoint(resolved.clone())?;
+                self.restore_endpoint(&resolved)?;
                 self.manager
                     .set_endpoint(resolved.config, Ok(resolved.endpoint));
             }
@@ -99,7 +99,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.cancel();
-        self.start_inner(self.manager.snapshot().config).map(|_| ())
+        self.start_inner(self.state().config).map(|_| ())
     }
 
     pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
@@ -111,7 +111,7 @@ impl DesktopRuntime {
     pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _guard = self.lock_agents()?;
         let config = settings_config::resolve_runtime_config(config)?;
-        let state = self.manager.snapshot();
+        let state = self.state();
         if config.remote_url != state.config.remote_url {
             return Err(Error::invalid_state(
                 "Select or verify the Confidential AI profile before starting",
@@ -143,7 +143,7 @@ impl DesktopRuntime {
             Ok(())
         })?;
         self.publish_profiles()?;
-        self.state()
+        Ok(self.state())
     }
 
     pub fn stop(&self) -> Result<AppState, Error> {
@@ -190,8 +190,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.cancel();
-        let preserve_session =
-            mode == ShutdownMode::UpdateRestart && self.manager.snapshot().session_active;
+        let preserve_session = mode == ShutdownMode::UpdateRestart && self.state().session_active;
         tracing::info!("Shutdown: stopping protection");
         let restored = self.stop_with_reconnect(preserve_session);
         // Outside the Mac App Store, a client's shutdown that ends the session

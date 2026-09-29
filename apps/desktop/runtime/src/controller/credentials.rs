@@ -142,7 +142,7 @@ impl DesktopRuntime {
                     Ok(crate::account_login::CredentialTransition::Unavailable)
                         if record.action == "activate" =>
                     {
-                        self.manager.report_error("Account: This device authorization is no longer active. Reconnect the account.".into());
+                        self.report_error("Account: This device authorization is no longer active. Reconnect the account.");
                     }
                     _ => {}
                 }

@@ -120,10 +120,9 @@ impl ClientCredentials {
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, ClientCredentialState>, Error> {
-        Ok(self
-            .0
+        self.0
             .lock()
-            .map_err(|_| "Client credential store unavailable")?)
+            .map_err(|_| "Client credential store unavailable".into())
     }
 
     fn token(&self) -> Result<String, Error> {
@@ -357,7 +356,7 @@ impl DesktopRuntime {
         manager.set_api_key_saved(credential_saved);
         proxy.set_api_key(None);
         for error in usage_error.into_iter().chain(settings_problems) {
-            manager.report_error(error);
+            runtime.report_error(error);
         }
         runtime
             .web_ui
@@ -472,8 +471,8 @@ impl DesktopRuntime {
             .ok_or_else(|| "The backend does not own its instance lock".to_string())
     }
 
-    pub fn state(&self) -> Result<AppState, Error> {
-        Ok(self.manager.snapshot())
+    pub fn state(&self) -> AppState {
+        self.manager.snapshot()
     }
 
     /// Whether the app is closing and accepts no further changes.
@@ -484,10 +483,9 @@ impl DesktopRuntime {
     /// Serializes changes of the agents' configuration and of the tokens the
     /// Local API accepts, so an older scan cannot restore revoked ones.
     fn lock_agents(&self) -> Result<MutexGuard<'_, ()>, Error> {
-        Ok(self
-            .agent_policy
+        self.agent_policy
             .lock()
-            .map_err(|_| "Agent state unavailable")?)
+            .map_err(|_| "Agent state unavailable".into())
     }
 
     pub fn report_error(&self, error: impl std::fmt::Display) {
@@ -497,7 +495,7 @@ impl DesktopRuntime {
     /// Reports `error` unless the state shows it already, so a failure that
     /// repeats on every attempt publishes no new state.
     fn report_once(&self, error: Error) {
-        if self.manager.snapshot().error != Some(error.to_string()) {
+        if self.state().error != Some(error.to_string()) {
             self.report_error(error);
         }
     }
@@ -515,7 +513,7 @@ impl DesktopRuntime {
 
     pub fn export_profiles_content(&self) -> Result<String, Error> {
         let backup =
-            desktop_core::maintenance::ProfileBackup::from_profiles(&self.state()?.profiles);
+            desktop_core::maintenance::ProfileBackup::from_profiles(&self.state().profiles);
         Ok(desktop_core::maintenance::json_content(&backup)?)
     }
 
@@ -528,7 +526,7 @@ impl DesktopRuntime {
 
     pub fn export_diagnostics_content(&self, version: &str) -> Result<String, Error> {
         Ok(desktop_core::maintenance::json_content(
-            &desktop_core::maintenance::diagnostics(&self.state()?, version),
+            &desktop_core::maintenance::diagnostics(&self.state(), version),
         )?)
     }
 

@@ -103,7 +103,7 @@ impl DesktopRuntime {
             // settings in effect, and protection must not keep running on a
             // profile they no longer name. The start then fails with its
             // reason, and the session, still active, offers Stop.
-            let reconnect = self.restart_needed(&self.manager.snapshot())?;
+            let reconnect = self.restart_needed(&self.state())?;
             if reconnect {
                 self.pause_protection()?;
             }

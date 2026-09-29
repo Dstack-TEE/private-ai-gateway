@@ -42,7 +42,7 @@ impl DesktopRuntime {
     /// than telling it to reconnect. Returns whether requests are admitted
     /// now. Call under [`Self::lock_agents`].
     pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, Error> {
-        let state = self.manager.snapshot();
+        let state = self.state();
         let tokens = if state.session_active {
             tokens
         } else {
@@ -66,7 +66,7 @@ impl DesktopRuntime {
         let projector = self.current_projector()?;
         projector.initialize_store()?;
         // Only a session the user ended restores the agents' configuration.
-        if !self.manager.snapshot().session_active {
+        if !self.state().session_active {
             all_applied(projector.reconcile(None)?)?;
         }
         self.publish_agent_tokens(projector.scan(None)?.1)?;
@@ -120,7 +120,7 @@ impl DesktopRuntime {
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
         let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
-        if !self.manager.snapshot().is_protected() || !session.verified {
+        if !self.state().is_protected() || !session.verified {
             for status in &mut statuses {
                 status.authorized = false;
             }
@@ -278,7 +278,7 @@ impl DesktopRuntime {
             return Ok(());
         }
         let _guard = self.lock_agents()?;
-        let state = self.manager.snapshot();
+        let state = self.state();
         let session = self.proxy.session();
         let protected = state.is_protected() && session.verified;
         // Until the user ends the session, agents stay pointed at the Local
@@ -347,7 +347,7 @@ impl DesktopRuntime {
         {
             return Ok(None);
         }
-        if !self.manager.snapshot().is_protected() {
+        if !self.state().is_protected() {
             return Ok(None);
         }
         let session = self.proxy.session();

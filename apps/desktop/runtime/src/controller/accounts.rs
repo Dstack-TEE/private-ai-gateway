@@ -157,7 +157,7 @@ impl DesktopRuntime {
     }
 
     pub async fn account_details(&self, profile_id: String) -> Result<AccountLoginDetails, Error> {
-        let state = self.manager.snapshot();
+        let state = self.state();
         let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
         if !account_key(profile.provider, &profile.auth) {
             return Err("Connect RedPill to select a workspace".into());
@@ -183,7 +183,7 @@ impl DesktopRuntime {
                     .await
             }
             AccountBalanceTarget::Profile { profile_id } => {
-                let state = self.manager.snapshot();
+                let state = self.state();
                 let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
                     return Err("Connect the account to view its balance".into());
