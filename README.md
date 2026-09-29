@@ -1,5 +1,8 @@
 # Private AI Gateway
 
+[![npm](https://img.shields.io/npm/v/private-ai-proxy?label=npm)](https://www.npmjs.com/package/private-ai-proxy)
+[![License](https://img.shields.io/github/license/Dstack-TEE/private-ai-gateway)](LICENSE)
+
 **Call the LLM APIs you already know. Verify that no one can read your data
 before you send it.**
 
@@ -18,11 +21,11 @@ developer preview.
 Install the Private AI Proxy CLI (macOS, Linux, or Windows):
 
 ```bash
-npm install --global private-ai-proxy@beta
+npm install --global private-ai-proxy
 ```
 
-`pap curl` is in the 0.2 beta. The [install guide](docs/private-ai-proxy-install.md)
-covers the desktop app and the install scripts, which take `--channel beta`.
+The [install guide](docs/private-ai-proxy-install.md) covers Homebrew, the
+desktop app, and the install scripts.
 You also need system `curl`.
 
 Then call Chat Completions as usual. Replace `YOUR_API_KEY` and `MODEL_ID`

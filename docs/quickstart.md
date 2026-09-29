@@ -9,12 +9,12 @@ You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm
 and select the service:
 
 ```bash
-npm install --global private-ai-proxy@beta
+npm install --global private-ai-proxy
 pap --help
 export ACI_URL=https://tee.redpill.ai
 ```
 
-This guide uses the 0.2 beta, which adds `pap curl` and the custody flags.
+`pap curl` and the custody flags need 0.2.0 or later.
 `private-ai-proxy` is the full name of the same command. For Homebrew, native
 installers, and install scripts, see the [install guide](private-ai-proxy-install.md).
 From a source checkout, replace each `pap` command below with
