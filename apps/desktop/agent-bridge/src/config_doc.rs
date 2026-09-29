@@ -381,22 +381,22 @@ fn json5_root(text: &str) -> Result<CstRootNode, String> {
     let root = CstRootNode::parse(text, &json5_options())
         .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
     if let Some(value) = root.value() {
-        validate_unique_keys(&value)?;
+        validate_unique_keys(&value, "JSON5")?;
     }
     Ok(root)
 }
 
-fn validate_unique_keys(node: &jsonc_parser::cst::CstNode) -> Result<(), String> {
+fn validate_unique_keys(node: &jsonc_parser::cst::CstNode, format: &str) -> Result<(), String> {
     if let Some(object) = node.as_object() {
         let mut keys = std::collections::HashSet::new();
         for property in object.properties() {
             let name = property
                 .name()
-                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+                .ok_or_else(|| format!("unsupported {format} property name"))?;
             let key = name
                 .decoded_value()
                 .ok()
-                .ok_or_else(|| "unsupported JSON5 property name".to_string())?;
+                .ok_or_else(|| format!("unsupported {format} property name"))?;
             // The CST parser's loose-word mode is wider than JSON5. Accept a
             // conservative identifier subset; quoted Unicode keys remain valid.
             if matches!(name, jsonc_parser::cst::ObjectPropName::Word(_))
@@ -414,12 +414,14 @@ fn validate_unique_keys(node: &jsonc_parser::cst::CstNode) -> Result<(), String>
                 );
             }
             if !keys.insert(key) {
-                return Err("duplicate JSON5 property names are unsafe to edit".to_string());
+                return Err(format!(
+                    "duplicate {format} property names are unsafe to edit"
+                ));
             }
         }
     }
     for child in node.children() {
-        validate_unique_keys(&child)?;
+        validate_unique_keys(&child, format)?;
     }
     Ok(())
 }
@@ -466,7 +468,7 @@ fn json_root(text: &str) -> Result<CstRootNode, String> {
     )
     .map_err(|_| "not valid JSON".to_string())?;
     if let Some(value) = root.value() {
-        validate_unique_keys(&value)?;
+        validate_unique_keys(&value, "JSON")?;
     }
     Ok(root)
 }

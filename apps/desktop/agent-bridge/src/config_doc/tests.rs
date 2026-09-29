@@ -135,6 +135,10 @@ fn json_edits_keep_every_untouched_byte() {
     doc.remove(&["env", "KEEP"]).unwrap();
     assert!(!doc.contains(&["env"]));
 
+    assert_eq!(
+        ConfigDoc::parse(Format::Json, "{\"a\":{\"b\":1,\"b\":2}}").unwrap_err(),
+        "duplicate JSON property names are unsafe to edit"
+    );
     for source in [
         "{\"a\":1,\"a\":2}",
         "{/* c */}",
