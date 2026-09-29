@@ -6,7 +6,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     time::{Duration, Instant},
 };
 use support::{assert_success, Backend};
@@ -23,6 +23,7 @@ fn sandbox_teardown_watchdog() {
 #[test]
 fn legacy_aci_alias_output_matches_the_canonical_command() {
     use std::path::Path;
+    use std::process::Command;
     let directory = tempfile::tempdir().unwrap();
     let alias = directory.path().join("aci");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
@@ -868,6 +869,7 @@ fn malformed_requests_and_event_streams_do_not_stop_backend() {
 #[cfg(unix)]
 #[test]
 fn a_legacy_backend_is_stopped_over_its_own_protocol() {
+    use std::process::Command;
     use std::{
         io::{BufRead, BufReader},
         os::unix::{fs::PermissionsExt, net::UnixListener},
