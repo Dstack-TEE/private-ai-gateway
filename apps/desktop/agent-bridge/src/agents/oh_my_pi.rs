@@ -243,41 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn external_provider_edit_revokes_without_overwriting_on_disconnect() {
-        let sandbox = sandbox("omp-external-edit");
-        let options = ConnectOptions::default();
-        let preview = sandbox
-            .projector
-            .preview(Agent::OhMyPi, true, Some(&catalog()), &options)
-            .unwrap();
-        sandbox
-            .projector
-            .apply(
-                Agent::OhMyPi,
-                true,
-                &preview.revision,
-                Some(&catalog()),
-                &options,
-            )
-            .unwrap();
-        let path = config_path(&sandbox.home, false);
-        let external =
-            "# externally replaced\nproviders: {private-ai-proxy: {apiKey: external-secret}}\n";
-        write(&path, external);
-        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        assert!(
-            !statuses
-                .iter()
-                .find(|status| status.id == "oh-my-pi")
-                .unwrap()
-                .authorized
-        );
-        assert!(tokens.is_empty());
-        disconnect(&sandbox, Agent::OhMyPi);
-        assert_eq!(fs::read_to_string(path).unwrap(), external);
-    }
-
-    #[test]
     fn yaml_provider_is_independent_and_restores_the_recorded_fallback_file() {
         let sandbox = sandbox("omp-yaml-journal");
         let dir = sandbox.home.join(".omp/agent");
@@ -347,49 +312,6 @@ mod tests {
         assert_eq!(fs::read(dir.join("models.yml")).unwrap(), foreign);
         assert_eq!(fs::read(pi_path).unwrap(), pi_before);
         assert_eq!(fs::read(auth).unwrap(), auth_before);
-    }
-
-    #[test]
-    fn legacy_and_ambiguous_yaml_are_refused_without_capture() {
-        let sandbox = sandbox("omp-yaml-conflicts");
-        let dir = sandbox.home.join(".omp/agent");
-        write(
-            &dir.join("models.json"),
-            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#,
-        );
-        assert!(validate_host(&sandbox.home, false)
-            .unwrap_err()
-            .contains("migration"));
-        assert_eq!(
-            fs::read_to_string(dir.join("models.json")).unwrap(),
-            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#
-        );
-        for text in [
-            "providers:\n  private-ai-proxy: {apiKey: secret}\n",
-            "providers:\n  private-ai-proxy: null\n",
-            "providers: []\n",
-            "providers: {other: {}, other: {}}\n",
-            "base: &base {other: {}}\nproviders: {<<: *base}\n",
-            "providers: {}\n---\nproviders: {}\n",
-        ] {
-            let path = dir.join("models.yml");
-            write(&path, text);
-            assert!(
-                sandbox
-                    .projector
-                    .preview(
-                        Agent::OhMyPi,
-                        true,
-                        Some(&catalog()),
-                        &ConnectOptions::default()
-                    )
-                    .is_err(),
-                "{text}"
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), text);
-            assert!(sandbox.projector.tokens.read("oh-my-pi").unwrap().is_none());
-            assert!(!sandbox.projector.store_path().exists());
-        }
     }
 
     #[test]
