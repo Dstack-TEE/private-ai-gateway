@@ -6,6 +6,15 @@ changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
 traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
 
+> **Status (2026-09-29 standards pass):** each external interface was checked
+> against the official v1.48.0 source and documentation. The readiness probe
+> now uses the proxy's `/readyz` instead of `GET /v1/models`, which v1.48
+> forwards unencrypted to the Privatemode API. The admin token is now a Compose
+> secret instead of a parsed dstack internal file. `proxy_image_sha256` moved
+> into a [published extension](../../../spec/proxy-image-binding.md). A fresh
+> production-OS Phala deployment passed `pap verify` with `--accept-compose` and
+> served E2EE v2 chat and streaming with passing receipt and session audits.
+
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).
 Attestation framework: [`edgelesssys/contrast`](https://github.com/edgelesssys/contrast).

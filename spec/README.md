@@ -9,6 +9,7 @@ attested keys, and verified aggregation.
 | --- | --- |
 | [aci.md](aci.md) | The specification (`aci/1`, draft) |
 | [e2ee-v2.md](e2ee-v2.md) | Supported E2EE v2 compatibility protocol and v3 transition policy |
+| [proxy-image-binding.md](proxy-image-binding.md) | `proxy_image_sha256` channel binding for a provider proxy co-deployed in an aggregator's attested workload |
 | [test-vectors.md](test-vectors.md) | Byte-exact ACI vectors for digests and signatures |
 | [e2ee-v2-test-vectors.md](e2ee-v2-test-vectors.md) | Byte-exact E2EE v2 AAD vectors |
 | [related-work.md](related-work.md) | Positioning against other confidential-inference systems and standards |

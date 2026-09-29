@@ -1,7 +1,8 @@
 # Privatemode co-deployed proxy verification
 
 - **TEE:** AMD SEV-SNP or Intel TDX with NVIDIA Confidential Computing
-- **Session binding:** `proxy_image_sha256`
+- **Session binding:** `proxy_image_sha256`, defined by the
+  [proxy-image binding extension](../../../spec/proxy-image-binding.md)
 - **Verifier:** official `privatemode-proxy` co-deployed in the gateway's
   measured dstack Compose
 - **Transport:** the gateway's attested client channel, private Compose HTTP
@@ -108,7 +109,8 @@ the request after it leaves that workload.
 ## Session binding and claims
 
 The receipt's `upstream.verified` event cites an immutable attested session.
-That session contains the enforceable channel binding:
+That session contains the enforceable channel binding that the
+[proxy-image binding extension](../../../spec/proxy-image-binding.md) defines:
 
 ```json
 {
@@ -163,6 +165,21 @@ CA. A proxy-image or credential change requires a measured redeployment. A
 manifest update does not require a redeployment, but relying parties should
 review the new observed digest before assigning manifest-specific transitive
 claims outside the gateway.
+
+## Tests and reproduction
+
+Run the hermetic adapter tests: the credential and binding refusals, redirect
+refusal, readiness deadline, verification cache, manifest observation, receipt
+binding, and capacity retry:
+
+```sh
+cargo test --test provider_e2e privatemode
+```
+
+For a live run, start the pinned proxy yourself and add a `privatemode` entry
+to the [live end-to-end suite](../../live-e2e-test-suite.md#provider-matrix-format).
+To test a Phala deployment, follow the
+[deployment runbook](../../../deploy/privatemode.md#verify-the-deployment).
 
 ## Sources
 
