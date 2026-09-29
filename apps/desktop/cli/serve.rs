@@ -24,6 +24,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
+use desktop_core::listen::http_endpoint;
 use desktop_runtime::verifier_session::{IdentityEvent, VerifierEvent, VerifierEventSink};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -505,13 +506,15 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     let control_local = control_listener
         .local_addr()
         .map_err(|e| format!("cannot read control address: {e}"))?;
+    let proxy_url = http_endpoint(&local.ip().to_string(), local.port())?;
+    let control_url = http_endpoint(&control_local.ip().to_string(), control_local.port())?;
     if args.json_events {
         let event = lifecycle_json(
             "ready",
             ready_identity,
             Some(json!({
-                "proxy_url": format!("http://{local}"),
-                "control_url": format!("http://{control_local}"),
+                "proxy_url": proxy_url,
+                "control_url": control_url,
                 "remote_url": base_url,
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
@@ -528,14 +531,14 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
     } else {
         println!();
         println!(
-            "private-ai-proxy serve: proxying {base_url} on http://{local} (plain HTTP, localhost)"
+            "private-ai-proxy serve: proxying {base_url} on {proxy_url} (plain HTTP, localhost)"
         );
         println!(
             "forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
              body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
-             verify on demand: GET http://{control_local}/receipts lists recent exchanges, \
-             POST http://{control_local}/receipts/<id>/verify checks one (send Authorization \
+             verify on demand: GET {control_url}/receipts lists recent exchanges, \
+             POST {control_url}/receipts/<id>/verify checks one (send Authorization \
              if the receipt fetch needs it).\n{}",
             if args.allow_unverified {
                 "verified serving NOT demanded (--allow-unverified)."

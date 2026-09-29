@@ -39,13 +39,13 @@ pub fn resolve(mut config: ListenConfig) -> Result<ResolvedListen, String> {
         .unwrap_or(&config.listen_address);
     Ok(ResolvedListen {
         bind: SocketAddr::new(address, config.port),
-        endpoint: endpoint(host, config.port)?,
+        endpoint: http_endpoint(host, config.port)?,
         config,
     })
 }
 
 /// `http://<host>:<port>`; `url` leaves out the port when it is 80.
-fn endpoint(host: &str, port: u16) -> Result<String, String> {
+pub fn http_endpoint(host: &str, port: u16) -> Result<String, String> {
     let invalid = || format!("Cannot form a URL for host {host}");
     let mut url = Url::parse("http://localhost").map_err(|_| invalid())?;
     url.set_host(Some(&url_host(host))).map_err(|_| invalid())?;

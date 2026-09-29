@@ -371,7 +371,10 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
         ServiceProvider::Phala => {
             let data = response(
                 client
-                    .post(format!("{PHALA_API}/api/v1/auth/device/code"))
+                    .post(desktop_core::endpoint(
+                        PHALA_API,
+                        &["api", "v1", "auth", "device", "code"],
+                    )?)
                     .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key"})),
             )
             .await?;
@@ -397,8 +400,11 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             (url, Some(code), worker, None)
         }
         ServiceProvider::Redpill => {
-            let discovery =
-                response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
+            let discovery = response(client.get(desktop_core::endpoint(
+                ISSUER,
+                &[".well-known", "openid-configuration"],
+            )?))
+            .await?;
             validate_discovery(&discovery)?;
             // RFC 8252 §7.3: a loopback redirect on an OS-assigned port, which
             // the authorization server must accept for any port.
@@ -413,6 +419,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?,
                 address,
             )?;
+            let userinfo = desktop_core::endpoint(ISSUER, &["oauth", "userinfo"])?;
             let (url, state, verifier) = authorization_request(&oauth);
             let (sender, receiver) = oneshot::channel();
             let callback = Arc::new(CallbackState {
@@ -429,7 +436,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                         &oauth,
                         code,
                         verifier,
-                        &format!("{ISSUER}/oauth/userinfo"),
+                        userinfo.as_str(),
                         ACCOUNT_URL,
                     )
                     .await
