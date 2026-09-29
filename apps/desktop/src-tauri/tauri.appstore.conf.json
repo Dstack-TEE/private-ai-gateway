@@ -14,8 +14,7 @@
     "createUpdaterArtifacts": false,
     "macOS": {
       "hardenedRuntime": false,
-      "infoPlist": "Info.appstore.plist",
-      "minimumSystemVersion": "13.0"
+      "infoPlist": "Info.appstore.plist"
     }
   }
 }

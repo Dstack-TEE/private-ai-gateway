@@ -1,10 +1,9 @@
-mod permission;
+pub(crate) mod permission;
 use desktop_core::{
     client::{CallError, Client},
     config::NotificationPreferences,
     contracts::{
-        AppState, NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
-        VerificationStatus,
+        AppState, NotificationPermission, NotificationPermissionStatus, VerificationStatus,
     },
     protocol::rpc,
 };
@@ -14,30 +13,6 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
-
-#[derive(Default)]
-pub struct Settings(Mutex<NotificationPreferences>);
-
-pub async fn configuration(
-    app: &AppHandle,
-    preferences: NotificationPreferences,
-) -> NotificationConfiguration {
-    NotificationConfiguration {
-        preferences,
-        system: permission::query(app).await,
-    }
-}
-
-pub fn set_cached_preferences(
-    app: &AppHandle,
-    preferences: NotificationPreferences,
-) -> Result<(), String> {
-    *app.state::<Settings>()
-        .0
-        .lock()
-        .map_err(|_| "Notification settings are unavailable")? = preferences;
-    Ok(())
-}
 
 /// Asks for the system permission at startup while the backend's preferences
 /// have notifications on and the user has not decided yet, so alerts can show
@@ -68,22 +43,16 @@ pub async fn request_notification_permission(
 #[tauri::command]
 pub fn open_notification_settings(app: AppHandle) -> Result<(), CallError> {
     use tauri_plugin_opener::OpenerExt;
-    let url = system_notification_settings()
-        .ok_or("Open Notifications in your desktop environment's settings.")?;
+    let url = if cfg!(target_os = "macos") {
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    } else if cfg!(target_os = "windows") {
+        "ms-settings:notifications"
+    } else {
+        return Err("Open Notifications in your desktop environment's settings.".into());
+    };
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "Could not open system notification settings".into())
-}
-
-/// The system's notification settings page, where the platform has one.
-fn system_notification_settings() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
-        Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
-    } else if cfg!(target_os = "windows") {
-        Some("ms-settings:notifications")
-    } else {
-        None
-    }
 }
 
 /// Reports an action the tray or the menu bar started, which has no window
@@ -164,7 +133,8 @@ impl Observer {
             .webview_windows()
             .values()
             .any(|window| window.is_focused().unwrap_or(true));
-        let Ok(config) = app.state::<Settings>().0.lock().map(|config| *config) else {
+        let preferences = app.state::<Mutex<NotificationPreferences>>();
+        let Ok(config) = preferences.lock().map(|config| *config) else {
             return;
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {

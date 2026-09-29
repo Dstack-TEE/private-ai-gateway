@@ -5,14 +5,21 @@ use desktop_core::{
     brand::AboutLink,
     client::{CallError, Client},
     contracts::ServiceProvider,
+    ui_api::Method,
 };
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use serde_json::{json, Value};
+use tauri::{menu::MenuBuilder, AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{distribution, open_account_url, run_blocking};
+use crate::{distribution, run_blocking};
 
-async fn open_url(app: AppHandle, url: String, failure: &'static str) -> Result<(), CallError> {
+/// Opens `url` in the default browser, reporting `failure` if it does not open.
+pub(crate) async fn open_url(
+    app: AppHandle,
+    url: String,
+    failure: &'static str,
+) -> Result<(), CallError> {
     Ok(run_blocking(move || {
         app.opener()
             .open_url(url, None::<&str>)
@@ -29,12 +36,8 @@ pub(crate) async fn open_agent_website(app: AppHandle, agent_id: String) -> Resu
 
 #[tauri::command]
 pub(crate) async fn open_about_link(app: AppHandle, target: AboutLink) -> Result<(), CallError> {
-    open_url(
-        app,
-        target.url().into(),
-        "Cannot open the resource in your browser",
-    )
-    .await
+    let url = target.url().into();
+    open_url(app, url, "Cannot open the resource in your browser").await
 }
 
 /// Opens the listening web UI in the system browser. The address carries no
@@ -73,37 +76,25 @@ pub(crate) async fn copy_text(app: AppHandle, text: String) -> Result<(), CallEr
     .await?)
 }
 
+/// Shows the system editing actions a text field allows. Only macOS has
+/// native Undo and Redo items.
 #[tauri::command]
 pub(crate) fn show_edit_menu(window: WebviewWindow, editable: bool) -> Result<(), CallError> {
-    use tauri::menu::{Menu, PredefinedMenuItem};
-    let app = window.app_handle();
-    let menu = Menu::new(app).map_err(|_| "Cannot create editing menu")?;
-    #[cfg(target_os = "macos")]
+    let mut menu = MenuBuilder::new(window.app_handle());
     if editable {
-        menu.append_items(&[
-            &PredefinedMenuItem::undo(app, None).map_err(|_| "Cannot create Undo action")?,
-            &PredefinedMenuItem::redo(app, None).map_err(|_| "Cannot create Redo action")?,
-            &PredefinedMenuItem::separator(app).map_err(|_| "Cannot create menu separator")?,
-        ])
-        .map_err(|_| "Cannot build editing menu")?;
+        if cfg!(target_os = "macos") {
+            menu = menu.undo().redo().separator();
+        }
+        menu = menu.cut();
     }
+    menu = menu.copy();
     if editable {
-        menu.append(&PredefinedMenuItem::cut(app, None).map_err(|_| "Cannot create Cut action")?)
-            .map_err(|_| "Cannot build editing menu")?;
+        menu = menu.paste();
     }
-    menu.append(&PredefinedMenuItem::copy(app, None).map_err(|_| "Cannot create Copy action")?)
+    let menu = menu
+        .select_all()
+        .build()
         .map_err(|_| "Cannot build editing menu")?;
-    if editable {
-        menu.append(
-            &PredefinedMenuItem::paste(app, None).map_err(|_| "Cannot create Paste action")?,
-        )
-        .map_err(|_| "Cannot build editing menu")?;
-    }
-    menu.append(
-        &PredefinedMenuItem::select_all(app, None)
-            .map_err(|_| "Cannot create Select All action")?,
-    )
-    .map_err(|_| "Cannot build editing menu")?;
     window
         .popup_menu(&menu)
         .map_err(|_| "Cannot open editing menu".into())
@@ -127,16 +118,66 @@ pub(crate) async fn stop_all_and_quit(
     Ok(())
 }
 
+const ACCOUNT_PAGE_FAILURE: &str = "Cannot open the account page";
+
+fn require_portal_links() -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.account_portal_links,
+        "Account portal links are unavailable in this distribution",
+    )
+}
+
+/// Opens the account page the renderer method `method` resolves.
+async fn open_account_page(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    method: Method,
+    params: Value,
+) -> Result<(), CallError> {
+    let value = crate::ui_api::invoke(app.clone(), client, method, params).await?;
+    let url = serde_json::from_value(value).map_err(|_| "Management response failed")?;
+    open_url(app, url, ACCOUNT_PAGE_FAILURE).await
+}
+
+#[tauri::command]
+pub(crate) async fn open_top_up(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    provider: ServiceProvider,
+    scope_slug: Option<String>,
+) -> Result<(), CallError> {
+    open_account_page(
+        app,
+        client,
+        Method::GetTopUpUrl,
+        json!({ "provider": provider, "scopeSlug": scope_slug }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn open_organization(
+    app: AppHandle,
+    client: State<'_, Arc<Client>>,
+    organization_slug: String,
+) -> Result<(), CallError> {
+    require_portal_links()?;
+    open_account_page(
+        app,
+        client,
+        Method::GetOrganizationUrl,
+        json!({ "organizationSlug": organization_slug }),
+    )
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn open_api_key_page(
     app: AppHandle,
     provider: ServiceProvider,
 ) -> Result<(), CallError> {
-    distribution::require(
-        distribution::CAPABILITIES.account_portal_links,
-        "Account portal links are unavailable in this distribution",
-    )?;
+    require_portal_links()?;
     let url = desktop_core::account::api_key_page(provider)
         .ok_or("Custom providers do not have a built-in API key page")?;
-    Ok(open_account_url(app, url.to_string()).await?)
+    open_url(app, url.to_string(), ACCOUNT_PAGE_FAILURE).await
 }

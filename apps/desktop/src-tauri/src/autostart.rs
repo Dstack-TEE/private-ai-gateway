@@ -10,6 +10,8 @@ const AUTOSTART_ARG: &str = "--autostart";
 #[cfg(any(test, all(target_os = "macos", not(feature = "mac-app-store"))))]
 mod migration;
 
+pub use platform::*;
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod platform {
     use std::path::Path;
@@ -46,6 +48,10 @@ mod platform {
             manager.0.disable()
         }
         .map_err(|error| error.to_string())
+    }
+
+    pub fn launched_at_login() -> bool {
+        std::env::args_os().any(|argument| argument == super::AUTOSTART_ARG)
     }
 
     fn build(app_name: &str, executable: &Path) -> Result<AutoLaunch, auto_launch::Error> {
@@ -199,9 +205,6 @@ mod platform {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-pub use platform::{is_enabled, set_enabled, setup};
-
 #[cfg(target_os = "macos")]
 mod platform {
     use objc2_core_services::{kAEOpenApplication, keyAELaunchedAsLogInItem, keyAEPropData};
@@ -209,17 +212,12 @@ mod platform {
     use objc2_service_management::{SMAppService, SMAppServiceStatus};
     use tauri::AppHandle;
 
-    fn status() -> SMAppServiceStatus {
-        let service = unsafe { SMAppService::mainAppService() };
-        unsafe { service.status() }
-    }
-
     pub fn is_enabled(_app: &AppHandle) -> Result<bool, String> {
         #[cfg(not(feature = "mac-app-store"))]
         if LegacyBackend(_app).legacy_enabled()? {
             return Ok(true);
         }
-        match status() {
+        match unsafe { SMAppService::mainAppService().status() } {
             SMAppServiceStatus::Enabled => Ok(true),
             SMAppServiceStatus::NotRegistered | SMAppServiceStatus::RequiresApproval => Ok(false),
             SMAppServiceStatus::NotFound => {
@@ -349,15 +347,4 @@ mod platform {
             tracing::warn!("Open at Login migration deferred: {error}");
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-pub use platform::{is_enabled, launched_at_login, set_enabled};
-
-#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
-pub use platform::migrate_legacy;
-
-#[cfg(not(target_os = "macos"))]
-pub fn launched_at_login() -> bool {
-    std::env::args_os().any(|argument| argument == std::ffi::OsStr::new(AUTOSTART_ARG))
 }
