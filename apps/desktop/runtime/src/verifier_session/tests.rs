@@ -319,7 +319,10 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
             "serving": "aggregator",
             "supported_e2ee_versions": []
         },
-        "verification": { "checks": [] }
+        "verification": { "checks": [{
+            "id": "id-1", "section": "9.1(1)", "title": "Hardware quote",
+            "status": "pass", "detail": "TDX quote verified"
+        }]}
     }));
     manager
         .handle_event(
@@ -331,6 +334,11 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
             },
         )
         .unwrap();
+    // The identity alone does not verify; the catalog read is still to run.
+    let identified = manager.snapshot();
+    assert_eq!(identified.status, VerificationStatus::Verifying);
+    assert!(identified.identity.is_some() && identified.checks.len() == 1);
+    assert!(!proxy.session().verified);
     let state = manager
         .wait_for_verification(
             started.session_id.as_deref().unwrap(),
@@ -831,34 +839,6 @@ fn receipt_activity(id: &str, session_id: &str, status: u16, detail: &str) -> Re
 }
 
 #[test]
-fn identity_alone_does_not_verify() {
-    let identity = json!({
-        "tee_type": "tdx",
-        "trust_level": "hardware_verified",
-        "keyset_digest": "sha256:keyset",
-        "keyset_not_after": 2_000_000_000,
-        "tls_spki": null,
-        "source_provenance": { "repo_commit": "abc123" },
-        "service_capabilities": {
-            "serving": "aggregator",
-            "supported_e2ee_versions": []
-        },
-        "verification": { "checks": [{
-            "id": "id-1", "section": "9.1(1)", "title": "Hardware quote",
-            "status": "pass", "detail": "TDX quote verified"
-        }]}
-    });
-    let mut state = AppState::default();
-    apply_identity_event(&mut state, &identity_event(identity));
-    assert_eq!(
-        state.status,
-        VerificationStatus::Stopped,
-        "status is decided once the catalog is in"
-    );
-    assert!(state.identity.is_some());
-}
-
-#[test]
 fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
     let mut state = AppState::default();
     merge_activity(
@@ -1069,4 +1049,119 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
         .unwrap();
     assert_eq!(manager.subscribe().borrow().error, state.error);
     assert_eq!(proxy.session().epoch, 2);
+}
+
+/// A stop keeps the session, the settings and the last verified catalog,
+/// and resets the verification. The fixture names every field, so a new
+/// `AppState` field fails to compile here until it is sorted into one.
+#[test]
+fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
+    use desktop_core::contracts::{ConfidentialProfile, ConfigFiles, ProfileAuth, ServiceProvider};
+    let previous = AppState {
+        backend_instance: Some("instance".into()),
+        sequence: 7,
+        client_key_revision: 2,
+        client_key_available: Some(false),
+        backend_connected: Some(true),
+        wake_monitor_available: Some(true),
+        status: VerificationStatus::Verified,
+        configuration_verification: true,
+        progress: Some("Reading the verified model list".into()),
+        remote_url: Some("https://tee.example".into()),
+        proxy_url: Some("http://127.0.0.1:4180".into()),
+        endpoint_error: Some("Port in use".into()),
+        identity: Some(parse_identity(&identity_event(json!({
+            "tee_type": "tdx",
+            "trust_level": "hardware_verified",
+            "keyset_digest": "sha256:keyset",
+            "keyset_not_after": 2_000_000_000,
+            "tls_spki": null,
+            "source_provenance": {},
+            "service_capabilities": { "serving": "aggregator", "supported_e2ee_versions": [] },
+            "verification": {}
+        })))),
+        checks: vec![VerificationCheck {
+            id: "id-1".into(),
+            section: "9.1(1)".into(),
+            title: "Hardware quote".into(),
+            status: "pass".into(),
+            detail: "TDX quote verified".into(),
+        }],
+        activity: vec![receipt_activity("request", "session", 200, "verified")],
+        session_id: Some("session".into()),
+        protected_since: Some(100),
+        reconnecting: true,
+        session_active: true,
+        session_usage: UsageSummary {
+            requests: 3,
+            ..UsageSummary::default()
+        },
+        usage_revision: 4,
+        error: Some("Verification failed".into()),
+        config: StartConfig {
+            remote_url: "https://tee.example".into(),
+            require_production_os: false,
+        },
+        profiles: vec![ConfidentialProfile {
+            id: "profile".into(),
+            credential_ref: Some("credential-1".into()),
+            name: "Profile".into(),
+            provider: ServiceProvider::Custom,
+            remote_url: "https://tee.example".into(),
+            auth: ProfileAuth::ApiKey,
+            credential_saved: true,
+            verified_at: Some(1),
+        }],
+        active_profile_id: "profile".into(),
+        local_api: ListenConfig {
+            port: 5000,
+            ..ListenConfig::default()
+        },
+        api_key_saved: true,
+        catalog: Some(CatalogSummary {
+            revision: "revision".into(),
+            fetched_at: 1,
+            models: Vec::new(),
+            removed: vec!["gone".into()],
+        }),
+        web_ui: desktop_core::contracts::WebUiStatus {
+            enabled: true,
+            url: Some("http://127.0.0.1:4182".into()),
+            ..Default::default()
+        },
+        config_files: ConfigFiles {
+            revision: 5,
+            ..ConfigFiles::default()
+        },
+        agents_revision: 6,
+    };
+    let reset = [
+        "backendConnected",
+        "status",
+        "configurationVerification",
+        "progress",
+        "remoteUrl",
+        "identity",
+        "checks",
+        "protectedSince",
+        "reconnecting",
+        "error",
+    ];
+    let json = |state: &AppState| serde_json::to_value(state).unwrap();
+    let (fixture, carried, defaults) = (
+        json(&previous),
+        json(&SessionManager::carried(&previous)),
+        json(&AppState::default()),
+    );
+    assert_eq!(fixture.as_object().unwrap().len(), 31);
+    for (field, value) in fixture.as_object().unwrap() {
+        // Differs from its default, so keeping it is observable.
+        assert_ne!(Some(value), defaults.get(field), "{field}");
+        let expected = if reset.contains(&field.as_str()) {
+            defaults.get(field)
+        } else {
+            Some(value)
+        };
+        assert_eq!(carried.get(field), expected, "{field}");
+    }
 }
