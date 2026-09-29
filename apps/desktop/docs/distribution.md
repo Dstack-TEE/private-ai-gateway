@@ -207,7 +207,8 @@ lists only the commits since the last beta, so curate the notes before merging.
 4. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
    it covers every change since the previous stable release, using the beta sections of
    `CHANGELOG.md`:
-   - its body becomes the release notes. Keep the header, the `## [<version>]`
+   - its body becomes the release notes, which the release job ends with the
+     download links. Keep the header, the `## [<version>]`
      heading and the footer, and replace the sections below the heading:
      `gh pr edit <number> --body-file notes.md`;
    - commit the same sections to the top of `apps/desktop/CHANGELOG.md` on

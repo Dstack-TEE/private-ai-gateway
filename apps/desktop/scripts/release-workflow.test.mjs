@@ -57,6 +57,11 @@ test("only release tags publish, after every package, in order", async () => {
   // Provenance and SBOM attestations exist before any asset is public.
   const attestations = direct.jobs.release.steps.flatMap((step, index) => (step.uses?.startsWith("actions/attest@") ? [{ index, ...step.with }] : []));
   for (const attestation of attestations) assert.ok(attestation.index < upload);
+  // The download links join the notes after the assets they link are
+  // attached, and before the release is public.
+  const notes = steps.findIndex((run) => run.includes("release-notes.mjs"));
+  const publish = steps.findIndex((run) => run.includes("--draft=false"));
+  assert.ok(upload < notes && notes < publish);
 
   // The release job attests exactly the SBOMs that verify (which also runs
   // on pull requests) generates, from outside the published directory.
