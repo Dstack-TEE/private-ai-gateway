@@ -392,3 +392,18 @@ fn the_header_stays_on_top_and_key_comments_stay_with_their_keys() {
         "appearance = \"dark\"\nport = 1\n"
     );
 }
+
+/// `toml_edit` writes LF line endings, so an edited CRLF file comes back with
+/// LF throughout, its header included.
+#[test]
+fn crlf_files_are_written_with_lf() {
+    let doc = |text: &str| text.parse::<DocumentMut>().unwrap();
+    let edited = edit(
+        Some("# Header\r\n\r\n# Mine\r\nappearance = \"dark\"\r\n"),
+        "",
+        &doc("appearance = \"dark\"\n"),
+        &doc("appearance = \"light\"\n"),
+    )
+    .unwrap();
+    assert_eq!(edited, "# Header\n\n# Mine\nappearance = \"light\"\n");
+}
