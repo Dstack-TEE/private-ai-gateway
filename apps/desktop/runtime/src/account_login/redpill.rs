@@ -64,7 +64,7 @@ pub(super) async fn transition_at(
 ) -> Result<CredentialTransition, Error> {
     let http = client()?;
     let request = match action {
-        "activate" | "abort" => http.post(format!("{base}/{action}")),
+        "activate" | "abort" => http.post(desktop_core::endpoint(base, &[action])?),
         "revoke" => http.delete(base),
         _ => return Err("Unsupported account operation".into()),
     };
@@ -126,9 +126,9 @@ pub(super) fn redpill_client(
     Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
         .set_auth_uri(AuthUrl::from_url(authorize))
         .set_token_uri(TokenUrl::from_url(token))
-        .set_redirect_uri(
-            RedirectUrl::new(callback_url(callback)).map_err(|_| "Invalid account callback URL")?,
-        ))
+        .set_redirect_uri(RedirectUrl::from_url(
+            callback_url(callback).map_err(|()| "Invalid account callback URL")?,
+        )))
 }
 
 /// The browser URL of an authorization code request with S256 PKCE

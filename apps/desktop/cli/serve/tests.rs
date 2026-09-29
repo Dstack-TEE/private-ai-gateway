@@ -1930,3 +1930,25 @@ async fn stale_pin_heals_against_live_service() {
     let pinned = state.client.pinned_spkis(&state.host);
     assert_eq!(pinned, vec![observed]);
 }
+
+#[test]
+fn upstream_urls_keep_the_base_path_and_the_request_target() {
+    let join = |base: &str, target: &str| {
+        join_url(base, &target.parse::<Uri>().unwrap())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        join("https://gateway.example", "/v1/models?limit=1"),
+        "https://gateway.example/v1/models?limit=1"
+    );
+    assert_eq!(
+        join("https://gateway.example/base/", "/v1/chat/completions"),
+        "https://gateway.example/base/v1/chat/completions"
+    );
+    assert_eq!(
+        join("https://gateway.example/base", "/v1/a%20b?q=%26"),
+        "https://gateway.example/base/v1/a%20b?q=%26"
+    );
+    assert!(join_url("not a url", &Uri::from_static("/v1/models")).is_err());
+}

@@ -108,7 +108,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         generated_catalog(
             PROVIDER_PATH,
             json!({
-                "baseUrl": format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
+                "baseUrl": api_url(inputs.endpoint)?,
                 "api": "openai-completions",
                 "apiKey": reference,
                 "models": models,

@@ -58,8 +58,12 @@ const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// The loopback redirect URI for a callback listener bound to `address`.
-fn callback_url(address: SocketAddr) -> String {
-    format!("http://{address}{CALLBACK_PATH}")
+fn callback_url(address: SocketAddr) -> Result<Url, ()> {
+    let mut url = Url::parse("http://localhost").map_err(|_| ())?;
+    url.set_ip_host(address.ip())?;
+    url.set_port(Some(address.port()))?;
+    url.set_path(CALLBACK_PATH);
+    Ok(url)
 }
 
 #[derive(Clone)]
@@ -302,7 +306,7 @@ impl PendingLogin {
                 "Account: This callback URL does not match the current sign-in.",
             ));
         }
-        let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
+        let uri: Uri = url[url::Position::BeforePath..url::Position::AfterQuery]
             .parse()
             .map_err(|_| Error::account("Account: Invalid callback URL."))?;
         let mut headers = HeaderMap::new();

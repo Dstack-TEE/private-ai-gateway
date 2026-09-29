@@ -390,7 +390,10 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
             async move {
                 assert_eq!(form["grant_type"], "authorization_code");
                 assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
-                assert_eq!(form["redirect_uri"], callback_url(callback_address));
+                assert_eq!(
+                    form["redirect_uri"],
+                    callback_url(callback_address).unwrap().as_str()
+                );
                 assert_eq!(form["code"], "one-use");
                 let verifier = Sha256::digest(form["code_verifier"].as_bytes());
                 assert_eq!(
@@ -440,7 +443,10 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
     assert_eq!(query["response_type"], "code");
     assert_eq!(query["response_mode"], "query");
     assert_eq!(query["client_id"], REDPILL_CLIENT_ID);
-    assert_eq!(query["redirect_uri"], callback_url(callback_address));
+    assert_eq!(
+        query["redirect_uri"],
+        callback_url(callback_address).unwrap().as_str()
+    );
     assert_eq!(query["scope"], "openid profile user:org:read");
     assert_eq!(query["code_challenge_method"], "S256");
     assert_eq!(query["state"], *state.secret());

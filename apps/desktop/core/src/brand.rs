@@ -15,9 +15,16 @@ pub const SERVICE_DEFAULT_URL: &str = match ServiceProvider::DEFAULT.preset_url(
     Some(url) => url,
     None => panic!("the default provider has a preset URL"),
 };
+/// [`APP_IDENTIFIER`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! app_identifier {
+    () => {
+        "org.dstack.private-ai-proxy"
+    };
+}
 /// `identifier` in src-tauri/tauri.conf.json. It names the per-user app data
 /// directory and credential namespace on every platform.
-pub const APP_IDENTIFIER: &str = "org.dstack.private-ai-proxy";
+pub const APP_IDENTIFIER: &str = app_identifier!();
 
 /// A project resource Settings, the Help menu and the tray link to. The
 /// renderer receives the URLs as generated constants.

@@ -17,6 +17,7 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use url::{Position, Url};
 
 use super::{auth::SESSION_LIFETIME, throttle::THROTTLE_REFILL, Auth, Throttle};
 use crate::{
@@ -294,14 +295,13 @@ fn valid_host<'a>(headers: &'a HeaderMap, allowed: &[String]) -> Option<&'a str>
 /// the page sets `no-referrer`. Such reads are accepted; cross-origin pages
 /// cannot read their responses because no CORS access is ever granted.
 fn valid_origin(headers: &HeaderMap, host: &str, method: &HttpMethod) -> bool {
-    let origin = format!("http://{host}");
     let header = |name| {
         headers
             .get(name)
             .and_then(|value: &HeaderValue| value.to_str().ok())
     };
     if let Some(actual) = header(header::ORIGIN) {
-        return actual.eq_ignore_ascii_case(&origin);
+        return is_page(actual, host);
     }
     if method != HttpMethod::GET && method != HttpMethod::HEAD {
         return false;
@@ -310,9 +310,24 @@ fn valid_origin(headers: &HeaderMap, host: &str, method: &HttpMethod) -> bool {
         return site == "same-origin";
     }
     if let Some(referer) = header(header::REFERER) {
-        return referer.eq_ignore_ascii_case(&format!("{origin}/"));
+        return is_page(referer, host);
     }
     true
+}
+
+/// Whether an `Origin` or `Referer` value is the page served on `host`, the
+/// request's `Host`: plain HTTP on that authority, without credentials, path,
+/// query or fragment.
+fn is_page(value: &str, host: &str) -> bool {
+    Url::parse(value).is_ok_and(|url| {
+        url.scheme() == "http"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url[Position::BeforeHost..Position::AfterPort].eq_ignore_ascii_case(host)
+    })
 }
 
 fn session_token<'a>(jar: &'a CookieJar, name: &str) -> Option<&'a str> {
@@ -459,6 +474,26 @@ mod tests {
     const ORIGIN: &str = "http://127.0.0.1:3210";
 
     const PASSWORD: &str = "correct horse battery";
+
+    #[test]
+    fn only_the_page_on_the_requested_host_is_its_origin() {
+        for value in [ORIGIN, "http://127.0.0.1:3210/", "HTTP://127.0.0.1:3210"] {
+            assert!(is_page(value, HOST), "{value}");
+        }
+        for value in [
+            "https://127.0.0.1:3210",
+            "http://127.0.0.1:3211",
+            "http://127.0.0.1:3210/page",
+            "http://127.0.0.1:3210/?q",
+            "http://user@127.0.0.1:3210",
+            "http://127.0.0.1",
+            "null",
+            "",
+        ] {
+            assert!(!is_page(value, HOST), "{value}");
+        }
+        assert!(is_page("http://[::1]:3210", "[::1]:3210"));
+    }
 
     /// Answers `stop` and refuses everything else, as the service may.
     #[derive(Clone)]

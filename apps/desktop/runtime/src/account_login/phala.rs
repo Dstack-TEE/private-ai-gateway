@@ -22,7 +22,7 @@ pub(super) async fn phala_at(
 ) -> Result<Credential, Error> {
     loop {
         tokio::time::sleep(Duration::from_secs(interval)).await;
-        let (status, data) = request_json(client.post(format!("{base}/api/v1/auth/device/token"))
+        let (status, data) = request_json(client.post(desktop_core::endpoint(base, &["api", "v1", "auth", "device", "token"])?)
             .json(&json!({"device_code":device,"client_id":"private-ai-proxy","grant_type":"urn:ietf:params:oauth:grant-type:device_code"}))).await?;
         if !status.is_success() {
             match protocol_error(&data) {
@@ -38,7 +38,10 @@ pub(super) async fn phala_at(
         let key = desktop_core::config::validate_api_key(&string(&data, "access_token")?)?;
         let metadata = response(
             client
-                .get(format!("{base}/api/v1/private_ai/self"))
+                .get(desktop_core::endpoint(
+                    base,
+                    &["api", "v1", "private_ai", "self"],
+                )?)
                 .timeout(Duration::from_secs(5))
                 .bearer_auth(&key),
         )

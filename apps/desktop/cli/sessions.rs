@@ -12,6 +12,7 @@ use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
 use crate::verify::verify_service;
+use desktop_core::endpoint;
 use desktop_core::now_secs;
 
 pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32, String> {
@@ -206,11 +207,11 @@ pub async fn audit_current_sessions(
     model: Option<&str>,
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
-    let mut url = format!("{base_url}/v1/aci/sessions");
+    let mut url = endpoint(base_url, &["v1", "aci", "sessions"])?;
     if let Some(model) = model {
-        url.push_str(&format!("?model={}", urlencoded(model)));
+        url.query_pairs_mut().append_pair("model", model);
     }
-    let listing = client.get(&url, None).await?;
+    let listing = client.get(url.as_str(), None).await?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;
     let ids: Vec<String> = listing
@@ -232,7 +233,7 @@ pub async fn audit_current_sessions(
         // The list entries drop the raw evidence data (§8.1), so only the
         // full served record can be audited.
         let audit = match client
-            .get(&format!("{base_url}/v1/aci/sessions/{session_id}"), None)
+            .fetch_session(base_url, &session_id)
             .await
             .and_then(|resp| {
                 resp.error_for_status("session fetch")?;
@@ -252,19 +253,4 @@ pub async fn audit_current_sessions(
         });
     }
     Ok(audited)
-}
-
-/// Percent-encode the few bytes that would break a query value; model ids
-/// are plain identifiers, so this stays minimal and reversible.
-fn urlencoded(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }

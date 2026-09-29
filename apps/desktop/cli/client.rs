@@ -8,6 +8,7 @@
 use std::sync::{Arc, RwLock};
 
 use crate::aci::tls::{error_chain, observing_spki_client, SpkiObservations};
+use desktop_core::endpoint;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use url::Url;
@@ -26,23 +27,6 @@ pub fn random_nonce_hex() -> String {
 /// Strip a trailing `/` so URL joins stay canonical.
 pub fn normalize_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
-}
-
-/// `base_url` with `segments` appended to its path, each percent-encoded as
-/// one segment. `url` drops `.` and `..` segments, so they are refused.
-pub fn endpoint(base_url: &str, segments: &[&str]) -> Result<Url, String> {
-    let mut url = Url::parse(base_url).map_err(|e| format!("invalid URL {base_url:?}: {e}"))?;
-    if let Some(segment) = segments
-        .iter()
-        .find(|segment| matches!(**segment, "" | "." | ".."))
-    {
-        return Err(format!("{segment:?} is not a URL path segment"));
-    }
-    url.path_segments_mut()
-        .map_err(|()| format!("URL {base_url:?} cannot have a path"))?
-        .pop_if_empty()
-        .extend(segments);
-    Ok(url)
 }
 
 /// The attestation report's URL, which carries the request nonce.
@@ -343,12 +327,10 @@ impl AciClient {
                 "receipt id {receipt_id:?} is not a URL-safe id"
             )));
         }
-        self.get_limited(
-            &format!("{base_url}/v1/aci/receipts/{receipt_id}"),
-            bearer,
-            MAX_RECEIPT_BYTES,
-        )
-        .await
+        let url =
+            endpoint(base_url, &["v1", "aci", "receipts", receipt_id]).map_err(GetError::Failed)?;
+        self.get_limited(url.as_str(), bearer, MAX_RECEIPT_BYTES)
+            .await
     }
 
     /// Fetch one attested session; the path takes the session id exactly as
@@ -361,8 +343,8 @@ impl AciClient {
         if !is_url_safe_id(session_id) {
             return Err(format!("session id {session_id:?} is not a URL-safe id"));
         }
-        self.get(&format!("{base_url}/v1/aci/sessions/{session_id}"), None)
-            .await
+        let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
+        self.get(url.as_str(), None).await
     }
 
     pub async fn fetch_models(
@@ -370,7 +352,8 @@ impl AciClient {
         base_url: &str,
         bearer: Option<&str>,
     ) -> Result<HttpResult, String> {
-        self.get(&format!("{base_url}/v1/models"), bearer).await
+        let url = endpoint(base_url, &["v1", "models"])?;
+        self.get(url.as_str(), bearer).await
     }
 
     /// POST a chat completion and read the whole body, capturing the exact
@@ -383,10 +366,10 @@ impl AciClient {
         body: Vec<u8>,
         mut on_chunk: impl FnMut(&[u8]),
     ) -> Result<HttpResult, String> {
-        let url = format!("{base_url}/v1/chat/completions");
+        let url = endpoint(base_url, &["v1", "chat", "completions"])?;
         let mut req = self
             .http()
-            .post(&url)
+            .post(url.as_str())
             .header("content-type", "application/json")
             .header("accept", "text/event-stream, application/json")
             .body(body);
@@ -460,23 +443,6 @@ mod tests {
                 .as_str(),
             "https://[::1]:8443/v1/aci/attestation?nonce=00ff"
         );
-    }
-
-    #[test]
-    fn endpoint_segments_cannot_leave_their_path() {
-        assert_eq!(
-            endpoint(
-                "https://gateway.example",
-                &["v1", "aci", "receipts", "a/b?c"]
-            )
-            .unwrap()
-            .as_str(),
-            "https://gateway.example/v1/aci/receipts/a%2Fb%3Fc"
-        );
-        for segment in ["", ".", ".."] {
-            assert!(endpoint("https://gateway.example", &["v1", segment]).is_err());
-        }
-        assert!(endpoint("not a url", &["v1"]).is_err());
     }
 
     #[test]

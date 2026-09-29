@@ -767,9 +767,14 @@ async fn proxy_passthrough(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    let url = join_url(&state.base_url, &uri);
+    let Ok(url) = join_url(&state.base_url, &uri) else {
+        return text_response(
+            StatusCode::BAD_GATEWAY,
+            "the upstream base URL is invalid\n",
+        );
+    };
     let send = || {
-        let req = forward_headers(state.client.request(method.clone(), &url), &headers);
+        let req = forward_headers(state.client.request(method.clone(), url.as_str()), &headers);
         if body.is_empty() {
             req.send()
         } else {
@@ -846,7 +851,12 @@ async fn proxy_inference(
         );
     }
 
-    let url = join_url(&state.base_url, &uri);
+    let Ok(url) = join_url(&state.base_url, &uri) else {
+        return text_response(
+            StatusCode::BAD_GATEWAY,
+            "the upstream base URL is invalid\n",
+        );
+    };
     let active_pins = state.active_pins();
     // A policy-derived set is refreshed only when it actually constrained this
     // request. Requests without a local policy keep their own pins unchanged.
@@ -865,7 +875,7 @@ async fn proxy_inference(
             }
         };
     let send = |body: Vec<u8>| {
-        forward_headers(state.client.request(Method::POST, &url), &headers)
+        forward_headers(state.client.request(Method::POST, url.as_str()), &headers)
             .body(body)
             .send()
     };
@@ -1170,12 +1180,14 @@ fn rotation_gate(state: &ProxyState, admitted: &TrustedIdentity, headers: &Heade
     }
 }
 
-fn join_url(base_url: &str, uri: &Uri) -> String {
-    let path_and_query = uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or_else(|| uri.path());
-    format!("{base_url}{path_and_query}")
+/// The upstream URL of a request: its path below the base URL's path, and
+/// its query.
+fn join_url(base_url: &str, uri: &Uri) -> Result<url::Url, url::ParseError> {
+    let mut url = url::Url::parse(base_url)?;
+    let path = [url.path().trim_end_matches('/'), uri.path()].concat();
+    url.set_path(&path);
+    url.set_query(uri.query());
+    Ok(url)
 }
 
 /// The `provider.aci_session_ids` a client pinned in its request body (§5.3),

@@ -48,7 +48,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
     if agent == Agent::Codex && default_model.is_none() {
         return Err(AgentError::IncompatibleModel);
     }
-    let base = inputs.endpoint.trim_end_matches('/');
+    let api = api_url(inputs.endpoint).map_err(|_| AgentError::InvalidState)?;
     Ok(match agent {
         Agent::OpenClaw => openclaw::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
         Agent::OhMyPi => oh_my_pi::fields(inputs).map_err(AgentError::ConfigurationConflict)?,
@@ -72,7 +72,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 ),
                 set(
                     &["model_providers", "private_ai_proxy", "base_url"],
-                    format!("{base}/v1"),
+                    api.as_str(),
                 ),
                 set(
                     &["model_providers", "private_ai_proxy", "wire_api"],
@@ -119,7 +119,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
         }
         Agent::ClaudeCode => {
             let mut fields = vec![
-                set(&["env", "ANTHROPIC_BASE_URL"], base),
+                set(&["env", "ANTHROPIC_BASE_URL"], inputs.endpoint),
                 set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
                 generated_catalog(
                     &["modelPicker"],
@@ -151,7 +151,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             let provider = "private-ai-proxy";
             let mut fields = vec![generated_catalog(
                 &["provider", provider],
-                opencode_provider(catalog, base, inputs.token_path),
+                opencode_provider(catalog, &api, inputs.token_path),
                 catalog.models.len(),
             )];
             if let Some(model) = default_model {
@@ -163,7 +163,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             &["providers", "private-ai-proxy"],
             pi_provider(
                 catalog,
-                base,
+                &api,
                 &inputs
                     .credential_command(Agent::Pi)
                     .map_err(AgentError::ConfigurationConflict)?,
@@ -175,7 +175,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             let provider = "private-ai-proxy";
             let mut fields = vec![
                 set(&["providers", provider, "name"], PRODUCT_NAME),
-                set(&["providers", provider, "api"], format!("{base}/v1")),
+                set(&["providers", provider, "api"], api.as_str()),
                 set(&["providers", provider, "transport"], "chat_completions"),
                 boolean(&["providers", provider, "discover_models"], true),
                 set(
@@ -195,9 +195,14 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
     })
 }
 
+/// The OpenAI-compatible API below the Local API endpoint.
+pub(super) fn api_url(endpoint: &str) -> Result<String, String> {
+    desktop_core::endpoint(endpoint, &["v1"]).map(String::from)
+}
+
 pub(super) fn opencode_provider(
     catalog: &Catalog,
-    base: &str,
+    api: &str,
     token_path: &Path,
 ) -> serde_json::Value {
     let models = catalog
@@ -226,7 +231,7 @@ pub(super) fn opencode_provider(
         "npm": "@ai-sdk/openai-compatible",
         "name": PRODUCT_NAME,
         "options": {
-            "baseURL": format!("{base}/v1"),
+            "baseURL": api,
             "apiKey": format!("{{file:{}}}", token_path.display()),
         },
         "models": serde_json::Value::Object(models),
@@ -235,7 +240,7 @@ pub(super) fn opencode_provider(
 
 pub(super) fn pi_provider(
     catalog: &Catalog,
-    base: &str,
+    api: &str,
     credential_command: &str,
 ) -> Result<serde_json::Value, String> {
     let models: Vec<serde_json::Value> = catalog
@@ -300,7 +305,7 @@ pub(super) fn pi_provider(
         })
         .collect();
     Ok(serde_json::json!({
-        "baseUrl": format!("{base}/v1"),
+        "baseUrl": api,
         "api": "openai-completions",
         "apiKey": format!("!{credential_command}"),
         "models": models,
