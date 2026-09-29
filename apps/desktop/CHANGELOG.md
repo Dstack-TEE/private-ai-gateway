@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.1...desktop-v0.3.0) (2026-09-29)
+
+Private AI Proxy 0.3.0 adds DeepSeek Harness and makes the whole app leaner, with the same look and behaviour.
+
+### Features
+
+* **DeepSeek Harness (`dsh`).** Connect it with one switch like the other agents. New dsh sessions (web, desktop, `dsh headless` and editor sessions through `dsh acp`) use the verified Local API. DeepSeek's own web search is turned off while connected so search queries don't bypass the proxy. Disconnecting restores your dsh configuration byte for byte. The `sdk` and `sdk-minimal` profiles pick their provider in code and are not covered.
+
+### Bug Fixes
+
+* **Your config formatting is kept.** JSON settings for Claude Code, OpenCode and Pi are now edited in place, so indentation and spacing you chose survive connect and disconnect. A settings file with duplicate keys is refused instead of silently losing one.
+* **Tray.** Agents no longer show a check mark before their status has loaded.
+* **CLI.** `pap verify --nonce` values are URL-encoded, so a nonce with `&` or `#` no longer changes the request.
+* **Local API example.** The copy-paste `curl` example shows the endpoint unquoted and the key in single quotes.
+
+### Internal
+
+* About 1,100 lines of product code removed across the backend, CLI, native shell, renderer, agent adapters and release tooling. Every config-like format is read and written through a library.
+* The nightly live end-to-end test now covers all eight agents, OpenCode 2 and a real network outage.
+
+### Upgrade notes
+
+* A Local API address written in a non-canonical form (port 80, or an IPv6 address that isn't compressed) is rewritten once in canonical form after upgrading. Connections keep working.
+
 ## [0.3.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.1...desktop-v0.3.0-beta.1) (2026-09-29)
 
 
