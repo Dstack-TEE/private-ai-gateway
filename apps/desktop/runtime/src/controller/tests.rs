@@ -1448,3 +1448,173 @@ fn only_codex_has_a_background_service_to_check_or_stop() {
         assert_eq!(stopped.unwrap_err().code(), ErrorCode::InvalidRequest);
     }
 }
+
+#[test]
+fn missing_usage_records_are_not_found_and_exports_need_absolute_paths() {
+    use desktop_core::protocol::{self, Command, ErrorCode};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    executor.block_on(async {
+        for command in [
+            Command::GetUsageRecord {
+                record_id: "missing".into(),
+            },
+            Command::GetUsageReceipt {
+                record_id: "missing".into(),
+            },
+        ] {
+            let error = crate::dispatch::dispatch(&runtime, command)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotFound);
+            assert_eq!(error.message, "Usage record not found");
+        }
+        for command in [
+            Command::GetUsageRecord {
+                record_id: "bad\u{7}".into(),
+            },
+            Command::ExportUsage {
+                query: Default::default(),
+                path: "usage.csv".into(),
+            },
+            Command::ExportProfiles {
+                path: "profiles.json".into(),
+            },
+        ] {
+            let error = crate::dispatch::dispatch(&runtime, command)
+                .await
+                .unwrap_err();
+            assert_eq!(error, protocol::Error::internal());
+        }
+        assert!(!directory.path().join("usage.csv").exists());
+    });
+}
+
+/// Protection of a service on this device does not depend on the network, so
+/// an address change leaves it running; any other service reconnects.
+#[test]
+fn an_address_change_reconnects_only_a_remote_service() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let verified = |remote_url: &str| AppState {
+        status: VerificationStatus::Verified,
+        session_id: Some("address-session".into()),
+        session_active: true,
+        config: StartConfig {
+            remote_url: remote_url.into(),
+            require_production_os: false,
+        },
+        ..Default::default()
+    };
+    for remote_url in [
+        "http://localhost:4190",
+        "http://LOCALHOST:4190",
+        "http://127.0.0.1:4190",
+        "http://[::1]:4190",
+    ] {
+        runtime.manager.restore_snapshot(verified(remote_url));
+        runtime.system_resumed();
+        runtime.recover_network().unwrap();
+        assert!(!runtime.recovery.needs_check(), "{remote_url}");
+        let state = runtime.subscribe().borrow().clone();
+        assert_eq!(state.status, VerificationStatus::Verified, "{remote_url}");
+        assert!(!state.reconnecting, "{remote_url}");
+    }
+    runtime
+        .manager
+        .restore_snapshot(verified("https://inference.phala.com"));
+    runtime.system_resumed();
+    assert!(runtime
+        .recover_network()
+        .unwrap_err()
+        .to_string()
+        .starts_with("Could not reconnect; retrying automatically: "));
+    let state = runtime.subscribe().borrow().clone();
+    assert_eq!(state.status, VerificationStatus::Stopped);
+    assert!(state.reconnecting && state.session_active);
+    assert!(runtime.recovery.pending());
+}
+
+#[test]
+fn clearing_an_account_key_queues_its_revocation() {
+    use desktop_core::contracts::{ProfileAuth, ServiceProvider};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let profile = |provider, remote_url: &str, auth| settings_config::Profile {
+        name: "Test".into(),
+        provider,
+        remote_url: remote_url.into(),
+        auth,
+        verified_at: None,
+    };
+    let account = ProfileAuth::OAuth {
+        account_id: "user_test".into(),
+        account_name: None,
+        images: None,
+        scope: None,
+    };
+    runtime
+        .update_config(|settings| {
+            settings.upsert(
+                "account".into(),
+                profile(ServiceProvider::Redpill, "https://tee.redpill.ai", account),
+            )?;
+            settings.upsert(
+                "manual".into(),
+                profile(
+                    ServiceProvider::Phala,
+                    "https://inference.phala.com",
+                    ProfileAuth::ApiKey,
+                ),
+            )?;
+            settings.active_profile = "account".into();
+            Ok(())
+        })
+        .unwrap();
+    runtime
+        .set_profile_key("account", Some("account-secret"))
+        .unwrap();
+    runtime
+        .set_profile_key("manual", Some("manual-secret"))
+        .unwrap();
+    runtime.publish_service_configuration(false).unwrap();
+
+    executor.block_on(runtime.clear_api_key()).unwrap();
+    let state = runtime.subscribe().borrow().clone();
+    assert!(!state.api_key_saved);
+    assert_eq!(
+        state
+            .profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile.credential_saved))
+            .collect::<Vec<_>>(),
+        [("account", false), ("manual", true)]
+    );
+    assert!(runtime.load_profile_key("account").unwrap().is_none());
+    let pending: Vec<_> = runtime
+        .local_state
+        .read()
+        .unwrap()
+        .account_cleanup
+        .into_values()
+        .collect();
+    assert_eq!(
+        pending,
+        [RetiredCredential {
+            profile_id: "account".into(),
+            action: "revoke".into(),
+            provider: ServiceProvider::Redpill,
+            key: "account-secret".into(),
+            revoke: true,
+        }]
+    );
+
+    // A manually entered key is only removed.
+    runtime.activate_profile("manual".into()).unwrap();
+    executor.block_on(runtime.clear_api_key()).unwrap();
+    assert!(runtime.load_profile_key("manual").unwrap().is_none());
+    assert_eq!(runtime.local_state.read().unwrap().account_cleanup.len(), 1);
+}

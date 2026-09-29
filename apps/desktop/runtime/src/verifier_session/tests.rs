@@ -1021,3 +1021,68 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
         serde_json::to_value(&restored).unwrap()
     );
 }
+
+/// Losing the verifier, whether its task ends or the manager fails it,
+/// revokes the proxy session under a new epoch while the protection session
+/// goes on; a failure of an older generation changes nothing.
+#[test]
+fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(StopTrackingLauncher(stopped.clone())),
+        executor.handle().clone(),
+        AppState::default(),
+    ));
+    let config = StartConfig {
+        remote_url: "https://inference.phala.com".into(),
+        require_production_os: true,
+    };
+    let revoked = |epoch| {
+        let session = proxy.session();
+        let state = manager.subscribe().borrow().clone();
+        assert_eq!(session.epoch, epoch);
+        assert_eq!(session.session_id, state.session_id);
+        assert!(session.session_id.is_some());
+        assert!(!session.verified && session.service.is_none() && session.catalog.is_none());
+        assert_eq!(state.status, VerificationStatus::Error);
+        assert!(state.progress.is_none() && state.catalog.is_none());
+        assert!(state.session_active && state.reconnecting);
+        state
+    };
+
+    manager.start(config.clone()).unwrap();
+    let generation = proxy.session().generation;
+    manager
+        .handle_event(generation, VerifierEvent::Terminated { error: None })
+        .unwrap();
+    assert_eq!(proxy.session().generation, generation);
+    let state = revoked(1);
+    assert_eq!(
+        state.error.as_deref(),
+        Some("Verifier stopped unexpectedly")
+    );
+    // A task that ended by itself is not stopped again.
+    assert!(!stopped.load(Ordering::SeqCst));
+
+    manager.start(config).unwrap();
+    let generation = proxy.session().generation;
+    manager
+        .fail(generation, "The verifier failed".into())
+        .unwrap();
+    assert_eq!(proxy.session().generation, generation);
+    let state = revoked(2);
+    assert_eq!(state.error.as_deref(), Some("The verifier failed"));
+    assert!(stopped.load(Ordering::SeqCst));
+
+    manager
+        .fail(generation - 1, "Stale failure".into())
+        .unwrap();
+    assert_eq!(manager.subscribe().borrow().error, state.error);
+    assert_eq!(proxy.session().epoch, 2);
+}

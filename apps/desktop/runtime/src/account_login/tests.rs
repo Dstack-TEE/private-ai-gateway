@@ -562,3 +562,50 @@ async fn redpill_token_errors_never_echo_the_response() {
     );
     assert!(!error.contains("secret"));
 }
+
+#[test]
+fn account_errors_name_what_the_user_can_do() {
+    let cases = [
+        ("org_required", "Select an organization on the connection page and try again."),
+        ("keys_permission_required", "Your organization must grant key-management permission before you can connect."),
+        ("organization_permission_required", "Your organization must grant key-management permission before you can connect."),
+        ("rate_limited", "Balance refresh is temporarily limited. Try again in a minute."),
+        ("balance_unavailable", "Balance is temporarily unavailable. Try refreshing later."),
+        ("billing_permission_required", "Your account does not have permission to view this balance."),
+        ("account_mapping_conflict", "Account setup conflicts with an existing account. Contact RedPill support."),
+        ("account_setup_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("account_service_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("organization_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("authorization_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("device_disabled", "This device key was disabled. Manage it in RedPill Keys before reconnecting."),
+        ("device_migration_required", "This device credential needs repair in RedPill Keys."),
+        ("device_credential_mismatch", "This device credential needs repair in RedPill Keys."),
+        ("invalid_authorization", "Your authorization is no longer valid. Reconnect the account."),
+        ("invalid_identity", "Your authorization is no longer valid. Reconnect the account."),
+        ("credentials_required", "Your authorization is no longer valid. Reconnect the account."),
+        ("device_unavailable", "Your authorization is no longer valid. Reconnect the account."),
+        ("key_store_unavailable", "The credential service is unavailable. Retry saving; your previous credential is unchanged."),
+        ("account_unavailable", "This account is unavailable. Contact your organization administrator."),
+        ("not_available", "Account connection is not enabled on this service."),
+        ("access_denied", "Authorization was declined."),
+        ("expired_token", "Authorization expired; reconnect the account."),
+        ("unknown_code", "Service rejected the request (HTTP 400). Retry or contact support."),
+    ];
+    for (code, message) in cases {
+        for data in [
+            json!({ "error": code }),
+            json!({ "detail": { "error": code } }),
+        ] {
+            let error = account_error(StatusCode::BAD_REQUEST, &data);
+            assert_eq!(
+                desktop_core::protocol::Error::from(error),
+                desktop_core::protocol::Error::account(format!("Account: {message}")),
+                "{data}"
+            );
+        }
+    }
+    assert_eq!(
+        account_error(StatusCode::BAD_GATEWAY, &json!({})).to_string(),
+        "Account: Service rejected the request (HTTP 502). Retry or contact support."
+    );
+}
