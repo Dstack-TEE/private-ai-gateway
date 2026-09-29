@@ -158,7 +158,10 @@ release; `package_only` skips the full verification.
 
 - Tags are `desktop-v<semver>` and titles are `Private AI Proxy v<semver>`.
 - Beta versions use `x.y.z-beta.n`; stable versions use `x.y.z`.
-- Release notes are the release's `CHANGELOG.md` section. GitHub lists the
+- Release notes are the release's `CHANGELOG.md` section, which the release
+  job places with `scripts/release-notes.mjs` between the download links
+  (installers and CLI archives per platform, and the Mac App Store for stable
+  versions) and the integrity details below. GitHub also lists the
   assets, including `SHA256SUMS`. In a directory of downloaded assets,
   `sha256sum --ignore-missing -c SHA256SUMS` checks them, and
   `gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway` checks

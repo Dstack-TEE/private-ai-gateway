@@ -939,6 +939,16 @@ jobs:
           set -euo pipefail
           test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
           gh release upload "$TAG" release/* --clobber
+      # Download links (and the App Store for stable versions) go above the
+      # changelog and integrity details below it; a rerun replaces both.
+      - name: Add download links to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json body --jq .body \
+            | node apps/desktop/scripts/release-notes.mjs release "$GITHUB_REPOSITORY" "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
       - name: Publish desktop version
         env:
           GH_TOKEN: ${{ github.token }}
