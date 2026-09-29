@@ -4,7 +4,7 @@
 //! model-registry.ts gives them precedence over stored auth.
 
 use super::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
@@ -101,56 +101,15 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let catalog = inputs
         .catalog
         .ok_or("The verified model list is not available")?;
-    let models: Vec<Value> = catalog
-        .models
-        .iter()
-        .map(|model| {
-            let mut row = json!({"id":model.id(), "name":model.display_name()});
-            if let Some(value) = model.remote.context_length.filter(|value| *value > 0) {
-                row["contextWindow"] = json!(value);
-            }
-            if let Some(value) = model.remote.max_output_length.filter(|value| *value > 0) {
-                row["maxTokens"] = json!(value);
-            }
-            let input: Vec<_> = model
-                .string_array("input_modalities")
-                .into_iter()
-                .filter(|value| matches!(value.as_str(), "text" | "image"))
-                .collect();
-            if !input.is_empty() {
-                row["input"] = json!(input);
-            }
-            if model
-                .string_array("supported_features")
-                .iter()
-                .any(|value| value == "reasoning")
-            {
-                row["reasoning"] = json!(true);
-            }
-            // New OMP models require all four rates when cost is present.
-            let mut cost = serde_json::Map::new();
-            for (source, target) in [
-                ("prompt", "input"),
-                ("completion", "output"),
-                ("input_cache_read", "cacheRead"),
-                ("input_cache_write", "cacheWrite"),
-            ] {
-                if let Some(value) = model
-                    .price_per_million(source)
-                    .and_then(serde_json::Number::from_f64)
-                {
-                    cost.insert(target.into(), Value::Number(value));
-                }
-            }
-            if !cost.is_empty() {
-                for key in ["input", "output", "cacheRead", "cacheWrite"] {
-                    cost.entry(key).or_insert(json!(0));
-                }
-                row["cost"] = Value::Object(cost);
-            }
-            row
-        })
-        .collect();
+    let models = model_rows(
+        catalog,
+        &ModelRows {
+            positive_limits: true,
+            any_input: false,
+            reasoning: true,
+            cost: Cost::Complete,
+        },
+    );
     Ok(vec![generated_catalog(
         PROVIDER_PATH,
         json!({
@@ -161,24 +120,6 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         }),
         catalog.models.len(),
     )])
-}
-
-pub(super) fn stale_helper(record: &Connection, helper: &Path, token_path: Option<&Path>) -> bool {
-    let expected = agent_credential_command(helper, Agent::OhMyPi, token_path)
-        .ok()
-        .map(|command| format!("!{command}"));
-    record
-        .fields
-        .iter()
-        .filter(|field| field.path == owned(PROVIDER_PATH))
-        .any(|field| {
-            let Some(ConfigValue::Json(provider)) = &field.value else {
-                return true;
-            };
-            expected.as_deref().is_none_or(|expected| {
-                provider.get("apiKey").and_then(Value::as_str) != Some(expected)
-            })
-        })
 }
 
 #[cfg(test)]

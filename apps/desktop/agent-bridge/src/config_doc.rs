@@ -23,11 +23,7 @@ pub(crate) fn parse_jsonc(text: &str) -> Result<Value, String> {
         &jsonc_parser::ParseOptions {
             allow_comments: true,
             allow_trailing_commas: true,
-            allow_loose_object_property_names: false,
-            allow_missing_commas: false,
-            allow_single_quoted_strings: false,
-            allow_hexadecimal_numbers: false,
-            allow_unary_plus_numbers: false,
+            ..json_options(true)
         },
     )
     .map_err(|_| "not valid JSONC".to_string())?;
@@ -163,19 +159,30 @@ pub struct EntryKey {
     pub id: String,
 }
 
+impl EntryKey {
+    /// The item whose `id` is `id`.
+    pub fn id(id: &str) -> Self {
+        Self {
+            key: "id".to_string(),
+            id: id.to_string(),
+        }
+    }
+}
+
 impl ConfigDoc {
     /// Parse a config file; a missing or empty file is an empty document.
     pub fn parse(format: Format, text: &str) -> Result<Self, String> {
         match format {
-            Format::Json5 => {
+            Format::Json | Format::Json5 => {
+                let strict = format == Format::Json;
                 let text = if text.trim().is_empty() { "{}\n" } else { text };
-                json5_root(text)?;
-                Ok(Self::Json5(text.to_string()))
-            }
-            Format::Json => {
-                let text = if text.trim().is_empty() { "{}\n" } else { text };
-                json_root(text)?;
-                Ok(Self::Json(text.to_string()))
+                json_root(text, strict)?;
+                let text = text.to_string();
+                Ok(if strict {
+                    Self::Json(text)
+                } else {
+                    Self::Json5(text)
+                })
             }
             Format::Toml => text
                 .parse::<DocumentMut>()
@@ -240,11 +247,9 @@ impl ConfigDoc {
 
     pub fn get_value(&self, path: &[&str]) -> Option<ConfigValue> {
         match self {
-            Self::Json5(text) => {
-                let value = recorded(json5_value(text).ok()?);
-                ConfigValue::from_json(json_get(&value, path)?)
+            Self::Json(_) | Self::Json5(_) => {
+                ConfigValue::from_json(json_get(&self.json_tree()?, path)?)
             }
-            Self::Json(text) => ConfigValue::from_json(json_get(&json_value(text).ok()?, path)?),
             Self::Toml(doc) => ConfigValue::from_toml(toml_get(doc.as_item(), path)?),
             Self::Yaml(_) | Self::YamlItem(_) => yaml_value(self.yaml_node(path)?),
         }
@@ -253,7 +258,17 @@ impl ConfigDoc {
     /// The value of a JSON document; other formats have none.
     pub fn as_json(&self) -> Option<Value> {
         match self {
-            Self::Json(text) => json_value(text).ok(),
+            Self::Json(text) => json_value(text, true).ok(),
+            _ => None,
+        }
+    }
+
+    /// The value of a JSON or JSON5 document, its numbers read as connection
+    /// records read them.
+    fn json_tree(&self) -> Option<Value> {
+        match self {
+            Self::Json(text) => json_value(text, true).ok(),
+            Self::Json5(text) => json_value(text, false).ok().map(recorded),
             _ => None,
         }
     }
@@ -267,11 +282,8 @@ impl ConfigDoc {
 
     pub fn contains(&self, path: &[&str]) -> bool {
         match self {
-            Self::Json5(text) => json5_value(text)
-                .ok()
-                .is_some_and(|root| json_get(&root, path).is_some()),
-            Self::Json(text) => json_value(text)
-                .ok()
+            Self::Json(_) | Self::Json5(_) => self
+                .json_tree()
                 .is_some_and(|root| json_get(&root, path).is_some()),
             Self::Toml(doc) => toml_get(doc.as_item(), path).is_some(),
             Self::Yaml(_) | Self::YamlItem(_) => !path.is_empty() && self.yaml_node(path).is_some(),
@@ -280,23 +292,15 @@ impl ConfigDoc {
 
     pub fn set_value(&mut self, path: &[&str], value: &ConfigValue) -> Result<(), String> {
         let (leaf, parents) = split_leaf(path)?;
+        let strict = matches!(self, Self::Json(_));
         match self {
-            Self::Json5(text) => {
-                *text = edit_json5(text, path, Some(value.to_json()))?;
-            }
-            Self::Json(text) => {
-                *text = edit_json(text, path, Some(value.to_json()))?;
+            Self::Json(text) | Self::Json5(text) => {
+                *text = edit_json(text, path, Some(value.to_json()), strict)?;
             }
             Self::Toml(doc) => {
                 toml_container(doc.as_item_mut(), parents)?.insert(leaf, value.to_toml()?);
             }
-            Self::Yaml(file) => {
-                let doc = file
-                    .documents()
-                    .next()
-                    .ok_or_else(|| "YAML document is empty".to_string())?;
-                yaml_set(&doc, path, value)?;
-            }
+            Self::Yaml(file) => yaml_set(&yaml_document(file)?, path, value)?,
             Self::YamlItem(item) => yaml_set(item, path, value)?,
         }
         Ok(())
@@ -308,11 +312,8 @@ impl ConfigDoc {
 
     pub fn is_table(&self, path: &[&str]) -> bool {
         match self {
-            Self::Json5(text) => json5_value(text)
-                .ok()
-                .is_some_and(|root| json_get(&root, path).is_some_and(Value::is_object)),
-            Self::Json(text) => json_value(text)
-                .ok()
+            Self::Json(_) | Self::Json5(_) => self
+                .json_tree()
                 .is_some_and(|root| json_get(&root, path).is_some_and(Value::is_object)),
             Self::Toml(doc) => {
                 toml_get(doc.as_item(), path).is_some_and(|item| item.as_table_like().is_some())
@@ -332,13 +333,13 @@ impl ConfigDoc {
         let emptied = match self {
             Self::Json5(text) => {
                 // Do not prune JSON5 parents: an empty object may contain user comments.
-                *text = edit_json5(text, path, None)?;
+                *text = edit_json(text, path, None, false)?;
                 None
             }
             Self::Json(text) => {
                 // Strict JSON has no comments, so an emptied object holds nothing.
-                *text = edit_json(text, path, None)?;
-                json_value(text)
+                *text = edit_json(text, path, None, true)?;
+                json_value(text, true)
                     .ok()
                     .and_then(|root| json_get(&root, parents)?.as_object().map(Map::is_empty))
             }
@@ -410,11 +411,9 @@ impl ConfigDoc {
     pub fn create_mapping(&mut self, path: &[&str]) -> Result<(), String> {
         let path_text = path.join(".");
         match self {
-            Self::Yaml(file) => file
-                .documents()
-                .next()
-                .ok_or_else(|| "YAML document is empty".to_string())?
-                .try_set_path(&path_text, Mapping::new_pending_block()),
+            Self::Yaml(file) => {
+                yaml_document(file)?.try_set_path(&path_text, Mapping::new_pending_block())
+            }
             Self::YamlItem(item) => item.try_set_path(&path_text, Mapping::new_pending_block()),
             _ => return self.set_value(path, &ConfigValue::Json(Value::Object(Map::new()))),
         }
@@ -449,11 +448,7 @@ impl ConfigDoc {
             .ok_or_else(|| "The recorded YAML scalar is invalid".to_string())?;
         let path_text = path.join(".");
         match self {
-            Self::Yaml(file) => file
-                .documents()
-                .next()
-                .ok_or_else(|| "YAML document is empty".to_string())?
-                .try_set_path(&path_text, scalar),
+            Self::Yaml(file) => yaml_document(file)?.try_set_path(&path_text, scalar),
             Self::YamlItem(item) => item.try_set_path(&path_text, scalar),
             _ => return Err("scalar sources are YAML only".to_string()),
         }
@@ -581,6 +576,12 @@ impl ConfigDoc {
     }
 }
 
+fn yaml_document(file: &YamlFile) -> Result<yaml_edit::Document, String> {
+    file.documents()
+        .next()
+        .ok_or_else(|| "YAML document is empty".to_string())
+}
+
 fn yaml_set(target: &impl YamlPath, path: &[&str], value: &ConfigValue) -> Result<(), String> {
     let path = path.join(".");
     match value {
@@ -596,32 +597,6 @@ fn yaml_set(target: &impl YamlPath, path: &[&str], value: &ConfigValue) -> Resul
         }
     }
     .map_err(|_| format!("cannot edit YAML path {path}"))
-}
-
-fn json5_options() -> jsonc_parser::ParseOptions {
-    jsonc_parser::ParseOptions {
-        allow_missing_commas: false,
-        ..Default::default()
-    }
-}
-
-fn json5_value(text: &str) -> Result<Value, String> {
-    let value: Value = jsonc_parser::parse_to_serde_value(text, &json5_options())
-        .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
-    if !value.is_object() {
-        return Err("not a JSON5 object".to_string());
-    }
-    Ok(value)
-}
-
-fn json5_root(text: &str) -> Result<CstRootNode, String> {
-    json5_value(text)?;
-    let root = CstRootNode::parse(text, &json5_options())
-        .map_err(|_| "invalid or unsupported JSON5 syntax".to_string())?;
-    if let Some(value) = root.value() {
-        validate_unique_keys(&value, "JSON5")?;
-    }
-    Ok(root)
 }
 
 fn validate_unique_keys(node: &jsonc_parser::cst::CstNode, format: &str) -> Result<(), String> {
@@ -680,21 +655,31 @@ fn cst_input(value: Value) -> CstInputValue {
     }
 }
 
-/// The JSON value of a strict JSON source; serde_json reads it, as it reads
-/// connection records.
-fn json_value(text: &str) -> Result<Value, String> {
-    let value: Value = serde_json::from_str(text).map_err(|_| "not valid JSON".to_string())?;
+/// The value of a JSON object source: strict JSON is read by serde_json, as
+/// connection records are; JSON5 by the CST parser's JSON5 options.
+fn json_value(text: &str, strict: bool) -> Result<Value, String> {
+    let (value, format): (Result<Value, _>, _) = if strict {
+        (
+            serde_json::from_str(text).map_err(|_| "not valid JSON"),
+            "JSON",
+        )
+    } else {
+        (
+            jsonc_parser::parse_to_serde_value(text, &json_options(false))
+                .map_err(|_| "invalid or unsupported JSON5 syntax"),
+            "JSON5",
+        )
+    };
+    let value = value?;
     if !value.is_object() {
-        return Err("not a JSON object".to_string());
+        return Err(format!("not a {format} object"));
     }
     Ok(value)
 }
 
-fn json_root(text: &str) -> Result<CstRootNode, String> {
-    json_value(text)?;
-    let root = CstRootNode::parse(
-        text,
-        &jsonc_parser::ParseOptions {
+fn json_options(strict: bool) -> jsonc_parser::ParseOptions {
+    if strict {
+        jsonc_parser::ParseOptions {
             allow_comments: false,
             allow_trailing_commas: false,
             allow_loose_object_property_names: false,
@@ -702,24 +687,37 @@ fn json_root(text: &str) -> Result<CstRootNode, String> {
             allow_single_quoted_strings: false,
             allow_hexadecimal_numbers: false,
             allow_unary_plus_numbers: false,
-        },
-    )
-    .map_err(|_| "not valid JSON".to_string())?;
+        }
+    } else {
+        jsonc_parser::ParseOptions {
+            allow_missing_commas: false,
+            ..Default::default()
+        }
+    }
+}
+
+fn json_root(text: &str, strict: bool) -> Result<CstRootNode, String> {
+    json_value(text, strict)?;
+    let (format, invalid) = if strict {
+        ("JSON", "not valid JSON")
+    } else {
+        ("JSON5", "invalid or unsupported JSON5 syntax")
+    };
+    let root = CstRootNode::parse(text, &json_options(strict)).map_err(|_| invalid.to_string())?;
     if let Some(value) = root.value() {
-        validate_unique_keys(&value, "JSON")?;
+        validate_unique_keys(&value, format)?;
     }
     Ok(root)
 }
 
-fn edit_json(text: &str, path: &[&str], value: Option<Value>) -> Result<String, String> {
-    let updated = edit_cst(json_root(text)?, text, path, value)?;
-    json_value(&updated)?;
-    Ok(updated)
-}
-
-fn edit_json5(text: &str, path: &[&str], value: Option<Value>) -> Result<String, String> {
-    let updated = edit_cst(json5_root(text)?, text, path, value)?;
-    json5_value(&updated)?;
+fn edit_json(
+    text: &str,
+    path: &[&str],
+    value: Option<Value>,
+    strict: bool,
+) -> Result<String, String> {
+    let updated = edit_cst(json_root(text, strict)?, text, path, value)?;
+    json_value(&updated, strict)?;
     Ok(updated)
 }
 

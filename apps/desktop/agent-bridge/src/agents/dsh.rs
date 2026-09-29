@@ -39,10 +39,7 @@ const GUARDED: [&str; 5] = [PI_AI, DEFAULT_MODEL, ACP, WEB_SEARCH, CREDENTIALS];
 pub(super) const CREDENTIALS_FILE: &str = ".credentials.yaml";
 
 fn key(id: &str) -> EntryKey {
-    EntryKey {
-        key: "id".to_string(),
-        id: id.to_string(),
-    }
+    EntryKey::id(id)
 }
 
 /// `$DSH_HOME` as `resolveDshHome` reads it: blank is unset, `~` is the home.
@@ -92,28 +89,15 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         .default_model
         .as_deref()
         .ok_or(AgentError::IncompatibleModel)?;
-    let models: Vec<Value> = catalog
-        .models
-        .iter()
-        .map(|model| {
-            let mut row = json!({"id": model.id(), "name": model.display_name()});
-            if let Some(value) = model.remote.context_length.filter(|value| *value > 0) {
-                row["contextWindow"] = json!(value);
-            }
-            if let Some(value) = model.remote.max_output_length.filter(|value| *value > 0) {
-                row["maxTokens"] = json!(value);
-            }
-            let input: Vec<_> = model
-                .string_array("input_modalities")
-                .into_iter()
-                .filter(|value| matches!(value.as_str(), "text" | "image"))
-                .collect();
-            if !input.is_empty() {
-                row["input"] = json!(input);
-            }
-            row
-        })
-        .collect();
+    let models = model_rows(
+        catalog,
+        &ModelRows {
+            positive_limits: true,
+            any_input: false,
+            reasoning: false,
+            cost: Cost::Omitted,
+        },
+    );
     let provider = json!({
         "displayName": PRODUCT_NAME,
         "api": "openai-completions",
@@ -149,12 +133,11 @@ pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {
 
 /// The preview line for the token the connection stores for dsh.
 pub(super) fn credential_change() -> ConfigChange {
-    ConfigChange {
-        key: format!("{CREDENTIALS_FILE} refs.{TOKEN_REF}"),
-        before: None,
-        after: Some("Managed local credential".to_string()),
-        sensitive: true,
-    }
+    secret_change(
+        format!("{CREDENTIALS_FILE} refs.{TOKEN_REF}"),
+        None,
+        Some(MANAGED_CREDENTIAL),
+    )
 }
 
 /// Refuse every configuration that could route dsh around the connection, or

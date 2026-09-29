@@ -64,6 +64,14 @@ impl Projector {
         }
     }
 
+    /// OpenClaw runs the staged helper unless it reads the token file.
+    fn openclaw_helper(&self) -> Result<(), String> {
+        if self.file_credentials {
+            return Ok(());
+        }
+        openclaw::validate_helper(&self.helper_exe, &self.tokens.path(Agent::OpenClaw.id()))
+    }
+
     pub(super) fn edit(
         &self,
         agent: Agent,
@@ -99,12 +107,8 @@ impl Projector {
         if agent == Agent::OpenClaw {
             openclaw::validate_host(&self.home, self.tool_env)
                 .map_err(AgentError::ConfigurationConflict)?;
-            if self.file_credentials {
-                Ok(())
-            } else {
-                openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
-            }
-            .map_err(|_| AgentError::HelperUnavailable)?;
+            self.openclaw_helper()
+                .map_err(|_| AgentError::HelperUnavailable)?;
             openclaw::validate_config(doc, prior).map_err(AgentError::ConfigurationConflict)?;
             openclaw::validate_selection(doc, options)
                 .map_err(AgentError::ConfigurationConflict)?;
@@ -190,6 +194,7 @@ impl Projector {
             }
             Agent::Hermes => {
                 let scope = &["providers", "private-ai-proxy"];
+                let provider = |key| ["providers", "private-ai-proxy", key];
                 if doc.contains(scope) {
                     let owned = prior.is_some_and(|record| {
                         let fields: Vec<_> = record.fields.iter().filter(|field| field.path.starts_with(&owned(scope))).collect();
@@ -199,16 +204,14 @@ impl Projector {
                         return Err(AgentError::ConfigurationConflict("The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten".to_string()));
                     }
                 }
-                if doc.contains(&["providers", "private-ai-proxy", "enabled"])
-                    && doc.get_value(&["providers", "private-ai-proxy", "enabled"]) != Some(ConfigValue::Bool(true)) {
+                if doc.contains(&provider("enabled")) && doc.get_value(&provider("enabled")) != Some(ConfigValue::Bool(true)) {
                     return Err(AgentError::ConfigurationConflict("The Hermes private-ai-proxy provider must have enabled: true or omit that field; resolve it in Hermes before connecting".to_string()));
                 }
-                if doc.contains(&["providers", "private-ai-proxy", "api_mode"])
-                    && doc.get_str(&["providers", "private-ai-proxy", "api_mode"]).as_deref() != Some("chat_completions") {
+                if doc.contains(&provider("api_mode")) && doc.get_str(&provider("api_mode")).as_deref() != Some("chat_completions") {
                     return Err(AgentError::ConfigurationConflict("Hermes api_mode overrides the private-ai-proxy provider's chat_completions transport; resolve that conflict in Hermes".to_string()));
                 }
                 for key in ["api_key", "key_env", "api_key_env"] {
-                    if doc.contains(&["providers", "private-ai-proxy", key]) || doc.contains(&["model", key]) {
+                    if doc.contains(&provider(key)) || doc.contains(&["model", key]) {
                         return Err(AgentError::AuthenticationConflict("Hermes has an explicit credential source that may override or seed a pool ahead of the helper; remove that conflict in Hermes".to_string()));
                     }
                 }
@@ -231,8 +234,7 @@ impl Projector {
                         directory.parent().and_then(Path::parent).ok_or(AgentError::InvalidState)?.to_path_buf()
                     } else { directory.to_path_buf() };
                 // Hermes falls back to the root auth store for named profiles.
-                let name = doc.get_str(&["providers", "private-ai-proxy", "name"])
-                    .unwrap_or_else(|| PRODUCT_NAME.to_string());
+                let name = doc.get_str(&provider("name")).unwrap_or_else(|| PRODUCT_NAME.to_string());
                 for path in [directory.join("auth.json"), root.join("auth.json")] {
                     let auth = read_auth_document(&path)?;
                     if let Some(pool) = auth.get("credential_pool") {
@@ -292,21 +294,18 @@ impl Projector {
             let layer = if path == target {
                 projected.clone()
             } else {
-                let text = match fs::read_to_string(&path) {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => return Err(format!(
-                        "Cannot verify OpenCode config merge: {} is unreadable. Access is disabled; \
-                         fix that file or Disconnect to restore the original config.", path.display(),
-                    )),
-                };
-                parse_jsonc(&text).map_err(|reason| {
+                let unverified = |reason: &str| {
                     format!(
                         "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; \
-                     fix that file or Disconnect to restore the original config.",
+                         fix that file or Disconnect to restore the original config.",
                         path.display(),
                     )
-                })?
+                };
+                match fs::read_to_string(&path) {
+                    Ok(text) => parse_jsonc(&text).map_err(|reason| unverified(&reason))?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(unverified("unreadable")),
+                }
             };
             sources.push(path.display().to_string());
             merge_opencode_config(&mut merged, layer);
@@ -400,13 +399,8 @@ impl Projector {
             }
         }
         if agent == Agent::OpenClaw && (installed || record.is_some()) {
-            let valid = openclaw::validate_host(&self.home, self.tool_env).and_then(|()| {
-                if self.file_credentials {
-                    Ok(())
-                } else {
-                    openclaw::validate_helper(&self.helper_exe, &self.tokens.path(agent.id()))
-                }
-            });
+            let valid = openclaw::validate_host(&self.home, self.tool_env)
+                .and_then(|()| self.openclaw_helper());
             if let Err(attention) = valid {
                 status.attention = Some(attention);
                 return status;
@@ -422,7 +416,7 @@ impl Projector {
         }
         // A broken config is reported, never hidden behind "not connected";
         // the record, the attention line, and Disconnect all stay available.
-        let (text, read_error) = self.config_text_at(agent, &current_path);
+        let (text, read_error) = self.config_text_at(&current_path);
         let doc = match read_error {
             Some(error) => {
                 status.error = Some(error);
@@ -527,57 +521,43 @@ impl Projector {
                 }
             }
         }
-        if agent == Agent::OpenCode && status.authorized {
-            if let Some(doc) = &doc {
+        // A managed connection has a readable config. Each check runs only
+        // while no earlier one refused.
+        if let (true, Some(doc)) = (status.authorized, &doc) {
+            let (mut refusal, mut repair) = (None, None);
+            if agent == Agent::OpenCode {
                 let owns_model = record.fields.iter().any(|field| field.path == ["model"]);
-                if let Err(attention) = self.check_opencode_merge(doc, owns_model) {
-                    status.connected = false;
-                    status.authorized = false;
-                    status.attention = Some(attention);
-                }
+                refusal = self.check_opencode_merge(doc, owns_model).err();
             }
-        }
-        if status.authorized {
-            if let Some(doc) = &doc {
-                if let Err(attention) =
-                    self.validate_native_config(agent, doc, Some(record), &record.options, catalog)
-                {
-                    status.connected = false;
-                    status.authorized = false;
-                    status.attention = Some(attention.to_string());
-                }
+            if refusal.is_none() {
+                refusal = self
+                    .validate_native_config(agent, doc, Some(record), &record.options, catalog)
+                    .err()
+                    .map(|error| error.to_string());
             }
-        }
-        if agent == Agent::Dsh && status.authorized {
-            let token = self.tokens.read(agent.id()).ok().flatten();
             let dsh_home = dsh::home_dir(&self.home, self.tool_env);
-            if token.is_none_or(|token| !dsh::credential_holds(&dsh_home, &token)) {
-                status.connected = false;
-                status.authorized = false;
-                status.repair_action = Some(AgentRepairAction::Reconnect);
-                status.attention = Some(format!(
-                    "dsh's credential store no longer holds this connection's token ({}). Reconnect this agent",
-                    dsh::TOKEN_REF
-                ));
+            if refusal.is_none()
+                && agent == Agent::Dsh
+                && (self.tokens.read(agent.id()).ok().flatten())
+                    .is_none_or(|token| !dsh::credential_holds(&dsh_home, &token))
+            {
+                refusal = Some(format!("dsh's credential store no longer holds this connection's token ({}). Reconnect this agent", dsh::TOKEN_REF));
+                repair = Some(AgentRepairAction::Reconnect);
             }
-        }
-        if agent == Agent::OpenClaw && status.authorized {
-            let result = doc
-                .as_ref()
-                .ok_or_else(|| "OpenClaw config is unavailable".to_string())
-                .and_then(|doc| openclaw::validate_config(doc, Some(record)));
-            let stale = openclaw::stale_credentials(
-                record,
-                &self.helper_exe,
-                &self.tokens.path(agent.id()),
-                self.file_credentials,
-            );
-            if result.is_err() || stale {
+            if refusal.is_none() && agent == Agent::OpenClaw {
+                let token = self.tokens.path(agent.id());
+                let (helper, file) = (&self.helper_exe, self.file_credentials);
+                refusal = openclaw::validate_config(doc, Some(record)).err();
+                if refusal.is_none() && openclaw::stale_credentials(record, helper, &token, file) {
+                    refusal =
+                        Some("The OpenClaw helper changed; Disconnect then Connect again".into());
+                }
+            }
+            if let Some(attention) = refusal {
                 status.connected = false;
                 status.authorized = false;
-                status.attention = Some(result.err().unwrap_or_else(|| {
-                    "The OpenClaw helper changed; Disconnect then Connect again".to_string()
-                }));
+                status.attention = Some(attention);
+                status.repair_action = repair.or(status.repair_action);
             }
         }
         status
@@ -587,11 +567,10 @@ impl Projector {
     /// revisions, disconnect): the error is carried, never thrown.
     pub(super) fn config_text_at(
         &self,
-        agent: Agent,
         path: &Result<PathBuf, String>,
     ) -> (Option<String>, Option<String>) {
         match path {
-            Ok(path) => match self.read_config_at(agent, path) {
+            Ok(path) => match self.read_config_at(path) {
                 Ok(text) => (text, None),
                 Err(error) => (None, Some(error.to_string())),
             },
@@ -604,14 +583,10 @@ impl Projector {
         let path = self
             .action_path(agent, None, true)
             .map_err(AgentError::ConfigurationConflict)?;
-        self.read_config_at(agent, &path)
+        self.read_config_at(&path)
     }
 
-    pub(super) fn read_config_at(
-        &self,
-        _agent: Agent,
-        path: &Path,
-    ) -> Result<Option<String>, AgentError> {
+    pub(super) fn read_config_at(&self, path: &Path) -> Result<Option<String>, AgentError> {
         match fs::read_to_string(path) {
             Ok(text) => Ok(Some(text)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
