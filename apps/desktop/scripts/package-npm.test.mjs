@@ -72,6 +72,28 @@ test("the launcher resolves the same alias the wrapper declares for each target"
   }
 });
 
+test("the command line builds the wrapper and validates its arguments", async () => {
+  const output = await mkdtemp(path.join(os.tmpdir(), "pap-npm-cli-"));
+  const cli = (...args) => spawnSync(process.execPath, [new URL("./package-npm.mjs", import.meta.url).pathname, ...args], { encoding: "utf8" });
+  try {
+    const packed = cli("wrapper", "--version", version, "--output", output);
+    assert.equal(packed.status, 0, packed.stderr);
+    assert.equal(packed.stdout, `Packaged ${path.join(output, `private-ai-proxy-${version}.tgz`)}\n`);
+    for (const args of [
+      [],
+      ["wrapper", "--version", version],
+      ["wrapper", "--version", version, "--output", output, "--arch", "x64"],
+      ["wrapper", "--version", version, "--version", version, "--output", output],
+      ["wrapper", "--version", "1.2.3+build", "--output", output],
+      ["platform", "--platform", "linux", "--arch", "x64", "--version", version, "--output", output],
+      ["platform", "--platform", "linux", "--arch", "ia32", "--version", version, "--source", output, "--output", output],
+      ["release", "--version", version, "--output", output],
+    ]) assert.notEqual(cli(...args).status, 0, args.join(" "));
+  } finally {
+    await rm(output, { recursive: true, force: true });
+  }
+});
+
 test("packs a thin wrapper and a native package that execute together", {
   skip: process.platform !== "linux" || process.arch !== "x64",
 }, async () => {

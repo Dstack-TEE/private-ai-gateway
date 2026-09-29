@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { load } from "js-yaml";
+import { publishedRelease, releaseChannel } from "./release-channel.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -110,4 +111,48 @@ test("npm publishes the channel wrapper after its platform versions", async () =
   assert.doesNotMatch(JSON.stringify(publish.steps), /dist-tag add/);
 
   assert.ok(direct.jobs["publish-npm"]["timeout-minutes"] > npm.jobs.package["timeout-minutes"] + publish["timeout-minutes"]);
+});
+
+test("release-please drafts and tags the releases the release workflows build", async () => {
+  const [config, releasePlease, direct] = await Promise.all([
+    readFile(path.join(repositoryRoot, "apps/desktop/release-please-config.json"), "utf8").then(JSON.parse),
+    readWorkflow("desktop-release-please.yml"),
+    readWorkflow("desktop-native.yml"),
+  ]);
+  const action = releasePlease.jobs["release-please"].steps.find((step) => step.uses?.startsWith("googleapis/release-please-action@"));
+  assert.deepEqual([action.with["config-file"], action.with["manifest-file"]], ["apps/desktop/release-please-config.json", "apps/desktop/.release-please-manifest.json"]);
+  const desktop = config.packages["apps/desktop"];
+  // The node strategy also bumps package.json; tags are <component>-v<version>,
+  // the desktop-v* tags that start Desktop release.
+  assert.equal(desktop["release-type"], "node");
+  assert.equal(desktop["include-component-in-tag"], true);
+  assert.equal(publishedRelease(`${desktop.component}-v0.3.0`, false).tag, "desktop-v0.3.0");
+  // The release job fills and publishes the draft release-please creates; a
+  // draft release gets its tag only with force-tag-creation.
+  assert.equal(desktop.draft, true);
+  assert.equal(desktop["force-tag-creation"], true);
+  assert.ok(direct.jobs.release.steps.some((step) => step.run?.includes("--json isDraft")));
+  // Prereleases count x.y.z-beta.n, the only form the beta channel accepts,
+  // and breaking changes before 1.0 bump the minor version.
+  assert.equal(desktop.versioning, "prerelease");
+  assert.equal(desktop.prerelease, true);
+  assert.equal(releaseChannel(`0.3.0-${desktop["prerelease-type"]}`).channel, "beta");
+  assert.equal(desktop["bump-minor-pre-major"], true);
+});
+
+test("desktop workflows keep their artifact names", async () => {
+  const uploads = [];
+  for (const workflow of ["desktop-native.yml", "desktop-mac-app-store.yml", "private-ai-proxy-npm.yml"]) {
+    for (const [name, job] of Object.entries((await readWorkflow(workflow)).jobs)) {
+      for (const step of job.steps ?? []) {
+        if (step.uses?.startsWith("actions/upload-artifact@")) uploads.push([`${workflow} ${name}`, step.with.name, step.with.path]);
+      }
+    }
+  }
+  assert.deepEqual(uploads, [
+    ["desktop-native.yml verify", "desktop-sbom", "${{ runner.temp }}/sbom/"],
+    ["desktop-native.yml package", "desktop-package-${{ matrix.platform }}", "apps/desktop/release/private-ai-proxy-*"],
+    ["desktop-mac-app-store.yml package", "private-ai-proxy-mac-app-store-${{ inputs.build_number || format('validate-only-{0}', github.run_number) }}", "apps/desktop/release/*-mac-app-store.pkg"],
+    ["private-ai-proxy-npm.yml package", "private-ai-proxy-npm-${{ steps.release.outputs.version }}", "npm-packages/*.tgz"],
+  ]);
 });

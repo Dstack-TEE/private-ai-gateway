@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { releaseConfig } from "./release-config.mjs";
+import { takeDistributionArgument } from "./distribution.mjs";
 
 const beta = "https://github.com/o/r/releases/download/desktop-updates-beta/latest.json";
 const updater = { TAURI_UPDATER_PUBLIC_KEY: "key", TAURI_UPDATER_ENDPOINT: beta };
@@ -38,4 +39,12 @@ test("Windows signing takes a SHA-1 thumbprint", () => {
     certificateThumbprint: thumbprint, digestAlgorithm: "sha256", timestampUrl: "http://timestamp.digicert.com",
   });
   assert.throws(() => releaseConfig("direct", { WINDOWS_CERTIFICATE_THUMBPRINT: "a".repeat(39) }, "0.2.0"), /thumbprint/);
+});
+
+test("dist takes --distribution and passes every other argument to Tauri", () => {
+  assert.deepEqual(takeDistributionArgument(["--bundles", "app,dmg"]), { distribution: "direct", args: ["--bundles", "app,dmg"] });
+  assert.deepEqual(takeDistributionArgument(["--distribution", "mac-app-store", "--bundles", "app"]), { distribution: "mac-app-store", args: ["--bundles", "app"] });
+  assert.deepEqual(takeDistributionArgument(["-d", "--distribution=direct", "--", "--foo"]), { distribution: "direct", args: ["-d", "--", "--foo"] });
+  assert.throws(() => takeDistributionArgument(["--distribution"]), /requires a value/);
+  assert.throws(() => takeDistributionArgument(["--distribution", "store"]), /Unsupported desktop distribution/);
 });
