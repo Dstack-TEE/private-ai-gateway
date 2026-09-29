@@ -8,42 +8,28 @@ impl DesktopRuntime {
         if let Some(error) = &self.agent_access_error {
             return Err(format!("Agent Home access is unavailable to the backend: {error}").into());
         }
-        Ok(self
-            .agent_configuration_enabled()
-            .then_some(())
-            .ok_or_else(|| "Agent Home access is required".to_string())?)
-    }
-
-    pub(super) fn agent_configuration_enabled(&self) -> bool {
-        self.agent_configuration
+        if !self.agent_configuration {
+            return Err("Agent Home access is required".into());
+        }
+        Ok(())
     }
 
     pub(super) fn projector(&self, endpoint: &str) -> Result<Projector, Error> {
-        let projector = {
-            #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
-            {
-                Projector::new_for_home(
-                    self.agent_home
-                        .clone()
-                        .ok_or("Agent Home access is unavailable to the backend")?,
-                    app_data_dir()?,
-                    self.helper_path.clone(),
-                    endpoint,
-                    self.local_state.clone(),
-                )?
-            }
-            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-            {
-                Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?
-            }
-        };
-        Ok(
-            if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
-                projector.with_home_credentials()
-            } else {
-                projector
-            },
-        )
+        #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
+        let projector = Projector::new_for_home(
+            self.agent_home
+                .clone()
+                .ok_or("Agent Home access is unavailable to the backend")?,
+            app_data_dir()?,
+            self.helper_path.clone(),
+            endpoint,
+            self.local_state.clone(),
+        )?
+        .with_home_credentials();
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        let projector =
+            Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?;
+        Ok(projector)
     }
 
     pub(super) fn current_projector(&self) -> Result<Projector, Error> {
@@ -54,38 +40,36 @@ impl DesktopRuntime {
     /// session lasts, verified or not: the Local API refuses a recognized
     /// agent with `gateway_not_verified` until verification succeeds, rather
     /// than telling it to reconnect. Returns whether requests are admitted
-    /// now. Call under agent_policy, so an older scan cannot restore revoked
-    /// credentials.
+    /// now. Call under [`Self::lock_agents`].
     pub(super) fn publish_agent_tokens(&self, tokens: TokenSet) -> Result<bool, Error> {
-        let state = self.manager.snapshot()?;
-        self.proxy.set_tokens(with_client_token(
-            if state.session_active {
-                tokens
-            } else {
-                TokenSet::default()
-            },
-            &self.credentials,
-        )?);
+        let state = self.state();
+        let tokens = if state.session_active {
+            tokens
+        } else {
+            TokenSet::default()
+        };
+        self.proxy.set_tokens(self.credentials.with_token(tokens)?);
         Ok(state.is_protected() && self.proxy.session().verified)
     }
 
+    /// Leaves the Local API accepting only the client key.
+    pub(super) fn withdraw_agent_tokens(&self) -> Result<(), Error> {
+        self.proxy
+            .set_tokens(self.credentials.with_token(TokenSet::default())?);
+        Ok(())
+    }
+
     pub(super) fn reload_agent_tokens(&self) -> Result<(), Error> {
-        if !self.agent_configuration_enabled() {
-            self.proxy
-                .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-            return Ok(());
+        if !self.agent_configuration {
+            return self.withdraw_agent_tokens();
         }
         let projector = self.current_projector()?;
         projector.initialize_store()?;
         // Only a session the user ended restores the agents' configuration.
-        if !self.manager.snapshot()?.session_active {
-            let failures = projector.reconcile(None)?;
-            if !failures.is_empty() {
-                return Err(agent_failures(failures).into());
-            }
+        if !self.state().session_active {
+            all_applied(projector.reconcile(None)?)?;
         }
-        let (_, tokens) = projector.scan(None)?;
-        self.publish_agent_tokens(tokens)?;
+        self.publish_agent_tokens(projector.scan(None)?.1)?;
         Ok(())
     }
 
@@ -97,25 +81,18 @@ impl DesktopRuntime {
         // A stale or unreadable agent connection record must fail closed, but
         // it must not prevent the desktop app from opening so the user can
         // inspect the error and restore the affected configuration.
-        let client_error = match with_client_token(TokenSet::default(), &self.credentials) {
-            Ok(tokens) => {
-                self.proxy.set_tokens(tokens);
-                None
-            }
-            Err(error) => {
-                self.proxy.set_tokens(TokenSet::default());
-                Some(error)
-            }
-        };
-        let message = match client_error {
-            Some(client_error) => format!(
-                "Agent configurations could not be loaded: {agent_error}. The Local API credential is also unavailable: {client_error}"
-            ),
-            None => format!(
+        let message = match self.withdraw_agent_tokens() {
+            Ok(()) => format!(
                 "Agent configurations could not be loaded and remain disconnected: {agent_error}"
             ),
+            Err(client_error) => {
+                self.proxy.set_tokens(TokenSet::default());
+                format!(
+                    "Agent configurations could not be loaded: {agent_error}. The Local API credential is also unavailable: {client_error}"
+                )
+            }
         };
-        self.manager.report_error(message);
+        self.report_error(message);
     }
 
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
@@ -123,40 +100,27 @@ impl DesktopRuntime {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, Error> {
-        if let Some(error) = &self.agent_access_error {
-            let _guard = self
-                .agent_policy
-                .lock()
-                .map_err(|_| "Agent state unavailable")?;
-            self.publish_agent_tokens(TokenSet::default())?;
-            return Err(format!(
-                "Agent detection cannot access the authorized Home folder: {error}. Re-enable Agent integrations and try again."
-            ).into());
-        }
-        if !self.agent_configuration_enabled() {
-            let _guard = self
-                .agent_policy
-                .lock()
-                .map_err(|_| "Agent state unavailable")?;
-            self.publish_agent_tokens(TokenSet::default())?;
-            return Ok(Vec::new());
+        if self.agent_access_error.is_some() || !self.agent_configuration {
+            let _guard = self.lock_agents()?;
+            self.withdraw_agent_tokens()?;
+            return match &self.agent_access_error {
+                Some(error) => Err(format!(
+                    "Agent detection cannot access the authorized Home folder: {error}. Re-enable Agent integrations and try again."
+                ).into()),
+                None => Ok(Vec::new()),
+            };
         }
         if let Err(error) = self.reconcile_agents() {
-            if self.state()?.error != Some(error.to_string()) {
-                self.report_error(error);
-            }
+            self.report_once(error);
         }
         // Publish the scan under the same lock as connect/disconnect and key
         // rotation, so an older scan cannot restore revoked credentials.
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
         let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
-        if !self.manager.snapshot()?.is_protected() || !session.verified {
+        if !self.state().is_protected() || !session.verified {
             for status in &mut statuses {
                 status.authorized = false;
             }
@@ -223,11 +187,8 @@ impl DesktopRuntime {
     ) -> Result<AgentStatus, crate::Error> {
         self.require_agent_access()?;
         let _operation = self.configuration_change()?;
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
-        if self.exiting.load(Ordering::Acquire) {
+        let _guard = self.lock_agents()?;
+        if self.closing() {
             return Err(crate::Error::closing());
         }
         if self.instance.is_none() {
@@ -291,51 +252,33 @@ impl DesktopRuntime {
     }
 
     pub(super) fn disconnect_all_agents_inner(&self) -> Result<Vec<AgentStatus>, Error> {
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         if self.instance.is_none() {
             return Err("Another app instance owns the agent configurations".into());
         }
-        self.proxy
-            .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
+        self.withdraw_agent_tokens()?;
         let projector = self.current_projector()?;
         let disconnected = projector.disconnect_all();
         self.manager.agents_changed();
-        match disconnected {
-            Err(error) => Err(format!(
-                "Restore all could not revoke the agents ({error}); access stays revoked until it is retried"
-            ).into()),
-            Ok(failures) => {
-                let (statuses, tokens) = projector.scan(None)?;
-                self.publish_agent_tokens(tokens)?;
-                if failures.is_empty() {
-                    Ok(statuses)
-                } else {
-                    Err(agent_failures(failures).into())
-                }
-            }
-        }
+        let failures = disconnected.map_err(|error| {
+            format!("Restore all could not revoke the agents ({error}); access stays revoked until it is retried")
+        })?;
+        let (statuses, tokens) = projector.scan(None)?;
+        self.publish_agent_tokens(tokens)?;
+        all_applied(failures)?;
+        Ok(statuses)
     }
 
     pub(super) fn reconcile_agents(&self) -> Result<(), Error> {
-        if !self.agent_configuration_enabled() {
-            let _guard = self
-                .agent_policy
-                .lock()
-                .map_err(|_| "Agent state unavailable")?;
-            self.publish_agent_tokens(TokenSet::default())?;
-            return Ok(());
+        if !self.agent_configuration {
+            let _guard = self.lock_agents()?;
+            return self.withdraw_agent_tokens();
         }
         if self.instance.is_none() {
             return Ok(());
         }
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
-        let state = self.manager.snapshot()?;
+        let _guard = self.lock_agents()?;
+        let state = self.state();
         let session = self.proxy.session();
         let protected = state.is_protected() && session.verified;
         // Until the user ends the session, agents stay pointed at the Local
@@ -360,25 +303,17 @@ impl DesktopRuntime {
                 .map_or(true, |failures| !failures.is_empty()),
         );
         let failures = outcome?;
-        let tokens = projector.scan(catalog.as_ref())?.1;
-        self.publish_agent_tokens(tokens)?;
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(agent_failures(failures).into())
-        }
+        self.publish_agent_tokens(projector.scan(catalog.as_ref())?.1)?;
+        Ok(all_applied(failures)?)
     }
 
     /// Points connected agents at the current Local API address; see
     /// `Projector::retarget`.
     pub(super) fn retarget_agents(&self, catalog: &Catalog) -> Result<(), Error> {
-        if !self.agent_configuration_enabled() || self.instance.is_none() {
+        if !self.agent_configuration || self.instance.is_none() {
             return Ok(());
         }
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         let failures = match self
             .current_projector()
             .and_then(|projector| Ok(projector.retarget(catalog)?))
@@ -392,11 +327,7 @@ impl DesktopRuntime {
             }
         };
         self.manager.agents_changed();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(agent_failures(failures).into())
-        }
+        Ok(all_applied(failures)?)
     }
 
     pub(super) fn connection_catalog(
@@ -416,14 +347,10 @@ impl DesktopRuntime {
         {
             return Ok(None);
         }
-        let state = self.manager.snapshot()?;
-        if !state.is_protected() {
+        if !self.state().is_protected() {
             return Ok(None);
         }
         let session = self.proxy.session();
-        match (session.verified, session.catalog) {
-            (true, Some(catalog)) => Ok(Some(catalog)),
-            _ => Ok(None),
-        }
+        Ok(session.verified.then_some(session.catalog).flatten())
     }
 }

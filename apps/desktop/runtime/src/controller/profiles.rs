@@ -32,7 +32,7 @@ impl DesktopRuntime {
         if saved.reconnect {
             self.start_inner(saved.config)
         } else {
-            Ok(self.manager.snapshot()?)
+            Ok(self.state())
         }
     }
 
@@ -45,12 +45,11 @@ impl DesktopRuntime {
         verify: bool,
     ) -> Result<SavedConfiguration<'_>, Error> {
         let _operation = self.configuration_change()?;
-        let initial = self.manager.snapshot()?;
+        let initial = self.state();
         if initial.status == VerificationStatus::Verifying {
             return Err(Error::verifying(&initial));
         }
-        let reconnect = initial.session_active
-            || (self.manager.is_running()? && !initial.configuration_verification);
+        let reconnect = self.restart_needed(&initial)?;
         let saved = self.settings.snapshot()?;
         let existing = saved.config.profiles.get(&profile.id).cloned();
         let resolved =
@@ -94,10 +93,15 @@ impl DesktopRuntime {
         };
 
         if reconnect {
-            self.stop_with_reconnect(true)?;
-            self.manager.cancel_reconnection();
+            self.pause_protection()?;
         }
-        let previous = self.manager.snapshot()?;
+        let previous = self.state();
+        // Every failure below leaves the key unloaded and the state as it was.
+        let rollback = |error: Error| {
+            self.proxy.set_api_key(None);
+            self.manager.restore_snapshot(previous.clone());
+            error
+        };
 
         if verify {
             self.proxy.set_api_key(Some(candidate_key.clone()));
@@ -114,9 +118,7 @@ impl DesktopRuntime {
             };
             let Some(session_id) = started.session_id.clone() else {
                 let _ = self.manager.stop();
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err("Configuration verification did not start".into());
+                return Err(rollback("Configuration verification did not start".into()));
             };
             let verified = self
                 .manager
@@ -124,20 +126,14 @@ impl DesktopRuntime {
                 .await;
             let stop_result = self.manager.stop_with_reconnect(initial.session_active);
             if let Err(error) = verified {
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(match stop_result {
+                return Err(rollback(match stop_result {
                     Ok(_) => error,
                     Err(stop_error) => {
                         format!("{error}. The verifier also could not stop: {stop_error}").into()
                     }
-                });
+                }));
             }
-            if let Err(error) = stop_result {
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(error.into());
-            }
+            stop_result.map_err(|error| rollback(error.into()))?;
         } else {
             self.manager.stop_with_reconnect(initial.session_active)?;
             self.proxy.set_api_key(None);
@@ -148,34 +144,20 @@ impl DesktopRuntime {
             .zip(stored_key.as_ref())
             .filter(|_| replace_key);
         if let Some((old, old_key)) = retiring {
-            if let Err(error) = self.queue_retired(RetiredCredential {
+            self.queue_retired(RetiredCredential {
                 profile_id: id.clone(),
                 action: "revoke".into(),
                 provider: old.provider,
                 key: old_key.clone(),
-                revoke: old.provider == ServiceProvider::Redpill
-                    && old_key != &candidate_key
-                    && matches!(old.auth, desktop_core::contracts::ProfileAuth::OAuth { .. }),
-            }) {
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(error);
-            }
+                revoke: old_key != &candidate_key && account_key(old.provider, &old.auth),
+            })
+            .map_err(rollback)?;
         }
         if replace_key {
-            if let Err(error) = self.set_profile_key(&id, Some(&candidate_key)) {
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(error);
-            }
+            self.set_profile_key(&id, Some(&candidate_key))
+                .map_err(rollback)?;
         }
-        if replace_key
-            && candidate.provider == ServiceProvider::Redpill
-            && matches!(
-                candidate.auth,
-                desktop_core::contracts::ProfileAuth::OAuth { .. }
-            )
-        {
+        if replace_key && account_key(candidate.provider, &candidate.auth) {
             if let Err(error) = self.queue_retired(RetiredCredential {
                 profile_id: id.clone(),
                 action: "activate".into(),
@@ -184,9 +166,7 @@ impl DesktopRuntime {
                 revoke: true,
             }) {
                 let restore = self.set_profile_key(&id, stored_key.as_deref());
-                self.proxy.set_api_key(None);
-                self.manager.restore_snapshot(previous);
-                return Err(restore.err().unwrap_or(error));
+                return Err(rollback(restore.err().unwrap_or(error)));
             }
         }
         let saved = self.update_config(|settings| {
@@ -201,20 +181,18 @@ impl DesktopRuntime {
             } else {
                 None
             };
-            self.proxy.set_api_key(None);
-            self.manager.restore_snapshot(previous);
-            return Err(match restore_error {
+            return Err(rollback(match restore_error {
                 Some(restore_error) => format!(
                     "{error}. The previous credential could not be restored: {restore_error}"
                 )
                 .into(),
                 None => error,
-            });
+            }));
         }
         self.recovery.cancel();
         self.publish_service_configuration(verify)?;
         if let Err(error) = self.cleanup_retired().await {
-            self.manager.report_error(error.to_string());
+            self.report_error(error);
         }
         Ok(SavedConfiguration {
             config,
@@ -225,15 +203,14 @@ impl DesktopRuntime {
 
     pub fn activate_profile(self: &Arc<Self>, profile_id: String) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
-        let previous = self.manager.snapshot()?;
+        let previous = self.state();
         if previous.status == VerificationStatus::Verifying {
             return Err(Error::verifying(&previous));
         }
         if previous.active_profile_id == profile_id {
             return Ok(previous);
         }
-        let reconnect = previous.session_active
-            || (self.manager.is_running()? && !previous.configuration_verification);
+        let reconnect = self.restart_needed(&previous)?;
         if !self.settings.config()?.profiles.contains_key(&profile_id) {
             return Err(Error::invalid_state("Confidential AI profile not found"));
         }
@@ -246,8 +223,7 @@ impl DesktopRuntime {
             ));
         }
         if reconnect {
-            self.stop_with_reconnect(true)?;
-            self.manager.cancel_reconnection();
+            self.pause_protection()?;
         }
         self.update_config(|settings| {
             settings.active_profile = profile_id;
@@ -263,7 +239,7 @@ impl DesktopRuntime {
                 self.report_error(error);
             }
         }
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     pub async fn delete_profile(&self, profile_id: String) -> Result<AppState, Error> {
@@ -273,7 +249,7 @@ impl DesktopRuntime {
                 "Stop protection before deleting a profile",
             ));
         }
-        let previous = self.manager.snapshot()?;
+        let previous = self.state();
         let affects_active = previous.active_profile_id == profile_id;
         let saved = self.settings.snapshot()?;
         let removed = saved
@@ -286,22 +262,12 @@ impl DesktopRuntime {
             .profiles
             .get(&profile_id)
             .map(|credential| credential.api_key.clone());
-        if removed.provider == ServiceProvider::Redpill
-            && matches!(
-                removed.auth,
-                desktop_core::contracts::ProfileAuth::OAuth { .. }
-            )
-        {
-            if let Some(key) = &removed_key {
-                self.queue_retired(RetiredCredential {
-                    profile_id: profile_id.clone(),
-                    action: "revoke".into(),
-                    provider: removed.provider,
-                    key: key.clone(),
-                    revoke: true,
-                })?;
-            }
-        }
+        self.retire_removed_key(
+            &profile_id,
+            removed.provider,
+            &removed.auth,
+            removed_key.as_deref(),
+        )?;
         self.set_profile_key(&profile_id, None)?;
         let deleted = self.update_config(|settings| {
             settings.profiles.shift_remove(&profile_id);
@@ -326,7 +292,7 @@ impl DesktopRuntime {
             self.recovery.cancel();
         }
         self.publish_service_configuration(false)?;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     pub async fn clear_api_key(&self) -> Result<AppState, Error> {
@@ -336,37 +302,44 @@ impl DesktopRuntime {
                 "Stop protection before deleting a profile credential",
             ));
         }
-        let state = self.manager.snapshot()?;
+        let state = self.state();
         if state.active_profile_id.is_empty() {
             return Err("There is no active Confidential AI profile".into());
         }
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == state.active_profile_id)
-            .ok_or("Profile not found")?;
+        let profile = find_profile(&state, &state.active_profile_id).ok_or("Profile not found")?;
         let previous_key = self.load_profile_key(&profile.id)?;
-        if profile.provider == ServiceProvider::Redpill
-            && matches!(
-                profile.auth,
-                desktop_core::contracts::ProfileAuth::OAuth { .. }
-            )
-        {
-            if let Some(key) = &previous_key {
-                self.queue_retired(RetiredCredential {
-                    profile_id: profile.id.clone(),
-                    action: "revoke".into(),
-                    provider: profile.provider,
-                    key: key.clone(),
-                    revoke: true,
-                })?;
-            }
-        }
+        self.retire_removed_key(
+            &profile.id,
+            profile.provider,
+            &profile.auth,
+            previous_key.as_deref(),
+        )?;
         self.set_profile_key(&profile.id, None)?;
         self.proxy.set_api_key(None);
         self.recovery.cancel();
         self.publish_profiles()?;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
+    }
+
+    /// Queues the revocation of a removed account key; a key entered by hand
+    /// is only removed.
+    fn retire_removed_key(
+        &self,
+        profile_id: &str,
+        provider: ServiceProvider,
+        auth: &ProfileAuth,
+        key: Option<&str>,
+    ) -> Result<(), Error> {
+        match key {
+            Some(key) if account_key(provider, auth) => self.queue_retired(RetiredCredential {
+                profile_id: profile_id.to_string(),
+                action: "revoke".into(),
+                provider,
+                key: key.to_string(),
+                revoke: true,
+            }),
+            _ => Ok(()),
+        }
     }
 
     pub fn import_profiles(

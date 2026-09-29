@@ -14,9 +14,8 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Err(Error::invalid_state(PRIMARY_ONLY));
         }
-        let listen =
-            settings_config::validate_web_ui(&config, self.manager.snapshot()?.local_api.port)
-                .map_err(Error::invalid_state)?;
+        let listen = settings_config::validate_web_ui(&config, self.state().local_api.port)
+            .map_err(Error::invalid_state)?;
         // Save the normalized address and client host.
         let config = WebUiConfig {
             listen_address: listen.config.listen_address,
@@ -28,7 +27,7 @@ impl DesktopRuntime {
             Ok(())
         })?;
         self.apply_web_ui(&config).await;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     /// Closes any running listener, revoking its sessions, then opens the configured one.
@@ -46,8 +45,9 @@ impl DesktopRuntime {
         if config.enabled {
             let started = generated
                 .map_err(|error| error.to_string())
-                .and_then(|()| self.manager.snapshot())
-                .and_then(|state| settings_config::validate_web_ui(config, state.local_api.port))
+                .and_then(|()| {
+                    settings_config::validate_web_ui(config, self.state().local_api.port)
+                })
                 .and_then(|listen| self.web_ui.start(self.clone(), &listen));
             match started {
                 Ok(url) => status.url = Some(url),
@@ -90,7 +90,7 @@ impl DesktopRuntime {
         }
         password::validate(&password).map_err(Error::invalid_state)?;
         self.save_web_ui_password(password)?;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     /// Generates a password when none is set, as code-server does on first run.

@@ -152,6 +152,37 @@ struct RuntimeState {
     state: AppState,
 }
 
+impl RuntimeState {
+    /// Verification is lost: the epoch moves so a catalog read still in
+    /// flight can neither publish nor clear this state, and the identity must
+    /// be reported again before anything opens. The status is an error unless
+    /// a security block holds. The session goes on while the user still
+    /// intends it.
+    fn lose_verification(&mut self) {
+        self.epoch += 1;
+        self.identity_ready = false;
+        if self.state.status != VerificationStatus::Blocked {
+            self.state.status = VerificationStatus::Error;
+        }
+        self.state.reconnecting = crate::recovery::connection_intended(&self.state);
+        self.state.progress = None;
+        self.state.catalog = None;
+    }
+
+    /// The verifier reported its identity, in a new epoch; the session stays
+    /// closed until the catalog read through this identity is in too.
+    fn identify(&mut self, identity: &IdentityEvent) {
+        self.state.identity = Some(parse_identity(identity));
+        self.state.checks = parse_checks(Some(&identity.verification));
+        self.state.error = None;
+        self.identity_ready = true;
+        self.epoch += 1;
+        self.state.status = VerificationStatus::Verifying;
+        self.state.progress = Some("Reading the verified model list".to_string());
+        self.state.catalog = None;
+    }
+}
+
 impl SessionManager {
     pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
         self.inventory = Some(Arc::new(inventory));
@@ -214,8 +245,8 @@ impl SessionManager {
     }
 
     /// The state as last published, with its sequence.
-    pub fn snapshot(&self) -> Result<AppState, String> {
-        Ok(self.state_tx.borrow().clone())
+    pub fn snapshot(&self) -> AppState {
+        self.state_tx.borrow().clone()
     }
 
     pub fn subscribe(&self) -> watch::Receiver<AppState> {
@@ -299,14 +330,9 @@ impl SessionManager {
         };
         drop(runtime);
 
-        self.proxy.publish(Session {
-            generation,
-            epoch: 0,
-            session_id: Some(session_id.clone()),
-            ..Session::default()
-        });
+        self.publish_unverified(generation, 0, Some(session_id.clone()));
         self.publish();
-        let state = self.snapshot()?;
+        let state = self.snapshot();
         let weak = Arc::downgrade(self);
         let events: VerifierEventSink = Arc::new(move |event| {
             if let Some(manager) = weak.upgrade() {
@@ -452,12 +478,7 @@ impl SessionManager {
         let session_id = runtime.session_id.clone();
         drop(runtime);
 
-        self.proxy.publish(Session {
-            generation,
-            epoch,
-            session_id: reconnecting.then_some(session_id),
-            ..Session::default()
-        });
+        self.publish_unverified(generation, epoch, reconnecting.then_some(session_id));
         let session_result = if reconnecting {
             Ok(())
         } else {
@@ -469,12 +490,13 @@ impl SessionManager {
         }
         self.publish();
         session_result?;
-        self.snapshot()
+        Ok(self.snapshot())
     }
 
-    /// What survives a stop or restart of the verifier: settings and their files, key status,
-    /// the local endpoint, and recent activity. The catalog does not: it
-    /// belongs to a verified session.
+    /// What survives a stop or restart of the verifier: the settings and
+    /// their files, key status, the local endpoint, the session and its
+    /// activity, and the last verified catalog for agent projection. Anything
+    /// else, a new field included, starts from its default.
     fn carried(previous: &AppState) -> AppState {
         AppState {
             backend_instance: previous.backend_instance.clone(),
@@ -531,36 +553,17 @@ impl SessionManager {
         true
     }
 
-    pub fn set_profile_credential_saved(&self, profile_id: &str, saved: bool) {
-        self.update(|state| {
-            if let Some(profile) = state
-                .profiles
-                .iter_mut()
-                .find(|profile| profile.id == profile_id)
-            {
-                profile.credential_saved = saved;
-            }
-            if state.active_profile_id == profile_id {
-                state.api_key_saved = saved;
-            }
-        });
-    }
-
     pub fn set_service_configuration(
         &self,
         config: StartConfig,
         profiles: Vec<ConfidentialProfile>,
         active_profile_id: String,
-        api_key_saved: bool,
         retain_catalog: bool,
     ) {
         let Ok(mut runtime) = self.lock() else {
             return;
         };
-        runtime.state.config = config;
-        runtime.state.profiles = profiles;
-        runtime.state.active_profile_id = active_profile_id;
-        runtime.state.api_key_saved = api_key_saved;
+        set_profiles(&mut runtime.state, profiles, active_profile_id, config);
         runtime.state.remote_url = None;
         runtime.state.identity = None;
         runtime.state.checks.clear();
@@ -582,14 +585,7 @@ impl SessionManager {
         active_profile_id: String,
         config: StartConfig,
     ) {
-        self.update(|state| {
-            state.api_key_saved = profiles
-                .iter()
-                .any(|profile| profile.id == active_profile_id && profile.credential_saved);
-            state.profiles = profiles;
-            state.active_profile_id = active_profile_id;
-            state.config = config;
-        });
+        self.update(|state| set_profiles(state, profiles, active_profile_id, config));
     }
 
     pub fn set_config_files(&self, files: desktop_core::contracts::ConfigFiles) {
@@ -599,17 +595,12 @@ impl SessionManager {
     /// Record whether the stable local endpoint is bound. A failure blocks
     /// starting and connecting until the listener is successfully rebound.
     pub fn set_endpoint(&self, config: ListenConfig, bound: Result<String, String>) {
-        self.update(|state| match bound {
-            Ok(endpoint) => {
-                state.local_api = config;
-                state.proxy_url = Some(endpoint);
-                state.endpoint_error = None;
-            }
-            Err(error) => {
-                state.local_api = config;
-                state.proxy_url = None;
-                state.endpoint_error = Some(error);
-            }
+        self.update(|state| {
+            state.local_api = config;
+            (state.proxy_url, state.endpoint_error) = match bound {
+                Ok(endpoint) => (Some(endpoint), None),
+                Err(error) => (None, Some(error)),
+            };
         });
     }
 
@@ -715,7 +706,7 @@ impl SessionManager {
             (runtime.generation, runtime.epoch)
         };
         self.load_catalog(generation, epoch).await?;
-        Ok(self.snapshot()?)
+        Ok(self.snapshot())
     }
 
     async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
@@ -895,34 +886,16 @@ impl SessionManager {
             return Ok(());
         }
         runtime.task = None;
-        runtime.service = None;
-        runtime.epoch += 1;
-        runtime.identity_ready = false;
-        runtime.verification_only = false;
-        runtime.state.catalog = None;
-        runtime.state.progress = None;
         if !matches!(
             runtime.state.status,
             VerificationStatus::Error | VerificationStatus::Blocked
         ) {
-            runtime.state.status = VerificationStatus::Error;
-            runtime.state.error = Some(if let Some(error) = error {
-                format!("Verifier task stopped unexpectedly: {error}")
-            } else {
-                "Verifier stopped unexpectedly".to_string()
+            runtime.state.error = Some(match error {
+                Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
+                None => "Verifier stopped unexpectedly".to_string(),
             });
         }
-        runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
-        let epoch = runtime.epoch;
-        let session_id = runtime.session_id.clone();
-        drop(runtime);
-        self.proxy.publish(Session {
-            generation,
-            epoch,
-            session_id: Some(session_id),
-            ..Session::default()
-        });
-        self.publish();
+        self.end_verifier(runtime, generation, None);
         Ok(())
     }
 
@@ -943,32 +916,41 @@ impl SessionManager {
             return Ok(());
         }
         let task = runtime.task.take();
-        runtime.service = None;
-        runtime.epoch += 1;
-        runtime.identity_ready = false;
-        runtime.verification_only = false;
-        if runtime.state.status != VerificationStatus::Blocked {
-            runtime.state.status = VerificationStatus::Error;
-        }
-        runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
-        runtime.state.progress = None;
-        runtime.state.catalog = None;
         runtime.state.error = Some(message);
         runtime.failure = None;
-        let epoch = runtime.epoch;
-        let session_id = runtime.session_id.clone();
+        self.end_verifier(runtime, generation, task);
+        Ok(())
+    }
+
+    /// The verifier of `generation` ended or failed: forwarding is revoked
+    /// under a new epoch, then `task`, if it still runs, is stopped.
+    fn end_verifier(
+        &self,
+        mut runtime: MutexGuard<'_, RuntimeState>,
+        generation: u64,
+        task: Option<Box<dyn VerifierTask>>,
+    ) {
+        runtime.service = None;
+        runtime.verification_only = false;
+        runtime.lose_verification();
+        let (epoch, session_id) = (runtime.epoch, runtime.session_id.clone());
         drop(runtime);
-        self.proxy.publish(Session {
-            generation,
-            epoch,
-            session_id: Some(session_id),
-            ..Session::default()
-        });
+        self.publish_unverified(generation, epoch, Some(session_id));
         if let Some(mut task) = task {
             let _ = task.stop();
         }
         self.publish();
-        Ok(())
+    }
+
+    /// Publishes the proxy session of `generation` unverified: it forwards
+    /// nothing until a verified catalog opens it.
+    fn publish_unverified(&self, generation: u64, epoch: u64, session_id: Option<String>) {
+        self.proxy.publish(Session {
+            generation,
+            epoch,
+            session_id,
+            ..Session::default()
+        });
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, RuntimeState>, String> {
@@ -976,6 +958,26 @@ impl SessionManager {
             .lock()
             .map_err(|_| "Protection state is unavailable".to_string())
     }
+}
+
+/// The saved profiles, the active one and its service configuration.
+fn set_profiles(
+    state: &mut AppState,
+    profiles: Vec<ConfidentialProfile>,
+    active_profile_id: String,
+    config: StartConfig,
+) {
+    state.api_key_saved = active_key_saved(&profiles, &active_profile_id);
+    state.profiles = profiles;
+    state.active_profile_id = active_profile_id;
+    state.config = config;
+}
+
+/// Whether the active profile has a saved credential.
+pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_id: &str) -> bool {
+    profiles
+        .iter()
+        .any(|profile| profile.id == active_profile_id && profile.credential_saved)
 }
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.

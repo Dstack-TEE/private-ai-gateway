@@ -218,7 +218,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         }
         release.notify_one();
         pending.await.unwrap().unwrap();
-        let state = manager.snapshot().unwrap();
+        let state = manager.snapshot();
         assert!(state.error.is_none());
         assert_eq!(proxy.session().verified, !stop);
         assert_eq!(
@@ -319,7 +319,10 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
             "serving": "aggregator",
             "supported_e2ee_versions": []
         },
-        "verification": { "checks": [] }
+        "verification": { "checks": [{
+            "id": "id-1", "section": "9.1(1)", "title": "Hardware quote",
+            "status": "pass", "detail": "TDX quote verified"
+        }]}
     }));
     manager
         .handle_event(
@@ -331,6 +334,11 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
             },
         )
         .unwrap();
+    // The identity alone does not verify; the catalog read is still to run.
+    let identified = manager.snapshot();
+    assert_eq!(identified.status, VerificationStatus::Verifying);
+    assert!(identified.identity.is_some() && identified.checks.len() == 1);
+    assert!(!proxy.session().verified);
     let state = manager
         .wait_for_verification(
             started.session_id.as_deref().unwrap(),
@@ -391,7 +399,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
         .unwrap_err();
     assert_eq!(protocol::Error::from(error), failure);
     assert_eq!(
-        manager.snapshot().unwrap().error.as_deref(),
+        manager.snapshot().error.as_deref(),
         Some(failure.message.as_str())
     );
     manager.stop().unwrap();
@@ -424,7 +432,7 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
             },
         )
         .unwrap();
-    let state = manager.snapshot().unwrap();
+    let state = manager.snapshot();
     assert_eq!(state.status, VerificationStatus::Error);
     assert_eq!(
         state.error.as_deref(),
@@ -482,21 +490,15 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(46)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verifying
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
     tokio::time::advance(Duration::from_secs(75)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Error
-    );
-    assert!(crate::recovery::should_retry(&manager.snapshot().unwrap()));
+    assert_eq!(manager.snapshot().status, VerificationStatus::Error);
+    assert!(crate::recovery::should_retry(&manager.snapshot()));
     assert!(!proxy.session().verified);
     manager.start(config).unwrap();
     let generation = proxy.session().generation;
-    let mut complete = manager.snapshot().unwrap();
+    let mut complete = manager.snapshot();
     complete.status = VerificationStatus::Verified;
     manager.restore_snapshot(complete);
     manager
@@ -508,10 +510,7 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
         .unwrap();
     tokio::time::advance(Duration::from_secs(121)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verified
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verified);
     manager.stop().unwrap();
 }
 
@@ -543,7 +542,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
             },
         )
         .unwrap();
-    let state = manager.snapshot().unwrap();
+    let state = manager.snapshot();
     assert_eq!(state.status, VerificationStatus::Error);
     assert!(state.reconnecting && crate::recovery::should_retry(&state));
     assert!(!manager.is_running().unwrap());
@@ -595,10 +594,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 },
             )
             .unwrap();
-        assert_eq!(
-            manager.snapshot().unwrap().status,
-            VerificationStatus::Blocked
-        );
+        assert_eq!(manager.snapshot().status, VerificationStatus::Blocked);
         assert!(usage.active_session().unwrap().is_some());
         assert_eq!(manager.is_running().unwrap(), running);
         manager
@@ -613,7 +609,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         manager
             .fail(generation, "event sink failed".into())
             .unwrap();
-        let state = manager.snapshot().unwrap();
+        let state = manager.snapshot();
         assert_eq!(state.status, VerificationStatus::Blocked);
         assert_eq!(state.configuration_verification, verification_only);
         assert!(!crate::recovery::should_retry(&state));
@@ -664,10 +660,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     assert!(!proxy.session().verified);
     assert!(proxy.session().generation > retired_generation);
     manager.terminated(retired_generation, None).unwrap();
-    assert_eq!(
-        manager.snapshot().unwrap().status,
-        VerificationStatus::Verifying
-    );
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
     manager
         .fail(proxy.session().generation, "Transport interrupted".into())
         .unwrap();
@@ -678,8 +671,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         executor.handle().clone(),
         AppState::default(),
     )
-    .snapshot()
-    .unwrap();
+    .snapshot();
     assert_eq!(recovered.session_id, resumed.session_id);
     assert_eq!(recovered.protected_since, Some(123));
     assert!(recovered.session_active && recovered.identity.is_none());
@@ -761,7 +753,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
         cost_usd: None,
     });
 
-    assert!(manager.snapshot().unwrap().activity.is_empty());
+    assert!(manager.snapshot().activity.is_empty());
     assert_eq!(
         manager
             .usage
@@ -844,34 +836,6 @@ fn receipt_activity(id: &str, session_id: &str, status: u16, detail: &str) -> Re
         cache_write_tokens: None,
         cost_usd: None,
     }
-}
-
-#[test]
-fn identity_alone_does_not_verify() {
-    let identity = json!({
-        "tee_type": "tdx",
-        "trust_level": "hardware_verified",
-        "keyset_digest": "sha256:keyset",
-        "keyset_not_after": 2_000_000_000,
-        "tls_spki": null,
-        "source_provenance": { "repo_commit": "abc123" },
-        "service_capabilities": {
-            "serving": "aggregator",
-            "supported_e2ee_versions": []
-        },
-        "verification": { "checks": [{
-            "id": "id-1", "section": "9.1(1)", "title": "Hardware quote",
-            "status": "pass", "detail": "TDX quote verified"
-        }]}
-    });
-    let mut state = AppState::default();
-    apply_identity_event(&mut state, &identity_event(identity));
-    assert_eq!(
-        state.status,
-        VerificationStatus::Stopped,
-        "status is decided once the catalog is in"
-    );
-    assert!(state.identity.is_some());
 }
 
 #[test]
@@ -998,7 +962,7 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     ));
     let published = manager.subscribe();
     let instance = Some(crate::api::version().instance_id.clone());
-    let initial = manager.snapshot().unwrap();
+    let initial = manager.snapshot();
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
@@ -1007,7 +971,7 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
         .unwrap();
     let stopped = manager.stop().unwrap();
     manager.restore_snapshot(initial.clone());
-    let restored = manager.snapshot().unwrap();
+    let restored = manager.snapshot();
     let states = [&initial, &started, &stopped, &restored];
     for state in states {
         assert_eq!(state.backend_instance, instance);
@@ -1020,4 +984,184 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
         serde_json::to_value(&*published.borrow()).unwrap(),
         serde_json::to_value(&restored).unwrap()
     );
+}
+
+/// Losing the verifier, whether its task ends or the manager fails it,
+/// revokes the proxy session under a new epoch while the protection session
+/// goes on; a failure of an older generation changes nothing.
+#[test]
+fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(StopTrackingLauncher(stopped.clone())),
+        executor.handle().clone(),
+        AppState::default(),
+    ));
+    let config = StartConfig {
+        remote_url: "https://inference.phala.com".into(),
+        require_production_os: true,
+    };
+    let revoked = |epoch| {
+        let session = proxy.session();
+        let state = manager.subscribe().borrow().clone();
+        assert_eq!(session.epoch, epoch);
+        assert_eq!(session.session_id, state.session_id);
+        assert!(session.session_id.is_some());
+        assert!(!session.verified && session.service.is_none() && session.catalog.is_none());
+        assert_eq!(state.status, VerificationStatus::Error);
+        assert!(state.progress.is_none() && state.catalog.is_none());
+        assert!(state.session_active && state.reconnecting);
+        state
+    };
+
+    manager.start(config.clone()).unwrap();
+    let generation = proxy.session().generation;
+    manager
+        .handle_event(generation, VerifierEvent::Terminated { error: None })
+        .unwrap();
+    assert_eq!(proxy.session().generation, generation);
+    let state = revoked(1);
+    assert_eq!(
+        state.error.as_deref(),
+        Some("Verifier stopped unexpectedly")
+    );
+    // A task that ended by itself is not stopped again.
+    assert!(!stopped.load(Ordering::SeqCst));
+
+    manager.start(config).unwrap();
+    let generation = proxy.session().generation;
+    manager
+        .fail(generation, "The verifier failed".into())
+        .unwrap();
+    assert_eq!(proxy.session().generation, generation);
+    let state = revoked(2);
+    assert_eq!(state.error.as_deref(), Some("The verifier failed"));
+    assert!(stopped.load(Ordering::SeqCst));
+
+    manager
+        .fail(generation - 1, "Stale failure".into())
+        .unwrap();
+    assert_eq!(manager.subscribe().borrow().error, state.error);
+    assert_eq!(proxy.session().epoch, 2);
+}
+
+/// A stop keeps the session, the settings and the last verified catalog,
+/// and resets the verification. The fixture names every field, so a new
+/// `AppState` field fails to compile here until it is sorted into one.
+#[test]
+fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
+    use desktop_core::contracts::{ConfidentialProfile, ConfigFiles, ProfileAuth, ServiceProvider};
+    let previous = AppState {
+        backend_instance: Some("instance".into()),
+        sequence: 7,
+        client_key_revision: 2,
+        client_key_available: Some(false),
+        backend_connected: Some(true),
+        wake_monitor_available: Some(true),
+        status: VerificationStatus::Verified,
+        configuration_verification: true,
+        progress: Some("Reading the verified model list".into()),
+        remote_url: Some("https://tee.example".into()),
+        proxy_url: Some("http://127.0.0.1:4180".into()),
+        endpoint_error: Some("Port in use".into()),
+        identity: Some(parse_identity(&identity_event(json!({
+            "tee_type": "tdx",
+            "trust_level": "hardware_verified",
+            "keyset_digest": "sha256:keyset",
+            "keyset_not_after": 2_000_000_000,
+            "tls_spki": null,
+            "source_provenance": {},
+            "service_capabilities": { "serving": "aggregator", "supported_e2ee_versions": [] },
+            "verification": {}
+        })))),
+        checks: vec![VerificationCheck {
+            id: "id-1".into(),
+            section: "9.1(1)".into(),
+            title: "Hardware quote".into(),
+            status: "pass".into(),
+            detail: "TDX quote verified".into(),
+        }],
+        activity: vec![receipt_activity("request", "session", 200, "verified")],
+        session_id: Some("session".into()),
+        protected_since: Some(100),
+        reconnecting: true,
+        session_active: true,
+        session_usage: UsageSummary {
+            requests: 3,
+            ..UsageSummary::default()
+        },
+        usage_revision: 4,
+        error: Some("Verification failed".into()),
+        config: StartConfig {
+            remote_url: "https://tee.example".into(),
+            require_production_os: false,
+        },
+        profiles: vec![ConfidentialProfile {
+            id: "profile".into(),
+            credential_ref: Some("credential-1".into()),
+            name: "Profile".into(),
+            provider: ServiceProvider::Custom,
+            remote_url: "https://tee.example".into(),
+            auth: ProfileAuth::ApiKey,
+            credential_saved: true,
+            verified_at: Some(1),
+        }],
+        active_profile_id: "profile".into(),
+        local_api: ListenConfig {
+            port: 5000,
+            ..ListenConfig::default()
+        },
+        api_key_saved: true,
+        catalog: Some(CatalogSummary {
+            revision: "revision".into(),
+            fetched_at: 1,
+            models: Vec::new(),
+            removed: vec!["gone".into()],
+        }),
+        web_ui: desktop_core::contracts::WebUiStatus {
+            enabled: true,
+            url: Some("http://127.0.0.1:4182".into()),
+            ..Default::default()
+        },
+        config_files: ConfigFiles {
+            revision: 5,
+            ..ConfigFiles::default()
+        },
+        agents_revision: 6,
+    };
+    let reset = [
+        "backendConnected",
+        "status",
+        "configurationVerification",
+        "progress",
+        "remoteUrl",
+        "identity",
+        "checks",
+        "protectedSince",
+        "reconnecting",
+        "error",
+    ];
+    let json = |state: &AppState| serde_json::to_value(state).unwrap();
+    let (fixture, carried, defaults) = (
+        json(&previous),
+        json(&SessionManager::carried(&previous)),
+        json(&AppState::default()),
+    );
+    assert_eq!(fixture.as_object().unwrap().len(), 31);
+    for (field, value) in fixture.as_object().unwrap() {
+        // Differs from its default, so keeping it is observable.
+        assert_ne!(Some(value), defaults.get(field), "{field}");
+        let expected = if reset.contains(&field.as_str()) {
+            defaults.get(field)
+        } else {
+            Some(value)
+        };
+        assert_eq!(carried.get(field), expected, "{field}");
+    }
 }

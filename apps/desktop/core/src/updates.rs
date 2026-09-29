@@ -112,11 +112,10 @@ pub fn installation() -> Installation {
     };
     let directory = executable.parent().unwrap_or(Path::new(""));
     let desktop = directory
-        .join(if cfg!(windows) {
-            "private-ai-proxy-desktop.exe"
-        } else {
-            "private-ai-proxy-desktop"
-        })
+        .join(format!(
+            "private-ai-proxy-desktop{}",
+            std::env::consts::EXE_SUFFIX
+        ))
         .is_file();
     let package_manager = std::fs::read_to_string(PACKAGE_MANAGER_MARKER).ok();
     classify(

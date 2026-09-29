@@ -78,13 +78,21 @@ fn test_runtime(
     executor: &tokio::runtime::Runtime,
     directory: &std::path::Path,
 ) -> Arc<DesktopRuntime> {
+    test_runtime_with(executor, directory, Arc::new(NoVerifier))
+}
+
+fn test_runtime_with(
+    executor: &tokio::runtime::Runtime,
+    directory: &std::path::Path,
+    launcher: Arc<dyn VerifierLauncher>,
+) -> Arc<DesktopRuntime> {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let proxy = ProxyState::new(events).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         usage.clone(),
-        Arc::new(NoVerifier),
+        launcher,
         executor.handle().clone(),
         AppState::default(),
     ));
@@ -181,7 +189,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
                 .map(|details| details.auth),
             Some(expected)
         );
-        assert!(runtime.state().unwrap().profiles.is_empty());
+        assert!(runtime.state().profiles.is_empty());
         let different_provider = ConfidentialProfileInput {
             provider: ServiceProvider::Redpill,
             remote_url: "https://tee.redpill.ai".into(),
@@ -230,7 +238,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
                 .to_string(),
             "Account connection is only available for Phala and RedPill"
         );
-        assert!(runtime.state().unwrap().profiles.is_empty());
+        assert!(runtime.state().profiles.is_empty());
         assert!(runtime.account_login.lock().await.is_none());
         assert!(!directory.path().join("settings/credentials.toml").exists());
     });
@@ -265,7 +273,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
         .set_profile_key("profile-test", Some("old-secret"))
         .unwrap();
     runtime.publish_service_configuration(false).unwrap();
-    assert!(runtime.state().unwrap().api_key_saved);
+    assert!(runtime.state().api_key_saved);
     executor.block_on(runtime.cleanup_retired()).unwrap();
 
     // A revocation of the key still in use is dropped without contacting the provider.
@@ -295,7 +303,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
     executor
         .block_on(runtime.delete_profile("profile-test".into()))
         .unwrap();
-    assert!(runtime.state().unwrap().profiles.is_empty());
+    assert!(runtime.state().profiles.is_empty());
     assert!(runtime.load_profile_key("profile-test").unwrap().is_none());
     let pending: Vec<_> = runtime
         .local_state
@@ -390,7 +398,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
             }],
         })
         .unwrap();
-    let state = runtime.state().unwrap();
+    let state = runtime.state();
     let imported = state
         .profiles
         .iter()
@@ -408,7 +416,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
         error.code(),
         desktop_core::protocol::ErrorCode::InvalidState
     );
-    let unchanged = runtime.state().unwrap();
+    let unchanged = runtime.state();
     assert_eq!(unchanged.active_profile_id, "ready");
     assert_eq!(unchanged.status, VerificationStatus::Verified);
     assert!(unchanged.session_active);
@@ -455,7 +463,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
     let starting = AppState {
         status: VerificationStatus::Verifying,
         session_active: true,
-        ..runtime.state().unwrap()
+        ..runtime.state()
     };
     runtime.manager.restore_snapshot(starting.clone());
 
@@ -470,7 +478,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
         .block_on(runtime.save_configuration(profile("new", "New"), true, Some("key".into())))
         .unwrap_err();
     assert_eq!(refused.code(), ErrorCode::Busy);
-    assert_eq!(runtime.state().unwrap().active_profile_id, "ready");
+    assert_eq!(runtime.state().active_profile_id, "ready");
     assert_eq!(runtime.settings.config().unwrap().active_profile, "ready");
 
     runtime.manager.restore_snapshot(AppState {
@@ -574,7 +582,7 @@ fn shutdown_blocks_later_configuration_changes() {
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::Quit, true))
         .unwrap();
-    let state = runtime.state().unwrap();
+    let state = runtime.state();
     assert_eq!(state.status, VerificationStatus::Stopped);
     assert_eq!(
         runtime.start(state.config).unwrap_err(),
@@ -630,7 +638,7 @@ fn shutdown_stops_waiting_for_a_stuck_command_after_its_bound() {
         );
     });
     assert_eq!(
-        runtime.start(runtime.state().unwrap().config).unwrap_err(),
+        runtime.start(runtime.state().config).unwrap_err(),
         crate::Error::closing()
     );
 }
@@ -669,7 +677,7 @@ fn update_restart_preserves_only_an_active_protection_session() {
 
         executor.block_on(runtime.shutdown(mode, true)).unwrap();
 
-        let state = runtime.state().unwrap();
+        let state = runtime.state();
         assert_eq!(state.status, VerificationStatus::Stopped);
         assert_eq!(state.reconnecting, preserved);
         assert_eq!(state.session_active, preserved);
@@ -726,9 +734,9 @@ fn finished_local_listener_can_restart_at_the_same_address() {
             .unwrap();
         // Stopping releases the port at once.
         runtime.endpoint.stop().await.unwrap();
-        runtime.restore_endpoint(resolved.clone()).unwrap();
+        runtime.restore_endpoint(&resolved).unwrap();
         assert!(std::net::TcpListener::bind(resolved.bind).is_err());
-        assert!(runtime.restore_endpoint(resolved.clone()).is_err());
+        assert!(runtime.restore_endpoint(&resolved).is_err());
         runtime.endpoint.stop().await.unwrap();
     });
 }
@@ -1067,7 +1075,6 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
             AppState::default(),
         )
         .snapshot()
-        .unwrap()
         .reconnecting
     };
     assert!(resumes());
@@ -1152,7 +1159,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     runtime.recover_network().unwrap();
     assert!(runtime.recovery.needs_check());
     drop(operation);
-    let mut verifying = runtime.state().unwrap();
+    let mut verifying = runtime.state();
     verifying.status = VerificationStatus::Verifying;
     runtime.manager.restore_snapshot(verifying.clone());
     runtime.recovery.available.store(true, Ordering::Release);
@@ -1163,22 +1170,22 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
     runtime.recover_network().unwrap();
     assert!(!runtime.recovery.needs_check());
     assert!(!runtime.proxy.session().verified);
-    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
-    assert!(runtime.state().unwrap().reconnecting);
+    assert_eq!(runtime.state().status, VerificationStatus::Stopped);
+    assert!(runtime.state().reconnecting);
     assert_eq!(
-        runtime.state().unwrap().session_id.as_deref(),
+        runtime.state().session_id.as_deref(),
         Some("network-session")
     );
-    assert_eq!(runtime.state().unwrap().protected_since, Some(123));
-    assert_eq!(runtime.state().unwrap().session_usage.requests, 7);
+    assert_eq!(runtime.state().protected_since, Some(123));
+    assert_eq!(runtime.state().session_usage.requests, 7);
     assert!(runtime.recovery.pending());
     runtime.stop().unwrap();
-    assert!(!runtime.state().unwrap().reconnecting);
-    assert!(runtime.state().unwrap().protected_since.is_none());
+    assert!(!runtime.state().reconnecting);
+    assert!(runtime.state().protected_since.is_none());
     assert!(!runtime.recovery.pending());
     runtime.recovery.available.store(true, Ordering::Release);
     runtime.recover_network().unwrap();
-    assert_eq!(runtime.state().unwrap().status, VerificationStatus::Stopped);
+    assert_eq!(runtime.state().status, VerificationStatus::Stopped);
 }
 
 #[test]
@@ -1208,16 +1215,16 @@ fn failed_and_noop_imports_preserve_recovery_and_monitor_state() {
     );
     assert!(runtime.recovery.pending());
     assert!(runtime.recovery.needs_check());
-    let snapshot = runtime.state().unwrap();
+    let snapshot = runtime.state();
     assert!(runtime.set_wake_monitor_available(false));
     assert!(!runtime.set_wake_monitor_available(false));
     runtime.manager.restore_snapshot(snapshot);
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+    assert_eq!(runtime.state().wake_monitor_available, Some(false));
     runtime.stop().unwrap();
     assert!(!runtime.recovery.needs_check());
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(false));
+    assert_eq!(runtime.state().wake_monitor_available, Some(false));
     assert!(runtime.set_wake_monitor_available(true));
-    assert_eq!(runtime.state().unwrap().wake_monitor_available, Some(true));
+    assert_eq!(runtime.state().wake_monitor_available, Some(true));
 }
 
 #[test]
@@ -1268,7 +1275,10 @@ fn client_key_rotation_preserves_agent_tokens_and_fails_closed() {
     std::fs::remove_dir(&token_path).unwrap();
     std::fs::write(&token_path, &rotated).unwrap();
     assert!(runtime.client_key().is_err());
-    let active = with_client_token(runtime.proxy.tokens(), &runtime.credentials).unwrap();
+    let active = runtime
+        .credentials
+        .with_token(runtime.proxy.tokens())
+        .unwrap();
     assert_eq!(active.agent_for(&rotated), None);
     assert_eq!(active.agent_for("agent-token"), Some("codex"));
     let replacement = runtime.rotate_client_key().unwrap();
@@ -1332,7 +1342,7 @@ fn occupied_listener_preserves_previous_endpoint_and_serializes_mutations() {
             )
             .await
             .is_err());
-        let state = runtime.state().unwrap();
+        let state = runtime.state();
         assert_eq!(state.local_api, config);
         assert_eq!(state.proxy_url.as_deref(), Some(original.endpoint.as_str()));
         assert!(state.endpoint_error.is_none());
@@ -1447,4 +1457,355 @@ fn only_codex_has_a_background_service_to_check_or_stop() {
         assert_eq!(running.unwrap_err().code(), ErrorCode::InvalidRequest);
         assert_eq!(stopped.unwrap_err().code(), ErrorCode::InvalidRequest);
     }
+}
+
+#[test]
+fn missing_usage_records_are_not_found_and_exports_need_absolute_paths() {
+    use desktop_core::protocol::{self, Command, ErrorCode};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    executor.block_on(async {
+        for command in [
+            Command::GetUsageRecord {
+                record_id: "missing".into(),
+            },
+            Command::GetUsageReceipt {
+                record_id: "missing".into(),
+            },
+        ] {
+            let error = crate::dispatch::dispatch(&runtime, command)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::NotFound);
+            assert_eq!(error.message, "Usage record not found");
+        }
+        for command in [
+            Command::GetUsageRecord {
+                record_id: "bad\u{7}".into(),
+            },
+            Command::ExportUsage {
+                query: Default::default(),
+                path: "usage.csv".into(),
+            },
+            Command::ExportProfiles {
+                path: "profiles.json".into(),
+            },
+        ] {
+            let error = crate::dispatch::dispatch(&runtime, command)
+                .await
+                .unwrap_err();
+            assert_eq!(error, protocol::Error::internal());
+        }
+        assert!(!directory.path().join("usage.csv").exists());
+    });
+}
+
+/// Protection of a service on this device does not depend on the network, so
+/// an address change leaves it running; any other service reconnects.
+#[test]
+fn an_address_change_reconnects_only_a_remote_service() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let verified = |remote_url: &str| AppState {
+        status: VerificationStatus::Verified,
+        session_id: Some("address-session".into()),
+        session_active: true,
+        config: StartConfig {
+            remote_url: remote_url.into(),
+            require_production_os: false,
+        },
+        ..Default::default()
+    };
+    for remote_url in [
+        "http://localhost:4190",
+        "http://LOCALHOST:4190",
+        "http://127.0.0.1:4190",
+        "http://[::1]:4190",
+    ] {
+        runtime.manager.restore_snapshot(verified(remote_url));
+        runtime.system_resumed();
+        runtime.recover_network().unwrap();
+        assert!(!runtime.recovery.needs_check(), "{remote_url}");
+        let state = runtime.subscribe().borrow().clone();
+        assert_eq!(state.status, VerificationStatus::Verified, "{remote_url}");
+        assert!(!state.reconnecting, "{remote_url}");
+    }
+    runtime
+        .manager
+        .restore_snapshot(verified("https://inference.phala.com"));
+    runtime.system_resumed();
+    assert!(runtime
+        .recover_network()
+        .unwrap_err()
+        .to_string()
+        .starts_with("Could not reconnect; retrying automatically: "));
+    let state = runtime.subscribe().borrow().clone();
+    assert_eq!(state.status, VerificationStatus::Stopped);
+    assert!(state.reconnecting && state.session_active);
+    assert!(runtime.recovery.pending());
+}
+
+#[test]
+fn clearing_an_account_key_queues_its_revocation() {
+    use desktop_core::contracts::{ProfileAuth, ServiceProvider};
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    let profile = |provider, remote_url: &str, auth| settings_config::Profile {
+        name: "Test".into(),
+        provider,
+        remote_url: remote_url.into(),
+        auth,
+        verified_at: None,
+    };
+    let account = ProfileAuth::OAuth {
+        account_id: "user_test".into(),
+        account_name: None,
+        images: None,
+        scope: None,
+    };
+    runtime
+        .update_config(|settings| {
+            settings.upsert(
+                "account".into(),
+                profile(ServiceProvider::Redpill, "https://tee.redpill.ai", account),
+            )?;
+            settings.upsert(
+                "manual".into(),
+                profile(
+                    ServiceProvider::Phala,
+                    "https://inference.phala.com",
+                    ProfileAuth::ApiKey,
+                ),
+            )?;
+            settings.active_profile = "account".into();
+            Ok(())
+        })
+        .unwrap();
+    runtime
+        .set_profile_key("account", Some("account-secret"))
+        .unwrap();
+    runtime
+        .set_profile_key("manual", Some("manual-secret"))
+        .unwrap();
+    runtime.publish_service_configuration(false).unwrap();
+
+    executor.block_on(runtime.clear_api_key()).unwrap();
+    let state = runtime.subscribe().borrow().clone();
+    assert!(!state.api_key_saved);
+    assert_eq!(
+        state
+            .profiles
+            .iter()
+            .map(|profile| (profile.id.as_str(), profile.credential_saved))
+            .collect::<Vec<_>>(),
+        [("account", false), ("manual", true)]
+    );
+    assert!(runtime.load_profile_key("account").unwrap().is_none());
+    let pending: Vec<_> = runtime
+        .local_state
+        .read()
+        .unwrap()
+        .account_cleanup
+        .into_values()
+        .collect();
+    assert_eq!(
+        pending,
+        [RetiredCredential {
+            profile_id: "account".into(),
+            action: "revoke".into(),
+            provider: ServiceProvider::Redpill,
+            key: "account-secret".into(),
+            revoke: true,
+        }]
+    );
+
+    // A manually entered key is only removed.
+    runtime.activate_profile("manual".into()).unwrap();
+    executor.block_on(runtime.clear_api_key()).unwrap();
+    assert!(runtime.load_profile_key("manual").unwrap().is_none());
+    assert_eq!(runtime.local_state.read().unwrap().account_cleanup.len(), 1);
+}
+
+/// A save that fails after the new listener was bound, when the previous
+/// listener cannot come back either, answers with both reasons and shows the
+/// Local API as unavailable.
+#[test]
+fn a_failed_rebind_that_cannot_restore_names_both_failures() {
+    use desktop_core::protocol::ErrorCode;
+    // Binds and rebinds ports; see `finished_local_listener_can_restart_at_the_same_address`.
+    const CHILD: &str = "PAP_TEST_FAILED_REBIND";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::a_failed_rebind_that_cannot_restore_names_both_failures",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime(&executor, directory.path());
+    // Saving the new address fails: config.toml does not parse.
+    std::fs::write(
+        directory.path().join("settings/config.toml"),
+        "local-api = [",
+    )
+    .unwrap();
+    let resolved = |port| {
+        settings_config::resolve_local_api(ListenConfig {
+            port,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let free = || {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+    let save_failure = "Fix config.toml before changing settings.";
+    executor.block_on(async {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let current = resolved(held.local_addr().unwrap().port());
+        let new = resolved(free());
+        let error = runtime
+            .rebind_local_api(new.config.clone(), current.clone(), new)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::OperationFailed);
+        let message = error.to_string();
+        let (save, restore) = message.split_once("; ").unwrap();
+        assert!(save.ends_with(save_failure), "{message}");
+        assert!(
+            restore.starts_with(&format!(
+                "The new Local API settings failed and the previous listener could not be restored: Cannot listen on {}: ",
+                current.bind
+            )),
+            "{message}"
+        );
+        let state = runtime.subscribe().borrow().clone();
+        assert_eq!(state.endpoint_error.as_deref(), Some(restore));
+        assert!(state.proxy_url.is_none());
+        assert_eq!(state.local_api, current.config);
+    });
+}
+
+/// A verifier that reports a failure as soon as it starts.
+struct UnreachableVerifier;
+
+impl VerifierLauncher for UnreachableVerifier {
+    fn spawn(
+        &self,
+        _: crate::verifier_session::VerifierConfig,
+        events: crate::verifier_session::VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn crate::verifier_session::VerifierTask>, String> {
+        events(crate::verifier_session::VerifierEvent::Fatal {
+            error: desktop_core::protocol::Error::new(
+                desktop_core::protocol::ErrorCode::ServiceConnectionFailed,
+                "Cannot reach tee.invalid.",
+            )
+            .into(),
+        });
+        Ok(Box::new(IdleTask))
+    }
+}
+
+struct IdleTask;
+
+impl crate::verifier_session::VerifierTask for IdleTask {
+    fn stop(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// A profile save that fails leaves the state, the settings and the saved
+/// key as they were, whether verification or saving the file failed.
+#[test]
+fn a_failed_profile_save_changes_nothing() {
+    use desktop_core::contracts::ServiceProvider;
+    use desktop_core::protocol::ErrorCode;
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = test_runtime_with(&executor, directory.path(), Arc::new(UnreachableVerifier));
+    let input = |id: &str| ConfidentialProfileInput {
+        id: id.into(),
+        name: "Service".into(),
+        provider: ServiceProvider::Custom,
+        remote_url: "https://tee.invalid".into(),
+    };
+    // The state as published, but for its sequence.
+    let state = || {
+        let mut state = runtime.subscribe().borrow().clone();
+        state.sequence = 0;
+        serde_json::to_value(state).unwrap()
+    };
+
+    // Verification fails: its own error answers, and nothing is saved.
+    let before = state();
+    let error = executor
+        .block_on(runtime.verify_configuration(input("new"), true, Some("new-key".into())))
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::ServiceConnectionFailed);
+    assert_eq!(error.to_string(), "Cannot reach tee.invalid.");
+    assert_eq!(state(), before);
+    assert!(runtime.settings.config().unwrap().profiles.is_empty());
+    assert!(runtime.load_profile_key("new").unwrap().is_none());
+
+    // A saved profile whose key is replaced.
+    executor
+        .block_on(runtime.save_configuration(input("saved"), true, Some("old-key".into())))
+        .unwrap();
+    let before = state();
+
+    // config.toml cannot be saved: the previous key is put back.
+    std::fs::write(
+        directory.path().join("settings/config.toml"),
+        "active-profile = [",
+    )
+    .unwrap();
+    let error = executor
+        .block_on(runtime.save_configuration(input("saved"), false, Some("new-key".into())))
+        .unwrap_err();
+    assert_eq!(error.code(), ErrorCode::InvalidState);
+    assert!(error
+        .to_string()
+        .ends_with("Fix config.toml before changing settings."));
+    assert_eq!(state(), before);
+    assert_eq!(
+        runtime.load_profile_key("saved").unwrap().as_deref(),
+        Some("old-key")
+    );
+    let credentials =
+        std::fs::read_to_string(directory.path().join("settings/credentials.toml")).unwrap();
+    assert!(credentials.contains("old-key") && !credentials.contains("new-key"));
+    // The replaced key stays queued; cleanup drops it while it is in use.
+    let queued: Vec<_> = runtime
+        .local_state
+        .read()
+        .unwrap()
+        .account_cleanup
+        .into_values()
+        .map(|record| (record.action, record.key, record.revoke))
+        .collect();
+    assert_eq!(
+        queued,
+        [("revoke".to_string(), "old-key".to_string(), false)]
+    );
 }

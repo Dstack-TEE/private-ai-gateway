@@ -356,16 +356,8 @@ impl Settings {
 
     /// Reads both files into `applied`; returns whether that changed it.
     fn refresh(&self, applied: &mut Applied) -> bool {
-        let config = read(&self.dir.join(CONFIG_FILE), false)
-            .map_err(|error| format!("Cannot read {CONFIG_FILE}: {error}"))
-            .and_then(|text| {
-                text.map_or_else(|| Ok(Parsed::default()), |text| config::parse(&text))
-            });
-        let credentials = read(&self.dir.join(CREDENTIALS_FILE), true)
-            .map_err(|error| format!("Cannot read {CREDENTIALS_FILE}: {error}"))
-            .and_then(|text| {
-                text.map_or_else(|| Ok(Parsed::default()), |text| parse_credentials(&text))
-            });
+        let config = load(&self.dir, CONFIG_FILE, config::parse);
+        let credentials = load(&self.dir, CREDENTIALS_FILE, parse_credentials);
         let previous = applied.current.clone();
         let status = |applied: &Applied| {
             (
@@ -438,8 +430,7 @@ pub(crate) fn write<T: Serialize>(
     let encode =
         |value: &T| toml_edit::ser::to_document(value).map_err(|_| format!("Cannot encode {name}"));
     let (from, to) = (encode(from)?, encode(to)?);
-    let current = read(&path, name == CREDENTIALS_FILE)
-        .map_err(|error| format!("Cannot read {name}: {error}"))?;
+    let current = read(dir, name)?;
     // The file's own errors name it with a position; the user fixes them.
     let text = edit(current.as_deref(), header, &from, &to).map_err(|()| {
         Error::invalid_state(match current.as_deref().map(parse) {
@@ -625,16 +616,29 @@ fn visit_headers(table: &mut Table, f: &mut dyn FnMut(&mut Table)) {
     }
 }
 
-/// Reads a settings file; `credentials.toml` is read without following symlinks.
-fn read(path: &Path, private: bool) -> io::Result<Option<String>> {
-    if private {
-        return private_fs::read_private_text(path);
-    }
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
+/// Reads a settings file, `None` when it does not exist; `credentials.toml`
+/// is read without following symlinks.
+fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
+    let path = dir.join(name);
+    let text = if name == CREDENTIALS_FILE {
+        private_fs::read_private_text(&path)
+    } else {
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    text.map_err(|error| format!("Cannot read {name}: {error}"))
+}
+
+/// A settings file as it is on disk; one that does not exist is empty.
+fn load<T: Default>(
+    dir: &Path,
+    name: &str,
+    parse: fn(&str) -> Result<Parsed<T>, String>,
+) -> Result<Parsed<T>, String> {
+    read(dir, name)?.map_or_else(|| Ok(Parsed::default()), |text| parse(&text))
 }
 
 /// Parses `credentials.toml`. Errors carry positions and key paths but never

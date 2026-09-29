@@ -22,10 +22,7 @@ pub(super) async fn request_json(
         if status.is_success() {
             "Invalid account response".into()
         } else {
-            Error::account(format!(
-                "Account: Service rejected the request (HTTP {}). Retry or contact support.",
-                status.as_u16()
-            ))
+            rejected(status)
         }
     })?;
     Ok((status, data))
@@ -77,33 +74,33 @@ pub(super) fn protocol_error(data: &Value) -> Option<&str> {
 }
 
 pub(super) fn account_error(status: StatusCode, data: &Value) -> Error {
-    if let Some(message) = match protocol_error(data) {
-        Some("org_required") => Some("Select an organization on the connection page and try again."),
-        Some("keys_permission_required" | "organization_permission_required") => Some("Your organization must grant key-management permission before you can connect."),
-        Some("rate_limited") => Some("Balance refresh is temporarily limited. Try again in a minute."),
-        Some("balance_unavailable") => Some("Balance is temporarily unavailable. Try refreshing later."),
-        Some("billing_permission_required") => Some("Your account does not have permission to view this balance."),
-        Some("account_mapping_conflict") => Some("Account setup conflicts with an existing account. Contact RedPill support."),
-        Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => Some("Account setup is temporarily unavailable. Retry connecting."),
-        Some("device_disabled") => Some("This device key was disabled. Manage it in RedPill Keys before reconnecting."),
-        Some("device_migration_required" | "device_credential_mismatch") => Some("This device credential needs repair in RedPill Keys."),
-        Some("invalid_authorization" | "invalid_identity" | "credentials_required" | "device_unavailable") => Some("Your authorization is no longer valid. Reconnect the account."),
-        Some("key_store_unavailable") => Some("The credential service is unavailable. Retry saving; your previous credential is unchanged."),
-        Some("account_unavailable") => Some("This account is unavailable. Contact your organization administrator."),
-        Some("not_available") => Some("Account connection is not enabled on this service."),
-        _ => None,
-    } { return Error::account(format!("Account: {message}")); }
+    let message = match protocol_error(data) {
+        Some("org_required") => "Select an organization on the connection page and try again.",
+        Some("keys_permission_required" | "organization_permission_required") => "Your organization must grant key-management permission before you can connect.",
+        Some("rate_limited") => "Balance refresh is temporarily limited. Try again in a minute.",
+        Some("balance_unavailable") => "Balance is temporarily unavailable. Try refreshing later.",
+        Some("billing_permission_required") => "Your account does not have permission to view this balance.",
+        Some("account_mapping_conflict") => "Account setup conflicts with an existing account. Contact RedPill support.",
+        Some("account_setup_unavailable" | "account_service_unavailable" | "organization_unavailable" | "authorization_unavailable") => "Account setup is temporarily unavailable. Retry connecting.",
+        Some("device_disabled") => "This device key was disabled. Manage it in RedPill Keys before reconnecting.",
+        Some("device_migration_required" | "device_credential_mismatch") => "This device credential needs repair in RedPill Keys.",
+        Some("invalid_authorization" | "invalid_identity" | "credentials_required" | "device_unavailable") => "Your authorization is no longer valid. Reconnect the account.",
+        Some("key_store_unavailable") => "The credential service is unavailable. Retry saving; your previous credential is unchanged.",
+        Some("account_unavailable") => "This account is unavailable. Contact your organization administrator.",
+        Some("not_available") => "Account connection is not enabled on this service.",
+        Some("access_denied") => "Authorization was declined.",
+        Some("expired_token") => "Authorization expired; reconnect the account.",
+        _ => return rejected(status),
+    };
+    Error::account(format!("Account: {message}"))
+}
 
-    match protocol_error(data) {
-        Some("access_denied") => Error::account("Account: Authorization was declined."),
-        Some("expired_token") => {
-            Error::account("Account: Authorization expired; reconnect the account.")
-        }
-        _ => Error::account(format!(
-            "Account: Service rejected the request (HTTP {}). Retry or contact support.",
-            status.as_u16()
-        )),
-    }
+/// A refusal the account service did not explain.
+fn rejected(status: StatusCode) -> Error {
+    Error::account(format!(
+        "Account: Service rejected the request (HTTP {}). Retry or contact support.",
+        status.as_u16()
+    ))
 }
 
 pub(super) async fn response(request: reqwest::RequestBuilder) -> Result<Value, Error> {

@@ -86,7 +86,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
                 false
             }
         };
-        let resume_session = startup.state().is_ok_and(|state| state.reconnecting);
+        let resume_session = startup.state().reconnecting;
         if connect_on_launch || resume_session {
             let result = startup.start_on_launch();
             if let Err(error) = result {

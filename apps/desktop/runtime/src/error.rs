@@ -3,16 +3,17 @@
 //! the service log, and callers receive only `operation_failed` (Docker
 //! `errdefs.System`, gRPC `INTERNAL`).
 
-use std::fmt;
-
 use desktop_core::contracts::AppState;
 use desktop_core::protocol::{self, ErrorCode};
 
-#[derive(Clone, Debug, PartialEq)]
+/// It displays as the message the state and the service log show.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub enum Error {
     /// Authored for the caller, answered as it is.
+    #[error("{0}")]
     Api(protocol::Error),
     /// Its detail never leaves the service.
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -75,18 +76,6 @@ fn active_profile_name(state: &AppState) -> &str {
         .find(|profile| profile.id == state.active_profile_id)
         .map_or("the active profile", |profile| profile.name.as_str())
 }
-
-/// The message the state and the service log show.
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Api(error) => formatter.write_str(&error.message),
-            Self::Internal(detail) => formatter.write_str(detail),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl From<String> for Error {
     fn from(detail: String) -> Self {

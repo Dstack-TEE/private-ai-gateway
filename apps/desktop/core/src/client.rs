@@ -158,15 +158,10 @@ impl Client {
         }
         let data = crate::paths::app_data_dir()?;
         let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
-        let expected = || {
-            crate::launch::service_executable()?
-                .canonicalize()
-                .map_err(|_| "Cannot identify the installed backend".to_string())
-        };
         match block_on(open())? {
             Ok(connection) if current(&connection.version) => return Ok(()),
             Ok(connection) => {
-                let expected = expected()?;
+                let expected = installed_backend()?;
                 if !executable_matches(&connection.version.executable, &expected)? {
                     return Err(OTHER_INSTALLATION.into());
                 }
@@ -176,7 +171,7 @@ impl Client {
             Err(error) if absent(&error) => {
                 if block_on(legacy::is_running())? {
                     Client::new()
-                        .shutdown_owned(Some(&expected()?), ShutdownMode::UpdateRestart)?;
+                        .shutdown_owned(Some(&installed_backend()?), ShutdownMode::UpdateRestart)?;
                 }
             }
             Err(error) => return Err(connection_error(error)),
@@ -188,11 +183,7 @@ impl Client {
         loop {
             match block_on(open())? {
                 Ok(connection) if current(&connection.version) => {
-                    if let Some(mut child) = child {
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                        });
-                    }
+                    reap(child);
                     return Ok(());
                 }
                 Ok(_) => {
@@ -204,11 +195,7 @@ impl Client {
                 }
                 Err(error) if absent(&error) => {}
                 Err(error) => {
-                    if let Some(mut child) = child {
-                        std::thread::spawn(move || {
-                            let _ = child.wait();
-                        });
-                    }
+                    reap(child);
                     return Err(connection_error(error));
                 }
             }
@@ -434,9 +421,7 @@ impl Client {
     }
 
     pub fn restart_service(&self) -> Result<(), String> {
-        let expected = crate::launch::service_executable()?
-            .canonicalize()
-            .map_err(|_| "Cannot identify the installed backend")?;
+        let expected = installed_backend()?;
         if self.is_running()? {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
@@ -505,9 +490,7 @@ impl Client {
         let startup = crate::lock::startup(&data)
             .map_err(|_| "Cannot secure update startup gate")?
             .ok_or("Another startup or update is in progress.")?;
-        let expected = crate::launch::service_executable()?
-            .canonicalize()
-            .map_err(|_| "Cannot identify the installed backend")?;
+        let expected = installed_backend()?;
         let was_running = self.is_running()?;
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
@@ -682,6 +665,22 @@ fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
         .build()
         .map_err(|_| "Cannot start the management client".to_string())?;
     Ok(runtime.block_on(future))
+}
+
+/// The backend executable this installation bundles.
+fn installed_backend() -> Result<PathBuf, String> {
+    crate::launch::service_executable()?
+        .canonicalize()
+        .map_err(|_| "Cannot identify the installed backend".to_string())
+}
+
+/// Waits for a started backend in the background, so it leaves no zombie.
+fn reap(child: Option<crate::launch::BackgroundService>) {
+    if let Some(mut child) = child {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 fn executable_matches(actual: &str, expected: &Path) -> Result<bool, String> {

@@ -63,44 +63,19 @@ impl Listener {
         let dir = endpoint.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
         })?;
-        ensure_private_dir(dir).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot prepare IPC runtime directory {}: {error}",
-                    dir.display()
-                ),
-            )
-        })?;
-        remove_stale_socket(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot clean IPC endpoint {}: {error}", endpoint.display()),
-            )
-        })?;
+        ensure_private_dir(dir)
+            .map_err(|error| failed(error, "prepare IPC runtime directory", dir))?;
+        remove_stale_socket(&endpoint)
+            .map_err(|error| failed(error, "clean IPC endpoint", &endpoint))?;
 
-        let inner = UnixListener::bind(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot bind IPC endpoint {}: {error}", endpoint.display()),
-            )
-        })?;
+        let inner = UnixListener::bind(&endpoint)
+            .map_err(|error| failed(error, "bind IPC endpoint", &endpoint))?;
         if let Err(error) = fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)) {
             let _ = fs::remove_file(&endpoint);
-            return Err(io::Error::new(
-                error.kind(),
-                format!("cannot secure IPC endpoint {}: {error}", endpoint.display()),
-            ));
+            return Err(failed(error, "secure IPC endpoint", &endpoint));
         }
-        let socket_identity = FileIdentity::read(&endpoint).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot inspect IPC endpoint {}: {error}",
-                    endpoint.display()
-                ),
-            )
-        })?;
+        let socket_identity = FileIdentity::read(&endpoint)
+            .map_err(|error| failed(error, "inspect IPC endpoint", &endpoint))?;
         Ok(Self {
             inner,
             endpoint,
@@ -119,6 +94,14 @@ impl Drop for Listener {
             }
         }
     }
+}
+
+/// `error` of what failed at `path`, keeping its kind.
+fn failed(error: io::Error, what: &str, path: &Path) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!("cannot {what} {}: {error}", path.display()),
+    )
 }
 
 /// Connects to the endpoint of a backend running as this user.
