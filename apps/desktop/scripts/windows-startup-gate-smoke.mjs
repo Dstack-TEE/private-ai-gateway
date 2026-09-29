@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { stringify } from "smol-toml";
 
 import { stagePortable } from "./package-cli.mjs";
 
@@ -117,7 +118,7 @@ try {
 
   const settings = path.join(profile, ".config", "private-ai-proxy");
   await mkdir(settings, { recursive: true });
-  await writeFile(path.join(settings, "config.toml"), `[local-api]\nport = ${await reservePort()}\n`);
+  await writeFile(path.join(settings, "config.toml"), stringify({ "local-api": { port: await reservePort() } }));
   const started = JSON.parse((await execute(pap, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
   assert.ok(Number.isInteger(started.processId) && started.processId > 0);
 } finally {

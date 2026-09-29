@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
+import { stringify } from "smol-toml";
 
 const [binaries, ...update] = process.argv.slice(2);
 assert.equal(process.platform, "linux");
@@ -73,7 +74,7 @@ try {
   await new Promise((resolve) => server.close(resolve));
   const data = path.join(home, ".private-ai-proxy");
   await mkdir(path.join(data, "Config"), { recursive: true, mode: 0o700 });
-  await writeFile(path.join(data, "Config", "config.toml"), `[local-api]\nport = ${address.port}\n`, { mode: 0o600 });
+  await writeFile(path.join(data, "Config", "config.toml"), stringify({ "local-api": { port: address.port } }), { mode: 0o600 });
   const backend = start("private-ai-proxy-service");
   let state;
   for (let count = 0; count < 100; count++) {
