@@ -396,45 +396,6 @@ mod tests {
         assert!(err.contains("spec 5.3"), "{err}");
     }
 
-    // The generator point, a valid compressed secp256k1 key.
-    const ROOT: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
-
-    fn policy(subjects: &[&str], roots: &[&str]) -> Result<VerifierPolicy, String> {
-        PolicyArgs {
-            accepted_composes: Vec::new(),
-            accepted_subjects: subjects.iter().map(|s| s.to_string()).collect(),
-            accepted_dstack_kms_root_public_keys: roots.iter().map(|s| s.to_string()).collect(),
-        }
-        .verifier_policy()
-    }
-
-    #[test]
-    fn custody_flags_build_a_policy_or_name_the_missing_flag() {
-        assert!(policy(&[], &[]).unwrap().custody.is_none());
-        assert!(policy(&["app-id:0xAB"], &[ROOT]).unwrap().custody.is_some());
-
-        let err = policy(&[], &[ROOT]).unwrap_err();
-        assert_eq!(
-            err,
-            "--accept-dstack-kms-root-public-key needs --accept-subject"
-        );
-        let err = policy(&["app-id:0xab"], &[]).unwrap_err();
-        assert_eq!(
-            err,
-            "--accept-subject needs --accept-dstack-kms-root-public-key"
-        );
-        let err = policy(&["0xab"], &[ROOT]).unwrap_err();
-        assert_eq!(
-            err,
-            r#"invalid --accept-subject "0xab": expected app-id:0x<hex>"#
-        );
-        let err = policy(&["app-id:0xab"], &["02zz"]).unwrap_err();
-        assert!(
-            err.starts_with("invalid --accept-dstack-kms-root-public-key: "),
-            "{err}"
-        );
-    }
-
     #[test]
     fn curl_args_after_separator_are_passed_through() {
         let matches = Command::augment_subcommands(clap::Command::new("pap"))

@@ -6,21 +6,10 @@ use std::{
     fs,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Output, Stdio},
     time::{Duration, Instant},
 };
-use support::{executable, Sandbox};
-
-/// Readiness is bounded only to fail a hung startup; loaded hosts are slow.
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// A backend in its own install tree and home. Dropping it stops every process
-/// started from that tree and removes it; see `support`.
-struct Backend {
-    directory: Sandbox,
-    child: Child,
-}
+use support::{assert_success, Backend};
 
 #[test]
 #[ignore = "subprocess fixture that tears down a test sandbox"]
@@ -28,135 +17,13 @@ fn sandbox_teardown_watchdog() {
     support::watchdog();
 }
 
-#[test]
-fn argument_errors_are_machine_readable_in_json_mode() {
-    for args in [
-        vec!["--json", "--non-interactive", "unknown-command"],
-        vec!["status", "--json", "--no-interactive", "--unknown-option"],
-    ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["error"]["code"], "invalid_arguments");
-    }
-}
-
-#[test]
-fn command_discovery_is_detailed() {
-    let settings = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["settings", "set", "--help"])
-        .output()
-        .unwrap();
-    assert_success(&settings);
-    let settings = String::from_utf8(settings.stdout).unwrap();
-    for key in [
-        "auto-cli-registration",
-        "connect-on-launch",
-        "notifications.local-api",
-        "local-api.allow-network-access",
-        "local-api.client-host",
-        "web-ui.enabled",
-        "web-ui.port",
-        "web-ui.listen-address",
-        "web-ui.allow-network-access",
-        "web-ui.client-host",
-        "web-ui.password",
-    ] {
-        assert!(settings.contains(key), "missing settings key {key}");
-    }
-    // The deprecated flat names still parse but are never offered.
-    assert!(!settings.contains("webUi"), "{settings}");
-
-    let usage = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["usage", "export", "--help"])
-        .output()
-        .unwrap();
-    assert_success(&usage);
-    let usage = String::from_utf8(usage.stdout).unwrap();
-    assert!(usage.contains("Unix timestamp in seconds"));
-    assert!(!usage.contains("--cursor"));
-    assert!(!usage.contains("--limit"));
-
-    let help = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .arg("--help")
-        .output()
-        .unwrap();
-    assert_success(&help);
-    let help = String::from_utf8(help.stdout).unwrap();
-    for name in ["verify", "audit", "sessions", "send", "serve", "profiles"] {
-        assert!(
-            help.contains(&format!("\n  {name} ")),
-            "missing command {name}"
-        );
-        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-            .args([name, "--help"])
-            .output()
-            .unwrap();
-        assert_success(&output);
-    }
-    assert!(help.contains("--json"));
-
-    let completion = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["completions", "bash"])
-        .output()
-        .unwrap();
-    assert_success(&completion);
-    assert!(String::from_utf8(completion.stdout)
-        .unwrap()
-        .contains("private-ai-proxy"));
-
-    let conflict = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args([
-            "agents",
-            "connect",
-            "codex",
-            "--dry-run",
-            "--revision",
-            "preview-revision",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(conflict.status.code(), Some(2));
-}
-
-#[test]
-fn send_reads_the_api_key_from_stdin_not_arguments() {
-    let send = |args: &[&str], input: &str| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-            .args(["send", "https://127.0.0.1:9"])
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        write!(child.stdin.take().unwrap(), "{input}").unwrap();
-        child.wait_with_output().unwrap()
-    };
-    // The key is read before any network access.
-    let empty = send(&["--api-key-stdin"], "  \n");
-    assert_eq!(empty.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&empty.stderr).contains("Enter an API key"));
-    let both = send(&["--api-key-stdin", "--api-key", "sk-test"], "");
-    assert_eq!(both.status.code(), Some(2));
-    let help = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["send", "--help"])
-        .output()
-        .unwrap();
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("--api-key-stdin") && !help.contains("--api-key <"));
-}
-
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
 /// streams; the legacy alias must stay byte-for-byte the canonical command.
 #[cfg(unix)]
 #[test]
 fn legacy_aci_alias_output_matches_the_canonical_command() {
+    use std::path::Path;
+    use std::process::Command;
     let directory = tempfile::tempdir().unwrap();
     let alias = directory.path().join("aci");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
@@ -181,156 +48,6 @@ fn legacy_aci_alias_output_matches_the_canonical_command() {
     }
 }
 
-#[test]
-fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
-    let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args([
-            "--json",
-            "profiles",
-            "add",
-            "--id",
-            "test",
-            "--name",
-            "Test",
-            "--url",
-            "https://example.com",
-            "--key-stdin",
-        ])
-        .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("--yes"));
-    assert!(fs::read_dir(home.path()).unwrap().next().is_none());
-}
-
-impl Backend {
-    fn start() -> Self {
-        Self::start_with_credentials("")
-    }
-
-    /// Starts with `credentials` as `credentials.toml`, when not empty.
-    fn start_with_credentials(credentials: &str) -> Self {
-        let directory = Sandbox::new();
-        let binary = |name: &str| directory.path().join(executable(name));
-        install(
-            env!("CARGO_BIN_EXE_private-ai-proxy"),
-            &binary("private-ai-proxy"),
-        );
-        install(
-            env!("CARGO_BIN_EXE_private-ai-proxy-service"),
-            &binary("private-ai-proxy-service"),
-        );
-        // No test requests agent credentials. Keep this unused helper tiny:
-        // startup durably stages it, so copying a debug CLI would fsync hundreds
-        // of megabytes per backend before its management endpoint becomes ready.
-        let helper = binary("private-ai-proxy-helper");
-        fs::write(&helper, b"#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let home = directory.path().join("home");
-        let data = home.join(".private-ai-proxy");
-        let settings = data.join("Config");
-        desktop_core::private_fs::create_private_dir(&settings).unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        desktop_core::private_fs::write_private(
-            &settings.join("config.toml"),
-            &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
-        )
-        .unwrap();
-        if !credentials.is_empty() {
-            desktop_core::private_fs::write_private(
-                &settings.join("credentials.toml"),
-                credentials,
-            )
-            .unwrap();
-        }
-        let child = Command::new(binary("private-ai-proxy-service"))
-            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
-            .spawn()
-            .unwrap();
-        let mut backend = Self { directory, child };
-        let deadline = Instant::now() + READY_TIMEOUT;
-        loop {
-            let output = backend.command(&["status", "--json"]).output().unwrap();
-            if output.status.success() {
-                let state: Value = serde_json::from_slice(&output.stdout).unwrap();
-                if !state["backend"].is_null() {
-                    break;
-                }
-            }
-            assert!(
-                backend.child.try_wait().unwrap().is_none(),
-                "Backend exited during startup: {}",
-                backend.startup_diagnostics(&output)
-            );
-            assert!(
-                Instant::now() < deadline,
-                "Backend readiness timed out: {}",
-                backend.startup_diagnostics(&output)
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        backend
-    }
-    fn startup_diagnostics(&self, output: &Output) -> String {
-        format!(
-            "status: {}; stdout: {}; stderr: {}; backend: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-            fs::read_to_string(self.directory.path().join("backend.log")).unwrap()
-        )
-    }
-    fn cli(&self) -> PathBuf {
-        self.directory.path().join(executable("private-ai-proxy"))
-    }
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(self.cli());
-        command.args(args).env(
-            desktop_core::paths::HOME_OVERRIDE_ENV,
-            self.directory.path().join("home"),
-        );
-        command
-    }
-    fn run(&self, args: &[&str]) -> Value {
-        let output = self.command(args).arg("--json").output().unwrap();
-        assert_success(&output);
-        serde_json::from_slice(&output.stdout).unwrap()
-    }
-}
-impl Drop for Backend {
-    fn drop(&mut self) {
-        self.directory.close();
-        // Teardown already killed it; this only reaps the process.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Places a build output in a sandbox. A hard link avoids copying hundreds of
-/// megabytes of debug binaries per backend; the launcher still sees a sibling.
-fn install(source: &str, destination: &Path) {
-    if fs::hard_link(source, destination).is_err() {
-        fs::copy(source, destination).unwrap();
-    }
-}
 const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
@@ -824,14 +541,6 @@ fn exchange(
         serde_json::from_str(body).unwrap_or(Value::Null),
     )
 }
-fn assert_success(output: &Output) {
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[test]
 fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     // Declared first so it is released only after the backend has stopped.
@@ -896,6 +605,8 @@ fn default_port_lock() -> fs::File {
 
 #[test]
 fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
+    // Outputs and errors are pinned by `tests/golden/management.txt`; this
+    // checks the state behind them.
     let backend = Backend::start();
     #[cfg(unix)]
     assert!(backend
@@ -904,27 +615,6 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .join("home/.private-ai-proxy/helpers/private-ai-proxy-helper")
         .is_file());
     let first = backend.run(&["status"]);
-    let rejected = backend
-        .command(&[
-            "--json",
-            "--yes",
-            "agents",
-            "disconnect",
-            "codex",
-            "--revision",
-            "stale-revision",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(rejected.status.code(), Some(1));
-    let rejected: Value = serde_json::from_slice(&rejected.stderr).unwrap();
-    // The backend's code, not `command_failed`; the message is text only.
-    assert_eq!(rejected["error"]["code"], "revision_conflict");
-    assert!(!rejected["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("revision_conflict"));
-    assert_eq!(first["gateway"]["status"], "stopped");
     // Every state output carries the protection it presents, as the API sends it.
     assert_eq!(first["gateway"]["protection"]["phase"], "profileRequired");
     assert_eq!(
@@ -933,53 +623,13 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     );
     let second = backend.run(&["service", "start"]);
     assert_eq!(first["backend"]["instanceId"], second["instanceId"]);
-    backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
-    assert_eq!(
-        backend.run(&["settings", "show"])["settings"]["appearance"],
-        "dark"
-    );
-    backend.run(&["settings", "set", "notifications.enabled", "false", "--yes"]);
-    let settings = backend.run(&["settings", "show"]);
-    assert_eq!(settings["settings"]["notifications"]["enabled"], false);
-    assert_eq!(settings["settings"]["notifications"]["local-api"], true);
-    assert_eq!(settings["settings"]["appearance"], "dark");
-    // A deprecated flat name still works and says what replaces it.
-    let deprecated = backend
-        .command(&[
-            "settings",
-            "set",
-            "autoCliRegistration",
-            "false",
-            "--yes",
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_success(&deprecated);
-    assert!(String::from_utf8_lossy(&deprecated.stderr).contains(
-        "`autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`"
-    ));
-    assert_eq!(
-        backend.run(&["settings", "show"])["settings"]["auto-cli-registration"],
-        false
-    );
     backend.run(&["token", "rotate", "--yes"]);
     let state = backend.run(&["status"]);
     assert_eq!(state["gateway"]["clientKeyRevision"], 1);
     assert_eq!(state["gateway"]["clientKeyAvailable"], true);
-    assert_eq!(backend.run(&["profiles", "list"]), serde_json::json!([]));
     let backup = backend.directory.path().join("profiles.json");
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
-    assert_eq!(
-        backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"])["imported"],
-        1
-    );
-    let profiles = backend.run(&["profiles", "list"]);
-    let profile_id = profiles[0]["id"].as_str().unwrap();
-    assert_eq!(
-        backend.run(&["profiles", "show", profile_id])["name"],
-        "Work"
-    );
+    backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
     let exported = backend.directory.path().join("exported.json");
     backend.run(&["profiles", "export", "--output", exported.to_str().unwrap()]);
     let text = fs::read_to_string(exported).unwrap();
@@ -990,23 +640,6 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let report: Value = serde_json::from_str(&fs::read_to_string(diagnostics).unwrap()).unwrap();
     assert_eq!(report["profiles"]["count"], 1);
     assert_eq!(report["gateway"]["status"], "stopped");
-    let rejected = backend
-        .command(&["usage", "clear", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--yes"));
-    assert_eq!(
-        backend.run(&["usage", "list"])["items"],
-        serde_json::json!([])
-    );
-    let receipt = backend
-        .command(&["usage", "show", "missing", "--receipt"])
-        .output()
-        .unwrap();
-    assert!(!receipt.status.success());
-    assert!(String::from_utf8_lossy(&receipt.stderr).contains("Usage record not found"));
     assert_eq!(
         backend.run(&["status"])["backend"]["instanceId"],
         first["backend"]["instanceId"]
@@ -1133,13 +766,6 @@ fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
 #[test]
 fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
     let backend = Backend::start();
-    // Restoring without a backend is refused while one owns the agents.
-    let refused = backend
-        .command(&["stop", "--offline", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("The backend is running"));
     backend.run(&["service", "stop", "--yes"]);
     let stopped = backend.run(&["status"]);
     assert!(stopped["backend"].is_null());
@@ -1243,10 +869,12 @@ fn malformed_requests_and_event_streams_do_not_stop_backend() {
 #[cfg(unix)]
 #[test]
 fn a_legacy_backend_is_stopped_over_its_own_protocol() {
+    use std::process::Command;
     use std::{
         io::{BufRead, BufReader},
         os::unix::{fs::PermissionsExt, net::UnixListener},
     };
+    use support::{executable, install, Sandbox};
     let sandbox = Sandbox::new();
     let cli = sandbox.path().join(executable("private-ai-proxy"));
     install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);

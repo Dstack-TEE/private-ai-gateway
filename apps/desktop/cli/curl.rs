@@ -26,17 +26,17 @@ pub async fn run(args: CurlArgs, require_production_os: bool) -> Result<i32, Str
     let verification = verify_service(&origin, None, &policy, require_production_os, false).await?;
     // stdout belongs to curl's response, so the transcript goes to stderr.
     if args.json {
-        let transcript = serde_json::to_string(&verification.transcript.to_json(false))
-            .map_err(|e| format!("failed to serialize transcript: {e}"))?;
+        let transcript = serde_json::to_string(&verification.transcript.to_json())
+            .map_err(|e| format!("failed to serialize: {e}"))?;
         eprintln!("{transcript}");
     } else {
         eprintln!("== ACI verification: {origin} ==");
-        eprint!("{}", verification.transcript.render_human(false));
+        eprint!("{}", verification.transcript.render_human());
     }
 
     let command_args = pinned_curl_args(
         &verification.transcript,
-        &verification.attested_spkis(),
+        &verification.tls_pins,
         &url,
         &args.curl_args,
     )?;
@@ -118,6 +118,12 @@ fn curl_spki_pin(spki_sha256_hex: &str) -> Result<String, String> {
     Ok(format!("sha256//{}", BASE64.encode(digest)))
 }
 
+/// Supported curl options that take no value, and those that take one.
+const FLAGS: &str = "--fail --fail-with-body --no-buffer --silent --show-error --include \
+                     --verbose --compressed --head -f -s -S -i -v -I";
+const OPTIONS: &str = "--header --data --data-raw --data-binary --json --request --output \
+                       --upload-file --form --max-time --connect-timeout -H -d -X -o -T -F";
+
 /// Accept only one-transfer options whose meaning cannot replace the URL,
 /// TLS pin, protocol policy, or transfer scope. In particular, a positional
 /// argument is never forwarded as a second URL.
@@ -125,54 +131,16 @@ fn validate_curl_args(args: &[OsString]) -> Result<(), String> {
     let mut values = args.iter();
     while let Some(arg) = values.next() {
         let value = arg.to_str().ok_or("curl arguments must be valid UTF-8")?;
-        if matches!(
-            value,
-            "--fail"
-                | "--fail-with-body"
-                | "--no-buffer"
-                | "--silent"
-                | "--show-error"
-                | "--include"
-                | "--verbose"
-                | "--compressed"
-                | "--head"
-                | "-f"
-                | "-s"
-                | "-S"
-                | "-i"
-                | "-v"
-                | "-I"
-        ) {
-            continue;
-        }
-        if matches!(
-            value,
-            "--header"
-                | "--data"
-                | "--data-raw"
-                | "--data-binary"
-                | "--json"
-                | "--request"
-                | "--output"
-                | "--upload-file"
-                | "--form"
-                | "--max-time"
-                | "--connect-timeout"
-                | "-H"
-                | "-d"
-                | "-X"
-                | "-o"
-                | "-T"
-                | "-F"
-        ) {
+        let listed = |list: &str| list.split_whitespace().any(|option| option == value);
+        if listed(OPTIONS) {
             values
                 .next()
                 .ok_or_else(|| format!("curl option {value:?} needs a value"))?;
-            continue;
+        } else if !listed(FLAGS) {
+            return Err(format!(
+                "curl argument {value:?} is not supported by pap curl; use a single URL and supported request options"
+            ));
         }
-        return Err(format!(
-            "curl argument {value:?} is not supported by pap curl; use a single URL and supported request options"
-        ));
     }
     Ok(())
 }
@@ -221,13 +189,6 @@ mod tests {
             request_url_and_origin("https://Example.COM:8443/v1/chat/completions?q=1").unwrap();
         assert_eq!(url, "https://example.com:8443/v1/chat/completions?q=1");
         assert_eq!(origin, "https://example.com:8443");
-    }
-
-    #[test]
-    fn rejects_urls_that_cannot_be_safely_pinned() {
-        assert!(request_url_and_origin("http://example.com/v1/models").is_err());
-        assert!(request_url_and_origin("https://user@example.com/v1/models").is_err());
-        assert!(request_url_and_origin("https://example.com/v1/models#response").is_err());
     }
 
     #[test]

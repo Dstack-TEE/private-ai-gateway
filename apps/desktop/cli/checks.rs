@@ -191,11 +191,8 @@ pub async fn run_report_checks(
 
 fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
     let result = (|| {
-        let event_log = report
-            .attestation
-            .evidence
-            .get("event_log")
-            .and_then(Value::as_str)
+        let event_log = report.attestation.evidence["event_log"]
+            .as_str()
             .ok_or("attestation evidence carries no dstack event_log")?;
         // id-4 already established that this exact log replays to the quote.
         let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
@@ -230,7 +227,7 @@ fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationRep
 pub fn parse_receipt_document(payload: Value) -> Result<Value, String> {
     // Appendix B: artifacts with a foreign api_version are rejected, same as
     // the report gate in run_report_checks.
-    if field_str(&payload, "api_version") != Some("aci/1") {
+    if payload["api_version"].as_str() != Some("aci/1") {
         return Err(format!(
             "unsupported receipt api_version {:?} (expected \"aci/1\")",
             payload.get("api_version").unwrap_or(&Value::Null)
@@ -295,19 +292,11 @@ impl<'a> ReceiptContext<'a> {
 }
 
 fn events(payload: &Value) -> impl Iterator<Item = &Value> {
-    payload
-        .get("event_log")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    payload["event_log"].as_array().into_iter().flatten()
 }
 
 fn event_by_type<'a>(payload: &'a Value, event_type: &str) -> Option<&'a Value> {
-    events(payload).find(|event| field_str(event, "type") == Some(event_type))
-}
-
-fn field_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
+    events(payload).find(|event| event["type"].as_str() == Some(event_type))
 }
 
 /// The `session_id` the serving (verified) `upstream.verified` event commits
@@ -317,10 +306,10 @@ fn field_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
     events(payload)
         .filter(|event| {
-            field_str(event, "type") == Some("upstream.verified")
-                && field_str(event, "result") == Some("verified")
+            event["type"].as_str() == Some("upstream.verified")
+                && event["result"].as_str() == Some("verified")
         })
-        .find_map(|event| field_str(event, "session_id").map(str::to_string))
+        .find_map(|event| event["session_id"].as_str().map(str::to_string))
 }
 
 /// Fetch the attested session record the receipt commits to — the live
@@ -359,7 +348,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     check_signature(transcript, &cx);
 
     // receipt-2 — the payload binds back to the established keyset digest.
-    let payload_digest = field_str(cx.receipt, "workload_keyset_digest");
+    let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
     if payload_digest == Some(cx.workload_keyset_digest) {
         transcript.pass(
             RECEIPT_2,
@@ -385,7 +374,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         ),
         Some(digest) => {
             match event_by_type(cx.receipt, "request.received")
-                .and_then(|event| field_str(event, "body_hash"))
+                .and_then(|event| event["body_hash"].as_str())
             {
                 None => transcript.fail(RECEIPT_3, "receipt has no request.received body_hash"),
                 Some(recorded) if recorded == digest.sha256 => {
@@ -412,7 +401,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         ),
         Some(digest) => {
             match event_by_type(cx.receipt, "response.returned")
-                .and_then(|event| field_str(event, "body_hash"))
+                .and_then(|event| event["body_hash"].as_str())
             {
                 None => transcript.fail(RECEIPT_4, "receipt has no response.returned body_hash"),
                 Some(recorded) if recorded == digest.sha256 => {
@@ -432,10 +421,10 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     // §9.3 rewrite note: differing request.forwarded/request.received hashes
     // are the service-side rewrite. ACI records it, nothing more — whether a
     // rewrite is acceptable is local policy, so this is an info line.
-    let received = event_by_type(cx.receipt, "request.received")
-        .and_then(|event| field_str(event, "body_hash"));
+    let received =
+        event_by_type(cx.receipt, "request.received").and_then(|event| event["body_hash"].as_str());
     let forwarded = event_by_type(cx.receipt, "request.forwarded")
-        .and_then(|event| field_str(event, "body_hash"));
+        .and_then(|event| event["body_hash"].as_str());
     if let (Some(received), Some(forwarded)) = (received, forwarded) {
         if received != forwarded {
             transcript.info(
@@ -451,7 +440,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
 }
 
 fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
-    let Some(key_id) = field_str(cx.receipt, "key_id") else {
+    let Some(key_id) = cx.receipt["key_id"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no key_id");
         return;
     };
@@ -467,7 +456,7 @@ fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
         );
         return;
     };
-    let Some(signature_hex) = field_str(cx.receipt, "signature") else {
+    let Some(signature_hex) = cx.receipt["signature"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no signature");
         return;
     };
@@ -604,11 +593,11 @@ pub fn unmet_claims(record: &Value, required: &[RequiredClaim]) -> Vec<String> {
             let claim = record
                 .get("claims")
                 .and_then(|claims| claims.get(&req.name));
-            let asserted = claim.and_then(|claim| field_str(claim, "status")) == Some("asserted");
+            let asserted = claim.and_then(|claim| claim["status"].as_str()) == Some("asserted");
             let source_ok = match &req.source {
                 None => true,
                 Some(source) => {
-                    claim.and_then(|claim| field_str(claim, "source")) == Some(source.as_str())
+                    claim.and_then(|claim| claim["source"].as_str()) == Some(source.as_str())
                 }
             };
             !(asserted && source_ok)
@@ -650,11 +639,11 @@ pub fn audit_session_record(
         .map(|bytes| hex::encode(sha256_raw(&bytes)))
         .map_err(|e| format!("session record violates the ACI document constraints: {e}"))?;
     // Appendix B: a session document with a foreign api_version is rejected.
-    let version_ok = field_str(&record, "api_version") == Some("aci/1");
+    let version_ok = record["api_version"].as_str() == Some("aci/1");
     let id_matches = recomputed_id == expected_id;
     let window = (
-        record.get("established_at").and_then(Value::as_u64),
-        record.get("expires_at").and_then(Value::as_u64),
+        record["established_at"].as_u64(),
+        record["expires_at"].as_u64(),
     );
     let in_window = match (at, window) {
         (Some(at), (Some(from), Some(until))) => from <= at && at <= until,
@@ -694,11 +683,11 @@ fn check_upstream_event(
     requires_verified: bool,
 ) {
     let upstream_events: Vec<&Value> = events(payload)
-        .filter(|event| field_str(event, "type") == Some("upstream.verified"))
+        .filter(|event| event["type"].as_str() == Some("upstream.verified"))
         .collect();
     let verified = upstream_events
         .iter()
-        .find(|event| field_str(event, "result") == Some("verified"));
+        .find(|event| event["result"].as_str() == Some("verified"));
     match verified {
         // §5.3: a direct service satisfies verified serving by construction —
         // the workload verified in §9.1 is the one serving, with no second
@@ -723,19 +712,16 @@ fn check_upstream_event(
             "no upstream.verified event reports a verified upstream",
         ),
         None => transcript.info(UPSTREAM_1, "the receipt records unverified serving"),
-        Some(event)
-            if requires_verified
-                && event.get("required").and_then(Value::as_bool) != Some(true) =>
-        {
+        Some(event) if requires_verified && event["required"].as_bool() != Some(true) => {
             transcript.fail(UPSTREAM_1, "verified upstream but required is not true")
         }
-        Some(event) => match field_str(event, "session_id") {
+        Some(event) => match event["session_id"].as_str() {
             None => transcript.fail(UPSTREAM_1, "verified upstream but cites no session_id"),
             Some(session) => transcript.pass(
                 UPSTREAM_1,
                 format!(
                     "model={} session={session} ({} attempt(s))",
-                    field_str(event, "model_id").unwrap_or("?"),
+                    event["model_id"].as_str().unwrap_or("?"),
                     upstream_events.len()
                 ),
             ),
@@ -789,7 +775,7 @@ fn check_session_audit(
         transcript.fail(UPSTREAM_2, "receipt cites no session_id to audit against");
         return;
     };
-    let served_at = payload.get("served_at").and_then(Value::as_u64);
+    let served_at = payload["served_at"].as_u64();
     let audit = match audit_session_record(bytes, &cited, served_at) {
         Ok(audit) => audit,
         Err(e) => {
@@ -848,8 +834,8 @@ fn claims_summary(claims: Option<&Value>) -> String {
         .iter()
         .filter(|(name, _)| name.as_str() != "extra")
         .map(|(name, claim)| {
-            let status = field_str(claim, "status").unwrap_or("?");
-            match field_str(claim, "source") {
+            let status = claim["status"].as_str().unwrap_or("?");
+            match claim["source"].as_str() {
                 Some(source) => format!("{name}={status}({source})"),
                 None => format!("{name}={status}"),
             }
@@ -866,8 +852,8 @@ fn claims_summary(claims: Option<&Value>) -> String {
 /// or malformed evidence rejects too — the deep audit never assumes.
 fn evidence_check(evidence: Option<&Value>) -> Result<(), String> {
     let (Some(digest), Some(data_uri)) = (
-        evidence.and_then(|e| field_str(e, "digest")),
-        evidence.and_then(|e| field_str(e, "data")),
+        evidence.and_then(|e| e["digest"].as_str()),
+        evidence.and_then(|e| e["data"].as_str()),
     ) else {
         return Err("record carries no spec 8.2 evidence digest+data".to_string());
     };

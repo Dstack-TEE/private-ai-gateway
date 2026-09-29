@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
+use crate::print_json;
 use crate::verify::verify_service;
 use desktop_core::endpoint;
 use desktop_core::now_secs;
@@ -26,7 +27,7 @@ pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32,
     .await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human(false));
+        print!("{}", verification.transcript.render_human());
         println!();
     }
     if !verification.transcript.verified() {
@@ -50,11 +51,7 @@ pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32,
 
     if args.json {
         let sessions: Vec<Value> = audited.iter().map(AuditedSession::to_json).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({ "sessions": sessions }))
-                .map_err(|e| e.to_string())?
-        );
+        print_json(&json!({ "sessions": sessions }))?;
     } else {
         if audited.is_empty() {
             println!("no current attested sessions listed");
@@ -130,36 +127,20 @@ impl AuditedSession {
             Ok(audit) => audit,
         };
         let record = &audit.record;
-        let field = |key: &str| {
-            record
-                .get(key)
-                .and_then(Value::as_str)
-                .unwrap_or("?")
-                .to_string()
-        };
-        let window = format!(
-            "{}..{}",
-            record
-                .get("established_at")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            record
-                .get("expires_at")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-        );
-        let claims: Vec<String> = record
-            .get("claims")
-            .and_then(Value::as_object)
+        let field = |key: &str| record[key].as_str().unwrap_or("?").to_string();
+        let time = |key: &str| record[key].as_u64().unwrap_or(0);
+        let window = format!("{}..{}", time("established_at"), time("expires_at"));
+        let claims: Vec<String> = record["claims"]
+            .as_object()
             .into_iter()
             .flatten()
             .filter(|(name, _)| name.as_str() != "extra")
             .filter_map(|(name, claim)| {
-                let status = claim.get("status").and_then(Value::as_str)?;
+                let status = claim["status"].as_str()?;
                 if status == "unknown" {
                     return None;
                 }
-                Some(match claim.get("source").and_then(Value::as_str) {
+                Some(match claim["source"].as_str() {
                     Some(source) => format!("{name} {status} ({source})"),
                     None => format!("{name} {status}"),
                 })
@@ -222,17 +203,11 @@ pub async fn audit_current_sessions(
         .await?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;
-    let ids: Vec<String> = listing
-        .get("sessions")
-        .and_then(Value::as_array)
+    let ids: Vec<String> = listing["sessions"]
+        .as_array()
         .ok_or("session listing carries no sessions array")?
         .iter()
-        .filter_map(|entry| {
-            entry
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .filter_map(|entry| entry["session_id"].as_str().map(str::to_string))
         .collect();
 
     let now = now_secs();

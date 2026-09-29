@@ -102,7 +102,7 @@ async fn control_verify(
                 entry.verified = Some(verified);
             }
             report(Some(verified), rewritten, detail, receipt);
-            let mut body = transcript.to_json(false);
+            let mut body = transcript.to_json();
             body["receipt_id"] = json!(id);
             json_response(StatusCode::OK, body)
         }

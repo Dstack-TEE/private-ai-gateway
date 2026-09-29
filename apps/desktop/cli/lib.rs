@@ -33,6 +33,14 @@ pub fn read_api_key(input: impl std::io::Read) -> Result<String, String> {
     desktop_core::config::validate_api_key(&key)
 }
 
+/// Pretty JSON on stdout, the form the ACI commands print.
+fn print_json(value: &serde_json::Value) -> Result<(), String> {
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?;
+    println!("{text}");
+    Ok(())
+}
+
 /// Select the provider used by the CLI and its verifier dependencies.
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

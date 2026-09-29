@@ -53,9 +53,7 @@ fn upstream_clause(transcript: &Transcript, session: Option<&Value>, serving: &s
     {
         return "upstream UNVERIFIED".to_string();
     }
-    let claims = session
-        .and_then(|record| record.get("claims"))
-        .and_then(Value::as_object);
+    let claims = session.and_then(|record| record["claims"].as_object());
     let asserted: Vec<String> = claims
         .into_iter()
         .flatten()
@@ -63,11 +61,11 @@ fn upstream_clause(transcript: &Transcript, session: Option<&Value>, serving: &s
         .filter_map(|(name, claim)| {
             // Appendix B: an unrecognized status or source is treated as
             // `unknown`, so it is never presented as a claim of record.
-            let status = match claim.get("status").and_then(Value::as_str)? {
+            let status = match claim["status"].as_str()? {
                 status @ ("asserted" | "refuted") => status,
                 _ => return None,
             };
-            match claim.get("source").and_then(Value::as_str) {
+            match claim["source"].as_str() {
                 Some(
                     source @ ("hardware_proven" | "verifier_derived" | "provider_asserted"
                     | "operator_asserted"),

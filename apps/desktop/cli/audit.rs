@@ -84,5 +84,5 @@ pub async fn run(args: AuditArgs, require_production_os: bool) -> Result<i32, St
         );
     }
 
-    transcript.print(args.json, false)
+    transcript.print(args.json)
 }
