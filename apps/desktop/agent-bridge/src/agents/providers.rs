@@ -151,7 +151,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             let provider = "private-ai-proxy";
             let mut fields = vec![generated_catalog(
                 &["provider", provider],
-                opencode_provider(catalog, &api, inputs.token_path),
+                opencode_provider(catalog, &api, inputs.token_path)
+                    .map_err(AgentError::ConfigurationConflict)?,
                 catalog.models.len(),
             )];
             if let Some(model) = default_model {
@@ -204,7 +205,7 @@ pub(super) fn opencode_provider(
     catalog: &Catalog,
     api: &str,
     token_path: &Path,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let models = catalog
         .models
         .iter()
@@ -227,15 +228,27 @@ pub(super) fn opencode_provider(
             (model.id().to_string(), serde_json::Value::Object(config))
         })
         .collect();
-    serde_json::json!({
+    Ok(serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": PRODUCT_NAME,
         "options": {
             "baseURL": api,
-            "apiKey": format!("{{file:{}}}", token_path.display()),
+            "apiKey": opencode_file_reference(token_path)?,
         },
         "models": serde_json::Value::Object(models),
-    })
+    }))
+}
+
+/// OpenCode's `{file:<path>}` substitution, which no library writes. It ends
+/// at the first `}`, so a path with a brace cannot be written safely.
+fn opencode_file_reference(token_path: &Path) -> Result<String, String> {
+    let path = token_path
+        .to_str()
+        .ok_or("The Agent token path is not valid Unicode")?;
+    if path.contains(['{', '}']) {
+        return Err("OpenCode cannot read an Agent token path that contains { or }".into());
+    }
+    Ok(format!("{{file:{path}}}"))
 }
 
 pub(super) fn pi_provider(

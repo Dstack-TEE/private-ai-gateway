@@ -678,7 +678,12 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
         1,
     )
     .unwrap();
-    let provider = opencode_provider(&catalog, &api_url(ENDPOINT).unwrap(), Path::new("token"));
+    let api = api_url(ENDPOINT).unwrap();
+    let provider = opencode_provider(&catalog, &api, Path::new("/data/token")).unwrap();
+    assert_eq!(provider["options"]["apiKey"], "{file:/data/token}");
+    for path in ["/data/{env:HOME}/token", "/data/a}b/token"] {
+        assert!(opencode_provider(&catalog, &api, Path::new(path)).is_err());
+    }
     assert!(provider["models"]["context-only"].get("limit").is_none());
     assert!(provider["models"]["output-only"].get("limit").is_none());
     assert_eq!(
