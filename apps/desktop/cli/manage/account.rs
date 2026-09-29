@@ -1,11 +1,11 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, open_browser, service_provider, value, Cli};
+use super::{args::AccountLoginOptions, open_browser};
+use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
     contracts::*,
     protocol::rpc,
 };
-use serde_json::Value;
 use std::{
     io::{self, IsTerminal, Read, Write},
     time::{Duration, Instant},
@@ -31,9 +31,9 @@ impl Drop for Pending<'_> {
 
 pub(super) fn login(
     client: &Client,
-    cli: &Cli,
+    global: &Global,
     options: &AccountLoginOptions,
-) -> Result<Value, CallError> {
+) -> Result<AppStateWire, CallError> {
     Client::ensure_service()?;
     let state = client.state()?;
     let existing = state
@@ -42,7 +42,7 @@ pub(super) fn login(
         .find(|profile| profile.id == options.id);
     let provider = options
         .provider
-        .map(service_provider)
+        .map(Into::into)
         .or_else(|| existing.map(|p| p.provider))
         .unwrap_or(ServiceProvider::Redpill);
     if provider == ServiceProvider::Custom {
@@ -118,7 +118,7 @@ pub(super) fn login(
         for workspace in &details.workspaces {
             eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
         }
-        if cli.non_interactive || cli.json || !io::stdin().is_terminal() {
+        if !global.interactive() {
             return Err("Choose a workspace with --workspace <id> and retry login.".into());
         }
         eprint!("Workspace ID: ");
@@ -161,7 +161,7 @@ pub(super) fn login(
 
     loop {
         match result {
-            AccountSaveResult::Complete { state } => return value(state),
+            AccountSaveResult::Complete { state } => return Ok(*state),
             AccountSaveResult::Failed { error } => return Err(error.into()),
             AccountSaveResult::Running => {
                 std::thread::sleep(Duration::from_millis(500));
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn oauth_login_supports_headless_callback_without_a_secret_argument() {
-        let parsed = super::super::Cli::try_parse_from([
+        let parsed = crate::Cli::try_parse_from([
             "private-ai-proxy",
             "--yes",
             "profiles",
@@ -209,16 +209,16 @@ mod tests {
             "--callback-stdin",
         ])
         .unwrap();
-        let super::super::Action::Profiles {
+        let crate::Command::Manage(super::super::Action::Profiles {
             command: super::super::Profiles::Login(options),
-        } = parsed.command
+        }) = parsed.command
         else {
             panic!("Expected login")
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
         assert!(options.no_browser && options.callback_stdin);
-        assert!(super::super::Cli::try_parse_from([
+        assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",
             "profiles",
             "login",

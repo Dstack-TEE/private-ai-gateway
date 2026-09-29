@@ -1,31 +1,13 @@
 use std::{fmt, path::PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{
+    builder::{PossibleValuesParser, TypedValueParser},
+    Args, Subcommand, ValueEnum,
+};
 use clap_complete::Shell;
 
-#[derive(Parser)]
-#[command(
-    name = "private-ai-proxy",
-    version = desktop_core::protocol::BUILD_VERSION,
-    about = "Control the Private AI Proxy",
-    long_about = "Control the Private AI Proxy backend, protected connection, profiles, and coding-agent integrations. `private-ai-proxy start` explicitly starts protection and waits for verification. `private-ai-proxy service start` starts the backend; Protect on launch (`connect-on-launch`) may then start protection automatically."
-)]
-pub(super) struct Cli {
-    /// Emit compact JSON instead of human-readable output.
-    #[arg(long, global = true)]
-    pub(super) json: bool,
-    /// Never prompt. Mutations require --yes; credential inputs use stdin flags.
-    #[arg(long, visible_alias = "no-interactive", global = true)]
-    pub(super) non_interactive: bool,
-    /// Approve a command's documented mutation without prompting.
-    #[arg(long, global = true)]
-    pub(super) yes: bool,
-    #[command(subcommand)]
-    pub(super) command: Action,
-}
-
 #[derive(Subcommand)]
-pub(super) enum Action {
+pub enum Action {
     /// Show backend and protection state. This does not start the backend.
     Status {
         /// Stream state changes: the current state, then each change. JSON is one snapshot per line.
@@ -121,7 +103,7 @@ pub(super) enum Action {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Service {
+pub enum Service {
     /// Start the local backend. Protect on launch (`connect-on-launch`) may start protection afterward.
     Start,
     /// Stop the backend and restore managed agent configurations.
@@ -131,7 +113,7 @@ pub(super) enum Service {
 }
 
 #[derive(Subcommand)]
-pub(super) enum App {
+pub enum App {
     /// Open the installed desktop UI; its backend may start protection when Protect on launch (`connect-on-launch`) is on.
     /// Without a desktop app or graphical session, or with --web, open or print the
     /// service-hosted web UI address (offering to enable it).
@@ -143,7 +125,7 @@ pub(super) enum App {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Registration {
+pub enum Registration {
     /// Show whether private-ai-proxy is registered on PATH.
     Status,
     /// Register private-ai-proxy in a user-writable directory.
@@ -161,7 +143,7 @@ pub(super) enum Registration {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Token {
+pub enum Token {
     /// Rotate the Local API token, immediately revoking the previous token.
     Rotate,
     /// Print the Local API token to stdout. Treat output as a secret.
@@ -171,7 +153,7 @@ pub(super) enum Token {
 }
 
 #[derive(Subcommand)]
-pub(super) enum WebUi {
+pub enum WebUi {
     /// Show or rotate the sign-in password. Set your own with `settings set web-ui.password`.
     Password {
         #[command(subcommand)]
@@ -180,7 +162,7 @@ pub(super) enum WebUi {
 }
 
 #[derive(Subcommand)]
-pub(super) enum WebUiPassword {
+pub enum WebUiPassword {
     /// Print the web UI password to stdout. Treat output as a secret.
     Show,
     /// Replace the web UI password with a generated one, signing out every browser.
@@ -188,7 +170,7 @@ pub(super) enum WebUiPassword {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Models {
+pub enum Models {
     /// List models from the verified catalog.
     List {
         /// Re-fetch the catalog from the verified service before listing it.
@@ -198,14 +180,24 @@ pub(super) enum Models {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-pub(super) enum Provider {
+pub enum Provider {
     Phala,
     Redpill,
     Custom,
 }
 
+impl From<Provider> for desktop_core::contracts::ServiceProvider {
+    fn from(provider: Provider) -> Self {
+        match provider {
+            Provider::Phala => Self::Phala,
+            Provider::Redpill => Self::Redpill,
+            Provider::Custom => Self::Custom,
+        }
+    }
+}
+
 #[derive(Args)]
-pub(super) struct AccountLoginOptions {
+pub struct AccountLoginOptions {
     /// Existing or new profile ID.
     pub id: String,
     /// Provider for a new profile (defaults to RedPill).
@@ -227,7 +219,7 @@ pub(super) struct AccountLoginOptions {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Profiles {
+pub enum Profiles {
     /// List saved profile metadata. Credentials are never returned.
     List,
     /// Show one saved profile. Credentials are never returned.
@@ -312,7 +304,7 @@ pub(super) enum Profiles {
 }
 
 #[derive(Subcommand)]
-pub(super) enum Agents {
+pub enum Agents {
     /// List supported agents and their actual configuration state.
     List,
     /// Connect an agent to the Local API.
@@ -345,36 +337,36 @@ pub(super) enum Agents {
 }
 
 #[derive(Args)]
-pub(super) struct UsageFilter {
+pub struct UsageFilter {
     /// Match an agent ID.
     #[arg(long)]
-    pub(super) agent: Option<String>,
+    pub agent: Option<String>,
     /// Match a model ID.
     #[arg(long)]
-    pub(super) model: Option<String>,
+    pub model: Option<String>,
     /// Match a session ID.
     #[arg(long)]
-    pub(super) session: Option<String>,
+    pub session: Option<String>,
     /// Include records at or after this Unix timestamp in seconds.
     #[arg(long)]
-    pub(super) since: Option<u64>,
+    pub since: Option<u64>,
     /// Include records at or before this Unix timestamp in seconds.
     #[arg(long)]
-    pub(super) until: Option<u64>,
+    pub until: Option<u64>,
 }
 
 #[derive(Args)]
-pub(super) struct Pagination {
+pub struct Pagination {
     /// Continue after a nextCursor returned by an earlier list response.
     #[arg(long)]
-    pub(super) cursor: Option<String>,
+    pub cursor: Option<String>,
     /// Maximum records to return.
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=100))]
-    pub(super) limit: u64,
+    pub limit: u64,
 }
 
 #[derive(Subcommand)]
-pub(super) enum Usage {
+pub enum Usage {
     /// List a page of usage records.
     List {
         #[command(flatten)]
@@ -407,7 +399,7 @@ pub(super) enum Usage {
 /// (`git config` and `cargo config get` name keys the same way).
 /// `web-ui.password` sets the password kept in `credentials.toml`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(super) enum SettingsKey {
+pub enum SettingsKey {
     #[value(name = "auto-cli-registration", alias = "autoCliRegistration")]
     AutoCliRegistration,
     #[value(name = "notifications.enabled")]
@@ -452,17 +444,10 @@ pub(super) enum SettingsKey {
     WebUiPassword,
 }
 
-impl SettingsKey {
-    pub(super) fn as_str(self) -> String {
-        self.to_possible_value()
-            .map(|value| value.get_name().to_string())
-            .unwrap_or_default()
-    }
-}
-
 impl fmt::Display for SettingsKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.as_str())
+        let value = self.to_possible_value();
+        formatter.write_str(value.as_ref().map_or("", |value| value.get_name()))
     }
 }
 
@@ -470,17 +455,28 @@ impl fmt::Display for SettingsKey {
 /// aliases and print a deprecation warning, as `git config` keeps accepting
 /// renamed keys; they are removed in 0.3.
 #[derive(Clone, Debug)]
-pub(super) struct SettingsKeyArg {
-    pub(super) key: SettingsKey,
+pub struct SettingsKeyArg {
+    pub key: SettingsKey,
     typed: String,
 }
 
 impl SettingsKeyArg {
+    /// Accepts every key name and alias, keeping the spelling typed.
+    fn parser() -> impl TypedValueParser<Value = Self> {
+        let names = SettingsKey::value_variants()
+            .iter()
+            .filter_map(ValueEnum::to_possible_value);
+        PossibleValuesParser::new(names).try_map(|typed| {
+            let key = SettingsKey::from_str(&typed, false)?;
+            Ok::<_, String>(Self { key, typed })
+        })
+    }
+
     /// The warning for a deprecated spelling, if this is one.
-    pub(super) fn deprecation(&self) -> Option<String> {
+    pub fn deprecation(&self) -> Option<String> {
         let replacement = match self.key {
             SettingsKey::Notifications => "`notifications.enabled`, `notifications.gateway`, `notifications.local-api` or `notifications.verification`".to_string(),
-            key if key.as_str() != self.typed => format!("`{key}`"),
+            key if key.to_string() != self.typed => format!("`{key}`"),
             _ => return None,
         };
         Some(format!(
@@ -490,39 +486,8 @@ impl SettingsKeyArg {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct SettingsKeyParser;
-
-impl clap::builder::TypedValueParser for SettingsKeyParser {
-    type Value = SettingsKeyArg;
-
-    fn parse_ref(
-        &self,
-        command: &clap::Command,
-        argument: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<SettingsKeyArg, clap::Error> {
-        let key = clap::builder::EnumValueParser::<SettingsKey>::new()
-            .parse_ref(command, argument, value)?;
-        Ok(SettingsKeyArg {
-            key,
-            typed: value.to_string_lossy().into_owned(),
-        })
-    }
-
-    fn possible_values(
-        &self,
-    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
-        Some(Box::new(
-            SettingsKey::value_variants()
-                .iter()
-                .filter_map(ValueEnum::to_possible_value),
-        ))
-    }
-}
-
 #[derive(Subcommand)]
-pub(super) enum Settings {
+pub enum Settings {
     /// Stop protection and reset backend settings, preserving profiles, keys and usage.
     Reset,
     /// Show the settings in effect, the settings file paths and web UI status. Never shows secrets.
@@ -532,7 +497,7 @@ pub(super) enum Settings {
     /// Change one setting. This may restart the Local API or protection.
     Set {
         /// The setting's dotted path in config.toml, for example web-ui.enabled.
-        #[arg(value_parser = SettingsKeyParser)]
+        #[arg(value_parser = SettingsKeyArg::parser())]
         key: SettingsKeyArg,
         /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it.
         value: Option<String>,

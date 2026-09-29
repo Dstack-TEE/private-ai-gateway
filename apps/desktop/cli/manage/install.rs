@@ -4,17 +4,7 @@ use std::path::PathBuf;
 
 use desktop_core::contracts::CommandRegistration;
 
-pub fn status() -> Result<CommandRegistration, String> {
-    platform::status()
-}
-
-pub fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
-    platform::install(directory)
-}
-
-pub fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
-    platform::uninstall(directory)
-}
+pub use platform::{install, status, uninstall};
 
 fn current_executable() -> Result<PathBuf, String> {
     let executable =
@@ -211,13 +201,13 @@ mod platform {
         Executable,
     }
 
-    pub(super) fn status() -> Result<CommandRegistration, String> {
+    pub fn status() -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = managed_system_directory(&executable).unwrap_or(default_directory()?);
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
 
-    pub(super) fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
+    pub fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         if directory.is_none() {
             if let Some(directory) = managed_system_directory(&executable) {
@@ -230,7 +220,7 @@ mod platform {
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
 
-    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
+    pub fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         if directory.is_none() && managed_system_directory(&executable).is_some() {
             return Err(
@@ -597,12 +587,12 @@ mod platform {
     const OWNERSHIP_KEY: &str = r"Software\Private AI Proxy\CLI";
     const OWNERSHIP_VALUE: &str = "OwnedPath";
 
-    pub(super) fn status() -> Result<CommandRegistration, String> {
+    pub fn status() -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         registration(executable, None)
     }
 
-    pub(super) fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
+    pub fn install(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
         reject_path_conflict(&executable)?;
@@ -643,7 +633,7 @@ mod platform {
         registration(executable, Some(directory))
     }
 
-    pub(super) fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
+    pub fn uninstall(directory: Option<PathBuf>) -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
         let directory = executable_directory(&executable, directory)?;
         windows_alias::uninstall(&executable)?;
