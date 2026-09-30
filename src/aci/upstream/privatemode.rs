@@ -64,19 +64,6 @@ pub enum PrivatemodeDeploymentConfigError {
     InvalidImageDigest(String),
 }
 
-impl PrivatemodeDeploymentConfigError {
-    /// Whether a logged manifest file is not yet fully written.
-    fn is_pending_manifest(&self) -> bool {
-        match self {
-            Self::ReadObservedManifest { source, .. } => {
-                source.kind() == std::io::ErrorKind::NotFound
-            }
-            Self::IncompleteObservedManifest { .. } => true,
-            _ => false,
-        }
-    }
-}
-
 /// Static, measured deployment policy for one co-deployed Privatemode proxy.
 #[derive(Debug)]
 pub struct PrivatemodeProxyDeployment {
@@ -166,6 +153,9 @@ impl PrivatemodeProxyDeployment {
         &self.base_url
     }
 
+    /// Best-effort observation of the manifest the proxy fetched last. The
+    /// proxy logs an entry before writing its file, so the newest one may
+    /// briefly be missing or partial.
     pub(crate) fn latest_observed_manifest(
         &self,
     ) -> Result<ObservedPrivatemodeManifest, PrivatemodeDeploymentConfigError> {
@@ -176,24 +166,16 @@ impl PrivatemodeProxyDeployment {
             }
         })?;
         // The proxy terminates every entry with a newline; ignore a torn tail.
-        let mut entries = log
+        let newest = log
             .split_inclusive('\n')
             .filter_map(|line| line.strip_suffix('\n'))
-            .rev();
-        let newest = entries.next().ok_or_else(|| {
-            PrivatemodeDeploymentConfigError::InvalidManifestLog(
-                "manifest log is empty".to_string(),
-            )
-        })?;
-        // The proxy logs an entry before writing its manifest file, so the
-        // newest manifest may still be missing or partially written. Report
-        // the previous complete observation during that window.
-        match (self.read_logged_manifest(newest), entries.next()) {
-            (Err(err), Some(previous)) if err.is_pending_manifest() => {
-                self.read_logged_manifest(previous)
-            }
-            (result, _) => result,
-        }
+            .next_back()
+            .ok_or_else(|| {
+                PrivatemodeDeploymentConfigError::InvalidManifestLog(
+                    "manifest log is empty".to_string(),
+                )
+            })?;
+        self.read_logged_manifest(newest)
     }
 
     fn read_logged_manifest(

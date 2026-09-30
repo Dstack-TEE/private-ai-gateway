@@ -29,6 +29,11 @@ def verify_provider(
         # Privatemode verification is inseparable from the official proxy
         # co-deployed with the gateway. A standalone Python probe would not bind
         # that service to the measured deployment and must not compete with it.
+        if strict:
+            raise RuntimeError(
+                "strict mode cannot check a gateway-deferred Privatemode "
+                "verification against a reviewed reference"
+            )
         output = {
             "status": "deferred_to_gateway",
             "verifier_id": "privatemode-proxy/co-deployed-contrast/v1",

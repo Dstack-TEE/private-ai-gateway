@@ -349,7 +349,7 @@ routes at another proxy or change the measured pins.
 | Field | Contract |
 | --- | --- |
 | `base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
-| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. The latest complete entry is reported as unbound observation metadata. |
+| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. When readable, the latest entry is reported as unbound observation metadata; it never gates serving. |
 | `credential_path` | Absolute path to the Compose secret mounted into both gateway and proxy. The gateway checks it at startup and never forwards it. |
 | `credential_sha256` | SHA-256 of that credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch fails startup. |
 | `proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, as `sha256:<64-hex>`. |

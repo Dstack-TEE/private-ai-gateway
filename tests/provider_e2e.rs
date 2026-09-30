@@ -1339,43 +1339,34 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
 }
 
 #[tokio::test]
-async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_written() {
+async fn privatemode_manifest_observation_is_supplemental() {
     let (base_url, _provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
     let fixture = PrivatemodeTestDeployment::new(base_url);
     let verifier = fixture.verifier(10, 0);
-    let observed = |event: &UpstreamVerifiedEvent| {
-        assert_eq!(
-            event.result,
-            VerificationResult::Verified,
-            "{:?}",
-            event.reason
-        );
-        event.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].clone()
-    };
 
     // The proxy appends the log entry before it writes the manifest file.
     std::fs::write(
         &fixture.manifest_log_path,
-        concat!(
-            "2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n",
-            "2026-07-31T01:00:00Z /var/lib/privatemode/manifests/2.json\n",
-            "2026-07-31T02:00:00Z /var/lib/privatemode/manif"
-        ),
+        "2026-07-31T01:00:00Z /var/lib/privatemode/manifests/2.json\n",
     )
     .unwrap();
     let pending = verifier.verify(fixture.verification_request("m")).await;
-    assert_eq!(observed(&pending), fixture.manifest_digest);
-
-    let manifest_path = fixture.manifest_dir.join("2.json");
-    std::fs::write(&manifest_path, br#"{"Policies":{"#).unwrap();
-    let partial = verifier.verify(fixture.verification_request("m")).await;
-    assert_eq!(observed(&partial), fixture.manifest_digest);
+    assert_eq!(pending.result, VerificationResult::Verified);
+    assert_eq!(
+        pending.channel_bindings,
+        fixture.verified_event().channel_bindings
+    );
+    assert!(pending.evidence.is_none());
+    assert!(pending.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].is_null());
 
     let manifest = br#"{"Policies":{}}"#;
-    std::fs::write(&manifest_path, manifest).unwrap();
+    std::fs::write(fixture.manifest_dir.join("2.json"), manifest).unwrap();
     let complete = verifier.verify(fixture.verification_request("m")).await;
-    assert_eq!(observed(&complete), normalized_sha256(manifest));
+    assert_eq!(
+        complete.provider_claims.as_ref().unwrap()["observed_manifest_sha256"],
+        normalized_sha256(manifest)
+    );
 }
 
 #[tokio::test]
