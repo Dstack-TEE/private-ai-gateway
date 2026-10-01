@@ -92,7 +92,7 @@ struct ChannelMaterial<'a> {
     identity: &'a Option<WorkloadIdentityRef>,
     channel_binding: &'a [ChannelBinding],
     claims: &'a SessionClaims,
-    evidence_digest: &'a Option<String>,
+    evidence_digest: Option<&'a str>,
 }
 
 impl ChannelMaterial<'_> {
@@ -699,14 +699,9 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // Every sealed session carries the verifier's evidence so a
-            // relying party can deep-audit it (§8.2, §9.2). Per-instance
-            // (Chutes) evidence is nonce-bound and rotates every verification
-            // round, so it is excluded from the dedup fingerprint — otherwise
-            // every request would mint a new session id. The document keeps
-            // the establishing round's evidence for the whole validity
-            // window; the enforceable channel binding, not the evidence
-            // freshness, is what each request is served over.
+            // Chutes evidence changes every round, so an instance session
+            // leaves it out of the fingerprint and keeps re-verification on
+            // the same session.
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),
@@ -809,14 +804,8 @@ impl AciService {
     /// persisting a fresh document only when no session with identical
     /// verified material has a live validity period. The store's channel
     /// fingerprint provides the dedup — the document bytes themselves change
-    /// with every validity period, so the id cannot.
-    ///
-    /// `fingerprint_covers_evidence` is false for per-instance (Chutes)
-    /// bindings whose nonce-bound evidence rotates every verification round:
-    /// covering the digest would make every request mint a new session. The
-    /// sealed document still carries the establishing round's evidence, so
-    /// the record stays deep-auditable per §8.2 for its whole window. The
-    /// evidence bundle is copied only when a new session is sealed.
+    /// with every validity period, so the id cannot. A new session stores the
+    /// event's evidence even when the fingerprint leaves it out.
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -826,14 +815,13 @@ impl AciService {
         claims: SessionClaims,
         now: u64,
         expires_at: u64,
-        fingerprint_covers_evidence: bool,
+        fingerprint_includes_evidence: bool,
     ) -> Result<String, ServiceError> {
-        let evidence_value = event.evidence.as_ref();
-        let evidence_digest = evidence_value
-            .filter(|_| fingerprint_covers_evidence)
-            .and_then(|value| value.get("digest"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+        let evidence = event.evidence.as_ref();
+        let evidence_digest = match evidence {
+            Some(evidence) if fingerprint_includes_evidence => evidence["digest"].as_str(),
+            _ => None,
+        };
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -841,7 +829,7 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: &evidence_digest,
+            evidence_digest,
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
@@ -865,9 +853,7 @@ impl AciService {
             identity,
             channel_binding: channel_bindings,
             claims,
-            evidence: evidence_value
-                .map(EvidenceRef::from_value)
-                .unwrap_or_default(),
+            evidence: evidence.map(EvidenceRef::from_value).unwrap_or_default(),
         })
         .map_err(|err| ServiceError::SessionStore(format!("seal attested session: {err}")))?;
         let session_id = session.session_id().to_string();

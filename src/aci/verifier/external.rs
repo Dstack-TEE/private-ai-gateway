@@ -513,20 +513,15 @@ struct ExternalChannelBinding {
 }
 
 /// A verified result must carry evidence whose data hashes to its digest
-/// (§8.2); the session that records it keeps those bytes for audit. The data
-/// URI is re-encoded canonically so a stored session rebuilds byte for byte.
+/// (§8.2). The data is re-encoded so a stored session rebuilds byte for byte.
 fn canonical_verified_evidence(evidence: Option<Value>) -> Result<Value, String> {
-    let Some(mut evidence) = evidence else {
-        return Err("provider verifier returned verified without evidence".to_string());
-    };
-    let Some((content_type, bytes)) = EvidenceRef::from_value(&evidence).decode() else {
-        return Err(
-            "provider verifier returned verified with evidence whose data does not hash to its digest"
-                .to_string(),
-        );
-    };
-    let canonical = EvidenceRef::from_bytes(&content_type, &bytes);
-    evidence["data"] = Value::String(canonical.data_uri.unwrap_or_default());
+    let mut evidence = evidence.ok_or("provider verifier returned verified without evidence")?;
+    let (content_type, bytes) = EvidenceRef::from_value(&evidence).decode().ok_or(
+        "provider verifier returned verified with evidence whose data does not hash to its digest",
+    )?;
+    evidence["data"] = EvidenceRef::from_bytes(&content_type, &bytes)
+        .data_uri
+        .into();
     Ok(evidence)
 }
 

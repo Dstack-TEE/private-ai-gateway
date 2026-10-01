@@ -173,15 +173,17 @@ impl EvidenceRef {
         }
     }
 
-    /// Split a complete bundle into its content type and decoded bytes. `None`
-    /// unless `data` is `data:<content-type>;base64,<b64>` and the bytes hash to
-    /// `digest`.
+    /// The bundle's content type and bytes. `None` unless `data` is a
+    /// `data:<content-type>;base64,<b64>` URI whose bytes hash to `digest`.
     pub fn decode(&self) -> Option<(String, Vec<u8>)> {
         let digest = self.digest.as_deref()?;
-        let rest = self.data_uri.as_deref()?.strip_prefix("data:")?;
-        let (content_type, b64) = rest.split_once(";base64,")?;
-        let bytes = BASE64.decode(b64.as_bytes()).ok()?;
-        (digest::sha256_hex(&bytes) == digest).then(|| (content_type.to_string(), bytes))
+        let data_uri = self.data_uri.as_deref()?;
+        let (content_type, b64) = data_uri.strip_prefix("data:")?.split_once(";base64,")?;
+        let bytes = BASE64.decode(b64).ok()?;
+        if digest::sha256_hex(&bytes) != digest {
+            return None;
+        }
+        Some((content_type.to_string(), bytes))
     }
 
     /// The canonical bundle for `bytes`: its `sha256:` digest and a
