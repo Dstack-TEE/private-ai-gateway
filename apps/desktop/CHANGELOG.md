@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0...desktop-v0.3.1-beta.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **desktop:** release notes list the downloads again ([#380](https://github.com/Dstack-TEE/private-ai-gateway/issues/380)) ([06a6b20](https://github.com/Dstack-TEE/private-ai-gateway/commit/06a6b208416392e1bde3075a54fd4071f8c13246))
+
 ## [0.3.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.2.1...desktop-v0.3.0) (2026-09-29)
 
 Private AI Proxy 0.3.0 adds DeepSeek Harness and makes the whole app leaner, with the same look and behaviour.
