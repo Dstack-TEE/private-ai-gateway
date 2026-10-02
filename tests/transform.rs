@@ -123,7 +123,10 @@ fn rust_response_transforms_match_node_fixtures() {
         let endpoint = parse_endpoint(case["fn"].as_str().unwrap());
         let input = case["input"].clone();
 
-        let output = strip_created(&transform_response(format, endpoint, input));
+        let output = strip_created(
+            &transform_response(format, endpoint, input)
+                .unwrap_or_else(|err| panic!("case {name}: unexpected error: {err}")),
+        );
         let expected = &case["output"];
         assert!(
             canonical_eq(&output, expected),
@@ -161,6 +164,7 @@ fn chat_responses_match_golden_fixtures() {
         let output = strip_created(&openai_chat_to_responses(
             case["input"].clone(),
             &case["echo"],
+            "resp_fixture",
         ));
         assert!(
             canonical_eq(&output, &case["output"]),
