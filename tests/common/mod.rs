@@ -32,8 +32,19 @@ pub fn verified_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEv
         result: VerificationResult::Verified,
         required: true,
         channel_bindings: vec![test_channel_binding()],
+        evidence: Some(test_evidence()),
         ..Default::default()
     }
+}
+
+/// The evidence bundle [`verified_event`] carries: every stored session needs
+/// a complete bundle, its digest plus the data that hashes to it (§8.2).
+pub fn test_evidence() -> serde_json::Value {
+    let evidence = private_ai_gateway::aggregator::session::EvidenceRef::from_bytes(
+        "application/json",
+        br#"{"fixture":"verifier-input"}"#,
+    );
+    serde_json::json!({ "digest": evidence.digest, "data": evidence.data_uri })
 }
 
 /// The enforceable channel binding [`verified_event`] pins: the fail-closed
@@ -60,15 +71,15 @@ pub fn failed_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEven
 /// Builds an event the way a mock `UpstreamVerifier` does: copying
 /// `upstream_name` / `model_id` / `url_origin` / `required` straight off the
 /// request, with the given `result` (verified events get an enforceable
-/// binding). The caller fills `verifier_id` and any `reason` / `evidence` via
+/// binding and evidence). The caller fills `verifier_id` and any `reason` via
 /// struct-update syntax.
 pub fn event_from_request(
     request: &UpstreamVerificationRequest,
     result: VerificationResult,
 ) -> UpstreamVerifiedEvent {
-    let channel_bindings = match result {
-        VerificationResult::Verified => vec![test_channel_binding()],
-        VerificationResult::Failed => Vec::new(),
+    let (channel_bindings, evidence) = match result {
+        VerificationResult::Verified => (vec![test_channel_binding()], Some(test_evidence())),
+        VerificationResult::Failed => (Vec::new(), None),
     };
     UpstreamVerifiedEvent {
         upstream_name: request.upstream_name.clone(),
@@ -77,6 +88,7 @@ pub fn event_from_request(
         required: request.required,
         result,
         channel_bindings,
+        evidence,
         ..Default::default()
     }
 }

@@ -659,7 +659,7 @@ async fn attested_session_lookup_returns_audit_record() {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:c66545694666be261c5babe518913c3536f26b1dd34c5f14de71dd7ad1968c1a",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {

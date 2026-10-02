@@ -89,7 +89,7 @@ impl AciServiceVerifierPolicy {
     /// free-form subject is otherwise the workload's own claim (§3.1:
     /// "Generic verifiers MUST NOT trust it by itself") — or the report's
     /// source-provenance image digest (uncorroborated; conformance-gaps
-    /// item 17).
+    /// item 16).
     pub(super) fn accepts_measured(
         &self,
         keyset: &WorkloadKeyset,

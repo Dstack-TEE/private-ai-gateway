@@ -64,7 +64,7 @@ impl SessionStore for FailingSessionStore {
         _fingerprint: &str,
         _retention_until: u64,
         _now: u64,
-    ) -> Option<AttestedSession> {
+    ) -> Option<String> {
         // Always a miss, so the caller falls through to the failing `put_session`.
         None
     }
@@ -224,6 +224,15 @@ async fn verifier_event_result_verified_emits_upstream_verified() {
     assert!(sid.bytes().all(|b| b.is_ascii_hexdigit()));
 }
 
+/// A distinct, complete evidence bundle per verification round.
+fn round_evidence(round: &str) -> serde_json::Value {
+    let evidence = private_ai_gateway::aggregator::session::EvidenceRef::from_bytes(
+        "application/json",
+        format!(r#"{{"round":"{round}"}}"#).as_bytes(),
+    );
+    serde_json::json!({ "digest": evidence.digest, "data": evidence.data_uri })
+}
+
 #[tokio::test]
 async fn verified_upstream_binding_creates_attested_session() {
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
@@ -231,7 +240,7 @@ async fn verified_upstream_binding_creates_attested_session() {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:c66545694666be261c5babe518913c3536f26b1dd34c5f14de71dd7ad1968c1a",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -298,24 +307,31 @@ async fn verified_upstream_binding_creates_attested_session() {
     assert_eq!(session_claims["tcb_up_to_date"]["status"], "unknown");
     assert_eq!(
         document.evidence.digest.as_deref(),
-        Some(format!("sha256:{}", "11".repeat(32)).as_str())
+        Some("sha256:c66545694666be261c5babe518913c3536f26b1dd34c5f14de71dd7ad1968c1a")
     );
 }
 
 /// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
-/// changes every round even when an instance's own material does not. That
-/// bundle must stay out of the per-instance session: sealing it in mints a
-/// fresh session per instance per round, so the store grows without bound
-/// relative to the live set.
+/// changes every round even when an instance's own material does not. The
+/// bundle therefore stays out of the dedup fingerprint — sealing it in would
+/// mint a fresh session per instance per round, growing the store without
+/// bound — but the establishing round's evidence must persist in the
+/// document: an empty `evidence` breaks §8.2 deep audit, and relying parties
+/// (§9.2 check 2) reject the record, which made every Chutes-routed model
+/// fail receipt verification.
 #[tokio::test]
 async fn chutes_instance_session_is_stable_across_evidence_rounds() {
+    use base64::Engine as _;
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
     let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        // §8.2: the digest is over the decoded evidence bytes.
         evidence: Some(serde_json::json!({
-            "digest": private_ai_gateway::aci::digest::sha256_hex(round.as_bytes()),
+            "digest": private_ai_gateway::aci::digest::sha256_hex(
+                &base64::engine::general_purpose::STANDARD.decode(round).unwrap(),
+            ),
             "data": format!("data:application/json;base64,{}", round),
         })),
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
@@ -361,8 +377,24 @@ async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     let session = svc
         .get_attested_session(&session_id)
         .expect("Chutes session should be queryable");
-    assert!(session.document().evidence.digest.is_none());
-    assert!(session.document().evidence.data_uri.is_none());
+    // §8.2: the record carries the establishing round's evidence (digest +
+    // data) so a relying party can deep-audit it, while the session id stays
+    // stable across nonce-bound evidence rounds.
+    let evidence = &session.document().evidence;
+    assert_eq!(
+        evidence.digest.as_deref(),
+        Some(private_ai_gateway::aci::digest::sha256_hex(b"abc").as_str(),),
+        "the first round's evidence digest must persist in the document"
+    );
+    assert_eq!(
+        evidence.data_uri.as_deref(),
+        Some("data:application/json;base64,YWJj"),
+        "the first round's evidence bytes must persist in the document"
+    );
+    assert!(
+        evidence.digest_matches_data(),
+        "persisted evidence must satisfy the §8.2 digest check"
+    );
 }
 
 #[tokio::test]
@@ -452,10 +484,7 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let make_event = |digest_byte: &str| UpstreamVerifiedEvent {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
-        evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", digest_byte.repeat(32)),
-            "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
-        })),
+        evidence: Some(round_evidence(digest_byte)),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://stub-upstream".to_string(),
             spki_sha256: "aa".repeat(32),
@@ -501,8 +530,8 @@ async fn attested_session_id_changes_when_verification_material_changes() {
     let second_session = svc
         .get_attested_session(second_session_id)
         .expect("second session should remain queryable");
-    let first_digest = format!("sha256:{}", "11".repeat(32));
-    let second_digest = format!("sha256:{}", "22".repeat(32));
+    let first_digest = round_evidence("11")["digest"].as_str().unwrap().to_string();
+    let second_digest = round_evidence("22")["digest"].as_str().unwrap().to_string();
     assert_eq!(
         first_session.document().evidence.digest.as_deref(),
         Some(first_digest.as_str())

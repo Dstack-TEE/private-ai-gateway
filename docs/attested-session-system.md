@@ -54,22 +54,35 @@ verification result.
 The durable store is an append-only log with one record per line:
 
 ```json
-{"seq":0,"ts":1700000000,"type":"session","fingerprint":"<hex>","retention_until":1700003600,"payload_b64":"<sealed document>"}
+{"seq":0,"ts":1700000000,"type":"evidence","payload_b64":"<bundle bytes>"}
+{"seq":1,"ts":1700000000,"type":"attested_session","fingerprint":"<hex>","retention_until":1700003600,"content_type":"application/json","payload_b64":"<document without evidence.data>"}
 ```
 
-On startup the gateway replays the log into an in-memory index. `payload_b64`
-carries the sealed document bytes, and the session id is always recomputed from
-them, never read from disk. `fingerprint` is a local key over a channel's
-verified material that lets the request path find the current session for a
-channel without sealing again. It is never served. Receipt signatures link
-requests to session ids. At-rest durability and confidentiality remain
-deployment concerns.
+The log has two kinds of records. An `evidence` record holds one evidence
+bundle. An `attested_session` record holds a session document with its
+`evidence.data` removed; the document still has `evidence.digest`, the hash of
+its bundle. Keeping bundles separate means a bundle is stored only once, even
+when many sessions use it. This matters for Chutes, where every instance
+session of a chute uses the same bundle. Every stored session has its bundle.
 
-The gateway holds an advisory lock on a separate lock file so only one process
-can own the log. On startup and hourly after that, it rewrites the live,
-non-expired index through a synced temporary file and an atomic rename,
-dropping duplicate, expired, malformed, or truncated history. The file names
-and their `state_dir` location are listed in
+On startup the gateway reads the log into memory. For each session it finds
+the bundle whose hash matches `evidence.digest`, puts the bundle back into the
+document, and computes the session ID from the result. The ID is never read
+from disk. If a bundle was altered on disk, its hash no longer matches, so the
+sessions that use it are dropped. Records of any other type are ignored, so
+the gateway can start on a log written by an older release.
+
+`fingerprint` is a local key over a channel's verified material. The gateway
+uses it to find a channel's current session without building the document
+again. It is never served. Receipt signatures link requests to session IDs.
+Backing up the log and keeping it private on disk are up to the deployment.
+
+The gateway locks a separate lock file so only one process can use the log.
+On startup and every hour after that, it writes the sessions that have not
+expired to a new file, flushes it to disk, and swaps it in with a single
+rename. This drops duplicate, expired, or damaged records and any bundle that
+no remaining session uses. The file
+names and their `state_dir` location are listed in
 [Runtime state files](configuration-reference.md#runtime-state-files).
 
 ## How claims are derived
