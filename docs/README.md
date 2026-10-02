@@ -47,6 +47,7 @@ The following documents record plans or point-in-time reviews. They can explain
 why code exists, but they are not runtime references:
 
 - [Project status and roadmap](roadmap.md)
+- [System One endpoint design proposal](systemone-design.md)
 - [Router-mode provider review process](router-mode-provider-review.md)
 - [ACI implementation gap review](reviews/aci-spec-conformance-gaps.md)
 - [Router soundness review](reviews/router-mode-soundness.md)

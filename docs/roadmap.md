@@ -68,6 +68,7 @@ These are gaps in the implementation. What ACI does not cover by design is in
 
 ### API, clients, and control plane
 
+- Native structured decisions through `POST /v1/systemone`; see the [System One design proposal](systemone-design.md). The endpoint is not implemented.
 - Optional receipt and session-policy checks in `pap curl`.
 - Define or reject an Anthropic Messages E2EE profile.
 - Responses API conformance tests, and live coverage for streaming, tools, structured output, multimodal input, context limits, and caching.
