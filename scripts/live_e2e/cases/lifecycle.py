@@ -96,8 +96,6 @@ def run_lifecycle_case(
         if not legacy_json.get(field):
             raise RuntimeError(f"{provider.name} legacy signature wrapper missing {field}")
 
-    verifier_summary = run_pap_audit(report_path, receipt_path, nonce, request_path, response_path)
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -105,6 +103,17 @@ def run_lifecycle_case(
         receipt=receipt,
         artifact_dir=provider_dir,
     )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    verifier_summary = run_pap_audit(
+        report_path,
+        receipt_path,
+        provider_dir / "attested-session-0.json",
+        nonce,
+        request_path,
+        response_path,
+    )
+    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     return {
         "provider": provider.name,
         "chat_id": chat_id,

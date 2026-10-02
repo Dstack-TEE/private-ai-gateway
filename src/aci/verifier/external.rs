@@ -17,7 +17,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use super::current_unix_secs;
+use super::{current_unix_secs, CachedProviderEvent};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
@@ -40,7 +40,7 @@ pub(super) struct ExternalProviderVerifier {
     options: HashMap<String, String>,
     timeout_seconds: u64,
     cache_ttl_seconds: u64,
-    cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedExternalProviderEvent>>>,
+    cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
 }
@@ -254,7 +254,7 @@ impl ExternalProviderVerifier {
         if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
             return;
         }
-        let cached = CachedExternalProviderEvent {
+        let cached = CachedProviderEvent {
             expires_at: current_unix_secs().saturating_add(self.cache_ttl_seconds),
             event: event.clone(),
         };
@@ -459,23 +459,6 @@ impl ExternalProviderVerifierCacheKey {
             url_origin: request.url_origin.clone(),
             model_id: request.model_id.clone(),
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CachedExternalProviderEvent {
-    expires_at: u64,
-    event: UpstreamVerifiedEvent,
-}
-
-impl CachedExternalProviderEvent {
-    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let mut event = self.event.clone();
-        event.upstream_name = request.upstream_name.clone();
-        event.model_id = request.model_id.clone();
-        event.url_origin = request.url_origin.clone();
-        event.required = request.required;
-        event
     }
 }
 

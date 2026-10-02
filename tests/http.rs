@@ -882,6 +882,7 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 30,
         verifier_request_timeout_seconds: 30,
+        privatemode_proxy: None,
     }
 }
 
