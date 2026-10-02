@@ -81,8 +81,9 @@ System One routing block or change how other provider fields are handled.
 
 Each question identifies its primitive with `type`. Instructions and rubric
 descriptions can contain strings, objects, or arrays; do not flatten them into
-chat messages. TypeSafe requires `instructions`; Kev makes it optional. The
-published primitive contracts are:
+chat messages. The TypeSafe and Kev interfaces differ on whether
+`instructions` is required; pass it through and leave provider-specific
+requiredness to the upstream. The published primitive contracts are:
 
 | Type | Criteria | Answer |
 | --- | --- | --- |
@@ -98,7 +99,9 @@ truncate inputs or invent cross-provider validation rules.
 
 Reuse the current JSON parsing, 32 MiB body limit, and routing checks. Use the
 existing buffered-only handler flag, as Embeddings does, rather than adding a
-System One-specific streaming error policy. The native parameter table does not
+System One-specific streaming error policy. This controls the gateway's local
+response lifecycle; it does not invent a new provider-field rewrite. The native
+parameter table does not
 inject chat streaming, reasoning, or engine parameters. Reject E2EE headers
 using the existing unsupported-endpoint behavior, as Responses does.
 
@@ -137,12 +140,14 @@ gateway. `kev-4b` would need an explicitly configured catalog entry:
 Preserve native `model`, `answers`, and `usage` instead of converting them to
 chat choices or explanations. Keep the existing processing in each topology:
 
-- Direct-upstream mode uses buffered passthrough. Do not add canonicalization,
-  identity rewriting, or gateway cost injection to this path.
+- Direct-upstream mode uses the existing buffered passthrough. Do not add
+  canonicalization, identity rewriting, or gateway cost injection to this path;
+  retain generic existing remaps such as client image-fetch failures.
 - Middleware mode uses its existing JSON decoding, identity rewriting, pricing,
   and canonicalization. Add a System One branch retaining top-level `model`,
   `answers`, and `usage`, and usage fields `input_tokens`, `output_tokens`, and
-  gateway-owned `cost`. Preserve `answers` as content without nested allowlists,
+  the existing `cost` field when the shared path adds or preserves it. Preserve
+  `answers` as content without nested allowlists,
   including answer `type`, `noul`, legends, probabilities, and confidence. This
   follows the existing Responses treatment of structured output content.
 
@@ -164,8 +169,9 @@ Pass confidence through unchanged. It is a
 guarantee of correctness or an interchangeable maximum probability.
 
 In middleware mode, reuse the existing usage resolver, which already recognizes
-`input_tokens` and `output_tokens`, pricing, and the gateway-owned `usage.cost`
-extension. Keep actual counters even when the output price is zero. Post-consult
+`input_tokens` and `output_tokens`. When existing pre-consult pricing is present
+and usage is parseable, inject the existing gateway `usage.cost` extension;
+otherwise preserve provider usage as the shared response path permits. Post-consult
 receives raw provider usage before client cost injection, just as on other
 endpoints. Direct-upstream responses retain the provider's usage unchanged.
 
@@ -175,15 +181,19 @@ Keep the current error behavior in each topology. Middleware uses the existing
 OpenAI-style gateway error envelope, upstream-status mapping, sanitization,
 ordered candidate handling, and failure accounting. Direct-upstream mode
 preserves upstream error bodies and statuses; it does not gain middleware
-sanitization. Gateway validation and ACI refusals keep their existing handling.
+sanitization or malformed-success rewriting. Gateway validation and ACI
+refusals keep their existing handling.
 
 Do not add System One-specific status codes, validation errors, retry rules, or
-idempotency semantics. The current middleware failover set is
+idempotency semantics. The ordinary middleware failover set is
 `401`, `402`, `403`, `404`, `429`, `500`, `502`, `503`, and `504`; request errors
 such as `400`, `405`, and `422` do not advance to another candidate. In
-particular, upstream `529` is not a failover or capacity-retry signal: middleware
-maps it to `502`, while direct-upstream mode preserves `529`. Retain and document
-this compatibility difference rather than adding a special retry policy.
+particular, an unmarked upstream `529` is not in that set and middleware maps it
+to `502`, while direct-upstream mode preserves `529`. The existing shared
+capacity classifier is an exception: any 5xx, including `529`, carrying the
+exact `exhausted all available targets` marker can fail over and enter the
+existing delayed capacity retry, and is surfaced as `429`. Retain this shared
+behavior; do not add a System One-specific retry policy.
 
 ## Integration with this gateway
 
@@ -233,15 +243,15 @@ and `422` would stop failover. This is an endpoint predicate, not a new routing
 framework or control-plane protocol. Chat reasoning and engine transforms
 remain limited to the endpoint branches that already use them.
 
-Feature extraction returns no chat features for System One, following the
-existing Embeddings/Responses pattern. Do not invent state-derived token
+Feature extraction returns no chat features for System One, as on native
+Embeddings handling. Do not invent state-derived token
 estimates or prefix hashes. The existing post-consult report already contains
 `endpoint`; retain its usage and failure accounting and send no state, questions,
 or answers to the control plane.
 
-Add configured model entries to the reference control plane using its existing
-fields, not a new configuration vocabulary. Do not add an `UpstreamProvider`
-variant for Jev or Kev: a model protocol is not a new attestation mechanism.
+Any test or reference-control-plane model entry should use its existing fields,
+not a new configuration vocabulary. Do not add an `UpstreamProvider` variant for
+Jev or Kev: a model protocol is not a new attestation mechanism.
 
 ### Catalog and SDK boundary
 
@@ -258,16 +268,21 @@ must not claim that every SDK method works after changing only the base URL.
 ### ACI and encryption
 
 API compatibility, open weights, and a model name do not prove confidential
-serving. A route requires an accepted verifier result and an enforced binding
-when `provider.aci_verified`, a session allowlist, or a TEE-only hostname demands
-it. A missing verifier or an unenforceable binding must fail before forwarding.
-No plain TypeSafe or OpenRouter route should be marked verified by assumption.
+serving. In direct-serving mode, the verified workload is the serving workload,
+so `provider.aci_verified` is satisfied by construction and there is no upstream
+verifier event or upstream session. A pinned session allowlist still fails
+closed because direct serving has no upstream session that can satisfy it.
+For middleware/non-direct upstreams, a demanded `provider.aci_verified`, pinned
+session, or TEE-only policy requires an accepted verifier result and enforceable
+binding before forwarding. No plain TypeSafe or OpenRouter route should be
+marked verified by assumption.
 
 Keep request observations before stripping gateway fields, record the actual
 provider-facing request, and bind the exact returned bytes to the existing
-receipt. Preserve the upstream session and signed refusal path. Receipt lookup
-uses `X-Receipt-Id`; a native response need not have a chat ID. No change to
-the [ACI receipt schema](../spec/aci.md#7-inference-receipts) is proposed.
+receipt. Preserve the upstream session and signed refusal path. The response
+continues to carry `X-Receipt-Id`, which clients use to call the existing
+`/v1/aci/receipts/{id}` lookup; a native response need not have a chat ID. No
+change to the [ACI receipt schema](../spec/aci.md#7-inference-receipts) is proposed.
 
 E2EE v2 has no reviewed System One field profile. Reject its headers with
 `e2ee_unsupported_endpoint`, as on unsupported existing surfaces. A future
@@ -285,7 +300,8 @@ client changes under [Contributing](../CONTRIBUTING.md#aci-wire-or-cryptography)
 
 Contract tests should cover preservation of question IDs, option order,
 structured criteria, and native answer fields; topology-specific usage and error
-handling, including `529`; buffered-only operation; and unsupported E2EE. Verify
+handling, including ordinary and capacity-marked `529`; buffered-only operation;
+and unsupported E2EE. Verify
 that middleware preserves complete answer content while filtering top-level and
 usage fields, and that direct-upstream mode retains the original body and
 status. Forward model-provided scores and probabilities without recomputing
