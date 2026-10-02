@@ -25,7 +25,8 @@ logged() {
 from_script() {
   local name="$1" url="$2"
   shift 2
-  curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$logs/$name-install"
+  curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-connrefused --connect-timeout 20 \
+    "$url" -o "$logs/$name-install"
   chmod +x "$logs/$name-install"
   logged "$name" "$logs/$name-install" "$@"
 }
