@@ -581,6 +581,9 @@ const RESPONSES_USAGE: &[&str] = &[
     "cost_details",
 ];
 
+const SYSTEMONE_TOP: &[&str] = &["model", "answers", "usage"];
+const SYSTEMONE_USAGE: &[&str] = &["input_tokens", "output_tokens", "cost"];
+
 /// Reduce a response to the gateway's documented output schema for `endpoint`,
 /// dropping every field the schema does not name. Runs last, after
 /// `rewrite_identity` and cost injection, on both a buffered body and a single
@@ -600,6 +603,17 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
         Endpoint::CreateModelResponse => canonicalize_responses(body),
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => {}
+        Endpoint::SystemOne => canonicalize_systemone(body),
+    }
+}
+
+fn canonicalize_systemone(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    retain_allowed(object, SYSTEMONE_TOP);
+    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
+        retain_allowed(usage, SYSTEMONE_USAGE);
     }
 }
 
@@ -1933,6 +1947,43 @@ mod identity_tests {
             body["error"],
             json!({ "code": "server_error", "message": "The upstream provider returned an error" })
         );
+    }
+
+    #[test]
+    fn canonicalize_systemone_preserves_nested_answers() {
+        let mut body = json!({
+            "model": "kev-4b",
+            "answers": {
+                "kind": {
+                    "type": "choice",
+                    "choice": "platform",
+                    "probabilities": { "platform": 0.9, "billing": 0.1 },
+                    "confidence": 0.8,
+                    "vendor_detail": "keep nested content"
+                }
+            },
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cost": 0.01,
+                "provider_trace": "drop"
+            },
+            "provider": "drop",
+            "id": "drop"
+        });
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(body["model"], "kev-4b");
+        assert_eq!(
+            body["answers"]["kind"]["vendor_detail"],
+            "keep nested content"
+        );
+        assert_eq!(body["usage"]["input_tokens"], 10);
+        assert_eq!(body["usage"]["output_tokens"], 4);
+        assert_eq!(body["usage"]["cost"], 0.01);
+        assert!(body.get("provider").is_none());
+        assert!(body["usage"].get("provider_trace").is_none());
     }
 
     /// `/v1/responses` streaming: a lifecycle event carries the response object
