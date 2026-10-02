@@ -630,6 +630,37 @@ fn chat_input() -> CompletionInput {
     }
 }
 
+fn systemone_input() -> CompletionInput {
+    let params = json!({
+        "model": "gpt-test",
+        "state": { "message": "export failed" },
+        "questions": {
+            "kind": {
+                "type": "choice",
+                "instructions": "Classify the issue",
+                "criteria": { "platform": "outage", "billing": null }
+            }
+        },
+        "stream": true
+    });
+    CompletionInput {
+        endpoint: Endpoint::SystemOne,
+        endpoint_path: "/v1/systemone",
+        surface: Surface::Openai,
+        received_body: serde_json::to_vec(&params).unwrap(),
+        params,
+        api_key_hash: Some("deadbeef".to_string()),
+        requester: None,
+        e2ee: None,
+        aci_required: false,
+        aci_session_ids: Vec::new(),
+        request_id: "req-systemone".to_string(),
+        user_model: Some("gpt-test".to_string()),
+        stream: false,
+        tee_only: false,
+    }
+}
+
 fn responses_input(stream: bool) -> CompletionInput {
     let params = json!({
         "model": "gpt-test",
@@ -731,6 +762,63 @@ async fn buffered_success_hides_which_upstream_served_it() {
     assert_eq!(body["choices"][0]["message"]["content"], json!("hi"));
     assert_eq!(body["choices"][0]["finish_reason"], json!("stop"));
     assert_eq!(body["usage"]["completion_tokens"], json!(1));
+}
+
+#[tokio::test]
+async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
+    let (control_url, _) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "acme:model-a",
+                "format": "openai",
+                "supportedEndpoints": ["/v1/systemone"]
+            }],
+            "pricing": { "inputCostPerToken": "1", "outputCostPerToken": "2" }
+        }),
+    )
+    .await;
+    let upstream = br#"{
+        "model":"internal-model",
+        "answers":{"kind":{"type":"choice","choice":"platform","vendor_detail":"keep"}},
+        "usage":{"input_tokens":2,"output_tokens":3,"provider_trace":"drop"},
+        "provider":"drop"
+    }"#;
+    let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
+
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["model"], json!("gpt-test"));
+    assert_eq!(body["answers"]["kind"]["vendor_detail"], json!("keep"));
+    assert_eq!(body["usage"]["input_tokens"], json!(2));
+    assert_eq!(body["usage"]["output_tokens"], json!(3));
+    assert_eq!(body["usage"]["cost"], json!(8));
+    assert!(body.get("provider").is_none());
+    assert!(body["usage"].get("provider_trace").is_none());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path.as_deref(), Some("/v1/systemone"));
+    assert_eq!(
+        requests[0].body,
+        json!({
+            "model": "gpt-test",
+            "state": { "message": "export failed" },
+            "questions": {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Classify the issue",
+                    "criteria": { "platform": "outage", "billing": null }
+                }
+            }
+        })
+    );
 }
 
 #[tokio::test]

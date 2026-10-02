@@ -22,7 +22,7 @@ use crate::aci::types::{
 };
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
@@ -510,6 +510,21 @@ pub(super) async fn responses(
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
 }
 
+pub(super) async fn systemone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if has_e2ee_headers(&headers) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE v2 is not supported on /v1/systemone",
+        );
+    }
+    openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
+}
+
 #[derive(Debug, Default)]
 struct AciConstraint {
     required: bool,
@@ -781,6 +796,7 @@ pub(super) async fn openai_completion_endpoint(
             EMBEDDINGS_PATH => Endpoint::Embed,
             MESSAGES_PATH => Endpoint::Messages,
             RESPONSES_PATH => Endpoint::CreateModelResponse,
+            SYSTEMONE_PATH => Endpoint::SystemOne,
             _ => Endpoint::ChatComplete,
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);

@@ -2,11 +2,11 @@
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-09-28.
+Last reviewed: 2026-10-02.
 
 ## Implemented
 
-- OpenAI chat, completions, embeddings, and Responses endpoints, and Anthropic Messages.
+- OpenAI chat, completions, embeddings, Responses, and native System One endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
 - Runtime upstream replacement: validated, redacted, atomically persisted, prewarmed, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
@@ -68,7 +68,6 @@ These are gaps in the implementation. What ACI does not cover by design is in
 
 ### API, clients, and control plane
 
-- Native structured decisions through `POST /v1/systemone`; see the [System One design proposal](systemone-design.md). The endpoint is not implemented.
 - Optional receipt and session-policy checks in `pap curl`.
 - Define or reject an Anthropic Messages E2EE profile.
 - Responses API conformance tests, and live coverage for streaming, tools, structured output, multimodal input, context limits, and caching.
