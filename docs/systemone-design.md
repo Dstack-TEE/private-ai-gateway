@@ -9,9 +9,10 @@ decision models. It is not an API reference, an ACI protocol change, or a claim
 that any model is available in a confidential deployment. The
 [HTTP API reference](api-reference.md) remains the source for implemented routes.
 
-Design constraint: reuse the existing inference pipeline. Add only the route
-and published endpoint-specific request and response fields, not a separate
-decision engine, business validator, middleware format, or control-plane API.
+Design constraint: reuse the existing inference pipeline. Add the route, native
+field tables, and a System One support check in the existing candidate loop.
+Do not add a separate decision engine, business validator, capability framework,
+middleware format, or control-plane API.
 
 ## Existing work and compatibility target
 
@@ -28,14 +29,17 @@ The external protocol already exists:
 - [TypeSafe's HTTP API](https://docs.typesafe.ai/api) accepts state and typed
   questions at `POST /v1/systemone`.
 - [OpenRouter's System One API](https://openrouter.ai/docs/api/api-reference/systemone/submit-a-system-one-request)
-  exposes the same success contract at `POST /api/v1/systemone`.
+  exposes the core decision contract at `POST /api/v1/systemone`, with extensions
+  such as request `session_id`, `user`, `provider`, and `trace`, and response
+  `id`, `provider`, and `usage.cost`.
 - [Kev](https://github.com/jaredpalmer/kev) provides an open-weight, Apache-2.0
-  model family and a server that accepts TypeSafe SDK decision calls.
+  model family and a server that accepts official TypeSafe Python SDK decision
+  calls.
 
-The proposed target is the published decision request and answer shapes through
-the gateway's existing policies. Full SDK compatibility, including model
-identity, discovery, and error handling, needs verification; it must not be
-inferred from a matching success body.
+The proposed target is the core decision request and answer shapes through
+the gateway's existing policies, not every provider extension. Full SDK
+compatibility, including model identity, discovery, and error handling, needs
+verification; it must not be inferred from a matching success body.
 
 ## Decision and scope
 
@@ -75,14 +79,15 @@ follow the [existing rules](api-reference.md#require-aci-verification), includin
 the current extraction and stripping behavior in each topology. Do not add a
 System One routing block or change how other provider fields are handled.
 
-Each question requires `type` and `instructions`. Instructions and rubric
+Each question identifies its primitive with `type`. Instructions and rubric
 descriptions can contain strings, objects, or arrays; do not flatten them into
-chat messages. The primitive contracts are:
+chat messages. TypeSafe requires `instructions`; Kev makes it optional. The
+published primitive contracts are:
 
 | Type | Criteria | Answer |
 | --- | --- | --- |
 | [`choice`](https://docs.typesafe.ai/primitives/choice) | Option-name map; descriptions may also be `null`. TypeSafe documents a maximum of 255 options. | Selected option, probabilities for all options, and confidence. |
-| [`score`](https://docs.typesafe.ai/primitives/score) | Ordered array of 2–10 rubric descriptions. | Probability-weighted, zero-based score, legend, probabilities, and confidence. |
+| [`score`](https://docs.typesafe.ai/primitives/score) | Ordered rubric descriptions; TypeSafe documents 2–10 levels, Kev supports 1–255. | Probability-weighted, zero-based score, legend, probabilities, and confidence. |
 | [`noul`](https://docs.typesafe.ai/primitives/noul) | Optional descriptions under `true` and `false`. | Probability of yes, between 0 and 1. |
 
 These are upstream protocol descriptions, not new gateway-wide limits. Shape
@@ -129,11 +134,17 @@ gateway. `kev-4b` would need an explicitly configured catalog entry:
 
 ### Response
 
-Return native `model`, `answers`, and `usage` fields through the same buffered
-response pipeline as other endpoints. Add the published System One fields to
-the endpoint-specific canonicalizer so chat allowlists do not discard them.
-Preserve structured answers, legends, probabilities, and confidence rather than
-converting them to chat choices or explanations.
+Preserve native `model`, `answers`, and `usage` instead of converting them to
+chat choices or explanations. Keep the existing processing in each topology:
+
+- Direct-upstream mode uses buffered passthrough. Do not add canonicalization,
+  identity rewriting, or gateway cost injection to this path.
+- Middleware mode uses its existing JSON decoding, identity rewriting, pricing,
+  and canonicalization. Add a System One branch retaining top-level `model`,
+  `answers`, and `usage`, and usage fields `input_tokens`, `output_tokens`, and
+  gateway-owned `cost`. Preserve `answers` as content without nested allowlists,
+  including answer `type`, `noul`, legends, probabilities, and confidence. This
+  follows the existing Responses treatment of structured output content.
 
 The gateway does not recompute weighted scores, enforce an argmax choice, check
 probability sums, or reinterpret a model's decision. Those are model semantics,
@@ -152,19 +163,27 @@ Pass confidence through unchanged. It is a
 [distribution-derived statistic](https://docs.typesafe.ai/confidence), not a
 guarantee of correctness or an interchangeable maximum probability.
 
-Reuse the existing usage resolver, which already recognizes `input_tokens` and
-`output_tokens`, pricing, and the gateway-owned `usage.cost` extension. Keep
-actual counters even when the output price is zero. Post-consult receives raw
-provider usage before client cost injection, just as on other endpoints.
+In middleware mode, reuse the existing usage resolver, which already recognizes
+`input_tokens` and `output_tokens`, pricing, and the gateway-owned `usage.cost`
+extension. Keep actual counters even when the output price is zero. Post-consult
+receives raw provider usage before client cost injection, just as on other
+endpoints. Direct-upstream responses retain the provider's usage unchanged.
 
 ### Errors and retries
 
-Use the existing OpenAI-style gateway error envelope, upstream-status mapping,
-sanitization, ordered candidate handling, and failure accounting. Do not add
-System One-specific status codes, validation errors, retry rules, or idempotency
-semantics. Provider question-validation errors go through the same sanitized
-upstream error path as errors from other endpoints. ACI refusals and receipt
-ownership retain their existing behavior.
+Keep the current error behavior in each topology. Middleware uses the existing
+OpenAI-style gateway error envelope, upstream-status mapping, sanitization,
+ordered candidate handling, and failure accounting. Direct-upstream mode
+preserves upstream error bodies and statuses; it does not gain middleware
+sanitization. Gateway validation and ACI refusals keep their existing handling.
+
+Do not add System One-specific status codes, validation errors, retry rules, or
+idempotency semantics. The current middleware failover set is
+`401`, `402`, `403`, `404`, `429`, `500`, `502`, `503`, and `504`; request errors
+such as `400`, `405`, and `422` do not advance to another candidate. In
+particular, upstream `529` is not a failover or capacity-retry signal: middleware
+maps it to `502`, while direct-upstream mode preserves `529`. Retain and document
+this compatibility difference rather than adding a special retry policy.
 
 ## Integration with this gateway
 
@@ -197,10 +216,22 @@ format and endpoint. An Anthropic-only route cannot shape this request and uses
 the existing unsupported-format handling.
 
 Declare native support using the existing `supportedEndpoints` field with
-`/v1/systemone`, and use the shared candidate-selection path. Unsupported
-candidates must not trigger a newly invented chat bridge. Chat reasoning and
-engine transforms remain limited to the endpoint branches that already use
-them.
+`/v1/systemone`. This metadata is not automatically enforced for every endpoint:
+the reviewed [`build_candidates`](../src/middleware/request_transform.rs) loop
+currently calls `supports_endpoint` only for native Responses selection. Add a
+System One-only check using the same helper in that loop, skipping candidates
+that omit `/v1/systemone`. Then use the existing format shaping and skip-on-error
+behavior, preserving candidate order. Only a declared native route that can
+shape this endpoint is eligible.
+
+If all candidates are excluded, use the existing
+[empty-candidate failure path](../src/aggregator/service/middleware.rs); if
+shaping fails for all candidates, retain the existing transform error path.
+Neither case forwards a request, chooses a default route, or bridges to chat.
+Do not rely on an incompatible upstream returning `404`, since `400`, `405`,
+and `422` would stop failover. This is an endpoint predicate, not a new routing
+framework or control-plane protocol. Chat reasoning and engine transforms
+remain limited to the endpoint branches that already use them.
 
 Feature extraction returns no chat features for System One, following the
 existing Embeddings/Responses pattern. Do not invent state-derived token
@@ -214,9 +245,10 @@ variant for Jev or Kev: a model protocol is not a new attestation mechanism.
 
 ### Catalog and SDK boundary
 
-Advertise only configured models with a usable native route, and keep TEE-only
-catalog filtering. A generic decision-model label is not enough to prove
-endpoint compatibility.
+Use the existing catalog configuration and TEE-only filtering. Configure a
+decision model only after establishing that its route implements the native
+endpoint; a generic decision-model label is not enough. No new catalog
+validation or discovery mechanism is proposed.
 
 Preserve the existing OpenAI `GET /v1/models` contract. TypeSafe model discovery
 expects a `models` array with a different entry shape. Decide and test a
@@ -247,15 +279,18 @@ client changes under [Contributing](../CONTRIBUTING.md#aci-wire-or-cryptography)
 | Slice | Deliverable and evidence |
 | --- | --- |
 | Native endpoint | Route, endpoint dispatch, native request and response fields, and credential-free mock-upstream tests through the existing direct and middleware paths. |
-| Middleware | Existing format and capability fields, unchanged pre-consult wire shape, shared failure handling, pricing, identity handling, and content-free reports. |
-| ACI regression coverage | Verified success, missing verifier, binding mismatch, rejected session ID, TEE-only downgrade attempt, receipt hashes, and ownership checks. |
-| SDK compatibility | Mixed-primitive decision calls using pinned official Python and JavaScript SDK versions against a local fixture, including structured criteria and common errors. Record the tested versions and the public-model identity policy; discovery remains separate. |
+| Middleware | Consume existing capability metadata in the candidate loop: skip an unsupported candidate, serve through a later eligible candidate, and fail without forwarding when none qualify. Keep pre-consult unchanged and reuse failure handling, pricing, identity handling, and content-free reports. |
+| ACI integration | One verified success with matching receipt hashes and one fail-closed rejection on the new endpoint. Reuse the existing shared suites for binding, session, TEE-only, and ownership coverage rather than duplicating them. |
+| SDK compatibility | Mixed-primitive decision calls using a pinned official TypeSafe Python SDK against a local fixture, including structured criteria and common errors. Record the tested version and public-model identity policy; discovery and unverified SDKs remain separate. |
 
 Contract tests should cover preservation of question IDs, option order,
-structured criteria, and native answer fields; shared usage and error handling;
-buffered-only operation; and unsupported E2EE. Verify that the adapter forwards
-model-provided scores and probabilities without recomputing them. Existing chat,
-Messages, Responses, embeddings, catalogs, and receipt tests must remain
+structured criteria, and native answer fields; topology-specific usage and error
+handling, including `529`; buffered-only operation; and unsupported E2EE. Verify
+that middleware preserves complete answer content while filtering top-level and
+usage fields, and that direct-upstream mode retains the original body and
+status. Forward model-provided scores and probabilities without recomputing
+them. Existing chat, Messages, Responses, embeddings, catalogs, and receipt
+tests must remain
 unchanged in behavior. Model evaluation and provider admission are separate
 tasks, not additional endpoint logic.
 
