@@ -611,6 +611,14 @@ fn canonicalize_systemone(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
+    if object.get("type").and_then(Value::as_str) == Some("error")
+        && object.get("error").is_none_or(Value::is_null)
+    {
+        object.insert("error".into(), Value::Object(object.clone()));
+    }
+    if object.get("error").is_some_and(Value::is_null) {
+        object.remove("error");
+    }
     retain_allowed(object, SYSTEMONE_TOP);
     sanitize_error(object.get_mut("error"));
     if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
