@@ -783,6 +783,7 @@ async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
         "model":"internal-model",
         "answers":{"kind":{"type":"choice","choice":"platform","vendor_detail":"keep"}},
         "usage":{"input_tokens":2,"output_tokens":3,"provider_trace":"drop"},
+        "error":null,
         "provider":"drop"
     }"#;
     let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
@@ -801,6 +802,7 @@ async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
     assert_eq!(body["usage"]["cost"], json!(8));
     assert!(body.get("provider").is_none());
     assert!(body["usage"].get("provider_trace").is_none());
+    assert_eq!(body.as_object().unwrap().len(), 3);
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -846,6 +848,85 @@ async fn systemone_unsupported_candidates_never_forward() {
     assert_eq!(status, 404);
     assert!(body.get("error").is_some());
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn systemone_non_2xx_uses_public_error_contract() {
+    for upstream_status in [400, 422] {
+        let control_url = spawn_control(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{
+                    "routeId": "acme:model-a", "format": "openai",
+                    "supportedEndpoints": ["/v1/systemone"]
+                }]
+            }),
+        )
+        .await;
+        let upstream = json!({
+            "error": { "message": "question q1 is invalid", "raw": "secret-detail" },
+            "trace": "secret-trace"
+        });
+        let (service, requests) = build_recording_service(
+            upstream_status,
+            serde_json::to_vec(&upstream).unwrap(),
+            "application/json",
+        );
+        let (status, _, body) = response_parts(
+            middleware(control_url)
+                .handle_completion(&service, systemone_input())
+                .await,
+        )
+        .await;
+
+        assert_eq!(status, upstream_status);
+        assert_eq!(
+            body,
+            json!({ "error": {
+            "type": "invalid_request_error", "message": "question q1 is invalid",
+            "code": null, "param": null
+        } })
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn systemone_top_level_inband_error_uses_public_error_contract() {
+    for code in [400, 422] {
+        let control_url = spawn_control(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{
+                    "routeId": "acme:model-a", "format": "openai",
+                    "supportedEndpoints": ["/v1/systemone"]
+                }]
+            }),
+        )
+        .await;
+        let upstream = json!({
+            "type": "error", "code": code, "message": "question q1 is invalid",
+            "trace": "secret-trace"
+        });
+        let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
+        let (status, _, body) = response_parts(
+            middleware(control_url)
+                .handle_completion(&service, systemone_input())
+                .await,
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            body,
+            json!({ "error": {
+            "type": "invalid_request_error", "message": "question q1 is invalid",
+            "code": code, "param": null
+        } })
+        );
+    }
 }
 
 #[tokio::test]
