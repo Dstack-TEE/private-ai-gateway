@@ -223,6 +223,10 @@ impl UpstreamBackend for RecordingUpstream {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "x-typesafe-request-id".to_string(),
+            "upstream-id".to_string(),
+        );
         Ok(UpstreamResponse {
             status_code: 200,
             body: self.response_body.clone(),
@@ -1813,6 +1817,9 @@ async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_rece
     let resp = h.requester.post("/v1/systemone", request, &[]).await;
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(resp.body, SYSTEMONE_RESPONSE);
+    let request_id = header(&resp.headers, "x-typesafe-request-id");
+    assert!(request_id.starts_with("req_"));
+    assert_ne!(request_id, "upstream-id");
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "false");
     let receipt_id = header(&resp.headers, "x-receipt-id");
 

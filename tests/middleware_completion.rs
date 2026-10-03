@@ -85,7 +85,13 @@ impl UpstreamBackend for RecordingUpstream {
         Ok(UpstreamResponse {
             status_code: self.status,
             body: self.body.clone(),
-            headers: HashMap::from([("content-type".to_string(), self.content_type.to_string())]),
+            headers: HashMap::from([
+                ("content-type".to_string(), self.content_type.to_string()),
+                (
+                    "x-typesafe-request-id".to_string(),
+                    "upstream-id".to_string(),
+                ),
+            ]),
             served_instance_id: None,
         })
     }
@@ -709,6 +715,7 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
 ];
 
 fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
+    assert!(!headers.contains_key("x-typesafe-request-id"));
     for (name, _) in LEAKY_UPSTREAM_HEADERS {
         assert!(
             headers.get(*name).is_none(),
@@ -788,13 +795,14 @@ async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
     }"#;
     let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
 
-    let (status, _, body) = response_parts(
+    let (status, headers, body) = response_parts(
         middleware(control_url)
             .handle_completion(&service, systemone_input())
             .await,
     )
     .await;
     assert_eq!(status, 200);
+    assert_eq!(headers["x-typesafe-request-id"], "req-systemone");
     assert_eq!(body["model"], json!("gpt-test"));
     assert_eq!(body["answers"]["kind"]["vendor_detail"], json!("keep"));
     assert_eq!(body["usage"]["input_tokens"], json!(2));
