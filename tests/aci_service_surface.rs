@@ -220,6 +220,10 @@ impl UpstreamBackend for RecordingUpstream {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "x-typesafe-request-id".to_string(),
+            "upstream-id".to_string(),
+        );
         Ok(UpstreamResponse {
             status_code: 200,
             body: self.response_body.clone(),
@@ -1022,7 +1026,7 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 async fn e2ee_v2_is_rejected_on_prompt_endpoints_without_a_v2_field_contract() {
     let h = harness_with_e2ee(RecordingUpstream::default());
 
-    for path in ["/v1/messages", "/v1/responses"] {
+    for path in ["/v1/messages", "/v1/responses", "/v1/systemone"] {
         let resp = h
             .requester
             .post(path, CHAT_REQUEST, &[("x-e2ee-version", "2")])
@@ -1616,12 +1620,13 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// /v1/completions and /v1/embeddings surfaces (plaintext)
+// /v1/completions, /v1/embeddings, and /v1/systemone surfaces (plaintext)
 // ---------------------------------------------------------------------------
 
 const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
 const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
     br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
+const SYSTEMONE_RESPONSE: &[u8] = br#"{"model":"aci-model","answers":{"kind":{"type":"choice","choice":"platform"}},"usage":{"input_tokens":3,"output_tokens":2},"provider_trace":"keep-in-direct-mode"}"#;
 
 #[tokio::test]
 async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
@@ -1721,6 +1726,41 @@ async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     assert_eq!(
         payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(EMBEDDINGS_PLAIN_RESPONSE)
+    );
+}
+
+#[tokio::test]
+async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(SYSTEMONE_RESPONSE));
+    let request = br#"{"model":"aci-model","state":{"message":"export failed"},"questions":{"kind":{"type":"choice","instructions":"Classify the issue","criteria":{"platform":"outage","billing":null}}},"stream":true}"#;
+
+    let resp = h.requester.post("/v1/systemone", request, &[]).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, SYSTEMONE_RESPONSE);
+    let request_id = header(&resp.headers, "x-typesafe-request-id");
+    assert!(request_id.starts_with("req_"));
+    assert_ne!(request_id, "upstream-id");
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "false");
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/systemone"));
+        assert_eq!(calls[0].body, request);
+    }
+
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/systemone");
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(request)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(SYSTEMONE_RESPONSE)
     );
 }
 

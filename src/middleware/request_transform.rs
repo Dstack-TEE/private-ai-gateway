@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -36,6 +37,7 @@ pub enum Endpoint {
     Embed,
     Messages,
     CreateModelResponse,
+    SystemOne,
 }
 
 impl Endpoint {
@@ -47,6 +49,7 @@ impl Endpoint {
             Endpoint::Embed => EMBEDDINGS_PATH,
             Endpoint::Messages => MESSAGES_PATH,
             Endpoint::CreateModelResponse => RESPONSES_PATH,
+            Endpoint::SystemOne => SYSTEMONE_PATH,
         }
     }
 
@@ -57,6 +60,7 @@ impl Endpoint {
             Endpoint::Embed => "embed",
             Endpoint::Messages => "messages",
             Endpoint::CreateModelResponse => "createModelResponse",
+            Endpoint::SystemOne => "systemOne",
         }
     }
 }
@@ -240,6 +244,14 @@ pub fn build_candidates(
     let mut shaped: Vec<(String, Value, Endpoint)> = Vec::new();
     let mut first_error: Option<TransformError> = None;
     for candidate in candidates {
+        if endpoint == Endpoint::SystemOne && !candidate.supports_endpoint(SYSTEMONE_PATH) {
+            tracing::debug!(
+                route_id = %candidate.route_id,
+                endpoint = SYSTEMONE_PATH,
+                "candidate does not declare native endpoint support; skipping"
+            );
+            continue;
+        }
         let (upstream_endpoint, body) = match responses {
             Some(responses) if candidate.supports_endpoint(RESPONSES_PATH) => (
                 Endpoint::CreateModelResponse,
@@ -613,10 +625,11 @@ fn select_config(
         (Openai, Embed) => openai_embed_config(),
         (Openai, Messages) => openai_to_anthropic_messages_config(),
         (Openai, CreateModelResponse) => openai_create_model_response_config(),
+        (Openai, SystemOne) => openai_systemone_config(),
         (Anthropic, Complete) => anthropic_complete_config(),
         (Anthropic, ChatComplete) => anthropic_chat_complete_config(),
         (Anthropic, Messages) => anthropic_messages_config(),
-        (Anthropic, Embed) | (Anthropic, CreateModelResponse) => {
+        (Anthropic, Embed) | (Anthropic, CreateModelResponse) | (Anthropic, SystemOne) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }
     };
@@ -1439,6 +1452,10 @@ fn openai_create_model_response_config() -> ProviderConfig {
     );
     config.extend([p!("input", required), p!("model", required)]);
     config
+}
+
+fn openai_systemone_config() -> ProviderConfig {
+    pass!("model", "state", "questions")
 }
 
 // ── Responses API → OpenAI chat.completion request ───────────────────────────
@@ -2448,6 +2465,60 @@ mod tests {
     }
 
     #[test]
+    fn systemone_preserves_native_request_fields() {
+        let params = json!({
+            "model": "kev-4b",
+            "state": { "message": "export failed" },
+            "questions": {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Classify the issue",
+                    "criteria": { "platform": "outage", "billing": null }
+                }
+            },
+            "provider": { "aci_verified": true },
+            "stream": true
+        });
+        let output = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &params,
+            Endpoint::SystemOne,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(output["model"], params["model"]);
+        assert_eq!(output["state"], params["state"]);
+        assert_eq!(output["questions"], params["questions"]);
+        assert!(output.get("provider").is_none());
+        assert!(output.get("stream").is_none());
+    }
+
+    #[test]
+    fn systemone_preserves_wire_object_order() {
+        let params: Value = serde_json::from_str(
+            r#"{"model":"kev-4b","state":{"2":"first","10":"second"},"questions":{"2":{"type":"choice","criteria":{"2":"first","10":"second"}},"10":{"type":"noul"}}}"#,
+        )
+        .unwrap();
+        let output = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &params,
+            Endpoint::SystemOne,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output["state"].to_string(),
+            r#"{"2":"first","10":"second"}"#
+        );
+        assert_eq!(
+            output["questions"].to_string(),
+            r#"{"2":{"type":"choice","criteria":{"2":"first","10":"second"}},"10":{"type":"noul"}}"#
+        );
+    }
+
+    #[test]
     fn build_candidates_skips_unshapeable_and_keeps_rest() {
         let params = json!({ "model": "m", "input": "x" });
         let shapeable = |id: &str| RouteCandidate {
@@ -2483,6 +2554,52 @@ mod tests {
         // 400 the all-or-nothing version produced.
         let err = build_candidates(&params, Endpoint::Embed, &[unshapeable], None, None);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn build_candidates_filters_systemone_capability_without_reordering() {
+        let params = json!({
+            "model": "kev-4b",
+            "state": "hello",
+            "questions": { "ok": { "type": "noul" } }
+        });
+        let candidate = |id: &str, supported: Vec<&str>| RouteCandidate {
+            route_id: id.into(),
+            supported_endpoints: supported.into_iter().map(str::to_string).collect(),
+            format: ProviderFormat::Openai,
+            engine: None,
+            reasoning_format: None,
+            reasoning_policy: None,
+        };
+        let bodies = build_candidates(
+            &params,
+            Endpoint::SystemOne,
+            &[
+                candidate("chat-only", vec![]),
+                candidate("systemone-a", vec![SYSTEMONE_PATH]),
+                candidate("systemone-b", vec![SYSTEMONE_PATH]),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            bodies
+                .iter()
+                .map(|(id, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["systemone-a", "systemone-b"]
+        );
+        assert!(build_candidates(
+            &params,
+            Endpoint::SystemOne,
+            &[candidate("chat-only", vec![])],
+            None,
+            None,
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]

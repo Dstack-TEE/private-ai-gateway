@@ -1,6 +1,6 @@
 # System One endpoint: design proposal
 
-Status: proposed; not implemented.
+Status: implemented.
 
 Reviewed: 2026-10-02. Gateway revision: `ef26e16d222a238e68633dd3522fde9f62ddae4f`.
 
@@ -68,9 +68,9 @@ upstream returning a retryable error.
   without adding middleware identity rewriting, canonicalization, or pricing.
 - Middleware mode retains existing JSON decoding, public-model identity,
   pricing, and sanitized errors. Add a canonicalizer retaining top-level
-  `model`, `answers`, and `usage`, with `input_tokens`, `output_tokens`, and
-  existing `cost` handling under usage. Preserve `answers` without nested
-  allowlists.
+  `model`, `answers`, `usage`, and shared sanitized in-band `error`, with
+  `input_tokens`, `output_tokens`, and existing `cost` handling under usage.
+  Preserve `answers` without nested allowlists.
 - Keep post-consult usage and failure accounting unchanged, with raw usage
   captured before cost injection and no state, questions, or answers reported.
 
@@ -103,8 +103,5 @@ Use credential-free fixtures to verify:
 - mixed-primitive calls through a pinned official TypeSafe Python SDK.
 
 Existing endpoint, catalog, and receipt behavior must remain unchanged.
-When implementation lands, update the [HTTP API reference](api-reference.md),
-[control-plane contract](control-plane-contract.md), and any changed
-[configuration fields](configuration-reference.md) in the same change.
-Move the feature out of the [roadmap](roadmap.md) only when code, tests, and
-living references agree.
+Keep the [HTTP API reference](api-reference.md), [control-plane contract](control-plane-contract.md),
+and [roadmap](roadmap.md) in sync with code and tests.
