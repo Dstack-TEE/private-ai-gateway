@@ -35,6 +35,17 @@ use std::sync::Arc;
 use crate::aggregator::service::AciService;
 use errors::Surface;
 
+/// Stamp the native SDK header from the same gateway identity used for billing.
+pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {
+    if path == crate::aggregator::service::SYSTEMONE_PATH {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            response
+                .headers_mut()
+                .insert("x-typesafe-request-id", value);
+        }
+    }
+}
+
 /// Middleware handle held by the gateway's app state.
 pub struct Middleware {
     control: ControlClient,
@@ -109,7 +120,9 @@ impl Middleware {
         service: &Arc<AciService>,
         input: CompletionInput,
     ) -> Response {
-        completion::run(
+        let request_id = input.request_id.clone();
+        let endpoint_path = input.endpoint_path;
+        let mut response = completion::run(
             &self.control,
             service,
             self.sse_keepalive_ms,
@@ -117,7 +130,9 @@ impl Middleware {
             &self.prefix_hash_key,
             input,
         )
-        .await
+        .await;
+        apply_request_id_header(&mut response, endpoint_path, &request_id);
+        response
     }
 }
 
