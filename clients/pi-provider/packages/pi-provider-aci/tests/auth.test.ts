@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createApiKeyAuth } from "../src/auth.ts";
+import { createAccountOAuthAuth, createApiKeyAuth } from "../src/auth.ts";
 import { resolveProfile } from "../src/profile.ts";
 
 test("native auth prefers stored credentials over the configured API key environment", async () => {
@@ -101,4 +101,113 @@ test("branded account login remains optional alongside the native API-key prompt
   });
   assert.deepEqual(manual, { type: "api_key", key: "manual-key" });
   assert.equal(accountLogins, 1);
+});
+
+test("account OAuth auth exposes device login in the account sign-in list", async () => {
+  let accountLogins = 0;
+  const notifications: unknown[] = [];
+  const oauth = createAccountOAuthAuth(
+    resolveProfile({
+      providerId: "brand",
+      label: "Brand Cloud",
+      apiKeyEnv: "BRAND_API_KEY",
+    }),
+    {
+      label: "Brand Cloud account",
+      async start() {
+        return {
+          url: "https://brand.test/device",
+          presentation: {
+            type: "device_code" as const,
+            userCode: "ABCD-EFGH",
+            intervalSeconds: 2,
+            expiresInSeconds: 60,
+          },
+          async complete(options) {
+            accountLogins += 1;
+            options?.onProgress?.("Waiting for authorization...");
+            return { apiKey: "account-issued" };
+          },
+        };
+      },
+    },
+  );
+  const signal = new AbortController().signal;
+
+  const before = Date.now();
+  const credential = await oauth.login({
+    signal,
+    notify(event) {
+      notifications.push(event);
+    },
+    async prompt() {
+      throw new Error("account login must not prompt");
+    },
+  });
+  assert.equal(credential.type, "oauth");
+  assert.equal(credential.apiKey, "account-issued");
+  assert.equal(typeof credential.expires, "number");
+  assert.ok(credential.expires > before);
+  assert.equal(accountLogins, 1);
+  assert.deepEqual(notifications, [
+    {
+      type: "device_code",
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://brand.test/device",
+      intervalSeconds: 2,
+      expiresInSeconds: 60,
+    },
+    { type: "progress", message: "Waiting for authorization..." },
+  ]);
+
+  // Request auth derives from the issued key stored in the credential.
+  assert.deepEqual(await oauth.toAuth(credential), { apiKey: "account-issued" });
+
+  // Refresh only re-arms the validity window; the issued key is unchanged.
+  const refreshed = await oauth.refresh(credential, signal);
+  assert.equal(refreshed.apiKey, "account-issued");
+  assert.ok(refreshed.expires >= credential.expires);
+
+  await assert.rejects(
+    oauth.toAuth({ type: "oauth", access: "", refresh: "", expires: credential.expires }),
+    /missing its API key/,
+  );
+});
+
+test("account OAuth auth notifies an authorization URL for non-device flows", async () => {
+  const notifications: unknown[] = [];
+  const oauth = createAccountOAuthAuth(
+    resolveProfile({ providerId: "brand", label: "Brand Cloud", apiKeyEnv: "BRAND_API_KEY" }),
+    {
+      label: "Brand Cloud account",
+      async start() {
+        return {
+          url: "https://brand.test/authorize",
+          instructions: "Approve in the browser",
+          presentation: { type: "authorization_url" as const },
+          async complete() {
+            return { apiKey: "browser-issued" };
+          },
+        };
+      },
+    },
+  );
+
+  const credential = await oauth.login({
+    signal: new AbortController().signal,
+    notify(event) {
+      notifications.push(event);
+    },
+    async prompt() {
+      throw new Error("account login must not prompt");
+    },
+  });
+  assert.equal(credential.apiKey, "browser-issued");
+  assert.deepEqual(notifications, [
+    {
+      type: "auth_url",
+      url: "https://brand.test/authorize",
+      instructions: "Approve in the browser",
+    },
+  ]);
 });

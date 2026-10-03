@@ -25,19 +25,18 @@ import type {
 import * as piAi from "@earendil-works/pi-ai";
 import {
   createProvider as createPiProvider,
+  type Context,
   type Model,
   type Provider,
 } from "@earendil-works/pi-ai";
 import { type SettingItem, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
-import {
-  createAciProvider,
-  formatAciInspection,
-  inspectAciProvider,
-  type AccountApiKeyAuth,
-  type AciModel,
-  type AciInspectionRequest,
-  type AciProvider,
-  type AciProviderProfile,
+import type {
+  AccountApiKeyAuth,
+  AciModel,
+  AciInspectionRequest,
+  AciProvider,
+  AciProviderConfig,
+  AciProviderProfile,
 } from "@phala/aci-provider";
 import os from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -52,10 +51,11 @@ import {
   saveProjectAciCloudConfig,
   toAciProviderConfig,
 } from "./src/config.ts";
-import { createApiKeyAuth } from "./src/auth.ts";
+import { createAccountOAuthAuth, createApiKeyAuth } from "./src/auth.ts";
 import { PROVIDER_VERSION } from "./src/constants.ts";
 import { DEFAULT_PROFILE, resolveProfile, type ProviderProfile } from "./src/profile.ts";
-import { mapAciModelToPi } from "./src/models.ts";
+import { mapAciModelToPi, resolveModelCompatOverride } from "./src/models.ts";
+import { contextForResolvedPi } from "./src/pi-context.ts";
 import { isAciProjectConfigApproved } from "./src/project-trust.ts";
 import {
   closeAciProvider,
@@ -70,11 +70,21 @@ import {
   settingsTitle,
 } from "./src/settings-ui.ts";
 
+import {
+  auditCatalogModels,
+  unauditableModelMessage,
+  type ModelAuditStatus,
+} from "./src/model-audit.ts";
+import { translateAciError, translateResponseErrors } from "./src/errors.ts";
+
 interface AciRuntimeState extends AciConnectionState<AciProvider> {
   profile: ProviderProfile;
   config: AciCloudConfig;
   accountAuth: AccountApiKeyAuth | undefined;
   overrides?: AciCloudConfigPatch;
+  /** Registration-time per-model upstream audit (ACI §8.1), empty until the
+   * first audit completes; models absent from the map are not yet audited. */
+  modelAudit: Map<string, ModelAuditStatus>;
 }
 
 export interface CreatePiAciProviderOptions {
@@ -100,18 +110,18 @@ function isOpenAICompletionsApi(api: unknown): api is OpenAICompletionsApi {
 }
 
 // Pi exposes compat stream factories at the root module for extensions while
-// managed installs intentionally omit Pi peer packages.
+// managed installs intentionally omit Pi peer packages. pi >= 0.80.8 removed
+// the root re-export in plain-Node resolution, so fall back to the lazy
+// factory wired to the ./api/* subpath (same implementation, loaded on first
+// use). Mirrors pi-provider-kimi-code's runtime detection.
 function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
-  if (!("openAICompletionsApi" in piAi)) {
-    throw new Error("Pi does not provide the OpenAI Completions API");
-  }
-  const factory = piAi.openAICompletionsApi;
-  if (typeof factory !== "function") {
-    throw new Error("Pi provides an invalid OpenAI Completions API factory");
-  }
-  const api: unknown = factory();
+  const factory = (piAi as typeof piAi & { openAICompletionsApi?: unknown }).openAICompletionsApi;
+  const api: unknown =
+    typeof factory === "function"
+      ? factory()
+      : piAi.lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions"));
   if (!isOpenAICompletionsApi(api)) {
-    throw new Error("Pi provides an invalid OpenAI Completions API");
+    throw new Error("Pi does not provide the OpenAI Completions API");
   }
   return api;
 }
@@ -119,10 +129,23 @@ function getHostOpenAICompletionsApi(): OpenAICompletionsApi {
 function providerFetch(state: AciRuntimeState): typeof globalThis.fetch {
   return async (input, init) => {
     await ensureAciConnection(state, () => createAciProvider(toAciProviderConfig(state.config)));
-    if (state.provider) return state.provider.fetch(input, init);
-    throw new Error(
-      `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
-    );
+    if (!state.provider) {
+      throw translateAciError(
+        new Error(
+          `${state.profile.logPrefix} inference blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
+        ),
+        state.profile.providerId,
+      );
+    }
+    try {
+      const response = await state.provider.fetch(input, init);
+      // Receipt verification runs at end-of-stream inside the response body;
+      // wrap it so those failures surface as actionable messages, not raw
+      // auditor output mid-turn.
+      return translateResponseErrors(response, state.profile.providerId);
+    } catch (error) {
+      throw translateAciError(error, state.profile.providerId);
+    }
   };
 }
 
@@ -136,7 +159,24 @@ async function refreshAciModels(
       `${state.profile.logPrefix} model discovery blocked because no verified ACI connection is available: ${state.connectionError ?? "verification has not completed"}`,
     );
   }
-  return state.provider.discoverModels({ signal });
+  const models = await state.provider.discoverModels({ signal });
+  // Registration-time upstream audit (§8.1/§9.2): tag models whose upstream
+  // sessions cannot be deep-audited so selection warns and the stream guard
+  // blocks before the first prompt instead of mid-turn on a receipt failure.
+  // Fire-and-forget: audit latency must not stall registration, and a failed
+  // audit degrades to "unknown" rather than breaking the catalog.
+  auditCatalogModels({
+    baseUrl: state.config.baseUrl,
+    fetch: state.provider.fetch,
+    modelIds: models.map((model) => model.id),
+  })
+    .then((audit) => {
+      state.modelAudit = audit;
+    })
+    .catch(() => {
+      // auditCatalogModels never rejects; defensive only.
+    });
+  return models;
 }
 
 function toPiModels(
@@ -144,7 +184,7 @@ function toPiModels(
   models: readonly AciModel[],
 ): Model<"openai-completions">[] {
   return models.map((model) => ({
-    ...mapAciModelToPi(model),
+    ...mapAciModelToPi(model, resolveModelCompatOverride(state.config, model.id)),
     api: "openai-completions",
     provider: state.profile.providerId,
     baseUrl: state.config.baseUrl,
@@ -154,19 +194,55 @@ function toPiModels(
 function nativeAciProvider(state: AciRuntimeState): Provider<"openai-completions"> {
   const streams = getHostOpenAICompletionsApi();
   const fetch = providerFetch(state);
+  // Account login (device code / auth URL) is surfaced as Pi account sign-in
+  // (`auth.oauth`) so it shows up in the "Sign in with an account" login list.
+  const accountOAuth = state.accountAuth
+    ? createAccountOAuthAuth(state.profile, state.accountAuth)
+    : undefined;
   return createPiProvider({
     id: state.profile.providerId,
     name: state.profile.label,
     baseUrl: state.config.baseUrl,
-    auth: { apiKey: createApiKeyAuth(state.profile, state.accountAuth) },
+    auth: {
+      apiKey: createApiKeyAuth(state.profile, accountOAuth ? undefined : state.accountAuth),
+      ...(accountOAuth ? { oauth: accountOAuth } : {}),
+    },
     models: [],
     async fetchModels({ signal }) {
       return toPiModels(state, await refreshAciModels(state, signal));
     },
     api: {
-      stream: (model, context, options) => streams.stream(model, context, { ...options, fetch }),
-      streamSimple: (model, context, options) =>
-        streams.streamSimple(model, context, { ...options, fetch }),
+      stream: (model, context, options) => {
+        if (state.modelAudit.get(model.id) === "unauditable") {
+          throw new Error(unauditableModelMessage(state.profile.label, model.id));
+        }
+        return streams.stream(model, contextForResolvedPi(piAi, context) as Context, {
+          ...options,
+          fetch,
+        });
+      },
+      streamSimple: (model, context, options) => {
+        if (state.modelAudit.get(model.id) === "unauditable") {
+          throw new Error(unauditableModelMessage(state.profile.label, model.id));
+        }
+        const prepared = contextForResolvedPi(piAi, context);
+        // pi-ai < 0.86 streamSimple estimates system-message content as blocks
+        // and throws on a transcript. Map reasoning here and call stream(),
+        // which still understands the folded Context shape.
+        if (prepared !== context) {
+          const reasoning = options?.reasoning;
+          const clamp = (piAi as { clampThinkingLevel?: (model: unknown, level: string) => string })
+            .clampThinkingLevel;
+          const clamped = reasoning && typeof clamp === "function" ? clamp(model, reasoning) : reasoning;
+          const reasoningEffort = !clamped || clamped === "off" ? undefined : clamped;
+          return streams.stream(model, prepared as Context, {
+            ...options,
+            fetch,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          });
+        }
+        return streams.streamSimple(model, context, { ...options, fetch });
+      },
     },
   });
 }
@@ -235,6 +311,7 @@ async function openSettingsMenu(
     const refreshValues = () => {
       list.updateValue("scope", scope);
       list.updateValue("isTeeOnly", drafts[scope].models.isTeeOnly ? "true" : "false");
+      list.updateValue("receiptVerification", drafts[scope].receipts.verification);
     };
 
     const save = () => {
@@ -267,6 +344,12 @@ async function openSettingsMenu(
         save();
         return;
       }
+      if (id === "receiptVerification") {
+        drafts[scope].receipts.verification = newValue as "response" | "on-demand";
+        list.updateValue(id, newValue);
+        save();
+        return;
+      }
     };
 
     const scopeItem: SettingItem = {
@@ -287,6 +370,17 @@ async function openSettingsMenu(
         description: "Only register models served confidentially (is_tee === true)",
         currentValue: drafts[scope].models.isTeeOnly ? "true" : "false",
         values: ["true", "false"],
+      },
+      {
+        id: "receiptVerification",
+        label: "Receipt verification",
+        description:
+          "response: verify every response receipt and block the turn on " +
+          "failure (fail-closed, the ACI default). on-demand: record receipts " +
+          "and verify manually via the receipt command — responses are never " +
+          "blocked.",
+        currentValue: drafts[scope].receipts.verification,
+        values: ["response", "on-demand"],
       },
     ];
 
@@ -332,6 +426,8 @@ async function runInspectionCommand(
     if (!state.provider) {
       throw new Error(state.connectionError ?? "no verified connection is available");
     }
+    const { inspectAciProvider, formatAciInspection } =
+      await import("@phala/aci-provider/inspection");
     const result = await inspectAciProvider(state.provider, request);
     ctx.ui.notify(formatAciInspection(result, { providerLabel: state.profile.label }), "info");
   } catch (error) {
@@ -369,21 +465,42 @@ export function createProvider({
       connectionError: undefined,
       renderConnectionStatus: undefined,
       overrides,
+      modelAudit: new Map(),
     };
     registerAciProvider(pi, state);
+
+    pi.on("model_select", (event, ctx) => {
+      if (event.model.provider !== state.profile.providerId) return;
+      if (state.modelAudit.get(event.model.id) === "unauditable") {
+        ctx.ui.notify(unauditableModelMessage(state.profile.label, event.model.id), "warning");
+      }
+    });
 
     pi.on("session_start", async (_event, ctx) => {
       state.renderConnectionStatus = () => updateFooter(ctx, state);
       state.renderConnectionStatus?.();
       const projectTrusted = isAciProjectConfigApproved(ctx);
       applyEffectiveConfig(pi, state, ctx.cwd, projectTrusted);
-      try {
+      // Seed the catalog only when Pi has no stored copy: attestation +
+      // /v1/models costs seconds of network and quote-verification CPU, so
+      // steady-state launches stay lazy (catalog hydrates from Pi's
+      // models-store, /model picker and post-login refresh cover updates,
+      // first inference connects on demand via providerFetch). A missing
+      // catalog entry means first run — refresh once so headless
+      // `pi --model <provider>/<id> -p` can resolve models.
+      await ctx.modelRegistry.refresh({
+        providers: [state.profile.providerId],
+        allowNetwork: false,
+      });
+      const hasCatalog = ctx.modelRegistry
+        .getAll()
+        .some((model) => model.provider === state.profile.providerId);
+      if (!hasCatalog) {
         await ctx.modelRegistry.refresh({
           providers: [state.profile.providerId],
         });
-      } finally {
-        state.renderConnectionStatus?.();
       }
+      state.renderConnectionStatus?.();
     });
 
     pi.on("session_shutdown", async () => {
@@ -457,5 +574,21 @@ export const PROVIDER_ID = DEFAULT_PROFILE.providerId;
 export { PROVIDER_VERSION };
 export { resolveProfile as getProviderProfile } from "./src/profile.ts";
 export { loadAciCloudConfig } from "./src/config.ts";
-export { discoverAciModels, mapAciModelToPi, mapAciServerModel } from "./src/models.ts";
-export { createAciProvider } from "@phala/aci-provider";
+export {
+  discoverAciModels,
+  mapAciModelToPi,
+  mapAciServerModel,
+  resolveModelCompatOverride,
+  BUILTIN_MODEL_COMPAT_OVERRIDES,
+} from "./src/models.ts";
+export type { ModelCompatOverride } from "./src/models.ts";
+
+/**
+ * Lazily load the heavyweight ACI provider implementation (pulls the
+ * attestation/verifier dependency chain). Kept async so importing this
+ * package stays cheap for hosts that never open a verified connection.
+ */
+export async function createAciProvider(config: AciProviderConfig): Promise<AciProvider> {
+  const { createAciProvider: create } = await import("@phala/aci-provider/provider");
+  return create(config);
+}
