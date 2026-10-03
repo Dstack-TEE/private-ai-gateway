@@ -68,9 +68,9 @@ upstream returning a retryable error.
   without adding middleware identity rewriting, canonicalization, or pricing.
 - Middleware mode retains existing JSON decoding, public-model identity,
   pricing, and sanitized errors. Add a canonicalizer retaining top-level
-  `model`, `answers`, and `usage`, with `input_tokens`, `output_tokens`, and
-  existing `cost` handling under usage. Preserve `answers` without nested
-  allowlists.
+  `model`, `answers`, `usage`, and shared sanitized in-band `error`, with
+  `input_tokens`, `output_tokens`, and existing `cost` handling under usage.
+  Preserve `answers` without nested allowlists.
 - Keep post-consult usage and failure accounting unchanged, with raw usage
   captured before cost injection and no state, questions, or answers reported.
 

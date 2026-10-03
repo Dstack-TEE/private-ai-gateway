@@ -822,6 +822,78 @@ async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
 }
 
 #[tokio::test]
+async fn systemone_unsupported_candidates_never_forward() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "acme:chat", "format": "openai" },
+                { "routeId": "acme:responses", "format": "openai",
+                  "supportedEndpoints": ["/v1/responses"] }
+            ]
+        }),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert!(body.get("error").is_some());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn systemone_preserves_sanitized_inband_errors() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "acme:model-a",
+                "format": "openai",
+                "supportedEndpoints": ["/v1/systemone"]
+            }]
+        }),
+    )
+    .await;
+    let upstream = json!({
+        "model": "internal-model",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "question q1 is invalid",
+            "metadata": { "provider_name": "secret-provider" }
+        },
+        "trace": "secret-trace"
+    });
+    let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["model"], "gpt-test");
+    assert_eq!(
+        body["error"],
+        json!({
+            "type": "invalid_request_error",
+            "message": "question q1 is invalid",
+            "param": null,
+            "code": 400
+        })
+    );
+    assert!(body.get("trace").is_none());
+}
+
+#[tokio::test]
 async fn streamed_success_hides_which_upstream_served_it() {
     // Same-format streaming is the path that relayed provider bytes verbatim,
     // so it gets its own end-to-end check rather than only a unit test.
