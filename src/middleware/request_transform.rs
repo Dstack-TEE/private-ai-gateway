@@ -2557,6 +2557,30 @@ mod tests {
     }
 
     #[test]
+    fn systemone_preserves_wire_object_order() {
+        let params: Value = serde_json::from_str(
+            r#"{"model":"kev-4b","state":{"2":"first","10":"second"},"questions":{"2":{"type":"choice","criteria":{"2":"first","10":"second"}},"10":{"type":"noul"}}}"#,
+        )
+        .unwrap();
+        let output = transform_to_provider_request(
+            ProviderFormat::Openai,
+            &params,
+            Endpoint::SystemOne,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            output["state"].to_string(),
+            r#"{"2":"first","10":"second"}"#
+        );
+        assert_eq!(
+            output["questions"].to_string(),
+            r#"{"2":{"type":"choice","criteria":{"2":"first","10":"second"}},"10":{"type":"noul"}}"#
+        );
+    }
+
+    #[test]
     fn build_candidates_skips_unshapeable_and_keeps_rest() {
         let params = json!({ "model": "m", "input": "x" });
         let shapeable = |id: &str| RouteCandidate {

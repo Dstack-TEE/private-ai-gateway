@@ -2019,6 +2019,22 @@ mod identity_tests {
         assert!(body["usage"].get("provider_trace").is_none());
     }
 
+    #[test]
+    fn canonicalize_systemone_preserves_wire_answer_order() {
+        let mut body: Value = serde_json::from_str(
+            r#"{"model":"kev-4b","answers":{"2":{"type":"choice","probabilities":{"2":0.9,"10":0.1}},"10":{"type":"noul","noul":0.5}},"provider":"drop"}"#,
+        )
+        .unwrap();
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(
+            body["answers"].to_string(),
+            r#"{"2":{"type":"choice","probabilities":{"2":0.9,"10":0.1}},"10":{"type":"noul","noul":0.5}}"#
+        );
+        assert!(body.get("provider").is_none());
+    }
+
     /// `/v1/responses` streaming: a lifecycle event carries the response object
     /// nested under `response`. Its identity is rewritten and its interior
     /// canonicalized, while the envelope's own control fields (`type`,
