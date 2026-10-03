@@ -581,7 +581,7 @@ const RESPONSES_USAGE: &[&str] = &[
     "cost_details",
 ];
 
-const SYSTEMONE_TOP: &[&str] = &["model", "answers", "usage"];
+const SYSTEMONE_TOP: &[&str] = &["model", "answers", "usage", "error"];
 const SYSTEMONE_USAGE: &[&str] = &["input_tokens", "output_tokens", "cost"];
 
 /// Reduce a response to the gateway's documented output schema for `endpoint`,
@@ -612,6 +612,7 @@ fn canonicalize_systemone(body: &mut Value) {
         return;
     };
     retain_allowed(object, SYSTEMONE_TOP);
+    sanitize_error(object.get_mut("error"));
     if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
         retain_allowed(usage, SYSTEMONE_USAGE);
     }
@@ -1946,6 +1947,30 @@ mod identity_tests {
         assert_eq!(
             body["error"],
             json!({ "code": "server_error", "message": "The upstream provider returned an error" })
+        );
+    }
+
+    #[test]
+    fn canonicalize_systemone_suppresses_private_account_errors() {
+        let mut body = json!({
+            "model": "kev-4b",
+            "error": {
+                "type": "billing_error",
+                "message": "secret-provider account credit balance too low",
+                "raw": "private account detail"
+            }
+        });
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(
+            body["error"],
+            json!({
+                "type": "upstream_error",
+                "message": "The upstream provider returned an error",
+                "param": null,
+                "code": 502
+            })
         );
     }
 
