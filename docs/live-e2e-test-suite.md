@@ -222,6 +222,7 @@ Optional fields are:
 | `chutes_chute_ids` | Map from upstream model to known chute identifier. |
 | `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |
 | `chutes_e2ee_discovery_interval_seconds` | Delay between Chutes discovery passes. |
+| `accepted_subjects` | Upstream `accepted_subjects` pins, for example the `tdx-measurement:sha256:` pins `armet-ai` requires. |
 
 Example:
 

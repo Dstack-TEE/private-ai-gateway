@@ -79,6 +79,7 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::ArmetAi.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
     assert_eq!(
         UpstreamProvider::OpenAiCompatible.attestation_scope(),
@@ -87,6 +88,74 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
     assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
+}
+
+#[test]
+fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
+    let pin = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+    let config_with = |subjects: &str, base_url: &str| {
+        format!(
+            r#"[{{
+              "name": "tdx-a",
+              "provider": "armet-ai",
+              "base_url": "{base_url}",
+              "models": {{"public-model": "upstream-model"}}{subjects}
+            }}]"#
+        )
+    };
+
+    let ok = parse_config_text(&config_with(
+        &format!(r#", "accepted_subjects": ["{pin}"]"#),
+        "https://model.example",
+    ))
+    .expect("a pinned HTTPS armet-ai upstream is valid");
+    assert_eq!(ok[0].provider, UpstreamProvider::ArmetAi);
+    assert_eq!(ok[0].accepted_subjects, Some(vec![pin.clone()]));
+
+    // An unpinned TD must never load: the bridge would otherwise have nothing
+    // to compare the measured MRTD/RTMRs against.
+    for subjects in ["", r#", "accepted_subjects": []"#] {
+        let err = parse_config_text(&config_with(subjects, "https://model.example"))
+            .expect_err("armet-ai without a pin must be rejected");
+        assert!(
+            err.to_string()
+                .contains("requires at least one accepted_subjects"),
+            "{subjects:?}: {err}"
+        );
+    }
+
+    for bad in [
+        "app-id:0xabc".to_string(),
+        format!("tdx-measurement:sha256:{}", "AB".repeat(32)),
+        format!("tdx-measurement:sha256:{}", "ab".repeat(31)),
+        format!("tdx-measurement:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(
+            &format!(r#", "accepted_subjects": ["{pin}", "{bad}"]"#),
+            "https://model.example",
+        ))
+        .expect_err("malformed armet-ai pin must be rejected");
+        assert!(
+            err.to_string().contains("must be tdx-measurement:sha256:"),
+            "{bad:?}: {err}"
+        );
+    }
+
+    for base_url in [
+        "http://model.example",
+        "https://user@model.example",
+        "https://model.example/v1",
+    ] {
+        let err = parse_config_text(&config_with(
+            &format!(r#", "accepted_subjects": ["{pin}"]"#),
+            base_url,
+        ))
+        .expect_err("armet-ai must reject an origin the verifier cannot bind");
+        assert!(
+            err.to_string().contains("requires a root HTTPS base_url"),
+            "{base_url:?}: {err}"
+        );
+    }
 }
 
 #[test]

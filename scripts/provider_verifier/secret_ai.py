@@ -39,6 +39,7 @@ from .common import (
     raw_http_bundle_evidence,
     raw_http_item,
     request_timeout_seconds,
+    verified_nras_gpu_claims,
     verifier_id_for,
 )
 
@@ -239,32 +240,7 @@ def _require_current_cpu_tcb(
 
 
 def _verified_gpu_claims(gpu_result: Any, gpu_nonce: str) -> tuple[list[str], int]:
-    report = getattr(gpu_result, "report", None)
-    if not isinstance(report, dict):
-        raise ValueError("SecretAI NRAS result is missing its signed report")
-    if report.get("overall_result") is not True:
-        raise ValueError("SecretAI NRAS signed overall attestation result is not true")
-    verified_nonce = str(report.get("nonce") or "").lower()
-    if not _HEX_32_RE.fullmatch(verified_nonce) or not hmac.compare_digest(
-        verified_nonce, gpu_nonce
-    ):
-        raise ValueError("SecretAI NRAS nonce does not match the CPU-bound GPU nonce")
-
-    gpu_reports = report.get("gpus")
-    if not isinstance(gpu_reports, dict) or not gpu_reports:
-        raise ValueError("SecretAI NRAS result contains no signed per-GPU reports")
-    models: set[str] = set()
-    for gpu_id, gpu_report in gpu_reports.items():
-        if not isinstance(gpu_report, dict):
-            raise ValueError(f"SecretAI NRAS report for GPU {gpu_id!r} is malformed")
-        if gpu_report.get("attestation_report_nonce_match") is not True:
-            raise ValueError(
-                f"SecretAI NRAS report for GPU {gpu_id!r} does not verify the nonce"
-            )
-        model = gpu_report.get("model")
-        if isinstance(model, str) and model:
-            models.add(model)
-    return sorted(models), len(gpu_reports)
+    return verified_nras_gpu_claims(gpu_result, gpu_nonce, "SecretAI")
 
 
 def _resolve_tdx_workload(cpu_report: dict[str, Any], compose: bytes) -> set[_PinnedWorkload]:

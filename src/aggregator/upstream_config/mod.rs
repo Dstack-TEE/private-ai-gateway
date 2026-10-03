@@ -168,6 +168,10 @@ pub enum UpstreamProvider {
     NearAi,
     SecretAi,
     PhalaDirect,
+    /// A per-model Intel TDX endpoint outside dstack, pinned by its measured TD
+    /// (`accepted_subjects`), with mandatory NRAS-verified GPU evidence, and
+    /// bound to its attested TLS SPKI.
+    ArmetAi,
 }
 
 impl UpstreamProvider {
@@ -179,7 +183,7 @@ impl UpstreamProvider {
                 AttestationScope::PerRouter
             }
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
-            UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            UpstreamProvider::PhalaDirect | UpstreamProvider::ArmetAi => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
             // prewarm probe granularity. Per-model is the safe default — it

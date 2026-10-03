@@ -14,9 +14,10 @@ use crate::aci::upstream::{
     OpenAICompatibleBackend, UpstreamBackend,
 };
 use crate::aci::verifier::{
-    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
-    NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ArmetAiProviderVerifier,
+    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
+    PreverifiedUpstreamVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
+    TinfoilProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -79,7 +80,8 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => true,
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::ArmetAi => true,
     }
 }
 
@@ -114,7 +116,8 @@ fn build_provider_backend(
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => {
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::ArmetAi => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(
                 cfg.base_url.clone(),
                 connect_timeout_seconds,
@@ -271,6 +274,15 @@ fn build_provider_verifier(
                     request_timeout_seconds,
                     cache_seconds,
                 );
+                if let Some(token) = &cfg.bearer_token {
+                    verifier = verifier.with_bearer_token(token.clone());
+                }
+                Some(Arc::new(verifier))
+            }
+            UpstreamProvider::ArmetAi => {
+                let mut verifier =
+                    ArmetAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                        .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
                 }

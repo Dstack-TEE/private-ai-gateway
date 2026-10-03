@@ -173,6 +173,8 @@ def build_upstream_config(
             value = getattr(provider, field)
             if value is not None and value != {}:
                 item[field] = value
+        if provider.accepted_subjects:
+            item["accepted_subjects"] = list(provider.accepted_subjects)
         config.append(item)
     return config
 

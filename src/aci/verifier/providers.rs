@@ -387,6 +387,84 @@ impl UpstreamVerifier for PhalaDirectProviderVerifier {
     }
 }
 
+/// Verifier for `ArmetAi` upstreams: a per-model Intel TDX endpoint that is
+/// not dstack-based. The external bridge fetches a nonce-bound report, verifies
+/// the quote with dcap-qvl, requires the verified report_data to commit to the
+/// nonce, TLS SPKI, GPU evidence and model id, requires the measured TD
+/// (MRTD/RTMR0..3 and launch configuration) to match an operator pin, and
+/// requires NRAS-verified GPU evidence. It returns a `tls_spki_sha256` binding that the
+/// [`OpenAICompatibleBackend`] pins on the forward connection.
+#[derive(Debug, Clone)]
+pub struct ArmetAiProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl ArmetAiProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "armet-ai",
+                UpstreamProvider::ArmetAi.attestation_scope(),
+                timeout_seconds,
+                cache_ttl_seconds,
+            ),
+        }
+    }
+
+    /// Bearer token sent on the attestation report request, when the provider
+    /// requires authorization there.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.verifier = self.verifier.with_option("armet_ai_bearer_token", token);
+        self
+    }
+
+    /// Measurement pins (`tdx-measurement:sha256:<hex>`). The bridge fails
+    /// closed when none are configured.
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        for subject in subjects {
+            self.verifier = self.verifier.with_option(
+                format!("armet_ai_accepted_subject:{}", subject.to_ascii_lowercase()),
+                "true",
+            );
+        }
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "armet-ai",
+                UpstreamProvider::ArmetAi.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for ArmetAiProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
 struct RoutedUpstreamVerifier {
     origin: String,
     verifier: Arc<dyn UpstreamVerifier>,
