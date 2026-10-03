@@ -96,6 +96,8 @@ struct ProviderCall {
     x_e2e_nonce: Option<String>,
     x_e2e_stream: Option<String>,
     x_e2e_path: Option<String>,
+    x_client_request_id: Option<String>,
+    x_request_id: Option<String>,
     body: Vec<u8>,
     decrypted_body: Option<Value>,
 }
@@ -129,6 +131,8 @@ async fn chat_handler(
         x_e2e_nonce: None,
         x_e2e_stream: None,
         x_e2e_path: None,
+        x_client_request_id: None,
+        x_request_id: None,
         body: body.to_vec(),
         decrypted_body: None,
     });
@@ -174,6 +178,8 @@ async fn embeddings_handler(
         x_e2e_nonce: None,
         x_e2e_stream: None,
         x_e2e_path: None,
+        x_client_request_id: None,
+        x_request_id: None,
         body: body.to_vec(),
         decrypted_body: None,
     });
@@ -314,6 +320,14 @@ async fn chutes_invoke_handler(
             .map(str::to_string),
         x_e2e_path: headers
             .get("x-e2e-path")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_client_request_id: headers
+            .get("x-client-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_request_id: headers
+            .get("x-request-id")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string),
         body: body.to_vec(),
@@ -1013,6 +1027,12 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
     assert_eq!(call.x_e2e_nonce.as_deref(), Some(CHUTES_NONCE));
     assert_eq!(call.x_e2e_stream.as_deref(), Some("false"));
     assert_eq!(call.x_e2e_path.as_deref(), Some("/v1/chat/completions"));
+    let upstream_request_id = call.x_request_id.as_deref().unwrap();
+    assert!(upstream_request_id.starts_with("ureq_"));
+    assert_eq!(
+        call.x_client_request_id.as_deref(),
+        Some(upstream_request_id)
+    );
     assert_ne!(call.body, PROVIDER_CHAT_REQUEST);
     assert_eq!(
         call.decrypted_body.as_ref().unwrap()["model"],

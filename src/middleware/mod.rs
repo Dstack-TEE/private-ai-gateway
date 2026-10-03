@@ -109,7 +109,8 @@ impl Middleware {
         service: &Arc<AciService>,
         input: CompletionInput,
     ) -> Response {
-        completion::run(
+        let request_id = input.request_id.clone();
+        let mut response = completion::run(
             &self.control,
             service,
             self.sse_keepalive_ms,
@@ -117,7 +118,12 @@ impl Middleware {
             &self.prefix_hash_key,
             input,
         )
-        .await
+        .await;
+        response.headers_mut().insert(
+            "x-request-id",
+            HeaderValue::from_str(&request_id).expect("generated request id is a valid header"),
+        );
+        response
     }
 }
 

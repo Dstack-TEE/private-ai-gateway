@@ -3,6 +3,7 @@
 //! candidates, and successful forwarding through receipt finalization.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +66,58 @@ struct RecordingUpstream {
     status: u16,
     body: Vec<u8>,
     content_type: &'static str,
+}
+
+type RequestHeaderList = Arc<Mutex<Vec<HashMap<String, String>>>>;
+
+struct RequestIdUpstream {
+    requests: RequestHeaderList,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamBackend for RequestIdUpstream {
+    fn name(&self) -> &str {
+        "request-id-upstream"
+    }
+
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://request-id-upstream.example")
+    }
+
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        self.requests.lock().unwrap().push(req.headers);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (status_code, provider_header) = match call {
+            0 => (502, Some(("x-request-id", "provider-first"))),
+            1 => (502, None),
+            _ => (200, Some(("cf-ray", "provider-third"))),
+        };
+        let mut headers =
+            HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        if let Some((name, value)) = provider_header {
+            headers.insert(name.to_string(), value.to_string());
+        }
+        let body = if status_code == 200 {
+            br#"{"id":"upstream-id","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec()
+        } else {
+            br#"{"error":{"message":"unavailable"}}"#.to_vec()
+        };
+        Ok(UpstreamResponse {
+            status_code,
+            body,
+            headers,
+            served_instance_id: None,
+        })
+    }
+
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward(req.request).await
+    }
 }
 
 #[async_trait]
@@ -364,6 +417,26 @@ fn build_recording_service(
                 status,
                 body,
                 content_type,
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    (service, requests)
+}
+
+fn build_request_id_service() -> (Arc<AciService>, RequestHeaderList) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(RequestIdUpstream {
+                requests: requests.clone(),
+                calls: AtomicUsize::new(0),
             }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -677,13 +750,21 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
     ("set-cookie", "edge_sess=0893731c1786104409;path=/"),
 ];
 
-fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
+fn assert_no_upstream_headers(headers: &axum::http::HeaderMap, request_id: &str) {
     for (name, _) in LEAKY_UPSTREAM_HEADERS {
+        if *name == "x-request-id" {
+            continue;
+        }
         assert!(
             headers.get(*name).is_none(),
             "{name} reached the client; response headers must be an allowlist"
         );
     }
+    assert_eq!(headers.get("x-request-id").unwrap(), request_id);
+    assert_ne!(
+        headers.get("x-request-id").unwrap(),
+        "fa57b5a8-4967-4e5c-9ab8-103a9feeeb14"
+    );
 }
 
 async fn raw_body(response: axum::response::Response) -> (axum::http::HeaderMap, String) {
@@ -723,7 +804,7 @@ async fn buffered_success_hides_which_upstream_served_it() {
     let (status, headers, body) =
         response_parts(mw.handle_completion(&service, chat_input()).await).await;
     assert_eq!(status, 200);
-    assert_no_upstream_headers(&headers);
+    assert_no_upstream_headers(&headers, "req-1");
     assert_eq!(body["id"], json!("req-1"));
     assert_eq!(body["model"], json!("gpt-test"));
     assert!(body["choices"][0].get("matched_stop").is_none());
@@ -756,7 +837,7 @@ async fn streamed_success_hides_which_upstream_served_it() {
     input.stream = true;
 
     let (headers, body) = raw_body(mw.handle_completion(&service, input).await).await;
-    assert_no_upstream_headers(&headers);
+    assert_no_upstream_headers(&headers, "req-1");
     assert!(!body.contains("matched_stop"), "{body}");
     assert!(!body.contains("vendor-model-int"), "{body}");
     assert!(!body.contains("b4fa5a1dc59c4b41"), "{body}");
@@ -765,6 +846,70 @@ async fn streamed_success_hides_which_upstream_served_it() {
     // Framing and content survive intact.
     assert!(body.contains(r#""content":"hi""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+}
+
+#[tokio::test]
+async fn upstream_attempt_ids_are_unique_and_report_provider_ids_per_attempt() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "openai:first", "format": "openai" },
+                { "routeId": "openai:second", "format": "openai" },
+                { "routeId": "openai:third", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let (service, requests) = build_request_id_service();
+
+    let (status, _, body) =
+        response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 200, "{body}");
+
+    let upstream_ids: Vec<_> = {
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let ids: Vec<_> = requests
+            .iter()
+            .map(|headers| {
+                let client_id = headers.get("X-Client-Request-Id").unwrap();
+                assert!(client_id.starts_with("ureq_"));
+                assert_eq!(headers.get("X-Request-Id"), Some(client_id));
+                assert_ne!(client_id, "req-1");
+                client_id.clone()
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+        ids
+    };
+
+    for _ in 0..40 {
+        if posts.lock().unwrap().len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let reports = posts.lock().unwrap().clone();
+    let attempts: Vec<_> = reports
+        .iter()
+        .filter(|report| report["requestId"] == "req-1")
+        .collect();
+    assert_eq!(attempts.len(), 3, "{reports:?}");
+    let by_index: HashMap<_, _> = attempts
+        .iter()
+        .map(|report| (report["attemptIndex"].as_u64().unwrap(), *report))
+        .collect();
+    assert_eq!(by_index[&0]["upstreamRequestId"], upstream_ids[0]);
+    assert_eq!(by_index[&0]["providerRequestId"], "provider-first");
+    assert_eq!(by_index[&1]["upstreamRequestId"], upstream_ids[1]);
+    assert!(by_index[&1].get("providerRequestId").is_none());
+    assert_eq!(by_index[&2]["upstreamRequestId"], upstream_ids[2]);
+    assert_eq!(by_index[&2]["providerRequestId"], "provider-third");
 }
 
 #[tokio::test]
@@ -1808,6 +1953,8 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1862,7 +2009,8 @@ async fn malformed_2xx_body_returns_502_upstream() {
     let service = build_service_with_upstream(200, b"<html>not json</html>".to_vec());
     let input = chat_input();
 
-    let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, body) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(headers.get("x-request-id").unwrap(), "req-1");
     assert_eq!(
         status, 502,
         "malformed 2xx must not be a fabricated success"
@@ -1909,11 +2057,16 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
     // pass and this stays a test about attribution. 429 would take the delayed
     // capacity-retry path, which the capacity_retry_* suite covers on its own.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"error":"unavailable"}"#.to_vec(),
+        vec![("request-id", "provider-stream-error")],
+    );
     let mut input = chat_input();
     input.stream = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    assert_eq!(headers.get("x-request-id").unwrap(), "req-1");
     assert_eq!(status, 503, "the upstream status must reach the client");
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
@@ -1924,6 +2077,11 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     );
     assert_eq!(report["isStreaming"], json!(true));
     assert_eq!(report["attemptIndex"], json!(0));
+    assert!(report["upstreamRequestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("ureq_"));
+    assert_eq!(report["providerRequestId"], "provider-stream-error");
     // The record names the failure's class; the upstream's body stays out of it.
     assert_eq!(report["errorMessage"], json!("upstream_http_error"));
     // A real upstream attempt, not a gateway-generated failure: error_source
@@ -2483,6 +2641,8 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
@@ -2549,6 +2709,8 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
@@ -3292,6 +3454,8 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3484,6 +3648,8 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: abort.clone(),
@@ -3813,6 +3979,39 @@ async fn streaming_upstream_error_text_stays_out_of_reports_and_logs() {
 }
 
 #[tokio::test]
+async fn streamed_in_band_error_response_has_gateway_request_id() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "openai:gpt", "format": "openai" }]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream_headers(
+        200,
+        format!("data: {{\"error\":{{\"message\":\"{CANARY}\"}}}}\n\ndata: [DONE]\n\n")
+            .into_bytes(),
+        vec![("x-request-id", "provider-stream-success")],
+    );
+    let mut input = chat_input();
+    input.stream = true;
+
+    let response = mw.handle_completion(&service, input).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("x-request-id").unwrap(), "req-1");
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(!body.is_empty());
+    let report = wait_for_post(&posts, |report| report["requestId"] == "req-1").await;
+    assert!(report["upstreamRequestId"]
+        .as_str()
+        .unwrap()
+        .starts_with("ureq_"));
+    assert_eq!(report["providerRequestId"], "provider-stream-success");
+}
+
+#[tokio::test]
 async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     captured_logs();
     // A 200 stream failed by an in-band error event settles as
@@ -3840,6 +4039,8 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         selected_route_id: Some("openai:gpt".to_string()),
         attempt_index: 0,
         upstream_status: 200,
+        upstream_request_id: "ureq_test".to_string(),
+        provider_request_id: None,
         prefix_hash: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),

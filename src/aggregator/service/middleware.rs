@@ -6,6 +6,7 @@ use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
 use super::forward::{attested_route_eligible, cite_served_session, ReverifyOutcome};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
+    generate_upstream_request_id, provider_request_id, trace_upstream_attempt,
 };
 use super::streaming::{
     E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
@@ -153,6 +154,8 @@ pub(super) struct BufferedCommit {
     pub path: &'static str,
     pub middleware_forwarded_body: Vec<u8>,
     pub forwarded_body: Vec<u8>,
+    pub upstream_request_id: String,
+    pub provider_request_id: Option<String>,
 }
 
 /// The request/response context observed for one forwarded candidate,
@@ -233,6 +236,8 @@ impl AciService {
             path,
             middleware_forwarded_body,
             forwarded_body,
+            upstream_request_id,
+            provider_request_id,
         } = commit;
         let status = response.status_code;
 
@@ -273,6 +278,8 @@ impl AciService {
                 upstream_status: status,
                 upstream_body: response.body,
                 upstream_headers: response.headers,
+                upstream_request_id,
+                provider_request_id,
                 selected_route: route_id,
                 selected_path: path,
                 failed_attempts,
@@ -294,6 +301,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let request_id = req.context.request_id.clone();
         // The user-requested model, recorded as the receipt's top-level `model`.
         let user_model = req.context.user_model.clone();
         let mode = if stream {
@@ -371,14 +379,29 @@ impl AciService {
                 let route_id = candidate.route_id.clone();
                 let is_last = index == last_index;
                 let attempt_started = Instant::now();
+                let attempt_index = failed_attempts.len() as u32;
+                let upstream_request_id = generate_upstream_request_id();
                 // Mirrored into the journal as well as the local list: the
                 // local list reaches the caller only through the forward
                 // result, which a request cancelled mid-walk never sees.
-                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>,
+                               status: u16,
+                               trace_status: u16,
+                               provider_id: Option<String>| {
+                    trace_upstream_attempt(
+                        &request_id,
+                        attempt_index,
+                        &route_id,
+                        trace_status,
+                        &upstream_request_id,
+                        provider_id.as_deref(),
+                    );
                     let attempt = FailedAttempt {
                         route_id: route_id.clone(),
                         status,
                         duration_ms: attempt_started.elapsed().as_millis() as u64,
+                        upstream_request_id: upstream_request_id.clone(),
+                        provider_request_id: provider_id,
                     };
                     receipt_journal.record_abandoned(attempt.clone());
                     failed_attempts.push(attempt);
@@ -389,15 +412,21 @@ impl AciService {
                 // attributed to it.
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
+                let mut attempt_headers = upstream_headers.clone();
+                attempt_headers.insert(
+                    "X-Client-Request-Id".to_string(),
+                    upstream_request_id.clone(),
+                );
+                attempt_headers.insert("X-Request-Id".to_string(), upstream_request_id.clone());
                 let prepared = match self.upstream.prepare(UpstreamRequest {
                     body: candidate.body.clone(),
-                    headers: upstream_headers.clone(),
+                    headers: attempt_headers,
                     path: Some(candidate.path.to_string()),
                     target_route_id: Some(route_id.clone()),
                 }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -406,7 +435,7 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, 502, None);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
@@ -444,7 +473,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -517,12 +546,14 @@ impl AciService {
                     let upstream_response = match upstream_response {
                         Ok(response) => response,
                         Err(status) => {
-                            abandon(&mut failed_attempts, status);
+                            abandon(&mut failed_attempts, status, status, None);
                             continue;
                         }
                     };
 
                     let status = upstream_response.status_code;
+                    let upstream_headers = upstream_response.headers;
+                    let provider_id = provider_request_id(&upstream_headers);
                     if status != 200 {
                         self.metrics.record_upstream_response(
                             endpoint_path,
@@ -534,7 +565,6 @@ impl AciService {
                         // decision can inspect it. A truncated/unreadable error body
                         // must not abort the remaining candidates, so it degrades to
                         // empty — the caller's normalizer emits its generic message.
-                        let upstream_headers = upstream_response.headers;
                         let upstream_body = collect_upstream_body(upstream_response.body)
                             .await
                             .unwrap_or_default();
@@ -558,21 +588,38 @@ impl AciService {
                                     upstream_status: status,
                                     upstream_headers,
                                     upstream_body,
+                                    upstream_request_id: upstream_request_id.clone(),
+                                    provider_request_id: provider_id.clone(),
                                 },
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            abandon(&mut failed_attempts, attempt_status);
+                            abandon(
+                                &mut failed_attempts,
+                                attempt_status,
+                                status,
+                                provider_id.clone(),
+                            );
                             continue;
                         }
                         self.metrics
                             .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
+                        trace_upstream_attempt(
+                            &request_id,
+                            attempt_index,
+                            &route_id,
+                            status,
+                            &upstream_request_id,
+                            provider_id.as_deref(),
+                        );
                         return Ok(MiddlewareForwardResult::UpstreamError(Box::new(
                             MiddlewareUpstreamError {
                                 error: StreamingUpstreamError {
                                     upstream_status: status,
                                     upstream_headers,
                                     upstream_body,
+                                    upstream_request_id,
+                                    provider_request_id: provider_id,
                                 },
                                 selected_route: route_id,
                                 failed_attempts,
@@ -581,7 +628,14 @@ impl AciService {
                     }
 
                     // Commit this candidate.
-                    let upstream_headers = upstream_response.headers;
+                    trace_upstream_attempt(
+                        &request_id,
+                        attempt_index,
+                        &route_id,
+                        status,
+                        &upstream_request_id,
+                        provider_id.as_deref(),
+                    );
                     let receipt_id = generate_receipt_id();
                     let served_at = self.clock.now_secs();
                     let sealed = self.record_attested_upstream_session(&recorded_event)?;
@@ -621,6 +675,8 @@ impl AciService {
                             receipt_id: receipt_id.clone(),
                             upstream_status: status,
                             upstream_headers,
+                            upstream_request_id,
+                            provider_request_id: provider_id,
                             body: Box::pin(body),
                             selected_route: route_id.clone(),
                             selected_path: candidate.path,
@@ -673,7 +729,7 @@ impl AciService {
                 let upstream_response = match upstream_response {
                     Ok(response) => response,
                     Err(status) => {
-                        abandon(&mut failed_attempts, status);
+                        abandon(&mut failed_attempts, status, status, None);
                         continue;
                     }
                 };
@@ -682,6 +738,7 @@ impl AciService {
                 // held back and committed after the walk must not be counted again
                 // on commit.
                 let status = upstream_response.status_code;
+                let provider_id = provider_request_id(&upstream_response.headers);
                 let response_model = accepted_response_model(status, &upstream_response.body);
                 self.metrics.record_upstream_response(
                     endpoint_path,
@@ -713,14 +770,29 @@ impl AciService {
                             path: candidate.path,
                             middleware_forwarded_body: candidate.body.clone(),
                             forwarded_body,
+                            upstream_request_id: upstream_request_id.clone(),
+                            provider_request_id: provider_id.clone(),
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    abandon(&mut failed_attempts, attempt_status);
+                    abandon(
+                        &mut failed_attempts,
+                        attempt_status,
+                        status,
+                        provider_id.clone(),
+                    );
                     continue;
                 }
 
                 // Commit this candidate.
+                trace_upstream_attempt(
+                    &request_id,
+                    attempt_index,
+                    &route_id,
+                    status,
+                    &upstream_request_id,
+                    provider_id.as_deref(),
+                );
                 return self.commit_buffered_response(
                     BufferedCommit {
                         response: upstream_response,
@@ -730,6 +802,8 @@ impl AciService {
                         path: candidate.path,
                         middleware_forwarded_body: candidate.body.clone(),
                         forwarded_body,
+                        upstream_request_id,
+                        provider_request_id: provider_id,
                     },
                     std::mem::take(&mut failed_attempts),
                     endpoint_path,
