@@ -7,12 +7,13 @@ use crate::checks::{parse_receipt_document, run_response_checks, UpstreamContext
 use crate::client::host_of;
 use crate::spec_fixtures::{
     vector_receipt_envelope, vector_report, vector_session_bytes, REQUEST_BODY, RESPONSE_BODY,
+    SERVED_AT,
 };
 use crate::transcript::Transcript;
 use agent_bridge::proxy::ProxyEvent;
 use axum::routing::{get, post};
 use axum::Json;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::mpsc;
 
 /// The one-line summary over the self-consistent fixtures, without any
@@ -47,6 +48,33 @@ fn summary_over_fixtures_reads_all_ok() {
         summary,
         "signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)"
     );
+
+    // A failed deep audit is named first, and the upstream is not presented
+    // as verified.
+    let upstream_2 = transcript
+        .checks
+        .iter_mut()
+        .find(|check| check.def.id == "upstream-2")
+        .unwrap();
+    upstream_2.status = crate::transcript::Status::Fail;
+    upstream_2.detail = "record carries no spec 8.2 evidence digest+data".into();
+    assert!(!transcript.verified());
+    assert_eq!(
+        summarize(&transcript, Some(&session), "upstream"),
+        "upstream-2 FAILED: record carries no spec 8.2 evidence digest+data, \
+         signature ok, wire hash ok, upstream UNVERIFIED"
+    );
+    // A failed wire hash is named once, with its detail.
+    let receipt_4 = transcript
+        .checks
+        .iter_mut()
+        .find(|check| check.def.id == "receipt-4")
+        .unwrap();
+    receipt_4.status = crate::transcript::Status::Fail;
+    receipt_4.detail = "response body_hash mismatch".into();
+    let summary = summarize(&transcript, Some(&session), "upstream");
+    assert!(summary.contains("receipt-4 FAILED: response body_hash mismatch"));
+    assert!(!summary.contains("wire hash"), "{summary}");
 }
 
 /// A request that passed the entry checks but has not started sending is
@@ -80,8 +108,7 @@ async fn blocked_after_entry_checks_delivers_nothing() {
             .unwrap()
     });
     reached.notified().await;
-    state.blocked.store(true, Ordering::SeqCst);
-    state.revoke_deliveries();
+    state.snapshot().delivery.cancel();
     resume.notify_one();
     let response = request.await.unwrap();
     assert_eq!(response.status().as_u16(), 503);
@@ -177,7 +204,7 @@ async fn non_post_requests_are_refused_while_blocked() {
     let base = spawn_server(upstream).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(base, tx);
-    state.blocked.store(true, Ordering::SeqCst);
+    state.snapshot().delivery.cancel();
     let proxy = spawn_server(build_proxy_router(state)).await;
     let resp = reqwest::Client::new()
         .get(format!("{proxy}/v1/models"))
@@ -209,6 +236,7 @@ fn request_outcome_event_is_stable_json() {
         status: 200,
         streamed: true,
         receipt_id: Some("rcpt-1".to_string()),
+        receipt: None,
         verified: Some(true),
         detail: "receipt verified".to_string(),
         context: None,
@@ -234,10 +262,12 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
         let _ = events.send(event);
     });
-    let previous = state.delivery.lock().unwrap().clone();
+    let previous = state.snapshot().delivery;
     let mut headers = HeaderMap::new();
     headers.insert("x-aci-keyset-digest", "new-keyset".parse().unwrap());
-    rotation_gate(&state, "old-keyset", &headers);
+    rotation_gate(&state, &state.snapshot(), &headers);
+    // A second response under the already-blocked identity reports nothing.
+    rotation_gate(&state, &state.snapshot(), &headers);
     assert!(previous.is_cancelled());
     assert!(matches!(
         received.recv().await.unwrap(),
@@ -256,6 +286,80 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     ));
 }
 
+/// A replacement for the fixture identity, adopted as a concurrent
+/// re-verification would.
+fn adopt_fixture_identity(state: &ProxyState) {
+    let report = vector_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state.adopt(report, identity);
+}
+
+/// Forwards under the current identity succeed without re-verification.
+async fn assert_forwards_without_reverification(state: &Arc<ProxyState>) {
+    assert!(!state.is_blocked());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    for _ in 0..3 {
+        let resp = client
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+}
+
+/// A rotation observed under an identity that a concurrent re-verification
+/// has since replaced neither blocks the new identity nor reports
+/// `keyset_changed`, which would make the managed backend rebuild a session
+/// that is already current.
+#[tokio::test]
+async fn a_rotation_observed_under_a_replaced_identity_is_ignored() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let mut events = capture_events(&mut state);
+    let observed = state.snapshot();
+    adopt_fixture_identity(&state);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &observed, &headers);
+
+    assert!(observed.delivery.is_cancelled());
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_forwards_without_reverification(&state).await;
+}
+
+/// The expiry path: a request observes the old identity expired, another
+/// request's re-verification adopts a new identity, and only then does the
+/// first request act on its expired observation. That closes only the old
+/// identity's gate; the request itself and later ones are served under the
+/// new identity.
+#[tokio::test]
+async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_successor() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    state.trusted.lock().unwrap().not_after = 0;
+    let expired = state.snapshot();
+    adopt_fixture_identity(&state);
+
+    let response = proxy_observed(
+        state.clone(),
+        expired.clone(),
+        Method::GET,
+        "/v1/models".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::new(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(expired.delivery.is_cancelled());
+    assert_forwards_without_reverification(&state).await;
+}
+
 #[test]
 fn identity_event_carries_the_verified_workload_summary() {
     let report = vector_report();
@@ -270,8 +374,8 @@ fn identity_event_carries_the_verified_workload_summary() {
         ),
         Some(json!({
             "remote_url": "https://tee.example",
-            "proxy_url": "http://127.0.0.1:4181",
-            "control_url": "http://127.0.0.1:4182",
+            "proxy_url": "http://127.0.0.1:4180",
+            "control_url": "http://127.0.0.1:4183",
             "policy": {},
         })),
     );
@@ -280,19 +384,19 @@ fn identity_event_carries_the_verified_workload_summary() {
     assert_eq!(event["tee_type"], "tdx");
     assert_eq!(event["keyset_digest"], report.workload_keyset_digest);
     assert_eq!(event["tls_spki"], "sha256:observed");
-    assert_eq!(event["control_url"], "http://127.0.0.1:4182");
+    assert_eq!(event["control_url"], "http://127.0.0.1:4183");
 }
 
 fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Arc<ProxyState> {
     let host = host_of(&base_url).unwrap();
     // Byte-exact passthrough harness: enforcement off so fixture-pinned
     // request hashes hold; `apply_constraints` has its own unit test.
-    Arc::new(ProxyState::new(
+    let state = ProxyState::new(
         AciClient::new().unwrap(),
         base_url,
         host,
         false,
-        Vec::new(),
+        VerifierPolicy::default(),
         false,
         Vec::new(),
         Vec::new(),
@@ -303,7 +407,15 @@ fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Ar
         }),
         Arc::new(|_| {}),
         tokio_util::sync::CancellationToken::new(),
-    ))
+    );
+    Arc::new(at_fixture_time(state))
+}
+
+/// Run on the published fixtures' clock: their keyset's `not_after` is fixed
+/// by the spec test vectors, so the system clock would expire it.
+fn at_fixture_time(mut state: ProxyState) -> ProxyState {
+    state.now_secs = || SERVED_AT;
+    state
 }
 
 #[tokio::test]
@@ -331,6 +443,83 @@ async fn client_cancelled_stream_is_not_a_failed_proof() {
     let outcome = outcomes.recv().await.expect("cancellation outcome");
     assert_eq!(outcome.verified, None);
     assert!(outcome.detail.contains("canceled or protection stopped"));
+}
+
+#[tokio::test]
+async fn audits_past_the_concurrency_limit_wait_instead_of_being_skipped() {
+    // The receipt service answers only once more audits than may run at once
+    // are waiting for it.
+    let (open, opened) = tokio::sync::watch::channel(false);
+    let receipt_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new()
+        .route(
+            "/v1/aci/receipts/{id}",
+            get({
+                let calls = receipt_calls.clone();
+                move || {
+                    let (calls, mut opened) = (calls.clone(), opened.clone());
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let _ = opened.wait_for(|open| *open).await;
+                        json_response(StatusCode::OK, vector_receipt_envelope())
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/aci/sessions/{id}",
+            get(|| async {
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .body(Body::from(vector_session_bytes()))
+                    .unwrap()
+            }),
+        );
+    let base = spawn_server(upstream).await;
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let limit = state.audits.available_permits();
+    let audits = limit + 4;
+    let exchange = || RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: true,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        at: 1,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+    for _ in 0..audits {
+        audit_exchange(state.clone(), state.snapshot(), exchange(), None);
+    }
+    wait_until(|| receipt_calls.load(Ordering::SeqCst) == limit).await;
+    assert!(outcomes.try_recv().is_err(), "no audit is skipped");
+
+    open.send(true).unwrap();
+    for _ in 0..audits {
+        let outcome = outcomes.recv().await.unwrap();
+        assert_eq!(outcome.verified, Some(true), "{}", outcome.detail);
+    }
+    assert_eq!(receipt_calls.load(Ordering::SeqCst), audits);
+
+    // One still queued when protection stops is reported as not audited,
+    // not left pending.
+    open.send(false).unwrap();
+    for _ in 0..=limit {
+        audit_exchange(state.clone(), state.snapshot(), exchange(), None);
+    }
+    wait_until(|| receipt_calls.load(Ordering::SeqCst) == audits + limit).await;
+    state.shutdown.cancel();
+    for _ in 0..=limit {
+        let outcome = outcomes.recv().await.unwrap();
+        assert_eq!(outcome.verified, None);
+        assert!(outcome.detail.contains("before its receipt was audited"));
+    }
 }
 
 #[tokio::test]
@@ -370,6 +559,50 @@ async fn standalone_control_lists_and_retries_recorded_exchanges() {
     assert_eq!(retried.status(), StatusCode::BAD_GATEWAY);
     let body: Value = retried.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("canceled"));
+}
+
+#[tokio::test]
+async fn an_oversized_receipt_is_refused_once_and_not_kept() {
+    let receipt_calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/v1/aci/receipts/{id}",
+        get({
+            let calls = receipt_calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    let mut receipt = vector_receipt_envelope();
+                    receipt["padding"] = json!("x".repeat(crate::client::MAX_RECEIPT_BYTES));
+                    json_response(StatusCode::OK, receipt)
+                }
+            }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let exchange = RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: true,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        at: 1,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+
+    let Err(error) = verify_exchange(&state, &state.snapshot(), &exchange, None).await else {
+        panic!("an oversized receipt must not be checked");
+    };
+
+    assert!(error.contains("exceeds the 64 KiB limit"), "{error}");
+    assert_eq!(receipt_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -428,11 +661,13 @@ async fn transient_receipt_and_session_fetches_are_retried() {
         local_policy_applied: false,
     };
 
-    let (transcript, _) = verify_exchange(&state, &state.snapshot(), &exchange, None)
+    let (transcript, _, receipt) = verify_exchange(&state, &state.snapshot(), &exchange, None)
         .await
         .unwrap();
 
     assert!(transcript.verified());
+    // The checked document is kept exactly as the service served it.
+    assert_eq!(receipt, Some(vector_receipt_envelope().to_string()));
     assert_eq!(receipt_calls.load(Ordering::SeqCst), 3);
     assert_eq!(session_calls.load(Ordering::SeqCst), 2);
 }
@@ -602,12 +837,12 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let host = host_of(&base).unwrap();
-    let state = Arc::new(ProxyState::new(
+    let state = Arc::new(at_fixture_time(ProxyState::new(
         AciClient::new().unwrap(),
         base.clone(),
         host,
         true,
-        Vec::new(),
+        VerifierPolicy::default(),
         false,
         Vec::new(),
         vec![crate::checks::RequiredClaim::parse("tee_attested").unwrap()],
@@ -618,7 +853,7 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
         }),
         Arc::new(|_| {}),
         tokio_util::sync::CancellationToken::new(),
-    ));
+    )));
     // A stale pin, as if the pinned session was superseded after startup.
     *state.policy_pins.lock().unwrap() = vec!["f".repeat(64)];
     let proxy = spawn_server(build_proxy_router(state.clone())).await;
@@ -1022,6 +1257,7 @@ fn proxy_event(generation: u64, request_id: &str) -> ProxyEvent {
         status: 200,
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: None,
         detail: String::new(),
         at: 1,
@@ -1047,6 +1283,7 @@ async fn managed_verdict_waits_for_a_full_queue_and_keeps_attribution() {
         status: 200,
         streamed: true,
         receipt_id: Some("rcpt-1".to_string()),
+        receipt: None,
         verified: Some(false),
         detail: "receipt failed".to_string(),
         context: Some(ForwardContext {
@@ -1126,6 +1363,592 @@ fn default_control_port_is_clear_of_the_desktop_listeners() {
         .parse::<std::net::SocketAddr>()
         .unwrap()
         .port();
-    assert_ne!(port, desktop_core::account::CALLBACK_PORT);
     assert_ne!(port, desktop_core::config::WEB_UI_DEFAULT_PORT);
+}
+
+/// A self-signed key for the local TLS upstream below, generated per test
+/// run. It protects nothing: the tests only need handshakes a pin can accept
+/// or refuse.
+struct TestKey {
+    config: Arc<rustls::ServerConfig>,
+    spki: String,
+}
+
+impl TestKey {
+    fn generate() -> Self {
+        crate::install_crypto_provider();
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key.into())
+            .unwrap();
+        Self {
+            spki: crate::aci::tls::leaf_spki_sha256_hex(cert.der()).unwrap(),
+            config: Arc::new(config),
+        }
+    }
+
+    fn server_config(&self) -> Arc<rustls::ServerConfig> {
+        self.config.clone()
+    }
+
+    fn spki(&self) -> String {
+        self.spki.clone()
+    }
+}
+
+/// The key the service rotated to: outside every pin set below.
+static ROTATED_KEY: std::sync::LazyLock<TestKey> = std::sync::LazyLock::new(TestKey::generate);
+
+/// The key a request was pinned to before the rotation.
+static PINNED_KEY: std::sync::LazyLock<TestKey> = std::sync::LazyLock::new(TestKey::generate);
+
+type TlsStream = rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>;
+
+/// A local TLS upstream: connection `n` presents `key_for(n)`; a handshake
+/// the client completes is counted in `completed` and handed to `serve`, one
+/// it aborts is counted in `aborted`.
+struct TlsUpstream {
+    base: String,
+    completed: Arc<AtomicUsize>,
+    aborted: Arc<AtomicUsize>,
+}
+
+fn spawn_tls_upstream(
+    key_for: impl Fn(usize) -> &'static TestKey + Send + 'static,
+    serve: impl Fn(usize, TlsStream) + Send + Sync + 'static,
+) -> TlsUpstream {
+    crate::install_crypto_provider();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = TlsUpstream {
+        base: format!("https://{}", listener.local_addr().unwrap()),
+        completed: Arc::new(AtomicUsize::new(0)),
+        aborted: Arc::new(AtomicUsize::new(0)),
+    };
+    let (completed, aborted) = (upstream.completed.clone(), upstream.aborted.clone());
+    let serve = Arc::new(serve);
+    std::thread::spawn(move || {
+        for (index, stream) in listener.incoming().enumerate() {
+            let Ok(mut stream) = stream else { continue };
+            let config = key_for(index).server_config();
+            let (serve, completed, aborted) = (serve.clone(), completed.clone(), aborted.clone());
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let mut conn = rustls::ServerConnection::new(config).unwrap();
+                while conn.is_handshaking() {
+                    if conn.complete_io(&mut stream).is_err() {
+                        aborted.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+                serve(index, rustls::StreamOwned::new(conn, stream));
+            });
+        }
+    });
+    upstream
+}
+
+/// Read one request head (the tests only answer body-less requests);
+/// `false` once the client closed the connection.
+fn read_request_head(stream: &mut TlsStream) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && matches!(stream.read(&mut byte), Ok(1)) {
+        head.push(byte[0]);
+    }
+    !head.is_empty()
+}
+
+/// Answer one request with a 200 that is no attestation report, so a
+/// re-verification against this upstream always fails.
+fn reply_ok(mut stream: TlsStream) {
+    use std::io::Write;
+    read_request_head(&mut stream);
+    let _ =
+        stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+    stream.conn.send_close_notify();
+    let _ = stream.flush();
+}
+
+/// An upstream presenting only the rotated key, answering after `hold` so
+/// other requests can arrive while a re-verification is in flight.
+fn unverifiable_upstream(hold: std::time::Duration) -> TlsUpstream {
+    spawn_tls_upstream(
+        |_| &ROTATED_KEY,
+        move |_, stream| {
+            std::thread::sleep(hold);
+            reply_ok(stream);
+        },
+    )
+}
+
+/// A re-pin drops pooled connections: a keep-alive connection set up under
+/// the old pin set is never reused once its key is no longer pinned.
+#[tokio::test]
+async fn a_repin_drops_connections_made_under_the_old_pin() {
+    use std::io::Write;
+    let upstream = spawn_tls_upstream(
+        |_| &PINNED_KEY,
+        |_, mut stream| {
+            while read_request_head(&mut stream) {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok");
+                let _ = stream.flush();
+            }
+        },
+    );
+    let client = AciClient::new().unwrap();
+    let host = host_of(&upstream.base).unwrap();
+    let url = format!("{}/v1/models", upstream.base);
+    client.pin(&host, &[PINNED_KEY.spki()]).unwrap();
+    for _ in 0..2 {
+        assert_eq!(client.get(&url, None).await.unwrap().status, 200);
+    }
+    // Both requests rode one keep-alive connection.
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+
+    client.pin(&host, &[ROTATED_KEY.spki()]).unwrap();
+    let refused = client
+        .request(reqwest::Method::GET, &url)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(crate::aci::tls::is_pin_mismatch(&refused), "{refused:?}");
+}
+
+/// A base URL on a local port that refuses connections, with the socket
+/// holding it: bound but never listening, so connecting is refused (RST) on
+/// every platform, and no concurrent test can bind the port while the caller
+/// keeps the socket alive. A dropped listener's port could be taken first.
+fn refused_base(scheme: &str) -> (String, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    let base = format!("{scheme}://{}", socket.local_addr().unwrap());
+    (base, socket)
+}
+
+fn capture_events(state: &mut Arc<ProxyState>) -> mpsc::UnboundedReceiver<VerifierEvent> {
+    let (events, received) = mpsc::unbounded_channel();
+    Arc::get_mut(state).unwrap().event_sink = Arc::new(move |event| {
+        let _ = events.send(event);
+    });
+    received
+}
+
+/// The codes of the `Blocked` events received so far, in order.
+fn blocked_codes(received: &mut mpsc::UnboundedReceiver<VerifierEvent>) -> Vec<Option<String>> {
+    std::iter::from_fn(|| received.try_recv().ok())
+        .filter_map(|event| match event {
+            VerifierEvent::Blocked { code, .. } => Some(code),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn wait_until(condition: impl Fn() -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !condition() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition not reached");
+}
+
+fn keyset_changed() -> Option<String> {
+    Some("keyset_changed".to_string())
+}
+
+/// A connect failure on a host with no registered pin keeps the 502: there
+/// is no pin that could be stale.
+#[tokio::test]
+async fn a_connect_failure_without_a_pin_keeps_the_502() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (base, _refusing) = refused_base("http");
+    let state = state_over(base, tx);
+    assert!(state.client.pinned_spkis(&state.host).is_empty());
+
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(REQUEST_BODY.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(resp
+        .text()
+        .await
+        .unwrap()
+        .contains("upstream connection failed"));
+}
+
+/// Only a handshake the pin refused heals: a refused port on a pinned host
+/// is an ordinary outage and keeps the plain 502 with no re-attestation.
+#[tokio::test]
+async fn a_refused_port_on_a_pinned_host_does_not_reverify() {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let (base, _refusing) = refused_base("https");
+    let mut state = state_over(base, tx);
+    let mut events = capture_events(&mut state);
+    let pin = vec![PINNED_KEY.spki()];
+    state.client.pin(&state.host, &pin).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(!state.is_blocked());
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_eq!(state.client.pinned_spkis(&state.host), pin);
+}
+
+/// A POST that fails after its own handshake may already have reached the
+/// service, so it is never healed or replayed — even when another request
+/// on the same client was refused by the pin meanwhile.
+#[tokio::test]
+async fn a_post_failing_after_its_handshake_is_never_replayed() {
+    let request_read = Arc::new(AtomicBool::new(false));
+    let hang_up = Arc::new(AtomicBool::new(false));
+    let (read, hung_up) = (request_read.clone(), hang_up.clone());
+    let upstream = spawn_tls_upstream(
+        |index| {
+            if index == 0 {
+                &PINNED_KEY
+            } else {
+                &ROTATED_KEY
+            }
+        },
+        move |index, mut stream| {
+            if index != 0 {
+                return reply_ok(stream);
+            }
+            // Take the request, then drop the connection without answering.
+            read_request_head(&mut stream);
+            read.store(true, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !hung_up.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let post = tokio::spawn(
+        reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(REQUEST_BODY.to_vec())
+            .send(),
+    );
+    wait_until(|| request_read.load(Ordering::SeqCst)).await;
+    let refused = state
+        .client
+        .request(
+            reqwest::Method::GET,
+            &format!("{}/v1/models", upstream.base),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert!(is_pin_mismatch(&refused));
+    hang_up.store(true, Ordering::SeqCst);
+
+    assert_eq!(post.await.unwrap().unwrap().status().as_u16(), 502);
+    assert!(blocked_codes(&mut events).is_empty());
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    // Only the POST's own connection completed a handshake: no re-verify
+    // fetch and no replay.
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+}
+
+/// The heal never widens trust: a pin refusal blocks like a keyset
+/// rotation and re-verifies, but an upstream that cannot reach VERIFIED
+/// keeps the stale pin and the 502 — no key is adopted on a failed verify.
+#[tokio::test]
+async fn a_refused_pin_on_an_unverifiable_host_fails_closed() {
+    let upstream = unverifiable_upstream(std::time::Duration::ZERO);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    let stale = vec![PINNED_KEY.spki()];
+    state.client.pin(&state.host, &stale).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    assert!(resp
+        .text()
+        .await
+        .unwrap()
+        .contains("upstream connection failed"));
+    // The refusal went through the rotation path (`keyset_changed`, one
+    // re-verify attempt whose unpinned fetch completed a handshake), and its
+    // failure is reported like any failed re-verification.
+    assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    assert_eq!(state.client.pinned_spkis(&state.host), stale);
+    assert!(state.is_blocked());
+}
+
+/// Single flight: requests that queue behind an in-flight heal share its
+/// verdict — on both the POST and the passthrough path — instead of each
+/// attesting the service again.
+#[tokio::test]
+async fn requests_queued_behind_a_heal_share_one_reverification() {
+    const QUEUED: usize = 6;
+    let upstream = unverifiable_upstream(std::time::Duration::from_millis(500));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let first = tokio::spawn(client.get(format!("{proxy}/v1/models")).send());
+    // The pin refusal blocked forwards; its re-verify is now in flight.
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await,
+        Ok(Some(VerifierEvent::Blocked { code: Some(code), .. })) if code == "keyset_changed"
+    ));
+    let queued = (0..QUEUED).map(|i| {
+        let request = if i % 2 == 0 {
+            client.get(format!("{proxy}/v1/models"))
+        } else {
+            client
+                .post(format!("{proxy}/v1/chat/completions"))
+                .header("content-type", "application/json")
+                .body(REQUEST_BODY.to_vec())
+        };
+        async move { request.send().await.unwrap().status().as_u16() }
+    });
+    let queued = futures_util::future::join_all(queued).await;
+
+    assert_eq!(first.await.unwrap().unwrap().status().as_u16(), 502);
+    assert_eq!(queued, vec![503; QUEUED]);
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    // The shared failure is reported once, by the request that ran it.
+    assert_eq!(blocked_codes(&mut events), vec![None]);
+}
+
+/// A request refused by a pin that another request's heal is replacing
+/// waits for that heal instead of starting its own. `identity_changed`
+/// selects whether the heal adopted a new keyset digest.
+async fn refused_while_another_heal_completes(
+    identity_changed: bool,
+) -> (u16, String, TlsUpstream, Vec<Option<String>>) {
+    let upstream = spawn_tls_upstream(|_| &ROTATED_KEY, |_, stream| reply_ok(stream));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let mut events = capture_events(&mut state);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+    let admitted = state.snapshot().delivery;
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    // Another request's heal holds the re-verify funnel.
+    let heal = state.reverify.lock().await;
+    let request = tokio::spawn(
+        reqwest::Client::new()
+            .get(format!("{proxy}/v1/models"))
+            .send(),
+    );
+    wait_until(|| upstream.aborted.load(Ordering::SeqCst) == 1).await;
+    // That heal completes: the rotated key is pinned and a freshly verified
+    // identity is adopted under a new delivery gate.
+    state
+        .client
+        .pin(&state.host, &[ROTATED_KEY.spki()])
+        .unwrap();
+    let mut report = vector_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
+    if identity_changed {
+        report.workload_keyset_digest = "rotated-keyset".to_string();
+    }
+    state.adopt(report, identity);
+    drop(heal);
+
+    let resp = request.await.unwrap().unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert!(admitted.is_cancelled());
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
+    (status, body, upstream, blocked_codes(&mut events))
+}
+
+/// When the heal kept the identity, the request is sent once more — under
+/// the current delivery token, since the one it was admitted with was
+/// revoked.
+#[tokio::test]
+async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(false).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, "ok");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
+    assert!(blocked.is_empty());
+}
+
+/// When the heal replaced the identity, the request admitted under the old
+/// one is refused as retryable, never silently re-sent under the new one.
+#[tokio::test]
+async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("identity changed"), "{body}");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
+    assert!(blocked.is_empty());
+}
+
+/// In managed mode the backend answers `keyset_changed` by stopping this
+/// verifier and rebuilding the session from a fresh one, so the request
+/// that hit the stale pin is refused as retryable (503), not failed.
+#[tokio::test]
+async fn a_managed_pin_refusal_hands_off_to_the_session_rebuild() {
+    let upstream = unverifiable_upstream(std::time::Duration::ZERO);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream.base.clone(), tx);
+    let (events, mut received) = mpsc::unbounded_channel();
+    let shutdown = state.shutdown.clone();
+    Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
+        if matches!(&event, VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed")
+        {
+            shutdown.cancel();
+        }
+        let _ = events.send(event);
+    });
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(REQUEST_BODY.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
+}
+
+/// A normal rotation in managed mode: a response advertises a new keyset,
+/// the backend stops this verifier to rebuild the session, and requests
+/// arriving meanwhile are refused as retryable. None of them may report a
+/// verification failure: a `Blocked` without a code after `keyset_changed`
+/// would turn the rebuild into a hard block with no reconnect.
+#[tokio::test]
+async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let (events, mut received) = mpsc::unbounded_channel();
+    let shutdown = state.shutdown.clone();
+    Arc::get_mut(&mut state).unwrap().event_sink = Arc::new(move |event| {
+        if matches!(&event, VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed")
+        {
+            shutdown.cancel();
+        }
+        let _ = events.send(event);
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let client = reqwest::Client::new();
+    let requests = (0..4).map(|_| {
+        let request = client.get(format!("{proxy}/v1/models"));
+        async move {
+            let resp = request.send().await.unwrap();
+            (resp.status().as_u16(), resp.text().await.unwrap())
+        }
+    });
+    let responses = futures_util::future::join_all(requests).await;
+    for (status, body) in responses {
+        assert_eq!(status, 503);
+        assert!(
+            body.contains("retry once the gateway is verified again"),
+            "{body}"
+        );
+        assert!(!body.contains("re-verification failed"), "{body}");
+    }
+    assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
+}
+
+/// Stale-pin heal against the live service: a bogus pin on the real host
+/// makes every forward's handshake fail closed, exactly as when the service
+/// rotates its attested TLS key. The proxy must re-verify (fresh nonce, full
+/// §9.1 checks incl. the DCAP quote) and re-pin — not wedge in 502 until
+/// restarted. The harness starts from a fixture identity, so the request
+/// that triggered the heal sees the identity change (retryable 503) and the
+/// next one goes through.
+/// Run from apps/desktop with: cargo test --package private-ai-proxy --lib -- --ignored stale_pin
+#[tokio::test]
+#[ignore]
+async fn stale_pin_heals_against_live_service() {
+    let base = "https://inference.phala.com";
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(base.to_string(), tx);
+    let stale = "00".repeat(32);
+    state
+        .client
+        .pin(&state.host, std::slice::from_ref(&stale))
+        .unwrap();
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let healing = client
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(healing.status().as_u16(), 503);
+    let resp = client
+        .get(format!("{proxy}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let observed = state.client.observed_spki(&state.host).expect("observed");
+    // Only the entry the report declares for this host is pinned (spec 4.2).
+    let pinned = state.client.pinned_spkis(&state.host);
+    assert_eq!(pinned, vec![observed]);
+}
+
+#[test]
+fn upstream_urls_keep_the_base_path_and_the_request_target() {
+    let join = |base: &str, target: &str| {
+        join_url(base, &target.parse::<Uri>().unwrap())
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(
+        join("https://gateway.example", "/v1/models?limit=1"),
+        "https://gateway.example/v1/models?limit=1"
+    );
+    assert_eq!(
+        join("https://gateway.example/base/", "/v1/chat/completions"),
+        "https://gateway.example/base/v1/chat/completions"
+    );
+    assert_eq!(
+        join("https://gateway.example/base", "/v1/a%20b?q=%26"),
+        "https://gateway.example/base/v1/a%20b?q=%26"
+    );
+    assert!(join_url("not a url", &Uri::from_static("/v1/models")).is_err());
 }

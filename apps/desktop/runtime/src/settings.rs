@@ -1,6 +1,6 @@
 //! The settings files the backend owns: `config.toml` (see
 //! `desktop_core::config`) and `credentials.toml`, which holds the user's
-//! credentials: provider API keys and the web UI password hash. Like Cargo's
+//! credentials: provider API keys and the web UI password. Like Cargo's
 //! `credentials.toml` and AWS's `credentials` file it is plain TOML, always
 //! owner-only (0600 on Unix, a protected owner-only DACL on Windows; see
 //! `private_fs::write_private_atomic`). Both
@@ -41,11 +41,11 @@ use desktop_core::{
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use toml_edit::{DocumentMut, Item, TableLike};
+use toml_edit::{Decor, DocumentMut, Item, RawString, Table, TableLike};
 
 const CREDENTIALS_HEADER: &str =
-    "# Private AI Proxy credentials: provider API keys and the web UI password
-# hash, in plain text. Keep this file owner-only (0600); sync it only where you
+    "# Private AI Proxy credentials: provider API keys and the web UI password,
+# in plain text. Keep this file owner-only (0600); sync it only where you
 # accept plaintext secrets. Saved edits apply immediately.
 #
 # [profiles.<profile id>]
@@ -76,14 +76,26 @@ pub struct ProfileCredential {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct WebUiCredential {
-    /// Argon2id PHC string of the sign-in password.
+    /// The sign-in password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Argon2id PHC string of a password set by an earlier version, which
+    /// kept only the hash; [`Self::password`] replaces it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_hash: Option<String>,
 }
 
 impl WebUiCredential {
     fn is_empty(&self) -> bool {
-        self.password_hash.is_none()
+        self.password.is_none() && self.password_hash.is_none()
+    }
+
+    pub fn secret(&self) -> Option<crate::web_ui::password::Secret> {
+        use crate::web_ui::password::Secret;
+        self.password
+            .clone()
+            .map(Secret::Password)
+            .or_else(|| self.password_hash.clone().map(Secret::Hash))
     }
 }
 
@@ -162,7 +174,7 @@ impl Settings {
     fn create_missing(&self) -> Result<(), String> {
         let path = self.dir.join(CONFIG_FILE);
         if self.import_error.is_none() && !path.exists() {
-            private_fs::write_atomic(&path, CONFIG_HEADER, Some(None))
+            private_fs::write_atomic(&path, &new_file(CONFIG_HEADER), Some(None))
                 .map_err(|error| format!("Cannot create {}: {error}", path.display()))?;
         }
         let schema = config::schema();
@@ -224,7 +236,9 @@ impl Settings {
         }
     }
 
-    /// Adds what the 0.1 credential import could not bring over.
+    /// Adds notices from after the settings were opened: what the 0.1
+    /// credential import could not bring over, and the settings directory move
+    /// (see `desktop_core::relocation`).
     pub(crate) fn add_import_notices(&self, notices: &[String]) {
         if notices.is_empty() {
             return;
@@ -342,16 +356,8 @@ impl Settings {
 
     /// Reads both files into `applied`; returns whether that changed it.
     fn refresh(&self, applied: &mut Applied) -> bool {
-        let config = read(&self.dir.join(CONFIG_FILE), false)
-            .map_err(|error| format!("Cannot read {CONFIG_FILE}: {error}"))
-            .and_then(|text| {
-                text.map_or_else(|| Ok(Parsed::default()), |text| config::parse(&text))
-            });
-        let credentials = read(&self.dir.join(CREDENTIALS_FILE), true)
-            .map_err(|error| format!("Cannot read {CREDENTIALS_FILE}: {error}"))
-            .and_then(|text| {
-                text.map_or_else(|| Ok(Parsed::default()), |text| parse_credentials(&text))
-            });
+        let config = load(&self.dir, CONFIG_FILE, config::parse);
+        let credentials = load(&self.dir, CREDENTIALS_FILE, parse_credentials);
         let previous = applied.current.clone();
         let status = |applied: &Applied| {
             (
@@ -424,10 +430,9 @@ pub(crate) fn write<T: Serialize>(
     let encode =
         |value: &T| toml_edit::ser::to_document(value).map_err(|_| format!("Cannot encode {name}"));
     let (from, to) = (encode(from)?, encode(to)?);
-    let current = read(&path, name == CREDENTIALS_FILE)
-        .map_err(|error| format!("Cannot read {name}: {error}"))?;
+    let current = read(dir, name)?;
     // The file's own errors name it with a position; the user fixes them.
-    let text = edit(current.as_deref().unwrap_or(header), &from, &to).map_err(|()| {
+    let text = edit(current.as_deref(), header, &from, &to).map_err(|()| {
         Error::invalid_state(match current.as_deref().map(parse) {
             Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
             _ => format!("{name} is not valid TOML. Fix it before changing settings."),
@@ -483,48 +488,157 @@ pub(crate) fn write<T: Serialize>(
     Ok(())
 }
 
-/// Applies the change from `from` to `to` to a file's text. The file's
-/// header, its leading comment block up to a blank line (as in a new file),
-/// stays at the top; comments directly above a key belong to that key.
-fn edit(text: &str, from: &DocumentMut, to: &DocumentMut) -> Result<String, ()> {
-    let (header, body) = split_header(text);
-    let mut document: DocumentMut = body.parse().map_err(|_| ())?;
+/// Applies the change from `from` to `to` to a file (`None` when it does not
+/// exist yet). The file's header, its leading comments up to a blank line (as
+/// in a new file), moves to the document's own decor, which `toml_edit`
+/// renders first, so it stays on top whatever keys are added or removed;
+/// comments directly above a key belong to that key.
+fn edit(
+    current: Option<&str>,
+    header: &str,
+    from: &DocumentMut,
+    to: &DocumentMut,
+) -> Result<String, ()> {
+    let (mut document, header) = match current {
+        Some(text) => {
+            let mut document: DocumentMut = text.parse().map_err(|_| ())?;
+            let header = take_header(&mut document);
+            (document, header)
+        }
+        None => (DocumentMut::new(), header.to_string()),
+    };
     patch(document.as_table_mut(), from.as_table(), to.as_table());
-    let body = document.to_string();
-    Ok(if header.trim().is_empty() {
-        body
-    } else if body.is_empty() || header.ends_with("\n\n") {
-        format!("{header}{body}")
+    let header = if header.trim().is_empty() {
+        String::new()
+    } else if document.to_string().is_empty() || header.ends_with("\n\n") {
+        header
     } else {
-        format!("{}\n\n{body}", header.trim_end())
-    })
+        format!("{}\n\n", header.trim_end())
+    };
+    document.decor_mut().set_prefix(header);
+    Ok(document.to_string())
 }
 
-fn split_header(text: &str) -> (&str, &str) {
-    let (mut header_end, mut offset) = (0, 0);
-    for line in text.split_inclusive('\n') {
-        let line_text = line.trim();
-        if !line_text.is_empty() && !line_text.starts_with('#') {
-            return text.split_at(header_end);
-        }
-        offset += line.len();
-        if line_text.is_empty() {
-            header_end = offset;
-        }
-    }
-    (text, "")
+/// A new settings file: its header comments and nothing else.
+fn new_file(header: &str) -> String {
+    let mut document = DocumentMut::new();
+    document.decor_mut().set_prefix(header);
+    document.to_string()
 }
 
-/// Reads a settings file; `credentials.toml` is read without following symlinks.
-fn read(path: &Path, private: bool) -> io::Result<Option<String>> {
-    if private {
-        return private_fs::read_private_text(path);
+/// Removes the header from the decor of the document's first item, or from
+/// its trailing comments when it has no items, and returns it.
+fn take_header(document: &mut DocumentMut) -> String {
+    if document.as_table().is_empty() {
+        let header = raw(document.trailing()).to_string();
+        document.set_trailing("");
+        return header;
     }
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+    let mut header = String::new();
+    let mut take = |decor: &mut Decor| {
+        let prefix = decor.prefix().map(raw).unwrap_or_default().to_string();
+        // A parsed prefix holds only comments and whitespace; the header is
+        // its lines up to and including the last blank one.
+        let mut end = 0;
+        let mut offset = 0;
+        for line in prefix.split_inclusive('\n') {
+            offset += line.len();
+            if line.ends_with('\n') && line.trim().is_empty() {
+                end = offset;
+            }
+        }
+        header = prefix[..end].to_string();
+        decor.set_prefix(&prefix[end..]);
+    };
+    // TOML puts every root key before the first table header.
+    let root = document.as_table_mut();
+    if !first_key_decor(root, &mut take) {
+        let mut first = None;
+        visit_headers(root, &mut |table| {
+            if let Some(position) = table.position() {
+                first = Some(first.map_or(position, |first: isize| first.min(position)));
+            }
+        });
+        visit_headers(root, &mut |table| {
+            if first.is_some() && table.position() == first {
+                take(table.decor_mut());
+            }
+        });
     }
+    header
+}
+
+fn raw(text: &RawString) -> &str {
+    text.as_str().unwrap_or_default()
+}
+
+/// Calls `f` with the decor of the first root key, which `toml_edit` renders
+/// first; a dotted key's is on its last part.
+fn first_key_decor(table: &mut dyn TableLike, f: &mut dyn FnMut(&mut Decor)) -> bool {
+    let Some((key, dotted)) = table.iter().find_map(|(key, item)| match item {
+        Item::Value(_) => Some((key.to_string(), false)),
+        Item::Table(child) if child.is_dotted() => Some((key.to_string(), true)),
+        _ => None,
+    }) else {
+        return false;
+    };
+    if dotted {
+        table
+            .get_mut(&key)
+            .and_then(Item::as_table_like_mut)
+            .is_some_and(|child| first_key_decor(child, f))
+    } else {
+        table
+            .key_mut(&key)
+            .map(|mut key| f(key.leaf_decor_mut()))
+            .is_some()
+    }
+}
+
+/// Calls `f` with every table that has a `[header]` or `[[header]]`.
+fn visit_headers(table: &mut Table, f: &mut dyn FnMut(&mut Table)) {
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Table(child) => {
+                if !child.is_implicit() && !child.is_dotted() {
+                    f(child);
+                }
+                visit_headers(child, f);
+            }
+            Item::ArrayOfTables(array) => {
+                for child in array.iter_mut() {
+                    f(child);
+                    visit_headers(child, f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Reads a settings file, `None` when it does not exist; `credentials.toml`
+/// is read without following symlinks.
+fn read(dir: &Path, name: &str) -> Result<Option<String>, String> {
+    let path = dir.join(name);
+    let text = if name == CREDENTIALS_FILE {
+        private_fs::read_private_text(&path)
+    } else {
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    text.map_err(|error| format!("Cannot read {name}: {error}"))
+}
+
+/// A settings file as it is on disk; one that does not exist is empty.
+fn load<T: Default>(
+    dir: &Path,
+    name: &str,
+    parse: fn(&str) -> Result<Parsed<T>, String>,
+) -> Result<Parsed<T>, String> {
+    read(dir, name)?.map_or_else(|| Ok(Parsed::default()), |text| parse(&text))
 }
 
 /// Parses `credentials.toml`. Errors carry positions and key paths but never
@@ -545,12 +659,15 @@ pub fn parse_credentials(text: &str) -> Result<Parsed<Credentials>, String> {
         profile.api_key = config::validate_api_key(&profile.api_key)
             .map_err(|message| invalid(vec!["profiles", id, "api-key"], message))?;
     }
+    if let Some(password) = &credentials.web_ui.password {
+        crate::web_ui::password::validate(password)
+            .map_err(|message| invalid(vec!["web-ui", "password"], message))?;
+    }
     if let Some(hash) = &credentials.web_ui.password_hash {
         if !crate::web_ui::password::is_hash(hash) {
             return Err(invalid(
                 vec!["web-ui", "password-hash"],
-                "Expected an Argon2id hash; set the password with `pap settings set web-ui.password`"
-                    .into(),
+                "Expected an Argon2id hash; replace it with `pap web-ui password rotate`".into(),
             ));
         }
     }

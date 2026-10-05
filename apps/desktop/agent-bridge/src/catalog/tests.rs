@@ -170,6 +170,39 @@ fn catalog_preserves_verified_entries_as_listed() {
 }
 
 #[test]
+fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "openai/gpt-oss-120b", "name": "OpenAI: GPT OSS 120B", "is_tee": true },
+            { "id": "phala/qwen", "name": " ", "is_tee": true },
+            { "id": "tagged", "name": "Tagged [TEE]", "is_tee": true },
+            { "id": "plain", "name": "Plain", "is_tee": false },
+            { "id": "unmarked" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let names: Vec<_> = catalog
+        .models
+        .iter()
+        .map(|model| (model.id(), model.display_name()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("openai/gpt-oss-120b", "OpenAI: GPT OSS 120B [TEE]"),
+            ("phala/qwen", "phala/qwen [TEE]"),
+            ("tagged", "Tagged [TEE]"),
+            ("plain", "Plain"),
+            ("unmarked", "unmarked"),
+        ]
+    );
+    let list = catalog.openai_list();
+    assert_eq!(list["data"][0]["id"], json!("openai/gpt-oss-120b"));
+    assert_eq!(list["data"][0]["name"], json!("OpenAI: GPT OSS 120B"));
+}
+
+#[test]
 fn removed_models_are_reported_not_replaced() {
     let before = Catalog::from_remote(&remote(), 1).unwrap();
     let after =
@@ -188,7 +221,8 @@ fn malformed_optional_metadata_is_omitted() {
             "pricing": {
                 "prompt": "0.000002",
                 "completion": -1,
-                "input_cache_read": "NaN"
+                "input_cache_read": "NaN",
+                "input_cache_write": 5e-8
             }
         }] }),
         1,
@@ -200,4 +234,6 @@ fn malformed_optional_metadata_is_omitted() {
     assert_eq!(model.price_per_million("prompt"), Some(2.0));
     assert_eq!(model.price_per_million("completion"), None);
     assert_eq!(model.price_per_million("input_cache_read"), None);
+    // The decimal point moves in the text; floats are not multiplied.
+    assert_eq!(model.price_per_million("input_cache_write"), Some(0.05));
 }

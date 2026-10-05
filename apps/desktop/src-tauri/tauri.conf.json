@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Private AI Proxy",
-  "version": "0.2.0-beta.1",
+  "version": "0.3.0",
   "identifier": "org.dstack.private-ai-proxy",
   "build": {
     "frontendDist": "../dist",
@@ -18,12 +18,9 @@
         "create": false,
         "title": "Private AI Proxy",
         "width": 1052,
-        "height": 840,
+        "height": 844,
         "minWidth": 720,
         "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
         "titleBarStyle": "Overlay",
         "trafficLightPosition": {
           "x": 14,
@@ -31,7 +28,11 @@
         },
         "hiddenTitle": true,
         "center": true,
-        "visible": false
+        "visible": false,
+        "allowLinkPreview": false,
+        "scrollBarStyle": "fluentOverlay",
+        "backgroundThrottling": "throttle",
+        "generalAutofillEnabled": false
       }
     ],
     "security": {

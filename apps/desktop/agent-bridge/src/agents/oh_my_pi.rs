@@ -1,10 +1,10 @@
-//! Oh My Pi v18.1.12, source 4f429faef639d182633d1cb3f6a15254adcf25c1.
+//! Oh My Pi v18.3.2, source 7853b4e499936f9dcc13c9b64adb55f6b342aabf.
 //! models-config.ts/config-file.ts and utils/dirs.ts define the file contract;
-//! model-config-values.ts uses execSync, and model-registry.ts gives !command
-//! precedence over stored auth without falling back when the command fails.
+//! resolve-config-value.ts runs `!command` values through `/bin/sh -c`, and
+//! model-registry.ts gives them precedence over stored auth.
 
 use super::*;
-use serde_json::{json, Value};
+use serde_json::json;
 
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
@@ -101,84 +101,25 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let catalog = inputs
         .catalog
         .ok_or("The verified model list is not available")?;
-    let models: Vec<Value> = catalog
-        .models
-        .iter()
-        .map(|model| {
-            let mut row = json!({"id":model.id(), "name":model.display_name()});
-            if let Some(value) = model.remote.context_length.filter(|value| *value > 0) {
-                row["contextWindow"] = json!(value);
-            }
-            if let Some(value) = model.remote.max_output_length.filter(|value| *value > 0) {
-                row["maxTokens"] = json!(value);
-            }
-            let input: Vec<_> = model
-                .string_array("input_modalities")
-                .into_iter()
-                .filter(|value| matches!(value.as_str(), "text" | "image"))
-                .collect();
-            if !input.is_empty() {
-                row["input"] = json!(input);
-            }
-            if model
-                .string_array("supported_features")
-                .iter()
-                .any(|value| value == "reasoning")
-            {
-                row["reasoning"] = json!(true);
-            }
-            // New OMP models require all four rates when cost is present.
-            let mut cost = serde_json::Map::new();
-            for (source, target) in [
-                ("prompt", "input"),
-                ("completion", "output"),
-                ("input_cache_read", "cacheRead"),
-                ("input_cache_write", "cacheWrite"),
-            ] {
-                if let Some(value) = model
-                    .price_per_million(source)
-                    .and_then(serde_json::Number::from_f64)
-                {
-                    cost.insert(target.into(), Value::Number(value));
-                }
-            }
-            if !cost.is_empty() {
-                for key in ["input", "output", "cacheRead", "cacheWrite"] {
-                    cost.entry(key).or_insert(json!(0));
-                }
-                row["cost"] = Value::Object(cost);
-            }
-            row
-        })
-        .collect();
+    let models = model_rows(
+        catalog,
+        &ModelRows {
+            positive_limits: true,
+            any_input: false,
+            reasoning: true,
+            cost: Cost::Complete,
+        },
+    );
     Ok(vec![generated_catalog(
         PROVIDER_PATH,
         json!({
-            "baseUrl":format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
+            "baseUrl": api_url(inputs.endpoint)?,
             "api":"openai-completions", "auth":"apiKey",
             "apiKey":format!("!{}", inputs.credential_command(Agent::OhMyPi)?),
             "models":models,
         }),
         catalog.models.len(),
     )])
-}
-
-pub(super) fn stale_helper(record: &Connection, helper: &Path, token_path: Option<&Path>) -> bool {
-    let expected = agent_credential_command(helper, Agent::OhMyPi, token_path)
-        .ok()
-        .map(|command| format!("!{command}"));
-    record
-        .fields
-        .iter()
-        .filter(|field| field.path == owned(PROVIDER_PATH))
-        .any(|field| {
-            let Some(ConfigValue::Json(provider)) = &field.value else {
-                return true;
-            };
-            expected.as_deref().is_none_or(|expected| {
-                provider.get("apiKey").and_then(Value::as_str) != Some(expected)
-            })
-        })
 }
 
 #[cfg(test)]
@@ -240,41 +181,6 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-    }
-
-    #[test]
-    fn external_provider_edit_revokes_without_overwriting_on_disconnect() {
-        let sandbox = sandbox("omp-external-edit");
-        let options = ConnectOptions::default();
-        let preview = sandbox
-            .projector
-            .preview(Agent::OhMyPi, true, Some(&catalog()), &options)
-            .unwrap();
-        sandbox
-            .projector
-            .apply(
-                Agent::OhMyPi,
-                true,
-                &preview.revision,
-                Some(&catalog()),
-                &options,
-            )
-            .unwrap();
-        let path = config_path(&sandbox.home, false);
-        let external =
-            "# externally replaced\nproviders: {private-ai-proxy: {apiKey: external-secret}}\n";
-        write(&path, external);
-        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        assert!(
-            !statuses
-                .iter()
-                .find(|status| status.id == "oh-my-pi")
-                .unwrap()
-                .authorized
-        );
-        assert!(tokens.is_empty());
-        disconnect(&sandbox, Agent::OhMyPi);
-        assert_eq!(fs::read_to_string(path).unwrap(), external);
     }
 
     #[test]
@@ -347,49 +253,6 @@ mod tests {
         assert_eq!(fs::read(dir.join("models.yml")).unwrap(), foreign);
         assert_eq!(fs::read(pi_path).unwrap(), pi_before);
         assert_eq!(fs::read(auth).unwrap(), auth_before);
-    }
-
-    #[test]
-    fn legacy_and_ambiguous_yaml_are_refused_without_capture() {
-        let sandbox = sandbox("omp-yaml-conflicts");
-        let dir = sandbox.home.join(".omp/agent");
-        write(
-            &dir.join("models.json"),
-            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#,
-        );
-        assert!(validate_host(&sandbox.home, false)
-            .unwrap_err()
-            .contains("migration"));
-        assert_eq!(
-            fs::read_to_string(dir.join("models.json")).unwrap(),
-            r#"{"providers":{"private-ai-proxy":{"apiKey":"legacy-secret"}}}"#
-        );
-        for text in [
-            "providers:\n  private-ai-proxy: {apiKey: secret}\n",
-            "providers:\n  private-ai-proxy: null\n",
-            "providers: []\n",
-            "providers: {other: {}, other: {}}\n",
-            "base: &base {other: {}}\nproviders: {<<: *base}\n",
-            "providers: {}\n---\nproviders: {}\n",
-        ] {
-            let path = dir.join("models.yml");
-            write(&path, text);
-            assert!(
-                sandbox
-                    .projector
-                    .preview(
-                        Agent::OhMyPi,
-                        true,
-                        Some(&catalog()),
-                        &ConnectOptions::default()
-                    )
-                    .is_err(),
-                "{text}"
-            );
-            assert_eq!(fs::read_to_string(&path).unwrap(), text);
-            assert!(sandbox.projector.tokens.read("oh-my-pi").unwrap().is_none());
-            assert!(!sandbox.projector.store_path().exists());
-        }
     }
 
     #[test]

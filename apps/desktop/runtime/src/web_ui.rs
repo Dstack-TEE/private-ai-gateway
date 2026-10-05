@@ -1,9 +1,10 @@
 //! The browser UI hosted by the backend service.
 //!
 //! It is off by default and listens on `127.0.0.1` unless network access is
-//! explicitly allowed, exactly like the Local API. It cannot run without a
-//! sign-in password, which only an authenticated local client (the desktop app
-//! or CLI over IPC) or an already signed-in browser can set.
+//! explicitly allowed, exactly like the Local API. Browsers sign in with a
+//! password that the service generates (see [`password`]) and that only an
+//! authenticated local client, the desktop app or CLI over IPC, can read or
+//! change.
 
 mod auth;
 pub(crate) mod password;
@@ -19,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use auth::Auth;
 #[cfg(feature = "web-ui")]
-pub(crate) use server::{change_password, routes, Gate};
+pub(crate) use server::{routes, Gate};
 #[cfg(feature = "web-ui")]
 pub use throttle::Throttle;
 
@@ -97,7 +98,7 @@ impl WebUi {
     }
 
     /// Applies a saved password change; every browser session ends.
-    pub(crate) fn set_password(&self, hash: Option<String>) {
-        self.auth.set_password(hash);
+    pub(crate) fn set_password(&self, secret: Option<password::Secret>) {
+        self.auth.set_password(secret);
     }
 }

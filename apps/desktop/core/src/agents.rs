@@ -3,17 +3,22 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AgentStatus {
     pub id: String,
     pub name: String,
     pub config_path: String,
+    /// The agent's configuration folder exists; each agent creates it on
+    /// first run, so detection does not depend on how the CLI was installed.
     pub installed: bool,
-    /// A connected link, including one suspended until protection resumes.
+    /// The agent's configuration routes it through the Local API. A
+    /// connection suspended until protection resumes is recorded, not
+    /// connected: its own configuration is restored.
     pub connected: bool,
-    /// A connection record exists (whatever the config now says).
+    /// A connection record exists (whatever the config now says), including
+    /// a suspended one.
     pub recorded: bool,
     /// The proxy would authorize this agent's token right now: recorded,
     /// enabled, config readable and its routing/authentication still managed.
@@ -27,7 +32,7 @@ pub struct AgentStatus {
     pub repair_action: Option<AgentRepairAction>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentRepairAction {
     Reconnect,
@@ -76,12 +81,14 @@ pub enum Agent {
     Hermes,
     OpenClaw,
     OhMyPi,
+    Dsh,
 }
 
 impl Agent {
-    pub const ALL: [Agent; 7] = [
+    pub const ALL: [Agent; 8] = [
         Agent::ClaudeCode,
         Agent::Codex,
+        Agent::Dsh,
         Agent::Hermes,
         Agent::Pi,
         Agent::OhMyPi,
@@ -105,6 +112,7 @@ impl Agent {
             Agent::Hermes => "hermes",
             Agent::OpenClaw => "openclaw",
             Agent::OhMyPi => "oh-my-pi",
+            Agent::Dsh => "dsh",
         }
     }
 
@@ -117,6 +125,7 @@ impl Agent {
             Agent::Hermes => "Hermes Agent",
             Agent::OpenClaw => "OpenClaw",
             Agent::OhMyPi => "Oh My Pi",
+            Agent::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -129,6 +138,7 @@ impl Agent {
             Agent::Hermes => "https://hermes-agent.nousresearch.com",
             Agent::OpenClaw => "https://openclaw.ai",
             Agent::OhMyPi => "https://omp.sh",
+            Agent::Dsh => "https://deepseek-harness.github.io/deepseek-harness/",
         }
     }
 }

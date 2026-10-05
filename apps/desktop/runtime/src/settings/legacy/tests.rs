@@ -238,7 +238,7 @@ fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain
 }
 
 #[test]
-fn a_linux_layout_moves_settings_to_the_config_directory() {
+fn a_direct_build_layout_moves_settings_to_the_config_directory() {
     let root = tempfile::tempdir().unwrap();
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
@@ -265,9 +265,9 @@ fn a_linux_layout_moves_settings_to_the_config_directory() {
 }
 
 #[test]
-fn macos_windows_and_mac_app_store_layouts_use_a_config_subdirectory() {
-    // Direct macOS, Windows and the MAS container keep one app directory;
-    // settings move into its `Config` subdirectory, state stays put.
+fn the_mac_app_store_layout_uses_a_config_subdirectory() {
+    // The MAS container keeps one app directory; settings move into its
+    // `Config` subdirectory, state stays put.
     let root = tempfile::tempdir().unwrap();
     let container = root
         .path()
@@ -374,7 +374,7 @@ fn a_fresh_install_imports_nothing_and_never_asks_the_credential_store() {
 }
 
 #[test]
-fn an_unavailable_credential_store_imports_settings_and_retries_the_keys() {
+fn an_unavailable_credential_store_is_asked_once_and_the_import_abandoned() {
     let root = tempfile::tempdir().unwrap();
     let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
     write_legacy(&data);
@@ -391,7 +391,7 @@ fn an_unavailable_credential_store_imports_settings_and_retries_the_keys() {
         "{}",
         problems[0]
     );
-    assert!(problems[0].contains("retried on the next start"));
+    assert!(problems[0].contains("not tried again"), "{}", problems[0]);
     // The settings are in effect; the web UI password hash was never in the store.
     assert_eq!(read_config(&config_dir).profiles.len(), 3);
     let credentials = read_credentials(&config_dir);
@@ -401,44 +401,41 @@ fn an_unavailable_credential_store_imports_settings_and_retries_the_keys() {
         Some(PASSWORD_HASH)
     );
     assert_eq!(settings.files().error, None);
-    // Nothing was deleted from the store and the step is still pending.
+    // Nothing was deleted from the store, and the step is over: a denied
+    // Keychain prompt is not shown again on every start.
     assert_eq!(locked.entries.borrow().len(), 5);
-    assert!(secrets_pending(&data));
-
-    // Meanwhile the user re-enters one key; the next start imports the rest
-    // and keeps what the user entered.
-    settings
-        .update_credentials(|credentials| {
-            credentials.profiles.insert(
-                "home".into(),
-                ProfileCredential {
-                    api_key: "sk-home-new".into(),
-                },
-            );
-            Ok(())
-        })
-        .unwrap();
+    assert!(!secrets_pending(&data));
+    let marker = fs::read_to_string(data.join(BACKUP_DIR).join(ABANDONED_FILE)).unwrap();
+    assert!(marker.contains("locked"), "{marker}");
+    assert!(!data.join(BACKUP_DIR).join(COMPLETE_FILE).exists());
+    // The profiles show no key, and the user signs in again.
+    let profiles = settings.profile_views(&settings.snapshot().unwrap());
+    assert!(profiles.iter().all(|profile| !profile.credential_saved));
     drop(settings);
+
     let unlocked = FakeKeychain {
         entries: RefCell::new(locked.entries.borrow().clone()),
         ..FakeKeychain::default()
     };
     let (settings, problems) = start(&config_dir, &data, &unlocked);
     assert!(problems.is_empty(), "{problems:?}");
-    assert_eq!(
-        settings.profile_key("home").unwrap().as_deref(),
-        Some("sk-home-new")
-    );
-    assert_eq!(
-        settings.profile_key("work").unwrap().as_deref(),
-        Some("sk-work")
-    );
-    assert!(!secrets_pending(&data));
-    // The home entry was not needed, so it stays; everything imported is gone.
-    assert_eq!(
-        unlocked.entries.borrow().keys().collect::<Vec<_>>(),
-        ["service-profile-home-api-key"]
-    );
+    assert!(unlocked.reads.borrow().is_empty());
+    assert_eq!(settings.profile_key("work").unwrap(), None);
+}
+
+#[test]
+fn a_problem_with_our_own_files_leaves_the_credential_import_pending() {
+    let root = tempfile::tempdir().unwrap();
+    let (config_dir, data) = (root.path().join("config"), root.path().join("data"));
+    write_legacy(&data);
+    let (settings, _) = Settings::open(config_dir, &data);
+    fs::write(data.join(LOCAL_STATE_FILE), "{ damaged").unwrap();
+    let local = LocalState::open(&data);
+    let keychain = keychain();
+    assert!(import_secrets(&settings, &local, &data, &keychain).is_err());
+    assert!(secrets_pending(&data) && local.importing());
+    assert!(!data.join(BACKUP_DIR).join(ABANDONED_FILE).exists());
+    assert_eq!(keychain.entries.borrow().len(), 5);
 }
 
 #[test]
@@ -522,7 +519,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
         provider = \"custom\"\n\
         remote-url = \"https://gateway.example\"\n";
     fs::write(config_dir.join(CONFIG_FILE), synced).unwrap();
-    let laptop_hash = crate::web_ui::password::hash("laptop password").unwrap();
+    let laptop_hash = "$argon2id$v=19$m=19456,t=2,p=1$PiesE0dTRXTr+ErD9FPgqg$pi4+YZvaut9BAi0h2zfrEgwKt/6n5zmYNMCYQ8FZ6mE";
     fs::write(
         config_dir.join(CREDENTIALS_FILE),
         format!("[web-ui]\npassword-hash = \"{laptop_hash}\"\n"),
@@ -550,7 +547,7 @@ fn a_synced_config_on_a_second_device_keeps_its_values_and_gets_this_devices_sec
     let credentials = read_credentials(&config_dir);
     assert_eq!(
         credentials.web_ui.password_hash.as_deref(),
-        Some(laptop_hash.as_str())
+        Some(laptop_hash)
     );
     assert_eq!(credentials.profiles["home"].api_key, "sk-home");
     assert!(!credentials.profiles.contains_key("work"));
@@ -667,7 +664,7 @@ fn unreadable_old_files_are_reported_and_kept() {
 }
 
 #[test]
-fn a_disconnect_before_the_credential_import_fails_instead_of_dropping_the_key() {
+fn a_disconnect_waits_for_the_credential_import_and_not_for_an_abandoned_one() {
     use agent_bridge::{
         agents::{helper_binary_name, AgentError, Projector},
         catalog::Catalog,
@@ -752,29 +749,26 @@ fn a_disconnect_before_the_credential_import_fails_instead_of_dropping_the_key()
     };
     let (settings, _) = Settings::open(config_dir.clone(), &data);
     local.set_importing(secrets_pending(&data));
-    let notices = import_secrets(&settings, &local, &data, &locked).unwrap();
-    assert!(
-        notices[0].contains("retried on the next start"),
-        "{notices:?}"
-    );
 
-    // The disconnect fails like one while 0.1's store was unavailable, and
-    // the agent's configuration keeps what it had.
+    // While the import runs, the disconnect fails like one while 0.1's store
+    // was unavailable, and the agent's configuration keeps what it had.
     let connected = fs::read(&claude).unwrap();
     assert!(matches!(apply(false), Err(AgentError::CredentialStore)));
     assert_eq!(fs::read(&claude).unwrap(), connected);
 
-    // The next start imports the key; the disconnect then puts it back.
-    drop(settings);
-    let (settings, _) = Settings::open(config_dir, &data);
-    let unlocked = FakeKeychain::with(&entries);
-    import_secrets(&settings, &local, &data, &unlocked).unwrap();
+    // The store refuses; the import is abandoned and the disconnect goes
+    // ahead, leaving the key it could not restore unset.
+    let notices = import_secrets(&settings, &local, &data, &locked).unwrap();
+    assert!(notices[0].contains("not tried again"), "{notices:?}");
     assert!(!local.importing());
     apply(false).unwrap();
     let restored: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&claude).unwrap()).unwrap();
-    assert_eq!(restored["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-ant-original");
-    assert!(unlocked.entries.borrow().is_empty());
+    assert!(
+        restored.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none(),
+        "{restored}"
+    );
+    assert_eq!(locked.entries.borrow().len(), 1);
 }
 
 #[test]

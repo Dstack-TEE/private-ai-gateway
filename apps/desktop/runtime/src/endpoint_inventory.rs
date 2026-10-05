@@ -31,8 +31,7 @@ pub(crate) struct InventoryUpdater {
     cache_path: PathBuf,
     cache: Mutex<CachedInventory>,
     refreshing: tokio::sync::Mutex<()>,
-    #[cfg(test)]
-    source: Option<String>,
+    source: String,
 }
 
 impl InventoryUpdater {
@@ -53,22 +52,17 @@ impl InventoryUpdater {
             cache_path,
             cache: Mutex::new(cached),
             refreshing: tokio::sync::Mutex::new(()),
-            #[cfg(test)]
-            source: None,
+            source: SOURCE.to_string(),
         })
     }
 
     pub async fn refresh(&self) -> EndpointInventory {
-        #[cfg(test)]
-        if let Some(source) = &self.source {
-            return self.refresh_from(source).await;
-        }
-        self.refresh_from(SOURCE).await
+        self.refresh_from(&self.source).await
     }
 
     #[cfg(test)]
     pub(crate) fn with_source(mut self, source: String) -> Self {
-        self.source = Some(source);
+        self.source = source;
         self
     }
 

@@ -17,7 +17,7 @@ impl Projector {
                 .load_store()
                 .map_err(|_| AgentError::RecordUnavailable)?;
             let path = self.action_path(agent, store.get(agent.id()), connect);
-            let (text, read_error) = self.config_text_at(agent, &path);
+            let (text, read_error) = self.config_text_at(&path);
             if revision(
                 agent,
                 connect,
@@ -151,39 +151,21 @@ impl Projector {
                 } else if record.suspended && record.attention.is_none() {
                     self.suspend(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
-                        .and_then(|()| {
-                            self.require_helper()?;
-                            let text = self.read_config(agent)?;
-                            let options = ConnectOptions::default();
-                            let path = self
-                                .action_path(agent, store.get(agent.id()), true)
-                                .map_err(|error| {
-                                    ConnectFailure::Conflict(AgentError::ConfigurationConflict(
-                                        error,
-                                    ))
-                                })?;
-                            self.connect(agent, &mut store, text, &path, catalog, &options)
-                        })
+                        .and_then(|()| self.reproject(agent, &mut store, catalog))
                 } else if !record.suspended
                     && catalog.is_some_and(|catalog| {
                         record.catalog_revision.as_deref() != Some(catalog.revision.as_str())
+                            || record
+                                .endpoint
+                                .as_deref()
+                                .is_some_and(|endpoint| endpoint != self.endpoint)
                             || (record.attention.is_none()
                                 && (record.options.default_model.is_none()
                                     || (matches!(agent, Agent::Pi | Agent::OhMyPi)
                                         && record.selection.is_none())))
                     })
                 {
-                    (|| {
-                        self.require_helper()?;
-                        let text = self.read_config(agent)?;
-                        let options = ConnectOptions::default();
-                        let path = self
-                            .action_path(agent, store.get(agent.id()), true)
-                            .map_err(|error| {
-                                ConnectFailure::Conflict(AgentError::ConfigurationConflict(error))
-                            })?;
-                        self.connect(agent, &mut store, text, &path, catalog, &options)
-                    })()
+                    self.reproject(agent, &mut store, catalog)
                 } else {
                     Ok(())
                 };
@@ -201,6 +183,60 @@ impl Projector {
             }
             Ok(failures)
         })
+    }
+
+    /// Points every connected agent at this projector's endpoint without
+    /// restoring its own configuration first, as a catalog change does. The
+    /// agents keep their tokens, which the proxy honours only while
+    /// protection is verified. An agent that cannot be re-projected is
+    /// suspended, which restores its own configuration.
+    pub fn retarget(&self, catalog: &Catalog) -> Result<Vec<(String, String)>, String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            let mut store = self.load_store()?;
+            let mut failures = Vec::new();
+            for agent in Agent::ALL {
+                let Some(record) = store.get(agent.id()) else {
+                    continue;
+                };
+                if record.disconnected() || record.suspended || record.cleanup_pending {
+                    continue;
+                }
+                if let Err(error) = self.reproject(agent, &mut store, Some(catalog)) {
+                    let suspended = self.suspend(agent, &mut store);
+                    failures.push((
+                        agent.id().to_string(),
+                        match suspended {
+                            Ok(()) => error.message(),
+                            Err(suspend) => format!("{}; {suspend}", error.message()),
+                        },
+                    ));
+                }
+            }
+            Ok(failures)
+        })
+    }
+
+    /// Writes an agent's projection again, against this projector's endpoint
+    /// and the given catalog.
+    fn reproject(
+        &self,
+        agent: Agent,
+        store: &mut Store,
+        catalog: Option<&Catalog>,
+    ) -> Result<(), ConnectFailure> {
+        self.require_helper()?;
+        let text = self.read_config(agent)?;
+        let path = self
+            .action_path(agent, store.get(agent.id()), true)
+            .map_err(|error| ConnectFailure::Conflict(AgentError::ConfigurationConflict(error)))?;
+        self.connect(
+            agent,
+            store,
+            text,
+            &path,
+            catalog,
+            &ConnectOptions::default(),
+        )
     }
 
     pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
@@ -235,16 +271,11 @@ impl Projector {
                     .map_err(|_| AgentError::RestorationFailed)?
             {
                 if !selection.changes.is_empty() {
-                    write_atomic(
-                        &selection.path,
-                        &selection.after,
-                        Some(selection.before.as_deref()),
-                    )
-                    .map_err(|_| AgentError::RestorationFailed)?;
+                    selection::commit(&selection).map_err(|_| AgentError::RestorationFailed)?;
                 }
             }
         }
-        let text = self.read_config_at(agent, path)?;
+        let text = self.read_config_at(path)?;
         let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
             .map_err(|reason| {
                 AgentError::InvalidConfiguration(format!(
@@ -261,10 +292,6 @@ impl Projector {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.
             Edit {
-                selection: None,
-                changes: Vec::new(),
-                record: None,
-                pending_secrets: Vec::new(),
                 consumed_secrets: record
                     .fields
                     .iter()
@@ -273,14 +300,24 @@ impl Projector {
                         _ => None,
                     })
                     .collect(),
+                ..Edit::default()
             }
         };
         if !edit.changes.is_empty() {
-            write_atomic(
-                path,
-                &doc.render().map_err(|_| AgentError::RestorationFailed)?,
-                Some(text.as_deref()),
-            )
+            let restored = doc.render().map_err(|_| AgentError::RestorationFailed)?;
+            // A list that was empty returns to exactly what it held, not `[]`.
+            let empty = ConfigDoc::parse(Format::YamlList, "")
+                .and_then(|empty| empty.render())
+                .map_err(|_| AgentError::Internal)?;
+            match &record.empty_original {
+                Some(EmptyOriginal::Absent) if restored == empty => {
+                    remove_unchanged(path, text.as_deref())
+                }
+                Some(EmptyOriginal::Blank(original)) if restored == empty => {
+                    write_atomic(path, original, Some(text.as_deref()))
+                }
+                _ => write_atomic(path, &restored, Some(text.as_deref())),
+            }
             .map_err(|_| AgentError::RestorationFailed)?;
         }
         for entry in &edit.consumed_secrets {
@@ -348,6 +385,16 @@ impl Projector {
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
+        next_record.endpoint = Some(self.endpoint.clone());
+        next_record.empty_original = match &text {
+            _ if agent.format() != Format::YamlList => None,
+            None => Some(EmptyOriginal::Absent),
+            Some(text) if text.trim().is_empty() => Some(EmptyOriginal::Blank(text.clone())),
+            Some(_) => self
+                .current_record(agent, previous_record.as_ref())
+                .and_then(|record| record.empty_original.clone()),
+        };
+        let mut selection = edit.selection.clone();
         let mut guard = Rollback::default();
         let result = (|| -> Result<(), AgentError> {
             // A fresh token on every new connection; a leftover file from an
@@ -375,6 +422,22 @@ impl Projector {
                     .map_err(|_| AgentError::CredentialStore)?;
                 guard.secrets.push((secret.entry.clone(), previous));
             }
+            if agent == Agent::Dsh {
+                // dsh reads the token itself, so it is stored once it is issued.
+                let token = self
+                    .tokens
+                    .read(agent.id())
+                    .ok()
+                    .flatten()
+                    .ok_or(AgentError::ConfigurationWrite)?;
+                let prior = self
+                    .current_record(agent, previous_record.as_ref())
+                    .and_then(|record| record.selection.as_ref());
+                let credential = selection::prepare_token(path, prior, &token)
+                    .map_err(|_| AgentError::ConfigurationWrite)?;
+                next_record.selection = Some(credential.journal.clone());
+                selection = Some(credential);
+            }
             // Persist recovery before either file changes. An interrupted apply
             // is never authorized and must restore before another connection.
             let mut pending = next_record.clone();
@@ -393,17 +456,10 @@ impl Projector {
                 .map_err(|_| AgentError::ConfigurationWrite)?;
                 guard.configs.push((path.to_path_buf(), text.clone()));
             }
-            if let Some(selection) = &edit.selection {
+            if let Some(selection) = &selection {
                 if !selection.changes.is_empty() {
-                    write_atomic(
-                        &selection.path,
-                        &selection.after,
-                        Some(selection.before.as_deref()),
-                    )
-                    .map_err(|_| AgentError::ConfigurationWrite)?;
-                    guard
-                        .configs
-                        .push((selection.path.clone(), selection.before.clone()));
+                    selection::commit(selection).map_err(|_| AgentError::ConfigurationWrite)?;
+                    guard.companion = Some(selection.reversed());
                 }
             }
             store.insert(agent.id().to_string(), next_record);
@@ -473,6 +529,11 @@ impl Projector {
 
     pub(super) fn rollback(&self, agent: Agent, guard: Rollback) -> Result<(), String> {
         let mut first_error = None;
+        if let Some(companion) = &guard.companion {
+            if let Err(error) = selection::commit(companion) {
+                first_error.get_or_insert(format!("cannot restore the config: {error}"));
+            }
+        }
         for (path, original) in guard.configs.into_iter().rev() {
             let restored = match original {
                 Some(original) => write_atomic(&path, &original, None),

@@ -10,13 +10,14 @@ persistence, and lifecycle.
 | Pi | Provider extension, auth API, model registry, commands, footer | `pi-provider-redpill`, `pi-provider-phala-cloud`, or `@phala/pi-provider-aci` |
 | OpenCode | Server plugin, provider config, auth hooks, tools, dispose | `opencode-provider-redpill`, `opencode-provider-phala-cloud`, or `@phala/opencode-provider-aci` |
 | Node/Bun SDK application | Per-client custom `fetch` | `connectAci().fetch` |
-| Base-URL-only coding agent | No transport injection point | No native ACI adapter in this release |
+| Base-URL-only coding agent | No transport injection point | No native adapter; use [`pap serve`](../docs/quickstart.md#4-use-it-as-a-local-endpoint) |
 
-All supported paths share `@phala/aci-provider` and
-`@phala/aci-verifier`. They verify the workload and TLS channel before sending
-model traffic, discover the live model catalog, require verified serving,
-retain bounded wire digests, and verify every signed receipt and cited session
-before an inference response finishes.
+The Pi and OpenCode adapters share `@phala/aci-provider` and
+`@phala/aci-verifier`, and they verify every response receipt before the
+model turn finishes. [Client architecture](architecture.md#shared-trust-contract)
+defines the checks, and
+[Response verification](architecture.md#response-verification) compares when
+each client verifies receipts.
 
 ## Pi
 
@@ -55,12 +56,24 @@ credential store; use `/login` when the key must survive a restart.
 The provider-scoped commands expose ACI-specific state that Pi does not know
 about: settings, attestation, retained receipts, and content-addressed sessions.
 For example, RedPill registers `/redpill-settings`, `/redpill-attestation`,
-`/redpill-receipts`, `/redpill-receipt`, and `/redpill-session`.
+`/redpill-receipts`, `/redpill-receipt`, and `/redpill-session`. The receipt
+commands list the retained exchanges or re-run the full audit for one. The
+session command fetches the public session artifact over the pinned connection
+and verifies it locally without an inference API key.
 
 Pi keeps the latest 32 receipt-bearing wire digests by default. That local audit
 history and the verified connection are cleared when Pi exits; credential,
 catalog, and default-model persistence are independent, and gateway artifacts
 follow the deployment's server-side retention policy.
+
+For another ACI gateway, install the neutral package and set its endpoint:
+
+```sh
+pi install npm:@phala/pi-provider-aci
+export ACI_BASE_URL=https://gateway.example.com/v1
+```
+
+Then run `/login aci` and select an `aci/` model.
 
 ## OpenCode
 
@@ -107,10 +120,9 @@ Replace `phala` with `redpill` for RedPill. These OpenCode custom commands
 use OpenCode's official prompt-command mechanism to ask the selected model to
 call the provider-scoped read-only inspect tool. The tool itself performs the
 local inspection; no second verifier is involved. Pi can render the same data
-directly because its extension API supports command callbacks. Attestation and
-response receipt verification already happen automatically and fail closed.
-OpenCode keeps the latest 32 receipt-bearing wire digests by default, and that
-local history is cleared when the process exits.
+directly because its extension API supports command callbacks. The commands
+only display evidence or rerun an audit; verification is automatic. OpenCode
+keeps the same 32-exchange local history, cleared when the process exits.
 
 For another ACI gateway, configure the neutral plugin:
 
@@ -135,6 +147,22 @@ Then use `/connect` and `/models`, or set `ACI_API_KEY` for the current process.
 The read-only `aci_inspect`, `redpill_aci_inspect`, or `phala_aci_inspect` tool
 reports connection status, attestation, receipt history, receipt audits, and
 session audits without returning prompts, responses, or raw evidence.
+
+## Shared settings
+
+Every Pi and OpenCode adapter reads the same optional settings, either from its
+provider config or from an environment variable under the adapter's prefix
+(`ACI`, `REDPILL`, or `PHALA`):
+
+| Setting | Environment variable | Effect |
+| --- | --- | --- |
+| `baseURL` | `<PREFIX>_BASE_URL` | Gateway endpoint. Required for the neutral packages. |
+| `trust.acceptedComposeHashes` | `<PREFIX>_ACCEPTED_COMPOSE_HASHES` | Reviewed compose hashes; see [Release acceptance](architecture.md#release-acceptance). |
+| `trust.acceptedSessionIds` | `<PREFIX>_ACCEPTED_SESSION_IDS` | Audited session IDs. Request pins are intersected with this set, and a disjoint request fails before network access. |
+| `models.isTeeOnly` | `<PREFIX>_IS_TEE_ONLY` | Register only models whose `/v1/models` entry has `is_tee: true`. Defaults to `true`. |
+| `models.allowlist` | `<PREFIX>_MODEL_ALLOWLIST` | Register only these model IDs. |
+
+List values in environment variables are comma-separated.
 
 ## SDK applications
 
@@ -169,31 +197,19 @@ reuse `inspectAciProvider()` for audit UI. If a product supplies an
 `AccountApiKeyAuth`, map its authorization presentation and returned key into
 the host's native auth API; manual API-key entry and all persistence stay in
 the host. Phala Cloud already supplies this contract. RedPill should add one
-only after its Clerk endpoints are defined. If the host cannot inject a
-per-provider fetch, changing only its base URL cannot provide ACI channel
-binding.
+only after its Clerk endpoints are defined.
 
 ## Unsupported hosts
 
-A custom API base URL is not enough to inject ACI's attested TLS transport. A
-coding agent without an official custom-fetch or provider-plugin extension
-point therefore has no native integration in this release. In particular, this
-guide does not claim native Codex CLI or Claude Code support. Add a dedicated
-adapter only when the host exposes a supported transport boundary and lifecycle
-contract.
+A coding agent without an official custom-fetch or provider-plugin extension
+point has no native integration in this release. In particular, this guide
+does not claim native Codex CLI or Claude Code support. Add a dedicated adapter
+only when the host exposes a supported transport boundary and lifecycle
+contract; [Client architecture](architecture.md#layers) explains why.
 
-## Trust boundary
-
-The shared clients verify a fresh quote and nonce-bound keyset, measured
-compose, optional reviewed-release allowlist, identity expiry, hostname and TLS
-SPKI binding, verified-serving constraints, exact wire digests, signed receipts,
-and cited sessions. Any required failure blocks the request or response.
-
-Coverage ends at model HTTP traffic between the local client and the attested
-gateway. WebSockets, MCP servers, tools, browser automation, shell commands,
-extensions, and telemetry have separate trust boundaries. The local coding
-agent still sees plaintext prompts and responses; ACI binds the remote network
-path to the attested workload identity.
+The local coding agent still sees plaintext prompts and responses, and tools,
+MCP servers, and shell commands are outside ACI. See
+[Trust boundary](architecture.md#trust-boundary).
 
 ## Sources
 

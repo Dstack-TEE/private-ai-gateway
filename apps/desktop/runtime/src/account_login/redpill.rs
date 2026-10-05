@@ -9,7 +9,7 @@ use oauth2::{
 
 impl CallbackState {
     pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
-        let result = match callback_code(uri, headers, &self.expected) {
+        let result = match callback_code(uri, headers, &self.expected, self.address) {
             Ok(code) => Ok(code),
             Err(CallbackError::Declined) => {
                 Err(Error::account("Account: Authorization was declined."))
@@ -40,6 +40,9 @@ pub(super) enum CallbackError {
 
 pub(super) struct CallbackState {
     pub(super) expected: String,
+    /// The loopback address the callback listener bound; its port is in the
+    /// redirect URI.
+    pub(super) address: SocketAddr,
     pub(super) sender: Mutex<Option<oneshot::Sender<Result<String, Error>>>>,
 }
 
@@ -61,7 +64,7 @@ pub(super) async fn transition_at(
 ) -> Result<CredentialTransition, Error> {
     let http = client()?;
     let request = match action {
-        "activate" | "abort" => http.post(format!("{base}/{action}")),
+        "activate" | "abort" => http.post(desktop_core::endpoint(base, &[action])?),
         "revoke" => http.delete(base),
         _ => return Err("Unsupported account operation".into()),
     };
@@ -115,13 +118,17 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, Error> {
 pub(super) type RedpillClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-pub(super) fn redpill_client(authorize: Url, token: Url) -> Result<RedpillClient, Error> {
+pub(super) fn redpill_client(
+    authorize: Url,
+    token: Url,
+    callback: SocketAddr,
+) -> Result<RedpillClient, Error> {
     Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
         .set_auth_uri(AuthUrl::from_url(authorize))
         .set_token_uri(TokenUrl::from_url(token))
-        .set_redirect_uri(
-            RedirectUrl::new(callback_url()).map_err(|_| "Invalid account callback URL")?,
-        ))
+        .set_redirect_uri(RedirectUrl::from_url(
+            callback_url(callback).map_err(|()| "Invalid account callback URL")?,
+        )))
 }
 
 /// The browser URL of an authorization code request with S256 PKCE
@@ -161,10 +168,10 @@ pub(super) fn callback_code(
     uri: &Uri,
     headers: &HeaderMap,
     expected: &str,
+    address: SocketAddr,
 ) -> Result<String, CallbackError> {
     if uri.path() != CALLBACK_PATH
-        || headers.get("host").and_then(|v| v.to_str().ok())
-            != Some(CALLBACK_ADDRESS.to_string().as_str())
+        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(address.to_string().as_str())
     {
         return Err(CallbackError::Invalid);
     }
@@ -196,61 +203,86 @@ pub(super) fn callback_code(
         .ok_or(CallbackError::Invalid)
 }
 
-/// A window-activation link only; OAuth credentials stay on the loopback channel.
-pub(super) fn callback_page(accepted: bool) -> String {
-    let product = desktop_core::brand::PRODUCT_NAME
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;");
-    include_str!("../account-callback.html")
-        .replace(
-            "__OPEN_APP__",
-            if accepted {
-                format!(
-                    "<a class=\"open-app\" href=\"{}\">Open {product}</a>",
-                    account_return_url()
-                )
-            } else {
-                String::new()
-            }
-            .as_str(),
-        )
-        .replace("__PRODUCT__", &product)
-        .replace(
-            "__BYLINE__",
-            &desktop_core::brand::BYLINE
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;"),
-        )
-        .replace(
-            "__LOGO__",
-            &format!(
-                r#"<img src="data:image/png;base64,{}" alt="">"#,
-                STANDARD.encode(include_bytes!(
-                    "../../../src/renderer/brand/app-icon-light.png"
-                ))
+/// The icon the callback page shows, inlined: the loopback listener may stop
+/// before a browser would fetch a separate image.
+pub(super) const CALLBACK_ICON: &[u8] =
+    include_bytes!("../../../src/renderer/brand/app-icon-light.png");
+
+/// A callback page as the markup before and after its base64 icon. Every
+/// part is a compile-time constant; `callback_pages_need_no_escaping` checks
+/// the brand strings and the icon's base64 alphabet.
+macro_rules! callback_page {
+    ($title:literal, $tone:literal, $symbol:literal, $message:literal, $open_app:expr) => {
+        [
+            concat!(
+                "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n",
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
+                "<meta name=\"color-scheme\" content=\"light dark\">\n",
+                "<title>",
+                $title,
+                " · ",
+                desktop_core::product_name!(),
+                "</title>\n",
+                "<style>\n",
+                include_str!("../account-callback.css"),
+                "</style>\n",
+                "</head>\n<body><main>\n",
+                "<div class=\"brand\"><img src=\"data:image/png;base64,",
             ),
-        )
-        .replace(
-            "__TITLE__",
-            if accepted {
-                "Authorization received"
-            } else {
-                "Account connection could not complete"
-            },
-        )
-        .replace(
-            "__MESSAGE__",
-            if accepted {
-                "Return to the app or terminal to finish setting up your account."
-            } else {
-                "Return to the app or terminal and try signing in again."
-            },
-        )
-        .replace("__TONE__", if accepted { "" } else { "error" })
-        .replace("__SYMBOL__", if accepted { "✓" } else { "!" })
+            concat!(
+                "\" alt=\"\"><span>",
+                desktop_core::product_name!(),
+                "<small>",
+                desktop_core::byline!(),
+                "</small></span></div>\n",
+                "<div class=\"status ",
+                $tone,
+                "\" aria-hidden=\"true\">",
+                $symbol,
+                "</div>\n",
+                "<h1>",
+                $title,
+                "</h1><p>",
+                $message,
+                "</p>\n",
+                $open_app,
+                "<p class=\"footnote\">You can close this tab.</p>\n",
+                "</main></body></html>\n",
+            ),
+        ]
+    };
+}
+
+/// A window-activation link only; OAuth credentials stay on the loopback channel.
+const ACCEPTED_PAGE: [&str; 2] = callback_page!(
+    "Authorization received",
+    "",
+    "✓",
+    "Return to the app or terminal to finish setting up your account.",
+    concat!(
+        "<a class=\"open-app\" href=\"",
+        desktop_core::app_identifier!(),
+        "://oauth/return\">Open ",
+        desktop_core::product_name!(),
+        "</a>\n",
+    )
+);
+const DECLINED_PAGE: [&str; 2] = callback_page!(
+    "Account connection could not complete",
+    "error",
+    "!",
+    "Return to the app or terminal and try signing in again.",
+    ""
+);
+
+pub(super) fn callback_page(accepted: bool) -> String {
+    let [before, after] = if accepted {
+        ACCEPTED_PAGE
+    } else {
+        DECLINED_PAGE
+    };
+    // Base64 has no character that HTML treats specially in an attribute.
+    [before, &STANDARD.encode(CALLBACK_ICON), after].concat()
 }
 
 pub(super) async fn callback(

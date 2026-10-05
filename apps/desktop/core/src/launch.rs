@@ -67,12 +67,7 @@ fn sibling_executable(name: &str) -> Result<PathBuf, String> {
     let directory = current
         .parent()
         .ok_or_else(|| "Cannot locate the application directory".to_string())?;
-    let file_name = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
-    let candidate = directory.join(file_name);
+    let candidate = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let executable = std::fs::canonicalize(&candidate).map_err(|error| {
         format!(
             "Cannot locate bundled executable {}: {error}",

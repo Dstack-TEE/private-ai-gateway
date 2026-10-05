@@ -1,10 +1,19 @@
+use desktop_core::contracts::{
+    AccountBalance, AccountBalanceTarget, AccountLoginDetails, AccountSaveResult,
+};
+use tokio::sync::{MappedMutexGuard, MutexGuard as AsyncMutexGuard};
+
 use super::*;
+use crate::account_login::PendingLogin;
 
 impl DesktopRuntime {
-    pub(super) async fn cancel_pending(
-        &self,
-        pending: &mut crate::account_login::PendingLogin,
-    ) -> Result<(), Error> {
+    /// The sign-in in progress.
+    async fn pending_login(&self) -> Result<MappedMutexGuard<'_, PendingLogin>, Error> {
+        AsyncMutexGuard::try_map(self.account_login.lock().await, Option::as_mut)
+            .map_err(|_| "Account connection is no longer active".into())
+    }
+
+    pub(super) async fn cancel_pending(&self, pending: &mut PendingLogin) -> Result<(), Error> {
         let key = self.load_profile_key(pending.profile_id())?;
         pending.protect_saved_key(key.as_deref()).await;
         pending.cancel().await
@@ -37,14 +46,8 @@ impl DesktopRuntime {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<desktop_core::contracts::AccountLoginDetails>, Error> {
-        self.account_login
-            .lock()
-            .await
-            .as_mut()
-            .ok_or("Account connection is no longer active")?
-            .poll(&id)
-            .await
+    ) -> Result<Option<AccountLoginDetails>, Error> {
+        self.pending_login().await?.poll(&id).await
     }
 
     pub fn begin_account_save(
@@ -54,8 +57,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<desktop_core::contracts::AccountSaveResult, Error> {
-        use desktop_core::contracts::AccountSaveResult;
+    ) -> Result<AccountSaveResult, Error> {
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
         let mut operation = self
             .account_save
@@ -82,7 +84,7 @@ impl DesktopRuntime {
                 .await
             {
                 Ok(state) => AccountSaveResult::Complete {
-                    state: Box::new(state),
+                    state: Box::new(state.into()),
                 },
                 Err(error) => AccountSaveResult::Failed {
                     error: desktop_core::protocol::Error::from(error).message,
@@ -93,10 +95,7 @@ impl DesktopRuntime {
         Ok(AccountSaveResult::Running)
     }
 
-    pub fn account_save_result(
-        &self,
-        operation_id: &str,
-    ) -> Result<desktop_core::contracts::AccountSaveResult, Error> {
+    pub fn account_save_result(&self, operation_id: &str) -> Result<AccountSaveResult, Error> {
         let operation = self
             .account_save
             .lock()
@@ -108,10 +107,8 @@ impl DesktopRuntime {
                 "Account: Save outcome is unavailable. Check the saved profile before retrying.",
             ))?;
         let outcome = result.borrow().clone();
-        if matches!(outcome, desktop_core::contracts::AccountSaveResult::Running)
-            && result.has_changed().is_err()
-        {
-            return Ok(desktop_core::contracts::AccountSaveResult::Failed {
+        if matches!(outcome, AccountSaveResult::Running) && result.has_changed().is_err() {
+            return Ok(AccountSaveResult::Failed {
                 error: "Account: Save was interrupted. Check the saved profile before retrying."
                     .into(),
             });
@@ -153,29 +150,16 @@ impl DesktopRuntime {
         id: String,
         callback_url: String,
     ) -> Result<(), Error> {
-        self.account_login
-            .lock()
-            .await
-            .as_ref()
-            .ok_or("Account connection is no longer active")?
+        self.pending_login()
+            .await?
             .complete_callback(&id, &callback_url)
             .await
     }
 
-    pub async fn account_details(
-        &self,
-        profile_id: String,
-    ) -> Result<desktop_core::contracts::AccountLoginDetails, Error> {
-        use desktop_core::contracts::{ProfileAuth, ServiceProvider};
-        let state = self.manager.snapshot()?;
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .ok_or("Profile not found")?;
-        if profile.provider != ServiceProvider::Redpill
-            || !matches!(profile.auth, ProfileAuth::OAuth { .. })
-        {
+    pub async fn account_details(&self, profile_id: String) -> Result<AccountLoginDetails, Error> {
+        let state = self.state();
+        let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
+        if !account_key(profile.provider, &profile.auth) {
             return Err("Connect RedPill to select a workspace".into());
         }
         let key = self
@@ -186,32 +170,21 @@ impl DesktopRuntime {
 
     pub async fn account_balance(
         &self,
-        target: desktop_core::contracts::AccountBalanceTarget,
-    ) -> Result<Option<desktop_core::contracts::AccountBalance>, Error> {
-        use desktop_core::contracts::{AccountBalanceTarget, ProfileAuth};
+        target: AccountBalanceTarget,
+    ) -> Result<Option<AccountBalance>, Error> {
         match target {
             AccountBalanceTarget::Login { id } => {
                 self.balances
                     .get(format!("login:{id}"), async {
-                        let (provider, secret) = self
-                            .account_login
-                            .lock()
-                            .await
-                            .as_mut()
-                            .ok_or("Account connection is no longer active")?
-                            .balance_credential(&id)
-                            .await?;
+                        let (provider, secret) =
+                            self.pending_login().await?.balance_credential(&id).await?;
                         crate::account_login::account_balance(&provider, &secret).await
                     })
                     .await
             }
             AccountBalanceTarget::Profile { profile_id } => {
-                let state = self.manager.snapshot()?;
-                let profile = state
-                    .profiles
-                    .iter()
-                    .find(|p| p.id == profile_id)
-                    .ok_or("Profile not found")?;
+                let state = self.state();
+                let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
                     return Err("Connect the account to view its balance".into());
                 }

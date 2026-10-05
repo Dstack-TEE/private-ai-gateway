@@ -1,27 +1,24 @@
 # Private AI Proxy
 
-Private AI Proxy is the local desktop client for confidential AI services. It
+<a href="https://apps.apple.com/app/private-ai-proxy/id6814051406"><img alt="Download on the Mac App Store" src="https://toolbox.marketingtools.apple.com/api/badges/download-on-the-mac-app-store/black/en-us?size=250x83" height="40"></a>
+
+[![npm](https://img.shields.io/npm/v/private-ai-proxy?label=npm)](https://www.npmjs.com/package/private-ai-proxy)
+
+Private AI Proxy is the local client for confidential AI services. It
 verifies an ACI service, exposes a machine-local API, and projects that API into
 supported coding agents without giving those agents the provider credential.
+It ships as a desktop app and the `pap` CLI, which both manage one per-user
+backend service. This directory holds all of them and their packaging.
 
-The desktop product and the remote Private AI Gateway are independent projects:
-
-- Gateway owns remote inference, service-side attestation, sessions, and signed
-  receipt production.
-- Proxy owns local profiles, relying-party verification, post-delivery receipt
-  audits, agent configuration, usage history, and desktop lifecycle.
-- They share only the neutral `aci-protocol` wire types and canonical encoding
-  crate. Producer logic and relying-party verification remain independent.
-
-The preferred user-facing command is `pap`; `private-ai-proxy` is the
-canonical executable name. `aci` is a legacy alias kept for existing scripts:
-it runs the same executable and prints a one-line deprecation note only on an
-interactive terminal outside JSON modes.
+Private AI Proxy and the remote Private AI Gateway are independent projects that
+share only neutral protocol crates; [Architecture](docs/client-architecture.md#project-boundary)
+describes the boundary.
 
 ## Documentation
 
+- [Install](../../docs/private-ai-proxy-install.md)
 - [Architecture](docs/client-architecture.md)
-- [CLI](docs/cli.md)
+- [CLI reference](docs/cli.md)
 - [Settings files](docs/configuration.md)
 - [CLI distribution](docs/cli-distribution.md)
 - [Account login](docs/account-login.md)
@@ -36,23 +33,19 @@ interactive terminal outside JSON modes.
 | --- | --- |
 | `src/renderer` | React UI and native-window content |
 | `src-tauri` | Tauri application, system integration, tray, menus, dialogs, updates |
-| `cli` | The only command-line surface (arguments, output, completions), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
+| `cli` | The `pap` CLI, the only command-line surface (arguments, output, completions), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
 | `core` | Client side shared by the app, CLI and backend: contracts, the management API and its client, the local endpoint, the `config.toml` model, paths |
 | `runtime` | Persistent backend: controller, settings files, the management API server, verifier sessions, usage, account login, web UI |
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
 | `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
+| `../../crates/aci-verify` | Shared policy-neutral ACI verification mechanisms: report binding, dstack event-log replay and KMS custody chain, declared TLS selection |
 | `brand` | Source branding and icon assets |
+| `npm` | npm packaging of the CLI |
 | `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
 
-The direct-download application contains three sibling executables:
-
-- `private-ai-proxy`
-- `private-ai-proxy-service`
-- `private-ai-proxy-helper`
-
-There is no standalone `aci` executable; it is a legacy alias. The package neither embeds nor imports
-the remote Private AI Gateway server.
+Every package ships the same three sibling executables; see
+[CLI distribution](docs/cli-distribution.md).
 
 ## Request Path
 
@@ -66,12 +59,31 @@ coding agent
 Identity, policy, credential ownership, and model admission gate request
 delivery. Response bytes stream immediately. Signed receipts are fetched and
 audited afterward; an audit failure updates Usage but cannot retract bytes that
-were already delivered.
+were already delivered. Usage keeps each checked receipt, shown in the request's
+proof details and printed by [`pap usage show <id> --receipt`](docs/cli.md#coverage).
 
-Only agents that are both linked and currently protected receive the local API
-configuration. Stop, shutdown, verification failure, or disconnect restores the
-owned configuration. External edits are preserved and incomplete restoration is
-kept retryable.
+Only agents that are both linked and currently protected are authorized on the
+Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset
+settings, or disconnecting restores the owned configuration; quitting the app
+from the tray or menu leaves the backend running and the agents pointed at it.
+A verification failure or block, a network loss, and a restart for an update,
+a profile switch or a settings change keep linked agents pointed at the Local
+API, which refuses them until protection is verified again, so their requests
+never fall back to the original provider. A Local API address change during
+the session rewrites them to the new address from the last verified catalog;
+only when this backend has not verified a catalog yet are they restored until
+verification projects them again. If neither the new address nor the old
+one can be bound, agents stay pointed at an address with no listener, which
+refuses them. External edits are preserved and incomplete restoration is kept
+retryable.
+
+A backend that is not running restores nothing, so agents it left projected
+(for example after an update installed without relaunching the app) keep
+pointing at the Local API until `pap stop --offline` restores them without a
+backend. The Windows uninstaller runs it; in-app updates never do. Moving the
+macOS app to the Trash and removing a Linux package run nothing, so choose Stop
+All and Quit in the app, or run `pap --yes service stop` and then
+`pap stop --offline`, before removing it.
 
 ## Development
 
@@ -97,7 +109,7 @@ Build a local package:
 npm run dist
 ```
 
-Build only the unified CLI:
+Build only the `pap` CLI:
 
 ```bash
 cd apps/desktop
@@ -141,18 +153,11 @@ Tauri application; there is no in-page mock API or Playwright screenshot suite.
 ## Profiles And Credentials
 
 Profiles contain a name, provider, service endpoint, and authentication method.
-Settings live in `config.toml` and provider credentials only in the owner-only
-`credentials.toml` beside it; see [Settings files](docs/configuration.md). The
-renderer, `config.toml`, agent configuration, command arguments, and diagnostics
-never receive the raw saved credential.
-
-Phala and RedPill support account login or manual API keys. Custom ACI services
-use manual keys. Saving a profile does not claim that the endpoint is verified;
-starting protection performs fresh verification. See
-[Account login](docs/account-login.md) for provider-specific flows.
-
-The local client key uses `sk-pap-` followed by 64 lowercase hexadecimal
-characters. It authenticates local inference, not backend administration.
+[Settings files](docs/configuration.md) describes where profiles and their
+credentials are stored, and [Account login](docs/account-login.md) covers the
+Phala and RedPill sign-in flows. The renderer, `config.toml`, agent
+configuration, command arguments, and diagnostics never receive the raw saved
+credential.
 
 ## Model Compatibility Inventory
 
@@ -188,14 +193,16 @@ Product identity is committed where each consumer reads it:
   product name, identifier and publisher for Rust, and its unit test fails when
   they differ from the config. The identifier names the data directory and
   credential namespace, so a mismatch would split user data.
-- `core/src/brand.rs` and `src/renderer/brand/brand.ts` also hold the byline and
-  the default service URL, and the same test checks that they match.
-  `brand.rs` has the support link.
+- `core/src/brand.rs` also holds the byline and the support link, and derives
+  the default service from `ServiceProvider::DEFAULT`; the renderer receives
+  the byline and the providers as generated contracts.
 - `package.json` `bugs.email`: the support contact, used as the Linux package
   maintainer address.
 - Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
-  `AppIcon.icon` that `npm run build` compiles on macOS), `assets/tray/trayTemplate@2x.png`,
-  `src/renderer/brand/app-icon-{light,dark}.png`, and the installer images
+  `AppIcon.icon` that `npm run build` compiles on macOS), the tray icons
+  `assets/tray/{protected,unprotected}{,-dark}.png` (the black ones are the
+  macOS menu bar template), `src/renderer/brand/app-icon-{light,dark}.png`,
+  and the installer images
   `src-tauri/installer/brand-header.bmp` (150×57), `brand-sidebar.bmp`
   (164×314, the NSIS sizes) and `brand-dmg-background.png` (660×440, matching
   `bundle.macOS.dmg`).
@@ -216,25 +223,12 @@ from earlier beta builds.
 
 ## Packaging And Releases
 
-The desktop workflow builds separate macOS arm64/x64 DMGs, Windows NSIS
-installers, and Linux DEB/RPM/Arch packages, plus portable CLI archives. AppImage is
-not supported because its transient mount is incompatible with a persistent
-per-user backend.
-
-Release and updater behavior is documented in
-[CLI distribution](docs/cli-distribution.md) and implemented by
-`.github/workflows/desktop-native.yml`. Published updates use Tauri's signed
-updater artifacts. macOS distribution additionally requires Developer ID
-signing and notarization. Windows Authenticode signing is optional; when its
-certificate is configured, CI imports it only for the package job, configures
-Tauri with its thumbprint, signs the bundled executables before packaging,
-verifies the installer and installed executables, and removes it afterward.
-
-Beta and stable are update channels; stable releases are also published to the
-beta feed. A release version, channel, published assets, and feed metadata must
-agree. Published releases must run from `main` and include all supported
-platforms. The tag, title, notes, asset naming, signing credentials,
-and channel rules are defined in [CLI distribution](docs/cli-distribution.md).
+`.github/workflows/desktop-native.yml` builds the desktop app installers, the
+Linux packages and the portable CLI archives.
+[CLI distribution](docs/cli-distribution.md) defines what each package contains
+and the release contract: tags, assets, signing and channels.
+[Distribution architecture](docs/distribution.md) covers release orchestration
+and how each installation updates.
 
 ## Design Rules
 

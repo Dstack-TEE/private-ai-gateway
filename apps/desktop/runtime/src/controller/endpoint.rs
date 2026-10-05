@@ -7,10 +7,7 @@ impl DesktopRuntime {
 
     pub fn rotate_client_key(&self) -> Result<String, Error> {
         let _operation = self.configuration_change()?;
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
         let token = match self.credentials.rotate() {
@@ -35,8 +32,9 @@ impl DesktopRuntime {
         if self.instance.is_none() {
             return Err("Change Local API settings in the primary app instance".into());
         }
-        if self.manager.snapshot()?.status == "verifying" {
-            return Err("Wait for the current verification to finish".into());
+        let state = self.state();
+        if state.status == VerificationStatus::Verifying {
+            return Err(Error::verifying(&state));
         }
         self.apply_local_api(config).await
     }
@@ -46,26 +44,37 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         config: ListenConfig,
     ) -> Result<AppState, Error> {
-        let previous = self.manager.snapshot()?;
+        let previous = self.state();
         let current = self.manager.local_api()?;
         let resolved = settings_config::resolve_local_api(config.clone())?;
         if current.config == resolved.config && previous.endpoint_error.is_none() {
             return Ok(previous);
         }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
-        // Suspend projections before changing the URL; reconnect rebuilds them against the new endpoint.
-        self.stop_with_reconnect(reconnect || previous.reconnecting)?;
+        // The projections name the Local API URL. While the session goes on,
+        // they are rewritten to the new address from the last verified
+        // catalog, so agents never fall back to their own provider. Without
+        // one they are restored, and verification projects them again.
+        let reconnecting = reconnect || previous.reconnecting;
+        let catalog = (reconnecting && previous.session_active)
+            .then(|| self.verified_catalog.lock().ok()?.clone())
+            .flatten();
+        self.stop_verifier(reconnecting, catalog.is_none())?;
         let result = self.rebind_local_api(config, current, resolved).await;
-        if self.manager.snapshot()?.endpoint_error.is_some() {
+        if let Some(catalog) = catalog {
+            if let Err(error) = self.retarget_agents(&catalog) {
+                self.report_error(error);
+            }
+        }
+        if self.state().endpoint_error.is_some() {
             self.recovery.cancel();
             self.manager.cancel_reconnection();
         } else if previous.reconnecting && !self.recovery.online() {
             self.recovery.wait();
             result?;
-            return Ok(self.manager.snapshot()?);
+            return Ok(self.state());
         }
-        if (reconnect || previous.reconnecting) && self.manager.snapshot()?.endpoint_error.is_none()
-        {
+        if (reconnect || previous.reconnecting) && self.state().endpoint_error.is_none() {
             if let Err(error) = self.start_inner(previous.config) {
                 self.manager.cancel_reconnection();
                 return Err(match result {
@@ -80,7 +89,7 @@ impl DesktopRuntime {
             }
         }
         result?;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     pub(super) async fn rebind_local_api(
@@ -89,13 +98,12 @@ impl DesktopRuntime {
         current: ResolvedListen,
         resolved: ResolvedListen,
     ) -> Result<AppState, Error> {
-        let needs_bind =
-            current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
+        let needs_bind = current.bind != resolved.bind || self.state().proxy_url.is_none();
         if !needs_bind {
             let resolved = self.save_local_api(config)?;
             self.manager
                 .set_endpoint(resolved.config, Ok(resolved.endpoint));
-            return Ok(self.manager.snapshot()?);
+            return Ok(self.state());
         }
 
         // Different ports can be reserved without releasing the working listener.
@@ -106,27 +114,16 @@ impl DesktopRuntime {
             None
         };
         self.endpoint.stop().await?;
-        let listener = match prepared.map(Ok).unwrap_or_else(|| rebind(resolved.bind)) {
-            Ok(listener) => listener,
-            Err(error) => {
-                if let Err(restore_error) = self.restore_endpoint(current.clone()) {
-                    self.manager
-                        .set_endpoint(current.config, Err(restore_error.to_string()));
-                    return Err(format!("{error}; {restore_error}").into());
-                }
-                return Err(error);
-            }
+        let listener = match prepared {
+            Some(listener) => listener,
+            None => proxy::bind_std(resolved.bind)
+                .map_err(|error| self.restore_after(&current, error.into()))?,
         };
         let resolved = match self.save_local_api(config) {
             Ok(resolved) => resolved,
             Err(error) => {
                 drop(listener);
-                if let Err(restore_error) = self.restore_endpoint(current.clone()) {
-                    self.manager
-                        .set_endpoint(current.config, Err(restore_error.to_string()));
-                    return Err(format!("{error}; {restore_error}").into());
-                }
-                return Err(error);
+                return Err(self.restore_after(&current, error));
             }
         };
         self.endpoint
@@ -142,7 +139,7 @@ impl DesktopRuntime {
             })?;
         self.manager
             .set_endpoint(resolved.config, Ok(resolved.endpoint));
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
 
     fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, Error> {
@@ -154,11 +151,24 @@ impl DesktopRuntime {
         Ok(resolved)
     }
 
+    /// Rebinds the previous listener after `error`, which it returns, with
+    /// the reason the previous one could not be restored either.
+    fn restore_after(self: &Arc<Self>, previous: &ResolvedListen, error: Error) -> Error {
+        match self.restore_endpoint(previous) {
+            Ok(()) => error,
+            Err(restore_error) => {
+                self.manager
+                    .set_endpoint(previous.config.clone(), Err(restore_error.to_string()));
+                format!("{error}; {restore_error}").into()
+            }
+        }
+    }
+
     pub(super) fn restore_endpoint(
         self: &Arc<Self>,
-        previous: ResolvedListen,
+        previous: &ResolvedListen,
     ) -> Result<(), Error> {
-        let listener = rebind(previous.bind).map_err(|error| {
+        let listener = proxy::bind_std(previous.bind).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
             )
@@ -167,7 +177,7 @@ impl DesktopRuntime {
             self.manager.clone(),
             self.proxy.clone(),
             listener,
-            previous.config,
+            previous.config.clone(),
         )
     }
 
@@ -177,8 +187,8 @@ impl DesktopRuntime {
             return Err("Reset settings in the primary backend instance".into());
         }
         self.recovery.cancel();
-        self.stop_inner()?;
-        if self.agent_configuration_enabled() {
+        self.stop_with_reconnect(false)?;
+        if self.agent_configuration {
             self.disconnect_all_agents_inner()?;
         }
         let current = self.manager.local_api()?;
@@ -202,11 +212,6 @@ impl DesktopRuntime {
         self.web_ui.set_password(None);
         self.apply_web_ui(&desktop_core::config::WebUiConfig::default())
             .await;
-        Ok(self.manager.snapshot()?)
+        Ok(self.state())
     }
-}
-
-/// Binds a port whose Local API listener was just stopped.
-fn rebind(address: std::net::SocketAddr) -> Result<std::net::TcpListener, Error> {
-    Ok(proxy::bind_std(address)?)
 }

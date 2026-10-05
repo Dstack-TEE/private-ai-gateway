@@ -1,6 +1,9 @@
 //! The verified remote catalog (`GET /v1/models` through the ACI verifier) is
 //! the only source of model truth. Entries are validated and preserved as the
-//! service lists them; nothing is added or inferred.
+//! service lists them; nothing is added or inferred. The display name shown
+//! in the app and agent pickers is derived from each entry and is part of the
+//! catalog revision, so connected agents pick up a new name like any other
+//! catalog update.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -179,6 +182,7 @@ impl Surface {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CatalogModel {
     pub remote: RemoteModel,
+    display_name: String,
     /// Local endpoint observations, separate from the verified remote metadata.
     /// None means this endpoint has no compatibility inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,7 +211,7 @@ impl CatalogModel {
         &self.remote.id
     }
     pub fn display_name(&self) -> &str {
-        self.remote.name.as_deref().unwrap_or(&self.remote.id)
+        &self.display_name
     }
 
     pub fn bool_field(&self, name: &str) -> Option<bool> {
@@ -237,15 +241,49 @@ impl CatalogModel {
     }
 
     /// Remote pricing is per token. The UI presents the same validated value
-    /// per one million tokens and omits malformed or negative fields.
+    /// per one million tokens and omits malformed or negative fields. The
+    /// decimal point is shifted in the price text instead of multiplying
+    /// floats, so `0.00000005` becomes exactly the f64 nearest `0.05`. The
+    /// result keeps `f64::DIGITS` significant digits, which serde_json's
+    /// default parser reads back exactly for per-million prices from 1e-8 up
+    /// to 1e15 (a significand below 2^53 and a decimal exponent within ±22).
+    /// A longer form can read back as a neighbouring f64, and a fresh
+    /// connection would then differ from its own record.
     pub fn price_per_million(&self, name: &str) -> Option<f64> {
-        let value = self.remote.extra.get("pricing")?.get(name)?;
-        let per_token = match value {
-            Value::Number(value) => value.as_f64()?,
-            Value::String(value) => value.parse::<f64>().ok()?,
+        let text = match self.remote.extra.get("pricing")?.get(name)? {
+            Value::Number(value) => value.to_string(),
+            Value::String(value) => value.trim().to_string(),
             _ => return None,
         };
-        (per_token.is_finite() && per_token >= 0.0).then_some(per_token * 1_000_000.0)
+        let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+            None => (text.as_str(), 0),
+        };
+        let price: f64 = format!("{mantissa}e{}", exponent.checked_add(6)?)
+            .parse()
+            .ok()?;
+        let price: f64 = format!("{price:.*e}", f64::DIGITS as usize - 1)
+            .parse()
+            .ok()?;
+        (price.is_finite() && price >= 0.0).then_some(price)
+    }
+}
+
+/// The name people see; requests always use the unchanged `id`. `[TEE]` marks
+/// models the service reports with `is_tee`, which the RedPill and Phala
+/// presets set on every model. A custom ACI service may also route to
+/// upstreams without a TEE, so an unmarked model gets no suffix.
+fn display_name(remote: &RemoteModel) -> String {
+    let name = remote
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&remote.id);
+    if remote.extra.get("is_tee").and_then(Value::as_bool) == Some(true) && !name.ends_with("[TEE]")
+    {
+        format!("{name} [TEE]")
+    } else {
+        name.to_string()
     }
 }
 
@@ -279,14 +317,16 @@ impl Catalog {
             {
                 continue;
             }
-            let canonical = serde_json::to_vec(&entry).map_err(|error| error.to_string())?;
-            hasher.update((canonical.len() as u64).to_be_bytes());
-            hasher.update(&canonical);
-            models.push(CatalogModel {
+            let model = CatalogModel {
+                display_name: display_name(&entry),
                 remote: entry,
                 supported_surfaces: None,
                 agent_surfaces: None,
-            });
+            };
+            let canonical = serde_json::to_vec(&model).map_err(|error| error.to_string())?;
+            hasher.update((canonical.len() as u64).to_be_bytes());
+            hasher.update(&canonical);
+            models.push(model);
         }
         let revision = hex::encode(hasher.finalize());
         Ok(Self {
@@ -379,7 +419,7 @@ impl Catalog {
             );
         }
         let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
-        self.revision = format!("{:x}", Sha256::digest(bytes));
+        self.revision = hex::encode(Sha256::digest(bytes));
         Ok(())
     }
 

@@ -70,16 +70,14 @@ runs with `always()`, including failed preflight runs. Keep the ASC app record,
 explicit App ID `org.dstack.private-ai-proxy`, team, agreements and applicable
 tax/banking details ready; preflight does not verify external account state.
 
-The committed version must be stable. CFBundleVersion is one to three
+A release's committed version must be stable. CFBundleVersion is one to three
 period-separated integers of at most 18 characters, and for a Mac app it must
 increase with every upload, across versions
 ([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
 Releases number it `100 + <Desktop release run number>` (see
 [Release orchestration](distribution.md#release-orchestration)).
-`Desktop release` runs only for `desktop-v*` tags, so its run number counts
-beta and stable release tags alike, from 4. Only stable tags upload, so the
-first upload is `100 +` the run number of the first stable tag, at least 104,
-and builds skip the numbers of beta tags. There is no manual upload path; a new
+`Desktop release` runs only for `desktop-v*` tags and only stable tags upload,
+so builds skip the numbers of beta tags. There is no manual upload path; a new
 build number needs a new release tag. ASC confirms uniqueness and ordering; the
 repository validates syntax only. For a local unsigned build of a stable
 version on macOS:
@@ -111,10 +109,24 @@ validates those separately on the final app, and `altool --validate-app` validat
 the final pkg before upload. Do not attempt to make the distribution package
 locally runnable or weaken its signature to satisfy CI.
 
-Pull requests, pushes to `main` and manual runs only verify. Packaging and
-upload happen only when a stable release tag calls the workflow; the upload
-must run from that tag and passes App Store validation before delivery. The
-signed pkg is also kept as a workflow artifact for review.
+Pull requests and pushes to `main` only verify. Uploads happen only when a
+stable release tag calls the workflow; the upload must run from that tag and
+passes App Store validation before delivery. The signed pkg is also kept as a
+workflow artifact for review.
+
+A manual run (`gh workflow run desktop-mac-app-store.yml --ref main`) also
+takes the release path up to that validation: Universal build, smoke test,
+signing and `altool --validate-app`, but no upload. Run it before promoting a
+stable version, and after changing the packaging. The `mac-app-store`
+environment admits only `main` and `desktop-v*` tags. App Store versions are
+`x.y.z`, so the run packages its ref as the stable version it leads to
+(`0.2.0-beta.10` as `0.2.0`). Its build number, `99999.<run number>`, is above
+every release build number, in case App Store Connect validation compares it
+with earlier uploads, and never equal to one. Never upload its pkg, the
+`private-ai-proxy-mac-app-store-validate-only-<run number>` artifact: App Store
+Connect would then require every later build number to exceed 99999, and every
+release tag's upload would fail. On another branch, or with `validate_package`
+set to false, the run only verifies.
 
 A re-run keeps the run number and therefore the build number, and ASC rejects a
 second upload of the same build. If a later job of the tag's `Desktop release`
@@ -130,7 +142,7 @@ No speculative `PrivacyInfo.xcprivacy` is supplied. The published required-reaso
 API enforcement platform list does not currently include macOS; privacy data
 collection disclosures / Nutrition Labels apply across platforms.
 
-Repository audit covers the desktop npm lockfile, the unified desktop Cargo lockfile, native
+Repository audit covers the `apps/desktop` npm lockfile and Cargo lockfile, native
 framework wrappers, and the macOS dependency tree. No named Apple required-manifest
 SDK was identified in the current shipped dependency inventory. `openssl-probe`
 is a certificate-location Rust utility, not the OpenSSL SDK, and is not in the
@@ -173,7 +185,7 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
   buttons share the same action and query. Before Enable, no picker or Home scan
   occurs and Agent connection toggles are disabled. Cancellation stays inactive;
   the supported Agent catalog remains visible before Enable; successful Enable
-  replaces its states with actual installed Agents without connecting them.
+  replaces its states with the detected Agents without connecting them.
   Keep toggles disabled until the scan completes. Test wrong folders, symlinked
   Home, relaunch and system reboot, recoverable stale app bookmarks, regeneration
   of the backend bookmark, revoked permission and moved Home. Verify a second
@@ -208,9 +220,10 @@ the Direct updater or install replacement code as a MAS rollback mechanism.
 ## Repository verification
 
 Run from `apps/desktop`: focused Agent contract tests; `cargo test --locked
---workspace`; workspace fmt/clippy; core, runtime and desktop clippy and tests
-with the `mac-app-store` feature; `npm run check` (TypeScript and Agent
-Integrations tests); `npm run test:release` (includes MAS package tests); and
+--workspace`; workspace fmt/clippy; core, runtime and desktop shell clippy and tests
+with the `mac-app-store` feature; `npm run check` (TypeScript and the
+renderer's Node tests, Agent Integrations among them); `npm run test:release`
+(includes MAS package tests); and
 `git diff --check`. In CI, `Desktop Tauri` (`desktop-native.yml`) runs fmt, the
 workspace clippy and tests, `npm run check` and `npm run test:release` on
 Linux; `Desktop Mac App Store` runs the `mac-app-store` feature clippy and
@@ -221,8 +234,8 @@ Agent contract tests cover both credential modes, missing helper, quoted Home
 paths, restoration, revocation and rotation. Package tests validate manifest/profile
 and updater/executable policy, including real plist Date/Data decoding; they do
 not validate signatures. The signing and upload preflights run only in the
-release package job. macOS CI checks Direct migration code as well as the MAS
-feature.
+package job, for release tags and manual runs. macOS CI checks Direct
+migration code as well as the MAS feature.
 Agent Integrations tests exercise inactive refresh, explicit Enable, cancellation,
 silent restoration, access loss, shared query publication, request serialization,
 connection gates and non-MAS behavior. Runtime access tests check that inactive

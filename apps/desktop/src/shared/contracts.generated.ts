@@ -1,16 +1,26 @@
 // Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.
 
-export type AppState = { backendInstance?: string, clientKeyRevision: number, clientKeyAvailable?: boolean,
+/**
+ * `AppState` as the management API answers and publishes it: the state and
+ * the [`Protection`] it presents. Every state-returning command answers one
+ * and every state event carries one, each built from its state with `From`,
+ * so none can carry a presentation of another state.
+ */
+export type AppState = { protection: Protection,
+/**
+ * The backend process whose state this is (its `/api/version` instance).
+ */
+backendInstance?: string,
+/**
+ * Increases with every state the backend instance publishes, so a client
+ * that receives states from events and command results keeps the newest.
+ */
+sequence: number, clientKeyRevision: number, clientKeyAvailable?: boolean,
 /**
  * Client connection state; the backend leaves this unset. `false`
  * without an `error` while the client is still starting the backend.
  */
-backendConnected?: boolean, wakeMonitorAvailable?: boolean,
-/**
- * `stopped`, `verifying` (identity and catalog not both in), `verified`,
- * `blocked`, or `error`.
- */
-status: "stopped" | "verifying" | "verified" | "blocked" | "error",
+backendConnected?: boolean, wakeMonitorAvailable?: boolean, status: VerificationStatus,
 /**
  * True while Settings is verifying a candidate configuration without
  * opening the forwarding session or turning protection on.
@@ -54,7 +64,27 @@ config: StartConfig, profiles: Array<ConfidentialProfile>, activeProfileId: stri
  * agent projection and readiness state; the proxy still requires a live
  * verified session before forwarding.
  */
-catalog?: CatalogSummary, webUi: WebUiStatus, configFiles: ConfigFiles, };
+catalog?: CatalogSummary, webUi: WebUiStatus, configFiles: ConfigFiles,
+/**
+ * Changes whenever the agents the backend reports change.
+ */
+agentsRevision: number, };
+/**
+ * The verifier's state. `Verifying` lasts until the service identity and
+ * the catalog are both in.
+ */
+export type VerificationStatus = "stopped" | "verifying" | "verified" | "blocked" | "error";
+export type Protection = { phase: ProtectionPhase, title: string, tone: Tone, action: ProtectionAction, };
+/**
+ * What protection is doing, as the user sees it.
+ */
+export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "blocked" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
+export type ProtectionAction = { operation: ProtectionOperation, label: string, enabled: boolean, };
+/**
+ * What the protection switch and the tray's protection item do.
+ */
+export type ProtectionOperation = "start" | "stop" | "setUpProfile";
+export type Tone = "success" | "warning" | "danger" | "neutral";
 export type VerificationCheck = { id: string, section: string, title: string, status: "pass" | "fail" | "skip" | "info", detail: string, };
 export type ServiceIdentity = { teeType: string, trustLevel: string, keysetDigest: string, keysetNotAfter: number, tlsSpki?: string, source: SourceProvenance, serving: string, supportedE2eeVersions: Array<string>, };
 export type SourceProvenance = { repoUrl?: string, repoCommit?: string, imageDigest?: string, };
@@ -89,6 +119,10 @@ export type CatalogSummary = { revision: string, fetchedAt: number, models: Arra
 removed: Array<string>, };
 export type ModelSummary = { id: string, name: string, supportedEndpoints?: Array<string>, contextLength?: number, maxOutputLength?: number, isTee?: boolean, inputPricePerMillion?: number, outputPricePerMillion?: number, cacheReadPricePerMillion?: number, cacheWritePricePerMillion?: number, inputModalities: Array<string>, outputModalities: Array<string>, capabilities: Array<string>, description?: string, };
 export type ServiceProvider = "phala" | "redpill" | "custom";
+/**
+ * A provider as the profile editor presents it.
+ */
+export type ServiceProviderInfo = { id: ServiceProvider, label: string, presetUrl: string | null, keyLabel: string, accountLogin: boolean, workspaces: boolean, callbackUrl: boolean, };
 export type ProfileAuth = { "kind": "apiKey" } | { "kind": "oauth", accountId: string, accountName?: string, images?: AccountImages, scope?: AccountScope, };
 export type AccountImages = { user: string | null, organization: string | null, };
 export type AccountScope = { organizationId?: string | null, organizationSlug?: string | null, organization: string | null, workspace: string | null, workspaceSlug?: string | null, workspaceId: number | null, };
@@ -111,8 +145,8 @@ export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
 export type ListenConfig = { listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
  * The service-hosted browser UI. It is off until the user enables it and
- * listens on loopback unless network access is explicitly allowed. It
- * cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+ * listens on loopback unless network access is explicitly allowed. Browsers
+ * sign in with a generated password (`pap web-ui password show`).
  */
 export type WebUiConfig = { enabled: boolean, listenAddress: string, allowNetworkAccess: boolean, port: number, clientHost?: string, };
 /**
@@ -122,11 +156,7 @@ export type WebUiStatus = { enabled: boolean, listenAddress: string, allowNetwor
 /**
  * Present only while the listener is bound.
  */
-url?: string, error?: string,
-/**
- * Whether a sign-in password is set. The password itself never leaves the service.
- */
-passwordSet: boolean, };
+url?: string, error?: string, };
 /**
  * The settings files the backend reads. Never carries their contents.
  */
@@ -161,12 +191,37 @@ commands: Array<string>,
 /**
  * Portable archive to extract into a fresh directory.
  */
-downloadUrl: string | null, channelPublished: boolean, };
+downloadUrl: string | null, };
 /**
  * Desktop notifications. The OS permission is managed by the desktop app.
  */
 export type NotificationPreferences = { enabled: boolean, gateway: boolean, localApi: boolean, verification: boolean, };
 export type LaunchPreferences = { openAtLogin: boolean, connectOnLaunch: boolean, };
+/**
+ * One of the [`LaunchPreferences`].
+ */
+export type LaunchPreference = "openAtLogin" | "connectOnLaunch";
+/**
+ * The system's permission to show this app's notifications.
+ */
+export type NotificationPermission = "granted" | "denied" | "notDetermined" | "unknown" | "unsupported";
+export type NotificationPermissionStatus = { permission: NotificationPermission,
+/**
+ * Whether banner alerts are on, where the system reports it.
+ */
+alertsEnabled?: boolean, };
+/**
+ * The notification preferences and the system permission they need.
+ */
+export type NotificationConfiguration = { preferences: NotificationPreferences, permission: NotificationPermission,
+/**
+ * Whether banner alerts are on, where the system reports it.
+ */
+alertsEnabled?: boolean, };
+/**
+ * What a tray or menu item asks the main window to show or open.
+ */
+export type NavigationTarget = "settings" | "agents" | "profiles" | "profile-setup" | "confirm-stop-all" | "confirm-codex-service-stop";
 export type ProfileBackup = { version: number, profiles: Array<ProfileConfiguration>, };
 export type ProfileConfiguration = { name: string, provider: ServiceProvider, remoteUrl: string, };
 export type ImportResult = { imported: number, skipped: number, };
@@ -174,13 +229,21 @@ export type UsageQuery = { agent?: string, model?: string, sessionId?: string, s
 export type UsagePage = { items: Array<RequestActivity>, nextCursor: string | null, summary: UsageSummary, series: Array<UsagePoint>, modelSeries: Array<UsageModelPoint>, agents: Array<string>, models: Array<string>, };
 export type UsagePoint = { day: string, requests: number, inputTokens: number, outputTokens: number, tokens: number, costUsd: number, };
 export type UsageModelPoint = { day: string, model: string | null, requests: number, tokens: number, costUsd: number, };
-export type AgentStatus = { id: string, name: string, configPath: string, installed: boolean,
+export type AgentStatus = { id: string, name: string, configPath: string,
 /**
- * A connected link, including one suspended until protection resumes.
+ * The agent's configuration folder exists; each agent creates it on
+ * first run, so detection does not depend on how the CLI was installed.
+ */
+installed: boolean,
+/**
+ * The agent's configuration routes it through the Local API. A
+ * connection suspended until protection resumes is recorded, not
+ * connected: its own configuration is restored.
  */
 connected: boolean,
 /**
- * A connection record exists (whatever the config now says).
+ * A connection record exists (whatever the config now says), including
+ * a suspended one.
  */
 recorded: boolean,
 /**
@@ -217,7 +280,7 @@ export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauth
 /**
  * The desktop app's update check result for the renderer.
  */
-export type UpdateInfo = { enabled: boolean, systemManaged: boolean, currentVersion: string, channel: UpdateChannel, version: string | null, channelPublished: boolean,
+export type UpdateInfo = { enabled: boolean, systemManaged: boolean, currentVersion: string, channel: UpdateChannel, version: string | null,
 /**
  * Steps that install `version` when a package manager or the user owns
  * the installation.
@@ -252,19 +315,122 @@ export type WebBootstrap = { version: string, };
  * renderer receives the URLs as generated constants.
  */
 export type AboutLink = "documentation" | "github" | "aci";
-/** A method the shared UI API accepts (`ui_api::Method`). */
-export type UiMethod = "get_state" | "start" | "stop" | "activate_profile" | "delete_profile" | "save_configuration" | "complete_account_login" | "begin_account_login" | "poll_account_login" | "get_account_details" | "get_account_balance" | "cancel_account_login" | "get_client_key" | "rotate_client_key" | "save_local_api_config" | "save_web_ui" | "set_web_ui_password" | "import_profiles" | "export_profiles_content" | "export_diagnostics_content" | "query_usage" | "get_usage_record" | "list_agents" | "preview_agent" | "apply_agent" | "start_backend_service" | "save_account_login" | "get_organization_url" | "get_top_up_url" | "list_listen_addresses" | "get_agent_access" | "request_agent_access" | "get_appearance" | "set_appearance" | "get_launch_preferences" | "set_launch_preference" | "get_notification_settings" | "save_notification_settings" | "reset_settings" | "get_update_notice";
-export const APPEARANCE_EVENT: string = "pap://appearance";
-export const LAUNCH_PREFERENCES_EVENT: string = "pap://launch-preferences";
-export const SETTINGS_RESET_EVENT: string = "pap://settings-reset";
-export const STATE_EVENT: string = "pap://state";
-export const CLIENT_KEY_CHANGED_EVENT: string = "pap://client-key-changed";
-export const AGENTS_CHANGED_EVENT: string = "pap://agents-changed";
-export const NAVIGATE_EVENT: string = "pap://navigate";
-export const CONFIRM_STOP_ALL_EVENT: string = "pap://confirm-stop-all";
+/** The parameters each UI method takes (`ui_api::Method`). */
+export type UiRequests = {
+  get_state: Record<string, never>;
+  start: { config: StartConfig, };
+  stop: Record<string, never>;
+  set_require_production_os: { required: boolean, };
+  activate_profile: { profileId: string, };
+  delete_profile: { profileId: string, };
+  save_configuration: { profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string, };
+  complete_account_login: { id: string, callbackUrl: string, };
+  begin_account_login: { profile: ConfidentialProfileInput, };
+  poll_account_login: { id: string, };
+  get_account_details: { profileId: string, };
+  get_account_balance: { target: AccountBalanceTarget, };
+  cancel_account_login: { id: string, };
+  get_client_key: Record<string, never>;
+  rotate_client_key: Record<string, never>;
+  save_local_api_config: { config: ListenConfig, };
+  save_web_ui: { config: WebUiConfig, };
+  get_web_ui_password: Record<string, never>;
+  rotate_web_ui_password: Record<string, never>;
+  set_web_ui_password: { password: string, };
+  import_profiles: { backup: ProfileBackup, };
+  export_profiles_content: Record<string, never>;
+  export_diagnostics_content: Record<string, never>;
+  query_usage: { query: UsageQuery, };
+  get_usage_record: { recordId: string, };
+  get_usage_receipt: { recordId: string, };
+  list_agents: Record<string, never>;
+  set_agent_connection: { agentId: string, connect: boolean, };
+  agent_service_running: { agentId: string, };
+  stop_agent_service: { agentId: string, };
+  start_backend_service: Record<string, never>;
+  save_account_login: { id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number, };
+  get_organization_url: { organizationSlug: string, };
+  get_top_up_url: { provider: ServiceProvider, scopeSlug?: string, };
+  list_listen_addresses: Record<string, never>;
+  get_agent_access: Record<string, never>;
+  request_agent_access: Record<string, never>;
+  get_appearance: Record<string, never>;
+  set_appearance: { appearance: Appearance, };
+  get_launch_preferences: Record<string, never>;
+  set_launch_preference: { name: LaunchPreference, enabled: boolean, };
+  get_notification_settings: Record<string, never>;
+  save_notification_settings: { config: NotificationPreferences, };
+  reset_settings: Record<string, never>;
+  get_update_notice: Record<string, never>;
+};
+/** The result each UI method answers. */
+export type UiResponses = {
+  get_state: AppState;
+  start: AppState;
+  stop: AppState;
+  set_require_production_os: AppState;
+  activate_profile: AppState;
+  delete_profile: AppState;
+  save_configuration: AppState;
+  complete_account_login: void;
+  begin_account_login: LoginPresentation;
+  poll_account_login: AccountLoginDetails | null;
+  get_account_details: AccountLoginDetails;
+  get_account_balance: AccountBalance | null;
+  cancel_account_login: void;
+  get_client_key: string;
+  rotate_client_key: string;
+  save_local_api_config: AppState;
+  save_web_ui: AppState;
+  get_web_ui_password: string | null;
+  rotate_web_ui_password: string;
+  set_web_ui_password: AppState;
+  import_profiles: ImportResult;
+  export_profiles_content: string;
+  export_diagnostics_content: string;
+  query_usage: UsagePage;
+  get_usage_record: RequestActivity;
+  get_usage_receipt: string | null;
+  list_agents: Array<AgentStatus>;
+  set_agent_connection: AgentStatus;
+  agent_service_running: boolean;
+  stop_agent_service: void;
+  start_backend_service: AppState;
+  save_account_login: AppState;
+  get_organization_url: string;
+  get_top_up_url: string;
+  list_listen_addresses: Array<ListenAddress>;
+  get_agent_access: AgentAccessStatus;
+  request_agent_access: AgentAccessStatus;
+  get_appearance: Appearance;
+  set_appearance: void;
+  get_launch_preferences: LaunchPreferences;
+  set_launch_preference: LaunchPreferences;
+  get_notification_settings: NotificationConfiguration;
+  save_notification_settings: void;
+  reset_settings: AppState;
+  get_update_notice: UpdateNotice;
+};
+/** A method the shared UI API accepts. */
+export type UiMethod = keyof UiRequests;
+export const APPEARANCE_EVENT = "pap://appearance";
+export const LAUNCH_PREFERENCES_EVENT = "pap://launch-preferences";
+export const SETTINGS_RESET_EVENT = "pap://settings-reset";
+export const STATE_EVENT = "pap://state";
+export const CLIENT_KEY_CHANGED_EVENT = "pap://client-key-changed";
+export const AGENTS_CHANGED_EVENT = "pap://agents-changed";
+export const NAVIGATE_EVENT = "pap://navigate";
+/** The payload each event carries. */
+export type UiEventPayloads = { "pap://appearance": Appearance, "pap://launch-preferences": LaunchPreferences, "pap://settings-reset": null, "pap://state": AppState, "pap://client-key-changed": boolean, "pap://agents-changed": null, "pap://navigate": null };
+export type UiEvent = keyof UiEventPayloads;
 export const ABOUT_LINKS: Record<AboutLink, string> = {"documentation":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md","github":"https://github.com/Dstack-TEE/private-ai-gateway","aci":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md"};
-export const AGENT_WEBSITES: Readonly<Record<string, string>> = {"claude-code":"https://code.claude.com","codex":"https://developers.openai.com/codex/cli/","hermes":"https://hermes-agent.nousresearch.com","pi":"https://pi.dev","oh-my-pi":"https://omp.sh","opencode":"https://opencode.ai","openclaw":"https://openclaw.ai"};
+export const AGENTS: ReadonlyArray<{ id: string, name: string, website: string }> = [{"id":"claude-code","name":"Claude Code","website":"https://code.claude.com"},{"id":"codex","name":"Codex","website":"https://developers.openai.com/codex/cli/"},{"id":"dsh","name":"DeepSeek Harness","website":"https://deepseek-harness.github.io/deepseek-harness/"},{"id":"hermes","name":"Hermes Agent","website":"https://hermes-agent.nousresearch.com"},{"id":"pi","name":"Pi","website":"https://pi.dev"},{"id":"oh-my-pi","name":"Oh My Pi","website":"https://omp.sh"},{"id":"opencode","name":"OpenCode","website":"https://opencode.ai"},{"id":"openclaw","name":"OpenClaw","website":"https://openclaw.ai"}];
 export const API_KEY_PAGES: Partial<Record<ServiceProvider, string>> = {"phala":"https://cloud.phala.com/dashboard","redpill":"https://www.redpill.ai/dashboard"};
+export const SERVICE_PROVIDERS: Readonly<Record<ServiceProvider, ServiceProviderInfo>> = {"phala":{"id":"phala","label":"Phala","presetUrl":"https://inference.phala.com","keyLabel":"Phala API key","accountLogin":true,"workspaces":false,"callbackUrl":false},"redpill":{"id":"redpill","label":"RedPill","presetUrl":"https://tee.redpill.ai","keyLabel":"RedPill API key","accountLogin":true,"workspaces":true,"callbackUrl":true},"custom":{"id":"custom","label":"Custom","presetUrl":null,"keyLabel":"API key","accountLogin":false,"workspaces":false,"callbackUrl":false}};
+export const DEFAULT_SERVICE_PROVIDER: ServiceProvider = "redpill";
+export const BYLINE: string = "by dstack TEE";
+export const INITIAL_STATE: AppState = {"sequence":0,"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}};
+export const UNAVAILABLE_STATE: AppState = {"sequence":0,"clientKeyRevision":0,"backendConnected":false,"status":"error","configurationVerification":false,"endpointError":"The background service stopped.","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"error":"The background service is unavailable.","config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"localApiUnavailable","title":"Local API unavailable","tone":"danger","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":false}}};
 export const WEB_UI_PASSWORD_MIN_LENGTH: number = 12;
 export const WEB_DISTRIBUTION: DistributionCapabilities = {"channel":"web","nativeUpdates":false,"cliRegistration":false,"accountPortalLinks":true,"sandboxHomeAccess":false,"launchAtLogin":false,"notifications":false,"webUi":true};
 export const DEFAULT_LOCAL_API_CONFIG: ListenConfig = {"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180};

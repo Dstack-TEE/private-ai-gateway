@@ -1,0 +1,11 @@
+{
+  "name": "private-ai-proxy-desktop-e2e",
+  "private": true,
+  "description": "Live end-to-end test of Private AI Proxy with every supported coding agent",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "smol-toml": "1.9.0",
+    "yaml": "2.9.1"
+  }
+}

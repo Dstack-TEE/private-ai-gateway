@@ -22,8 +22,6 @@
 
   --sidebar-width: 196px;
   --warning: var(--color-amber-700);
-  --warning-bg: color-mix(in oklch, var(--warning) 10%, transparent);
-  --danger-bg: color-mix(in oklch, var(--destructive) 10%, transparent);
 }
 :root.dark {
   color-scheme: dark;
@@ -41,4 +39,28 @@
 }
 @media (prefers-reduced-motion: reduce) {
   [data-slot="button"], [data-slot="switch"], [data-slot="switch-thumb"] { transition: none; }
+  /* Dialogs, menus and tooltips fade in place instead of zooming or sliding,
+     and busy spinners stand still. */
+  * {
+    --tw-enter-scale: 1;
+    --tw-exit-scale: 1;
+    --tw-enter-translate-x: 0;
+    --tw-enter-translate-y: 0;
+    --tw-exit-translate-x: 0;
+    --tw-exit-translate-y: 0;
+  }
+  .animate-spin { animation: none; }
+}
+/* High contrast: switches use the system's control colors, with the highlight
+   for on, and dialogs keep an outline where their ring (a shadow) is dropped. */
+@media (forced-colors: active) {
+  [data-slot="switch"] { forced-color-adjust: none; }
+  [data-slot="switch"][data-checked] { border-color: Highlight; background-color: Highlight; }
+  [data-slot="switch"][data-unchecked] { border-color: ButtonBorder; background-color: Canvas; }
+  [data-slot="switch"][data-disabled] { border-color: GrayText; }
+  [data-slot="switch-thumb"][data-checked] { background-color: HighlightText; }
+  [data-slot="switch-thumb"][data-unchecked] { background-color: ButtonText; }
+  [data-slot="switch"][data-disabled] [data-slot="switch-thumb"] { background-color: GrayText; }
+  [data-slot="input"] { border-color: ButtonBorder; }
+  [data-slot="dialog-content"], [data-slot="alert-dialog-content"] { border: 1px solid CanvasText; }
 }

@@ -35,6 +35,7 @@ const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
 /// by the legacy `ed25519` mode.
 const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
+const PREFIX_HASH_PURPOSE: &str = "aci.prefix-hash.hmac-sha256.v1";
 
 #[derive(Debug, Clone)]
 pub struct DstackAciProviderConfig {
@@ -42,6 +43,7 @@ pub struct DstackAciProviderConfig {
     pub x25519_e2ee_path: String,
     pub legacy_e2ee_path: String,
     pub legacy_ed25519_path: String,
+    pub prefix_hash_path: String,
     pub receipt_key_id: String,
     pub x25519_e2ee_key_id: String,
     pub legacy_e2ee_key_id: String,
@@ -57,6 +59,7 @@ impl Default for DstackAciProviderConfig {
             // legacy `signing_address` old clients already pin.
             legacy_e2ee_path: "aci/e2ee/v1".to_string(),
             legacy_ed25519_path: "aci/legacy-ed25519/v1".to_string(),
+            prefix_hash_path: "aci/prefix-hash-hmac-sha256/v1".to_string(),
             receipt_key_id: "dstack-kms-receipt-ed25519-v1".to_string(),
             x25519_e2ee_key_id: "dstack-kms-e2ee-x25519-v1".to_string(),
             legacy_e2ee_key_id: "dstack-kms-e2ee-v1".to_string(),
@@ -93,6 +96,7 @@ pub struct DstackAciProvider {
     x25519_e2ee_key_id: String,
     legacy_e2ee_key_id: String,
     legacy_ed25519_key_id: String,
+    prefix_hash_path: String,
 }
 
 impl DstackAciProvider {
@@ -183,6 +187,7 @@ impl DstackAciProvider {
             x25519_e2ee_key_id: config.x25519_e2ee_key_id,
             legacy_e2ee_key_id: config.legacy_e2ee_key_id,
             legacy_ed25519_key_id: config.legacy_ed25519_key_id,
+            prefix_hash_path: config.prefix_hash_path,
         })
     }
 }
@@ -243,6 +248,19 @@ fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, KeyError> {
 }
 
 impl DstackAciProvider {
+    /// Derive the middleware's prefix-hash HMAC key. It stays inside the TEE,
+    /// so the control plane cannot test guessed prefixes against `prefixHash`.
+    pub async fn prefix_hash_key(&self) -> Result<[u8; 32], KeyError> {
+        let (key, _signature_chain) = load_kms_raw32_key(
+            &self.client,
+            "prefix-hash",
+            &self.prefix_hash_path,
+            PREFIX_HASH_PURPOSE,
+        )
+        .await?;
+        Ok(key)
+    }
+
     /// Request a dstack TDX quote binding exactly the supplied 64-byte
     /// report-data, returning the verified quote plus its event log and VM
     /// config evidence.

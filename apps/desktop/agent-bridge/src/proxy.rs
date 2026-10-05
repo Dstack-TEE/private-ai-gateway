@@ -31,14 +31,14 @@ use std::{
 
 use axum::{
     body::{to_bytes, Body, Bytes},
-    extract::{RawQuery, State},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    extract::State,
+    http::{header, uri::PathAndQuery, HeaderMap, HeaderValue, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use futures_util::{FutureExt, StreamExt};
-use rand::RngCore;
+use rand::{rngs::SysRng, TryRng};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::mpsc, sync::Semaphore};
@@ -135,6 +135,9 @@ pub struct ProxyEvent {
     pub status: u16,
     pub streamed: bool,
     pub receipt_id: Option<String>,
+    /// The receipt document the verifier checked, exactly as the service
+    /// returned it.
+    pub receipt: Option<String>,
     pub verified: Option<bool>,
     pub detail: String,
     pub at: u64,
@@ -323,7 +326,7 @@ impl ProxyState {
             Rejection::new(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                format!("This endpoint accepts only agents connected through {PRODUCT_NAME}"),
+                format!("Missing API key. Use the Local API key shown in {PRODUCT_NAME}."),
             )
         })?;
         let epoch = self.credential_epoch.load(Ordering::SeqCst);
@@ -455,7 +458,7 @@ pub async fn serve(state: Arc<ProxyState>, listener: std::net::TcpListener) -> R
 async fn relay(
     state: Arc<ProxyState>,
     headers: HeaderMap,
-    query: Option<String>,
+    uri: Uri,
     body: Body,
     surface: Surface,
     path: &'static str,
@@ -541,7 +544,9 @@ async fn relay(
         &agent,
         surface,
         path,
-        query.as_deref(),
+        uri.path_and_query()
+            .cloned()
+            .unwrap_or_else(|| PathAndQuery::from_static(path)),
         &headers,
         bytes,
         model,
@@ -600,7 +605,7 @@ async fn forward(
     agent: &str,
     surface: Surface,
     path: &str,
-    query: Option<&str>,
+    target: PathAndQuery,
     headers: &HeaderMap,
     body: Bytes,
     model: Option<String>,
@@ -608,10 +613,6 @@ async fn forward(
 ) -> Response {
     let request_id = new_id();
     let dropped = hop_by_hop_names(headers);
-    let target = match query {
-        Some(query) => format!("{path}?{query}"),
-        None => path.to_string(),
-    };
     let mut request = Request::builder().method("POST").uri(target);
     for (name, value) in headers {
         let name = name.as_str();
@@ -744,6 +745,7 @@ async fn forward(
         status,
         streamed,
         receipt_id: receipt_id.clone(),
+        receipt: None,
         verified: None,
         detail: String::new(),
         at: now_secs(),
@@ -786,6 +788,7 @@ async fn forward(
                 status,
                 streamed,
                 receipt_id: event_receipt_id,
+                receipt: None,
                 verified: None,
                 detail: String::new(),
                 at: now_secs(),
@@ -931,6 +934,7 @@ fn reject_with_context(
         status: rejection.status.as_u16(),
         streamed: false,
         receipt_id: None,
+        receipt: None,
         verified: None,
         detail: rejection.message.clone(),
         at: now_secs(),
@@ -999,7 +1003,9 @@ fn model_of(bytes: &[u8]) -> Option<String> {
 
 fn new_id() -> String {
     let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the system random source failed");
     hex::encode(bytes)
 }
 

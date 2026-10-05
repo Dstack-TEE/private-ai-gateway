@@ -44,7 +44,7 @@ use private_ai_gateway::aggregator::upstream_config::{
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
 use rand::Rng;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -411,7 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
     );
     let keys: Arc<dyn KeyProvider> = provider.clone();
-    let quoter: Arc<dyn Quoter> = provider;
+    let quoter: Arc<dyn Quoter> = provider.clone();
     seed_upstream_config_if_empty(&upstream_config_path, upstream_config_seed_path.as_deref())?;
     let upstream_config = Arc::new(UpstreamConfigManager::load(
         upstream_config_path.clone(),
@@ -575,7 +575,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let app = if let Some(middleware_config) = middleware_config {
-        let middleware = Arc::new(Middleware::new(&middleware_config).map_err(invalid_input)?);
+        let prefix_hash_key = PrefixHashKey::new(provider.prefix_hash_key().await?);
+        let middleware =
+            Arc::new(Middleware::new(prefix_hash_key, &middleware_config).map_err(invalid_input)?);
         tracing::info!(
             control_url = %middleware_config.control_url,
             "private-ai-gateway middleware enabled"

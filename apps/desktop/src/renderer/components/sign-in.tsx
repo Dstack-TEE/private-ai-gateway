@@ -1,4 +1,5 @@
-import { useId, useLayoutEffect, useState, type FormEvent } from "react";
+import { useId, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { useLocation, useRouter, useSearch } from "@tanstack/react-router";
 import { brand } from "../brand/brand";
 import { errorMessage } from "../lib/error-message";
@@ -14,30 +15,17 @@ export function SignInPage() {
   const { redirect } = useSearch({ from: "/sign-in" });
   const notice = useLocation({ select: (location) => location.state.notice });
   const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
   const errorId = useId();
-  // Saved appearance needs a session, so the sign-in page follows the system theme.
-  useLayoutEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => document.documentElement.classList.toggle("dark", media.matches);
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
-  }, []);
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(undefined);
-    try {
+  const signIn = useMutation({
+    mutationFn: async () => {
       if (!session) throw new Error("Sign-in is only needed in the web UI");
       await session.signIn(password);
-      router.history.push(redirect ?? "/");
-    } catch (signInError) {
-      setError(errorMessage(signInError));
-      setBusy(false);
-    }
-  };
+    },
+    onSuccess: () => router.history.push(redirect ?? "/"),
+  });
+  // Stays busy after signing in, until the page asked for replaces this one.
+  const busy = signIn.isPending || signIn.isSuccess;
+  const error = signIn.error ? errorMessage(signIn.error) : undefined;
   return <main className="grid min-h-svh place-items-center bg-background p-4 text-foreground">
     <Card className="w-full max-w-sm">
       <CardHeader>
@@ -50,7 +38,7 @@ export function SignInPage() {
         <CardDescription>{notice ?? "Enter the web UI password."}</CardDescription>
       </CardHeader>
       <CardContent>
-        <form onSubmit={(event) => void submit(event)}>
+        <form onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>
           <FieldGroup>
             <Field data-invalid={Boolean(error)}>
               <FieldLabel htmlFor="web-ui-sign-in-password">Password</FieldLabel>
@@ -58,7 +46,7 @@ export function SignInPage() {
               {error && <FieldError id={errorId}>{error}</FieldError>}
             </Field>
             <Button type="submit" disabled={busy || !password}>{busy ? "Signing In…" : "Sign In"}</Button>
-            <FieldDescription>Set the password in the desktop app under Settings › Web UI, or with pap settings set web-ui.password.</FieldDescription>
+            <FieldDescription>Find the password in the desktop app under Settings › Web UI, or run <code>pap web-ui password show</code>.</FieldDescription>
           </FieldGroup>
         </form>
       </CardContent>

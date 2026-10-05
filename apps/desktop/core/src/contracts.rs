@@ -2,6 +2,7 @@
 //! generated from them; run `npm run generate:contracts` after changing one.
 
 pub use crate::agents::{AgentPreview, AgentStatus, ConnectOptions};
+pub use crate::protection::{Protection, VerificationStatus};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -152,6 +153,8 @@ pub enum ServiceProvider {
 
 impl ServiceProvider {
     pub const ALL: [Self; 3] = [Self::Phala, Self::Redpill, Self::Custom];
+    /// The provider a new profile and a fresh installation start with.
+    pub const DEFAULT: Self = Self::Redpill;
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -168,13 +171,64 @@ impl ServiceProvider {
             Self::Custom => None,
         }
     }
+
+    pub const fn key_label(self) -> &'static str {
+        match self {
+            Self::Phala => "Phala API key",
+            Self::Redpill => "RedPill API key",
+            Self::Custom => "API key",
+        }
+    }
+
+    /// Whether a profile can sign in with an account instead of an API key.
+    pub const fn account_login(self) -> bool {
+        !matches!(self, Self::Custom)
+    }
+
+    /// Whether an account signs in to one of its workspaces.
+    pub const fn workspaces(self) -> bool {
+        matches!(self, Self::Redpill)
+    }
+
+    /// Whether a sign-in returns to a loopback callback URL the user can also
+    /// paste; Phala signs in with a device code instead.
+    pub const fn callback_url(self) -> bool {
+        matches!(self, Self::Redpill)
+    }
+}
+
+/// A provider as the profile editor presents it.
+#[derive(Clone, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceProviderInfo {
+    pub id: ServiceProvider,
+    pub label: &'static str,
+    pub preset_url: Option<&'static str>,
+    pub key_label: &'static str,
+    pub account_login: bool,
+    pub workspaces: bool,
+    pub callback_url: bool,
+}
+
+impl From<ServiceProvider> for ServiceProviderInfo {
+    fn from(provider: ServiceProvider) -> Self {
+        Self {
+            id: provider,
+            label: provider.label(),
+            preset_url: provider.preset_url(),
+            key_label: provider.key_label(),
+            account_login: provider.account_login(),
+            workspaces: provider.workspaces(),
+            callback_url: provider.callback_url(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum AccountSaveResult {
     Running,
-    Complete { state: Box<AppState> },
+    Complete { state: Box<AppStateWire> },
     Failed { error: String },
 }
 
@@ -293,12 +347,18 @@ pub struct ConfidentialProfileInput {
     pub remote_url: String,
 }
 
+/// The backend's state. Clients receive it as [`AppStateWire`].
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AppState {
+    /// The backend process whose state this is (its `/api/version` instance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_instance: Option<String>,
+    /// Increases with every state the backend instance publishes, so a client
+    /// that receives states from events and command results keeps the newest.
+    #[serde(default)]
+    pub sequence: u64,
     #[serde(default)]
     pub client_key_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,10 +369,7 @@ pub struct AppState {
     pub backend_connected: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_monitor_available: Option<bool>,
-    /// `stopped`, `verifying` (identity and catalog not both in), `verified`,
-    /// `blocked`, or `error`.
-    #[ts(type = r#""stopped" | "verifying" | "verified" | "blocked" | "error""#)]
-    pub status: String,
+    pub status: VerificationStatus,
     /// True while Settings is verifying a candidate configuration without
     /// opening the forwarding session or turning protection on.
     pub configuration_verification: bool,
@@ -363,6 +420,28 @@ pub struct AppState {
     pub web_ui: WebUiStatus,
     #[serde(default)]
     pub config_files: ConfigFiles,
+    /// Changes whenever the agents the backend reports change.
+    #[serde(default)]
+    pub agents_revision: u64,
+}
+
+/// `AppState` as the management API answers and publishes it: the state and
+/// the [`Protection`] it presents. Every state-returning command answers one
+/// and every state event carries one, each built from its state with `From`,
+/// so none can carry a presentation of another state.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[ts(rename = "AppState")]
+pub struct AppStateWire {
+    #[serde(flatten)]
+    pub state: AppState,
+    pub protection: Protection,
+}
+
+impl From<AppState> for AppStateWire {
+    fn from(state: AppState) -> Self {
+        let protection = state.protection();
+        Self { state, protection }
+    }
 }
 
 /// The settings files the backend reads. Never carries their contents.
@@ -402,9 +481,6 @@ pub struct WebUiStatus {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Whether a sign-in password is set. The password itself never leaves the service.
-    #[serde(default)]
-    pub password_set: bool,
 }
 
 impl From<&crate::config::WebUiConfig> for WebUiStatus {
@@ -417,33 +493,57 @@ impl From<&crate::config::WebUiConfig> for WebUiStatus {
             client_host: config.client_host.clone(),
             url: None,
             error: None,
-            password_set: false,
         }
     }
 }
 
 impl AppState {
+    pub fn protection(&self) -> Protection {
+        Protection::of(self)
+    }
+
+    /// The state a client shows once the backend stopped answering.
+    pub fn disconnect(&mut self, error: String) {
+        self.status = VerificationStatus::Error;
+        self.backend_connected = Some(false);
+        self.identity = None;
+        self.proxy_url = None;
+        self.error = Some(error);
+        // Every desktop distribution, the App Store one included, offers to
+        // start the service again; not every one has the `pap` command.
+        self.endpoint_error = Some("The background service stopped.".into());
+    }
+
     pub fn is_protected(&self) -> bool {
-        self.status == "verified"
+        self.status == VerificationStatus::Verified
             && !self.configuration_verification
             && self.api_key_saved
             && self.endpoint_error.is_none()
     }
 
     /// Shared by the native action label and the management client's toggle.
+    /// A session the user has not ended can always be stopped, even when
+    /// nothing runs, so its agents can be restored.
     pub fn should_stop_protection(&self) -> bool {
         !self.configuration_verification
             && (self.reconnecting
-                || matches!(self.status.as_str(), "verifying" | "verified" | "blocked"))
+                || self.session_active
+                || matches!(
+                    self.status,
+                    VerificationStatus::Verifying
+                        | VerificationStatus::Verified
+                        | VerificationStatus::Blocked
+                ))
     }
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            status: "stopped".to_string(),
+            status: VerificationStatus::Stopped,
             backend_connected: None,
             backend_instance: None,
+            sequence: 0,
             client_key_revision: 0,
             client_key_available: None,
             wake_monitor_available: None,
@@ -470,6 +570,7 @@ impl Default for AppState {
             catalog: None,
             web_ui: WebUiStatus::from(&crate::config::WebUiConfig::default()),
             config_files: ConfigFiles::default(),
+            agents_revision: 0,
         }
     }
 }
@@ -576,6 +677,59 @@ impl DistributionCapabilities {
     };
 }
 
+/// What a tray or menu item asks the main window to show or open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum NavigationTarget {
+    Settings,
+    Agents,
+    Profiles,
+    ProfileSetup,
+    /// The confirmation to stop everything and quit.
+    ConfirmStopAll,
+    /// The question whether to stop Codex's background service, after the
+    /// tray changed Codex's connection while it runs.
+    ConfirmCodexServiceStop,
+}
+
+/// The system's permission to show this app's notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum NotificationPermission {
+    Granted,
+    Denied,
+    NotDetermined,
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
+pub struct NotificationPermissionStatus {
+    pub permission: NotificationPermission,
+    /// Whether banner alerts are on, where the system reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alerts_enabled: Option<bool>,
+}
+
+impl From<NotificationPermission> for NotificationPermissionStatus {
+    fn from(permission: NotificationPermission) -> Self {
+        Self {
+            permission,
+            alerts_enabled: None,
+        }
+    }
+}
+
+/// The notification preferences and the system permission they need.
+#[derive(Clone, Copy, Debug, Serialize, TS)]
+pub struct NotificationConfiguration {
+    pub preferences: crate::config::NotificationPreferences,
+    #[serde(flatten)]
+    pub system: NotificationPermissionStatus,
+}
+
 /// `GET /api/bootstrap` on the web UI; it also tells whether this browser has
 /// a session.
 #[derive(Clone, Debug, Serialize, TS)]
@@ -585,7 +739,7 @@ pub struct WebBootstrap {
 
 #[cfg(test)]
 mod typescript {
-    use std::path::Path;
+    use std::{any::TypeId, path::Path};
 
     use ts_rs::{Config, TS};
 
@@ -600,7 +754,9 @@ mod typescript {
             WEB_UI_PASSWORD_MIN_LENGTH,
         },
         maintenance::{ImportResult, ProfileBackup, ProfileConfiguration},
-        ui_api::{self, LaunchPreferences, ListenAddress, Method},
+        protection::{ProtectionAction, ProtectionOperation, ProtectionPhase, Tone},
+        protocol::{rpc, Call},
+        ui_api::{self, requests, HostCall, LaunchPreference, LaunchPreferences, ListenAddress},
         updates::{Installation, UpdateInfo, UpdateNotice},
         usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
     };
@@ -617,18 +773,59 @@ mod typescript {
         };
     }
 
+    /// Each renderer method (`ui_api::Method`) with the parameters it takes
+    /// and the result it answers: a command's `rpc` request or a host
+    /// method's `ui_api::requests` one.
+    macro_rules! method_contracts {
+        (
+            commands { $($command:ident => $command_variant:ident),+ $(,)? }
+            host { $($host:ident => $host_variant:ident),+ $(,)? }
+        ) => {
+            fn method_contracts(config: &Config) -> Vec<(&'static str, String, String)> {
+                vec![
+                    $(method_contract::<rpc::$command_variant, <rpc::$command_variant as Call>::Response>(
+                        config,
+                        stringify!($command),
+                    ),)+
+                    $(method_contract::<requests::$host_variant, <requests::$host_variant as HostCall>::Response>(
+                        config,
+                        stringify!($host),
+                    ),)+
+                ]
+            }
+        };
+    }
+
+    crate::renderer_methods!(method_contracts);
+
+    /// A method's parameters and result. A method without a result answers
+    /// `null`, which the renderer awaits as `void`.
+    fn method_contract<Request: TS, Response: TS + 'static>(
+        config: &Config,
+        name: &'static str,
+    ) -> (&'static str, String, String) {
+        let response = if TypeId::of::<Response>() == TypeId::of::<()>() {
+            "void".to_owned()
+        } else {
+            Response::name(config)
+        };
+        (name, Request::inline(config), response)
+    }
+
     fn typescript() -> String {
         let config = Config::new().with_large_int("number");
-        let methods: Vec<_> = Method::ALL
-            .iter()
-            .map(|method| format!("\"{}\"", method.name()))
-            .collect();
         let mut output = String::from(
             "// Generated from the Rust contracts by `npm run generate:contracts`. Do not edit.\n\n",
         );
         for declaration in declarations!(
             &config,
-            AppState,
+            AppStateWire,
+            VerificationStatus,
+            Protection,
+            ProtectionPhase,
+            ProtectionAction,
+            ProtectionOperation,
+            Tone,
             VerificationCheck,
             ServiceIdentity,
             SourceProvenance,
@@ -637,6 +834,7 @@ mod typescript {
             CatalogSummary,
             ModelSummary,
             ServiceProvider,
+            ServiceProviderInfo,
             ProfileAuth,
             AccountImages,
             AccountScope,
@@ -659,6 +857,11 @@ mod typescript {
             UpdateNotice,
             NotificationPreferences,
             LaunchPreferences,
+            LaunchPreference,
+            NotificationPermission,
+            NotificationPermissionStatus,
+            NotificationConfiguration,
+            NavigationTarget,
             ProfileBackup,
             ProfileConfiguration,
             ImportResult,
@@ -682,39 +885,87 @@ mod typescript {
         ) {
             output.push_str(&declaration);
         }
-        output.push_str(&format!(
-            "/** A method the shared UI API accepts (`ui_api::Method`). */\nexport type UiMethod = {};\n",
-            methods.join(" | ")
-        ));
-        for (name, value) in [
-            ("APPEARANCE_EVENT", ui_api::APPEARANCE_EVENT),
-            ("LAUNCH_PREFERENCES_EVENT", ui_api::LAUNCH_PREFERENCES_EVENT),
-            ("SETTINGS_RESET_EVENT", ui_api::SETTINGS_RESET_EVENT),
-            ("STATE_EVENT", ui_api::STATE_EVENT),
-            ("CLIENT_KEY_CHANGED_EVENT", ui_api::CLIENT_KEY_CHANGED_EVENT),
-            ("AGENTS_CHANGED_EVENT", ui_api::AGENTS_CHANGED_EVENT),
-            ("NAVIGATE_EVENT", ui_api::NAVIGATE_EVENT),
-            ("CONFIRM_STOP_ALL_EVENT", ui_api::CONFIRM_STOP_ALL_EVENT),
-        ] {
-            output.push_str(&constant(name, "string", serde_json::json!(value)));
+        let methods = method_contracts(&config);
+        output.push_str("/** The parameters each UI method takes (`ui_api::Method`). */\nexport type UiRequests = {\n");
+        for (name, request, _) in &methods {
+            output.push_str(&format!("  {name}: {request};\n"));
         }
+        output.push_str(
+            "};\n/** The result each UI method answers. */\nexport type UiResponses = {\n",
+        );
+        for (name, _, response) in &methods {
+            output.push_str(&format!("  {name}: {response};\n"));
+        }
+        output.push_str(
+            "};\n/** A method the shared UI API accepts. */\nexport type UiMethod = keyof UiRequests;\n",
+        );
+        // Each event with the type of the payload it carries.
+        let events = [
+            (
+                "APPEARANCE_EVENT",
+                ui_api::APPEARANCE_EVENT,
+                Appearance::name(&config),
+            ),
+            (
+                "LAUNCH_PREFERENCES_EVENT",
+                ui_api::LAUNCH_PREFERENCES_EVENT,
+                LaunchPreferences::name(&config),
+            ),
+            (
+                "SETTINGS_RESET_EVENT",
+                ui_api::SETTINGS_RESET_EVENT,
+                <()>::name(&config),
+            ),
+            (
+                "STATE_EVENT",
+                ui_api::STATE_EVENT,
+                AppStateWire::name(&config),
+            ),
+            (
+                "CLIENT_KEY_CHANGED_EVENT",
+                ui_api::CLIENT_KEY_CHANGED_EVENT,
+                bool::name(&config),
+            ),
+            (
+                "AGENTS_CHANGED_EVENT",
+                ui_api::AGENTS_CHANGED_EVENT,
+                <()>::name(&config),
+            ),
+            (
+                "NAVIGATE_EVENT",
+                ui_api::NAVIGATE_EVENT,
+                <()>::name(&config),
+            ),
+        ];
+        for (name, value, _) in &events {
+            output.push_str(&format!(
+                "export const {name} = {};\n",
+                serde_json::json!(value)
+            ));
+        }
+        let payloads: Vec<_> = events
+            .iter()
+            .map(|(_, event, payload)| format!("{}: {payload}", serde_json::json!(event)))
+            .collect();
+        output.push_str(&format!(
+            "/** The payload each event carries. */\nexport type UiEventPayloads = {{ {} }};\nexport type UiEvent = keyof UiEventPayloads;\n",
+            payloads.join(", ")
+        ));
         let links: serde_json::Map<_, _> = AboutLink::ALL
             .into_iter()
             .map(|link| (name(&link), link.url().into()))
             .collect();
-        output.push_str(&constant(
-            "ABOUT_LINKS",
-            "Record<AboutLink, string>",
-            links.into(),
-        ));
-        let websites: serde_json::Map<_, _> = Agent::ALL
+        output.push_str(&constant("ABOUT_LINKS", "Record<AboutLink, string>", links));
+        let agents: Vec<_> = Agent::ALL
             .into_iter()
-            .map(|agent| (agent.id().to_string(), agent.website().into()))
+            .map(|agent| {
+                serde_json::json!({ "id": agent.id(), "name": agent.name(), "website": agent.website() })
+            })
             .collect();
         output.push_str(&constant(
-            "AGENT_WEBSITES",
-            "Readonly<Record<string, string>>",
-            websites.into(),
+            "AGENTS",
+            "ReadonlyArray<{ id: string, name: string, website: string }>",
+            agents,
         ));
         let api_key_pages: serde_json::Map<_, _> = ServiceProvider::ALL
             .into_iter()
@@ -723,27 +974,54 @@ mod typescript {
         output.push_str(&constant(
             "API_KEY_PAGES",
             "Partial<Record<ServiceProvider, string>>",
-            api_key_pages.into(),
+            api_key_pages,
+        ));
+        let providers: indexmap::IndexMap<_, _> = ServiceProvider::ALL
+            .into_iter()
+            .map(|provider| (name(&provider), ServiceProviderInfo::from(provider)))
+            .collect();
+        output.push_str(&constant(
+            "SERVICE_PROVIDERS",
+            "Readonly<Record<ServiceProvider, ServiceProviderInfo>>",
+            providers,
+        ));
+        output.push_str(&constant(
+            "DEFAULT_SERVICE_PROVIDER",
+            "ServiceProvider",
+            ServiceProvider::DEFAULT,
+        ));
+        output.push_str(&constant("BYLINE", "string", crate::brand::BYLINE));
+        output.push_str(&constant(
+            "INITIAL_STATE",
+            "AppState",
+            AppStateWire::from(AppState::default()),
+        ));
+        let mut unavailable = AppState::default();
+        unavailable.disconnect("The background service is unavailable.".into());
+        output.push_str(&constant(
+            "UNAVAILABLE_STATE",
+            "AppState",
+            AppStateWire::from(unavailable),
         ));
         output.push_str(&constant(
             "WEB_UI_PASSWORD_MIN_LENGTH",
             "number",
-            WEB_UI_PASSWORD_MIN_LENGTH.into(),
+            WEB_UI_PASSWORD_MIN_LENGTH,
         ));
         output.push_str(&constant(
             "WEB_DISTRIBUTION",
             "DistributionCapabilities",
-            serde_json::to_value(DistributionCapabilities::WEB).unwrap(),
+            DistributionCapabilities::WEB,
         ));
         output.push_str(&constant(
             "DEFAULT_LOCAL_API_CONFIG",
             "ListenConfig",
-            serde_json::to_value(ListenConfig::default()).unwrap(),
+            ListenConfig::default(),
         ));
         output.push_str(&constant(
             "DEFAULT_WEB_UI_CONFIG",
             "WebUiConfig",
-            serde_json::to_value(WebUiConfig::default()).unwrap(),
+            WebUiConfig::default(),
         ));
         output
             .lines()
@@ -752,8 +1030,11 @@ mod typescript {
     }
 
     /// A value the Rust side owns, as a typed TypeScript constant.
-    fn constant(name: &str, ty: &str, value: serde_json::Value) -> String {
-        format!("export const {name}: {ty} = {value};\n")
+    fn constant(name: &str, ty: &str, value: impl Serialize) -> String {
+        format!(
+            "export const {name}: {ty} = {};\n",
+            serde_json::to_value(value).unwrap()
+        )
     }
 
     /// The serialized name of a unit enum variant.
@@ -779,5 +1060,38 @@ mod typescript {
             current.replace("\r\n", "\n") == expected,
             "{OUTPUT} is stale; run `npm run generate:contracts` in apps/desktop"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wire state presents exactly the state it carries.
+    #[test]
+    fn a_wire_state_carries_the_protection_it_presents() {
+        let mut state = AppState {
+            status: VerificationStatus::Verified,
+            api_key_saved: true,
+            ..AppState::default()
+        };
+        let changes: [fn(&mut AppState); 4] = [
+            |_| {},
+            |state| state.status = VerificationStatus::Stopped,
+            |state| state.endpoint_error = Some("Port in use".into()),
+            |state| state.disconnect("Connection closed".into()),
+        ];
+        for change in changes {
+            change(&mut state);
+            let serialized = serde_json::to_value(AppStateWire::from(state.clone())).unwrap();
+            assert_eq!(
+                serialized["status"],
+                serde_json::to_value(state.status).unwrap()
+            );
+            assert_eq!(
+                serialized["protection"],
+                serde_json::to_value(state.protection()).unwrap()
+            );
+        }
     }
 }

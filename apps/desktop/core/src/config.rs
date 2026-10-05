@@ -27,14 +27,13 @@ use crate::{
         ProfileAuth, ServiceProvider, StartConfig,
     },
     listen::{self, ResolvedListen},
-    paths::config_dir,
 };
 
 pub const CONFIG_FILE: &str = "config.toml";
 pub const CREDENTIALS_FILE: &str = "credentials.toml";
 /// The JSON Schema for `config.toml`, written beside it for editors.
 pub const SCHEMA_FILE: &str = "config.schema.json";
-/// Clear of the Local API (4180) and the account callback (4181).
+/// Clear of the Local API (4180).
 pub const WEB_UI_DEFAULT_PORT: u16 = 4182;
 /// The shortest web UI password, in characters (NIST SP 800-63B).
 pub const WEB_UI_PASSWORD_MIN_LENGTH: usize = 12;
@@ -159,8 +158,8 @@ impl Default for NotificationPreferences {
 }
 
 /// The service-hosted browser UI. It is off until the user enables it and
-/// listens on loopback unless network access is explicitly allowed. It
-/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+/// listens on loopback unless network access is explicitly allowed. Browsers
+/// sign in with a generated password (`pap web-ui password show`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 #[ts(optional_fields)]
@@ -237,8 +236,8 @@ struct ListenTable {
 }
 
 /// The service-hosted browser UI. It is off until the user enables it and
-/// listens on loopback unless network access is explicitly allowed. It
-/// cannot turn on without a sign-in password (`pap settings set web-ui.password`).
+/// listens on loopback unless network access is explicitly allowed. Browsers
+/// sign in with a generated password (`pap web-ui password show`).
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(
     remote = "WebUiConfig",
@@ -381,12 +380,15 @@ pub fn load() -> Result<Config, String> {
     }
 }
 
+/// `config.toml` where the settings are now, for processes that read it
+/// without the backend: in the old directory until the backend has moved it
+/// (see [`crate::relocation`]).
 pub fn config_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join(CONFIG_FILE))
+    Ok(crate::relocation::current_dir()?.join(CONFIG_FILE))
 }
 
 pub fn credentials_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join(CREDENTIALS_FILE))
+    Ok(crate::relocation::current_dir()?.join(CREDENTIALS_FILE))
 }
 
 /// A settings file that loaded, with a warning for each key it does not know.
@@ -605,11 +607,6 @@ pub fn validate_web_ui(
             "Web UI port {port} is used by the Local API; choose another port"
         ));
     }
-    if port == crate::account::CALLBACK_PORT {
-        return Err(format!(
-            "Web UI port {port} is reserved for account connection callbacks; choose another port"
-        ));
-    }
     listen::resolve(config.listen()).map_err(|error| format!("Web UI: {error}"))
 }
 
@@ -685,13 +682,7 @@ pub fn normalize_url(value: &str) -> Result<String, String> {
                 .to_string(),
         );
     }
-    let loopback = match url.host() {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
-    };
-    if url.scheme() != "https" && !loopback {
+    if url.scheme() != "https" && !is_loopback(&url) {
         return Err(
             "Gateway URL must use HTTPS unless it points to localhost or a loopback address"
                 .to_string(),
@@ -706,6 +697,16 @@ pub fn normalize_url(value: &str) -> Result<String, String> {
     let path = url.path().trim_end_matches('/').to_string();
     url.set_path(&path);
     Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+/// Whether a URL names this device: `localhost` or a loopback address.
+pub fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
 }
 
 /// The JSON Schema of `config.toml`, generated from [`Config`].
@@ -974,7 +975,6 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
         );
         assert!(validate_web_ui(&config(0), 4180).is_err());
         assert!(validate_web_ui(&config(4180), 4180).is_err());
-        assert!(validate_web_ui(&config(4181), 4180).is_err());
         assert!(validate_web_ui(&config(5000), 5000).is_err());
     }
 

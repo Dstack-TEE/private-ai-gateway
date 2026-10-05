@@ -1,0 +1,23 @@
+[package]
+name = "aci-verify"
+version = "0.1.0"
+description = "Policy-neutral verification mechanisms for Attested Confidential Inference"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+aci-protocol = { path = "../aci-protocol" }
+base64 = "0.22"
+hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+sha3 = "0.10"
+thiserror = "1"
+url = "2"
+
+[lints.rust]
+unused_must_use = "deny"

@@ -7,19 +7,22 @@
 //! processes: the lock is held from the revision check through the final
 //! rename and manifest update.
 
-use std::{fmt, fs, io, path::Path};
+use std::{
+    fs, io,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use crate::private_fs::create_private_dir;
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
-    let file = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(dir.join(name))?;
-    Ok(file)
+        .open(dir.join(name))
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
@@ -36,48 +39,51 @@ pub struct StartupLock {
     _file: fs::File,
 }
 
+/// Whether a `try_lock` took the lock; `false` while another holder has it.
+fn taken(result: Result<(), fs::TryLockError>) -> io::Result<bool> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(fs::TryLockError::WouldBlock) => Ok(false),
+        Err(fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 /// Take the gate to start the backend; `None` while an installer holds it.
 pub fn startup_shared(data_dir: &Path) -> io::Result<Option<StartupLock>> {
     let file = open(data_dir, "startup.lock")?;
-    match file.try_lock_shared() {
-        Ok(()) => Ok(Some(StartupLock { _file: file })),
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
-        Err(fs::TryLockError::Error(error)) => Err(error),
-    }
+    Ok(taken(file.try_lock_shared())?.then_some(StartupLock { _file: file }))
 }
 
 /// Take the gate to replace the backend; `None` while anyone else holds it.
 pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
     let file = open(data_dir, "startup.lock")?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(StartupLock { _file: file })),
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
-        Err(fs::TryLockError::Error(error)) => Err(error),
-    }
+    Ok(taken(file.try_lock())?.then_some(StartupLock { _file: file }))
 }
 
 /// Try to become the primary instance; `None` when another process holds it.
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
     let file = open(data_dir, "instance.lock")?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(InstanceLock { _file: file })),
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
-        Err(fs::TryLockError::Error(error)) => Err(error),
+    Ok(taken(file.try_lock())?.then_some(InstanceLock { _file: file }))
+}
+
+/// [`instance`], waiting up to `wait` for a holder to release it: Windows may
+/// release a `LockFileEx` lock shortly after its process exits.
+pub fn instance_within(data_dir: &Path, wait: Duration) -> io::Result<Option<InstanceLock>> {
+    let deadline = Instant::now() + wait;
+    loop {
+        let lock = instance(data_dir)?;
+        if lock.is_some() || Instant::now() >= deadline {
+            return Ok(lock);
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// Failure to open or acquire the transaction lock, separate from operation errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("Cannot lock the agent configurations: {0}")]
 pub struct ApplyLockError(io::Error);
-
-impl fmt::Display for ApplyLockError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cannot lock the agent configurations: {}", self.0)
-    }
-}
-
-impl std::error::Error for ApplyLockError {}
 
 impl From<ApplyLockError> for String {
     fn from(error: ApplyLockError) -> Self {
@@ -127,6 +133,23 @@ mod tests {
         assert!(instance(dir.path()).unwrap().is_none());
         drop(first);
         eventually(|| instance(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn instance_within_waits_for_a_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = instance(dir.path()).unwrap().unwrap();
+        assert!(instance_within(dir.path(), Duration::from_millis(100))
+            .unwrap()
+            .is_none());
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        assert!(instance_within(dir.path(), Duration::from_secs(5))
+            .unwrap()
+            .is_some());
+        releaser.join().unwrap();
     }
 
     #[test]

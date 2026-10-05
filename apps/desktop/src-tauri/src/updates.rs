@@ -8,6 +8,9 @@ use desktop_core::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
+use tokio::sync::MutexGuard;
+
+use crate::{distribution, run_blocking};
 
 pub(crate) struct DownloadedUpdate {
     channel: UpdateChannel,
@@ -15,8 +18,27 @@ pub(crate) struct DownloadedUpdate {
     bytes: Vec<u8>,
 }
 
-#[derive(Default)]
-pub struct PreparedUpdate(pub(crate) tokio::sync::Mutex<Option<DownloadedUpdate>>);
+/// The downloaded release that Restart to Update installs.
+pub(crate) type PreparedUpdate = tokio::sync::Mutex<Option<DownloadedUpdate>>;
+
+fn begin(prepared: &PreparedUpdate) -> Result<MutexGuard<'_, Option<DownloadedUpdate>>, &str> {
+    prepared
+        .try_lock()
+        .map_err(|_| "An update operation is already in progress")
+}
+
+/// Whether this build installs its own updates: the distribution does, and
+/// its configuration has the updater's feed.
+pub(crate) fn configured(app: &AppHandle) -> bool {
+    distribution::CAPABILITIES.native_updates && app.config().plugins.0.contains_key("updater")
+}
+
+fn require_native_updates() -> Result<(), String> {
+    distribution::require(
+        distribution::CAPABILITIES.native_updates,
+        "Updates are managed by the App Store",
+    )
+}
 
 fn configured_endpoint(app: &AppHandle) -> Result<String, String> {
     app.config()
@@ -37,16 +59,10 @@ pub async fn set_update_channel(
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<UpdateChannel, CallError> {
-    crate::distribution::require(
-        crate::distribution::CAPABILITIES.native_updates,
-        "Updates are managed by the App Store",
-    )?;
-    let mut prepared = prepared
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is already in progress")?;
+    require_native_updates()?;
+    let mut prepared = begin(&prepared)?;
     let client = client.inner().clone();
-    crate::run_blocking(move || {
+    run_blocking(move || {
         client
             .call(rpc::SetPreference {
                 change: Preference::UpdateChannel(channel),
@@ -64,18 +80,14 @@ pub async fn prepare_update(
     app: AppHandle,
     prepared: State<'_, PreparedUpdate>,
 ) -> Result<UpdateInfo, CallError> {
-    let configured = crate::distribution::CAPABILITIES.native_updates
-        && app.config().plugins.0.contains_key("updater");
-    let mut prepared = prepared
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is already in progress")?;
+    let configured = configured(&app);
+    let mut prepared = begin(&prepared)?;
     let current_version = app.package_info().version.to_string();
     let default = updates::build_channel(&current_version);
     // The backend's settings, like every other preference the app reads, so
     // the app and the backend always agree on the file in effect.
     let client = app.state::<Arc<Client>>().inner().clone();
-    let (channel, system_managed) = crate::run_blocking(move || {
+    let (channel, system_managed) = run_blocking(move || {
         let channel = match client.call(rpc::Settings) {
             Ok(saved) => saved.update_channel.unwrap_or(default),
             Err(error) => {
@@ -97,7 +109,6 @@ pub async fn prepare_update(
         current_version,
         channel,
         version: None,
-        channel_published: true,
         upgrade_commands: Vec::new(),
         download_url: None,
     };
@@ -119,15 +130,13 @@ pub async fn prepare_update(
         .await?;
         info.version = notice.version;
         info.upgrade_commands = notice.commands;
-        info.channel_published = notice.channel_published;
         return Ok(info);
     }
     let endpoint = updates::feed_url(&feed, channel)?;
     let update = match feed_update(&app, endpoint, channel).await {
-        Ok(Checked::Update(update)) => *update,
-        Ok(checked) => {
+        Ok(Some(update)) => update,
+        Ok(None) => {
             *prepared = None;
-            info.channel_published = !matches!(checked, Checked::Unpublished);
             return Ok(info);
         }
         Err(error) => {
@@ -135,12 +144,10 @@ pub async fn prepare_update(
             return Err(error.into());
         }
     };
-    let version = update.version.clone();
-    if prepared
-        .as_ref()
-        .is_some_and(|download| download.channel == channel && download.update.version == version)
-    {
-        info.version = Some(version);
+    info.version = Some(update.version.clone());
+    if prepared.as_ref().is_some_and(|download| {
+        download.channel == channel && download.update.version == update.version
+    }) {
         return Ok(info);
     }
     // Only one release can be installed. Drop an older prepared archive before
@@ -156,59 +163,33 @@ pub async fn prepare_update(
         update,
         bytes,
     });
-    info.version = Some(version);
     Ok(info)
 }
 
-enum Checked {
-    Update(Box<Update>),
-    Current,
-    Unpublished,
-}
-
+/// The newer release `feed` announces, as `updates::offers_update` decides in
+/// place of the plugin's default comparison.
 async fn feed_update(
     app: &AppHandle,
     endpoint: tauri::Url,
     feed: UpdateChannel,
-) -> Result<Checked, String> {
+) -> Result<Option<Update>, String> {
     let updater = app
         .updater_builder()
-        .endpoints(vec![endpoint.clone()])
+        .endpoints(vec![endpoint])
         .map_err(|_| "Invalid update endpoint")?
+        .version_comparator(move |current, release| {
+            updates::offers_update(&current, &release.version, feed)
+        })
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|_| "Updates are not configured correctly for this build")?;
-    match updater.check().await {
-        Ok(Some(update)) => {
-            if !updates::belongs_to_feed(&update.version, feed) {
-                return Err("The update does not match the selected channel".into());
-            }
-            Ok(Checked::Update(Box::new(update)))
+    updater.check().await.map_err(|error| match error {
+        // The plugin reports every unsuccessful feed response this way.
+        tauri_plugin_updater::Error::ReleaseNotFound => {
+            "The update channel is temporarily unavailable".to_string()
         }
-        Ok(None) => Ok(Checked::Current),
-        // The plugin groups HTTP failures as ReleaseNotFound. Only a confirmed
-        // 404 means the channel has not published a feed yet.
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            if feed_missing(endpoint).await? {
-                Ok(Checked::Unpublished)
-            } else {
-                Err("The update channel is temporarily unavailable".into())
-            }
-        }
-        Err(_) => Err("Could not check for updates. Try again later.".into()),
-    }
-}
-
-async fn feed_missing(endpoint: tauri::Url) -> Result<bool, String> {
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| "Could not check the update channel")?
-        .head(endpoint)
-        .send()
-        .await
-        .map_err(|_| "Could not reach the update channel")?;
-    Ok(response.status() == reqwest::StatusCode::NOT_FOUND)
+        _ => "Could not check for updates. Try again later.".to_string(),
+    })
 }
 
 #[tauri::command]
@@ -217,14 +198,8 @@ pub async fn restart_to_update(
     prepared: State<'_, PreparedUpdate>,
     client: State<'_, Arc<Client>>,
 ) -> Result<(), CallError> {
-    crate::distribution::require(
-        crate::distribution::CAPABILITIES.native_updates,
-        "Updates are managed by the App Store",
-    )?;
-    let mut prepared = prepared
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is already in progress")?;
+    require_native_updates()?;
+    let mut prepared = begin(&prepared)?;
     let download = prepared.take().ok_or("The update is not ready yet")?;
     drop(prepared);
     let client = client.inner().clone();

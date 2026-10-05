@@ -4,7 +4,7 @@
 //! JSON5 editing and conditional restoration belong to the parent projector.
 
 use super::*;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["models", "providers", PROVIDER];
@@ -21,9 +21,6 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if selected.is_some_and(|id| catalog.get(id).is_none()) {
-        return Err("Choose an OpenClaw model from the verified model list".into());
-    }
     let endpoint = reqwest::Url::parse(inputs.endpoint).map_err(|_| "Invalid Local API URL")?;
     if endpoint.scheme() != "http"
         || !matches!(
@@ -38,52 +35,15 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     {
         return Err("OpenClaw projection requires the native host's loopback Local API".into());
     }
-    let models: Vec<Value> = catalog
-        .models
-        .iter()
-        .map(|model| {
-            let mut row = json!({"id": model.id(), "name": model.display_name()});
-            if let Some(n) = model.remote.context_length.filter(|n| *n > 0) {
-                row["contextWindow"] = json!(n);
-            }
-            if let Some(n) = model.remote.max_output_length.filter(|n| *n > 0) {
-                row["maxTokens"] = json!(n);
-            }
-            let input: Vec<_> = model
-                .string_array("input_modalities")
-                .into_iter()
-                .filter(|mode| matches!(mode.as_str(), "text" | "image"))
-                .collect();
-            if !input.is_empty() {
-                row["input"] = json!(input);
-            }
-            if model
-                .string_array("supported_features")
-                .iter()
-                .any(|s| s == "reasoning")
-            {
-                row["reasoning"] = json!(true);
-            }
-            let mut cost = Map::new();
-            for (source, target) in [
-                ("prompt", "input"),
-                ("completion", "output"),
-                ("input_cache_read", "cacheRead"),
-                ("input_cache_write", "cacheWrite"),
-            ] {
-                if let Some(n) = model
-                    .price_per_million(source)
-                    .and_then(serde_json::Number::from_f64)
-                {
-                    cost.insert(target.into(), Value::Number(n));
-                }
-            }
-            if !cost.is_empty() {
-                row["cost"] = Value::Object(cost);
-            }
-            row
-        })
-        .collect();
+    let models = model_rows(
+        catalog,
+        &ModelRows {
+            positive_limits: true,
+            any_input: false,
+            reasoning: true,
+            cost: Cost::Listed,
+        },
+    );
     let (reference, provider) = if inputs.file_credentials {
         (
             json!({"source": "file", "provider": PROVIDER, "id": "value"}),
@@ -108,7 +68,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         generated_catalog(
             PROVIDER_PATH,
             json!({
-                "baseUrl": format!("{}/v1", inputs.endpoint.trim_end_matches('/')),
+                "baseUrl": api_url(inputs.endpoint)?,
                 "api": "openai-completions",
                 "apiKey": reference,
                 "models": models,
@@ -116,9 +76,8 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             catalog.models.len(),
         ),
         Field {
-            path: owned(SECRET_PATH),
-            value: Some(ConfigValue::Json(provider)),
             preview: Some("Native-host OpenClaw local token".into()),
+            ..generated_catalog(SECRET_PATH, provider, 0)
         },
     ];
     if let Some(id) = selected {
@@ -460,36 +419,27 @@ fn file_provider(token_path: &Path) -> Value {
     json!({"source": "file", "path": token_path, "mode": "singleValue"})
 }
 
+/// The recorded SecretRef provider no longer reads this connection's token
+/// file, or no longer runs this installation's staged helper.
 pub(super) fn stale_credentials(
     record: &Connection,
     source: &Path,
     token_path: &Path,
     file_credentials: bool,
 ) -> bool {
-    if file_credentials {
-        return !record.fields.iter().any(|field| {
-            field.path == owned(SECRET_PATH)
-                && field.value == Some(ConfigValue::Json(file_provider(token_path)))
-        });
-    }
-    stale_helper(record, source, token_path)
-}
-
-pub(super) fn stale_helper(record: &Connection, source: &Path, token_path: &Path) -> bool {
-    let Ok(command) = helper_path(source, token_path) else {
-        return true;
-    };
-    let Ok(environment) = helper_env(token_path) else {
-        return true;
-    };
-    let Some(field) = record
+    let recorded = record
         .fields
         .iter()
         .find(|field| field.path == owned(SECRET_PATH))
-    else {
-        return true;
-    };
-    let Some(ConfigValue::Json(value)) = &field.value else {
+        .and_then(|field| field.value.as_ref());
+    if file_credentials {
+        return recorded != Some(&ConfigValue::Json(file_provider(token_path)));
+    }
+    let (Ok(command), Ok(environment), Some(ConfigValue::Json(value))) = (
+        helper_path(source, token_path),
+        helper_env(token_path),
+        recorded,
+    ) else {
         return true;
     };
     value.get("command").and_then(Value::as_str) != command.to_str()
@@ -656,12 +606,13 @@ mod tests {
             json!({"env":{"KEY":{"source":"exec","provider":PROVIDER,"id":"another"}}}),
             json!({"env":{"KEY":{"source":"file","provider":PROVIDER,"id":"openclaw"}}}),
         ] {
-            let doc = ConfigDoc::Json(root);
+            let doc = ConfigDoc::Json(root.to_string());
             let before = doc.render().unwrap();
             assert!(validate_config(&doc, None).is_err());
             assert_eq!(doc.render().unwrap(), before);
         }
-        let doc = ConfigDoc::Json(json!({"agents":{"defaults":{"model":"external/model"}}}));
+        let doc =
+            ConfigDoc::Json(json!({"agents":{"defaults":{"model":"external/model"}}}).to_string());
         assert!(validate_config(&doc, None).is_ok());
         assert!(validate_selection(&doc, &ConnectOptions::default()).is_ok());
         assert!(validate_selection(
@@ -727,7 +678,7 @@ mod tests {
             .unwrap()
             .contains("// Keep the user's routing policy."));
 
-        let mut drifted = ConfigDoc::Json(json!({}));
+        let mut drifted = ConfigDoc::Json(json!({}).to_string());
         let fields = projection(temp.path(), &ConnectOptions::default());
         let record = project(&mut drifted, &fields, None, Agent::OpenClaw)
             .unwrap()

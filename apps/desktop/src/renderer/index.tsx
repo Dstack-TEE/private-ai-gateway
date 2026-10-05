@@ -5,13 +5,20 @@ import { queryClient } from "./lib/query-client";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { ConfirmProvider } from "./components/confirm";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { desktopApi, web } from "./lib/environment";
+import { desktopApi, platform, web } from "./lib/environment";
 import { router } from "./router";
 
+/**
+ * How long the pointer rests before a tooltip shows: about a second for macOS
+ * help tags (AppKit's NSInitialToolTipDelay), and Windows' and GTK's 500 ms.
+ * The web UI keeps showing them at once.
+ */
+const tooltipDelay = platform === "macos" ? 1_000 : platform ? 500 : 0;
+
 export function Renderer(): React.JSX.Element {
-  // Browsers keep their own context menu, reload and drop behavior.
-  useEffect(() => web ? undefined : installNativeInteractions(desktopApi), []);
-  return <QueryClientProvider client={queryClient}><TooltipProvider><ConfirmProvider>
+  // Browsers keep their own context menu, shortcuts and drop behavior.
+  useEffect(() => web ? undefined : installNativeInteractions(desktopApi, platform), []);
+  return <QueryClientProvider client={queryClient}><TooltipProvider delay={tooltipDelay}><ConfirmProvider>
     <RouterProvider router={router} />
   </ConfirmProvider></TooltipProvider></QueryClientProvider>;
 }

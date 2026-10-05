@@ -1,21 +1,27 @@
 import {
   ABOUT_LINKS,
-  AGENT_WEBSITES,
+  AGENTS,
   API_KEY_PAGES,
+  SERVICE_PROVIDERS,
+  STATE_EVENT,
+  UNAVAILABLE_STATE,
   WEB_DISTRIBUTION,
+  type AppState,
   type ProfileBackup,
+  type UiEvent,
+  type UiEventPayloads,
   type UiMethod,
+  type UiResponses,
   type UpdateInfo,
-  type UpdateNotice,
   type WebBootstrap,
 } from "../../shared/contracts";
-import { createDesktopApi, type Backend, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
-
-type EventListener = (payload: never) => void;
+import { createDesktopApi, type Backend, type UiParams, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
+import { AuthoredError, SessionEndedError } from "../lib/error-message";
 
 const sessionEnded = "Your web UI session ended or expired. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
-const listeners = new Map<string, Set<EventListener>>();
+/** Dispatches each event of the stream as a `MessageEvent` of its name. */
+const listeners = new EventTarget();
 const endListeners = new Set<(notice: string) => void>();
 let events: EventSource | undefined;
 /** A session was confirmed and has not ended since, so its end is announced once. */
@@ -36,27 +42,27 @@ export function createBackend(): Backend {
     desktopApi: createDesktopApi(transport, platform),
     distributionCapabilities: WEB_DISTRIBUTION,
     session,
+    windowFocus: undefined,
   };
 }
 
 const unavailable = async (): Promise<never> => {
-  throw new Error("This is only available in the desktop app");
+  throw new AuthoredError("This is only available in the desktop app");
 };
 
 const platform: UiPlatform = {
   showEditMenu: async () => undefined,
-  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap", { method: "GET" })).version,
+  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap")).version,
   setUpdateChannel: async (channel) => channel,
   // The backend's own installation owns updates; the browser only announces them.
   prepareUpdate: async (): Promise<UpdateInfo> => {
-    const notice = await rpc<UpdateNotice>("get_update_notice");
+    const notice = await rpc("get_update_notice");
     return {
       enabled: false,
       systemManaged: true,
       currentVersion: notice.currentVersion,
       channel: notice.channel,
       version: notice.version,
-      channelPublished: notice.channelPublished,
       upgradeCommands: notice.commands,
       downloadUrl: notice.downloadUrl,
     };
@@ -65,31 +71,34 @@ const platform: UiPlatform = {
   getCliRegistration: unavailable,
   setCliRegistration: unavailable,
   stopAllAndQuit: async () => undefined,
+  // Only the desktop app has a tray and a menu bar.
+  onNavigate: () => () => undefined,
+  closeWindow: undefined,
+  quit: undefined,
   copyText: async (text) => {
     // Absent outside secure contexts, such as plain HTTP on a network address.
-    if (!window.isSecureContext) throw new Error("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
+    if (!window.isSecureContext) throw new AuthoredError("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
     await navigator.clipboard.writeText(text);
   },
   selectProfileBackup,
   saveProfileExport: async () => download(
     "private-ai-proxy-profiles.json",
-    await rpc<string>("export_profiles_content"),
+    await rpc("export_profiles_content"),
   ),
   saveDiagnosticsExport: async () => download(
     "private-ai-proxy-diagnostics.json",
-    await rpc<string>("export_diagnostics_content"),
+    await rpc("export_diagnostics_content"),
   ),
   requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
   openNotificationSettings: async () => undefined,
-  mainWindowReady: async () => undefined,
   openWebUi: async () => {
-    throw new Error("The web UI is already open in this browser");
+    throw new AuthoredError("The web UI is already open in this browser");
   },
   openAboutLink: async (target) => openAllowed(ABOUT_LINKS[target]),
-  openAgentWebsite: async (agentId) => openAllowed(AGENT_WEBSITES[agentId]),
+  openAgentWebsite: async (agentId) => openAllowed(AGENTS.find((agent) => agent.id === agentId)?.website),
   openApiKeyPage: async (provider) => openAllowed(API_KEY_PAGES[provider]),
   presentAccountLogin: (login) => {
-    // The login sheet keeps a manual link, so a blocked or rejected tab must not fail the login.
+    // The sign-in also shows a link to the page, so a blocked or rejected tab must not fail the login.
     try {
       openAllowed(login.url);
     } catch {
@@ -97,17 +106,17 @@ const platform: UiPlatform = {
     }
   },
   openOrganization: async (organizationSlug) => openAllowed(
-    await rpc<string>("get_organization_url", { organizationSlug }),
+    await rpc("get_organization_url", { organizationSlug }),
   ),
   openTopUp: async (provider, scopeSlug) => openAllowed(
-    await rpc<string>("get_top_up_url", { provider, scopeSlug }),
+    await rpc("get_top_up_url", { provider, scopeSlug }),
   ),
 };
 
 async function check(): Promise<boolean> {
   // Confirmed sessions are remembered until they end, so navigating costs no request.
   if (signedIn) return true;
-  const response = await fetch("/api/bootstrap", { cache: "no-store", credentials: "same-origin" });
+  const response = await send("/api/bootstrap");
   // Signed-in requests are never throttled, so 429 also means there is no session.
   if (response.status === 401 || response.status === 429) return false;
   await read<WebBootstrap>(response);
@@ -117,21 +126,13 @@ async function check(): Promise<boolean> {
 }
 
 async function signIn(password: string): Promise<void> {
-  const response = await fetch("/api/session", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-  if (response.ok) return;
-  const payload: unknown = await response.json().catch(() => undefined);
-  throw errorFrom(payload, "Sign-in failed. Try again.");
+  const response = await send("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
 }
 
 /** Ends this browser's session on the server. */
 async function signOut(): Promise<void> {
-  await request<undefined>("/api/session", { method: "DELETE" });
+  await answer(await send("/api/session", { method: "DELETE" }));
   endSession(signedOut);
 }
 
@@ -143,53 +144,54 @@ function endSession(notice: string): void {
   for (const listener of endListeners) listener(notice);
 }
 
-async function rpc<T>(method: UiMethod, params: Record<string, unknown> = {}): Promise<T> {
-  const response = await request<{ result: T }>(
-    `/api/rpc/${encodeURIComponent(method)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
-    },
-  );
-  return response.result;
+async function rpc<M extends UiMethod>(method: M, ...[params]: UiParams<M>): Promise<UiResponses[M]> {
+  const { result } = await request<{ result: UiResponses[M] }>(`/api/rpc/${encodeURIComponent(method)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params ?? {}),
+  });
+  return result;
 }
 
-async function request<T>(path: string, init: RequestInit): Promise<T> {
-  return read<T>(await fetch(path, { ...init, cache: "no-store", credentials: "same-origin" }));
+/** Answers are `{"result": …}` in the shapes the generated contracts declare. */
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return read(await send(path, init));
 }
 
-/** Answers are `{"result": …}`, or `{"error": {code, message}}` with the status of its code. */
+/** Requests carry the session cookie and are never cached. */
+function send(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(path, { ...init, cache: "no-store", credentials: "same-origin" });
+}
+
 async function read<T>(response: Response): Promise<T> {
-  const payload: unknown = await response.json().catch(() => undefined);
+  return (await answer(response)).json();
+}
+
+/** A failed answer is `{"error": {code, message}}` with the status of its code. */
+async function answer(response: Response): Promise<Response> {
   if (response.status === 401) {
     endSession(sessionEnded);
-    throw new Error(sessionEnded);
+    throw new SessionEndedError(sessionEnded);
   }
-  if (!response.ok) throw errorFrom(payload, "Web UI request failed");
-  return payload as T;
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
+  return response;
 }
 
-function errorFrom(payload: unknown, fallback: string): Error {
+/** The backend's API error, whose message is authored; any other answer, such as a proxy's, is not. */
+function errorFrom(payload: unknown): Error {
   if (payload && typeof payload === "object" && "error" in payload) {
     const error = payload.error;
     if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
-      return new Error(error.message);
+      return new AuthoredError(error.message);
     }
   }
-  return new Error(fallback);
+  return new Error("Web UI request failed");
 }
 
-function subscribe<T>(event: string, listener: (payload: T) => void): () => void {
-  const wrapped: EventListener = listener as EventListener;
-  const current = listeners.get(event) ?? new Set<EventListener>();
-  current.add(wrapped);
-  listeners.set(event, current);
-  return () => current.delete(wrapped);
-}
-
-function emit(event: string, payload: unknown): void {
-  for (const listener of listeners.get(event) ?? []) listener(payload as never);
+function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void {
+  const receive = (message: Event) => {
+    if (message instanceof MessageEvent) listener(message.data);
+  };
+  listeners.addEventListener(event, receive);
+  return () => listeners.removeEventListener(event, receive);
 }
 
 /** The server sends a full state snapshot on every connection, so reconnecting loses nothing. */
@@ -202,12 +204,17 @@ function readEvents(): EventSource {
     } catch {
       return;
     }
-    if (isWebEvent(decoded)) emit(decoded.event, decoded.payload);
+    if (isWebEvent(decoded)) listeners.dispatchEvent(new MessageEvent(decoded.event, { data: decoded.payload }));
   });
   // EventSource retries dropped connections itself but stops at an error
-  // response, such as after the session ended.
+  // response, such as after the session ended. Meanwhile the state is read
+  // again, so a backend that stopped doesn't keep showing its last state.
   source.addEventListener("error", () => {
-    if (source.readyState === EventSource.CLOSED && events === source) window.setTimeout(() => void resumeEvents(source), 1_000);
+    if (events !== source) return;
+    rpc("get_state").then(publishState, () => {
+      if (signedIn) publishState(UNAVAILABLE_STATE);
+    });
+    if (source.readyState === EventSource.CLOSED) window.setTimeout(() => void resumeEvents(source), 1_000);
   });
   return source;
 }
@@ -216,12 +223,16 @@ function readEvents(): EventSource {
 async function resumeEvents(closed: EventSource): Promise<void> {
   if (events !== closed) return;
   try {
-    await request("/api/bootstrap", { method: "GET" });
+    await request("/api/bootstrap");
   } catch {
     if (events === closed) window.setTimeout(() => void resumeEvents(closed), 5_000);
     return;
   }
   if (events === closed) events = readEvents();
+}
+
+function publishState(state: AppState): void {
+  listeners.dispatchEvent(new MessageEvent(STATE_EVENT, { data: state }));
 }
 
 function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
@@ -243,11 +254,12 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
         return;
       }
       if (file.size > 256 * 1024) {
-        reject(new Error("Profile configuration file is too large"));
+        reject(new AuthoredError("Profile configuration file is too large"));
         return;
       }
       void parseProfileBackup(file).then(resolve, reject);
     }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
     input.click();
   });
 }
@@ -257,9 +269,9 @@ async function parseProfileBackup(file: File): Promise<ProfileBackup> {
   try {
     parsed = JSON.parse(await file.text());
   } catch {
-    throw new Error("Could not read the profile configuration file");
+    throw new AuthoredError("Could not read the profile configuration file");
   }
-  if (!isProfileBackup(parsed)) throw new Error("The profile configuration file is invalid");
+  if (!isProfileBackup(parsed)) throw new AuthoredError("The profile configuration file is invalid");
   return parsed;
 }
 
@@ -269,13 +281,12 @@ function isProfileBackup(value: unknown): value is ProfileBackup {
   return value.profiles.every((profile: unknown) => Boolean(
     profile && typeof profile === "object"
       && "name" in profile && typeof profile.name === "string"
-      && "provider" in profile
-      && (profile.provider === "phala" || profile.provider === "redpill" || profile.provider === "custom")
+      && "provider" in profile && typeof profile.provider === "string" && Object.hasOwn(SERVICE_PROVIDERS, profile.provider)
       && "remoteUrl" in profile && typeof profile.remoteUrl === "string",
   ));
 }
 
-function download(name: string, content: string): boolean {
+function download(name: string, content: string): void {
   const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
@@ -284,12 +295,11 @@ function download(name: string, content: string): boolean {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  return true;
 }
 
 function openAllowed(url: string | undefined): void {
-  if (!url) throw new Error("This link is unavailable");
+  if (!url) throw new AuthoredError("This link is unavailable");
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") throw new Error("Only secure external links are allowed");
+  if (parsed.protocol !== "https:") throw new AuthoredError("Only secure external links are allowed");
   window.open(parsed.href, "_blank", "noopener,noreferrer");
 }

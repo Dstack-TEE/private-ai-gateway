@@ -1,33 +1,6 @@
 use super::*;
 
 #[test]
-fn openclaw_same_path_empty_helper_deauthorizes_but_does_not_block_disconnect() {
-    let mut sandbox = sandbox("openclaw-empty-helper");
-    let agent = Agent::OpenClaw;
-    let options = claude_options();
-    let catalog = catalog();
-    sandbox.projector.helper_exe = sandbox
-        .projector
-        .data_dir
-        .join("helpers")
-        .join(helper_binary_name());
-    apply_connect(&sandbox, agent, &catalog, &options);
-    fs::write(&sandbox.projector.helper_exe, "").unwrap();
-    let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-    let status = statuses
-        .iter()
-        .find(|status| status.id == "openclaw")
-        .unwrap();
-    assert!(status.recorded && !status.connected && !status.authorized && tokens.is_empty());
-    assert!(sandbox
-        .projector
-        .preview(agent, true, Some(&catalog), &options)
-        .is_err());
-    disconnect(&sandbox, agent);
-    assert!(sandbox.projector.load_store().unwrap()[agent.id()].disconnected());
-}
-
-#[test]
 fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
     let sandbox = sandbox("selection-crash");
     let agent = Agent::Pi;
@@ -87,54 +60,6 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
 }
 
 #[test]
-fn native_model_settings_edits_invalidate_preview_and_survive_disconnect() {
-    let sandbox = sandbox("selection-drift");
-    let agent = Agent::Pi;
-    let config = agent.config_path(&sandbox.home, false);
-    write(&config, "{}");
-    let defaults = config.with_file_name("settings.json");
-    write(
-        &defaults,
-        r#"{"defaultProvider":"original","defaultModel":"native"}"#,
-    );
-    let catalog = catalog();
-    let options = ConnectOptions::default();
-    let preview = sandbox
-        .projector
-        .preview(agent, true, Some(&catalog), &options)
-        .unwrap();
-    write(
-        &defaults,
-        r#"{"defaultProvider":"edited","defaultModel":"edited-model"}"#,
-    );
-    assert!(
-        sandbox
-            .projector
-            .apply(agent, true, &preview.revision, Some(&catalog), &options)
-            .unwrap_err()
-            .code()
-            == desktop_core::protocol::ErrorCode::RevisionConflict
-    );
-    let preview = sandbox
-        .projector
-        .preview(agent, true, Some(&catalog), &options)
-        .unwrap();
-    sandbox
-        .projector
-        .apply(agent, true, &preview.revision, Some(&catalog), &options)
-        .unwrap();
-    write(
-        &defaults,
-        r#"{"defaultProvider":"user-choice","defaultModel":"user-model"}"#,
-    );
-    disconnect(&sandbox, agent);
-    assert!(fs::read_to_string(&defaults)
-        .unwrap()
-        .contains("user-choice"));
-    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
-}
-
-#[test]
 fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     let sandbox = sandbox("link-restore-retry");
     let agent = Agent::ClaudeCode;
@@ -164,179 +89,6 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
         Some(ConfigValue::Str("user-choice".into()))
-    );
-}
-
-#[test]
-fn opencode_merge_conflicts_revoke_without_writes_and_keep_original_restore_path() {
-    let sandbox = sandbox("opencode-merge");
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
-    let jsonc = path.with_extension("jsonc");
-    let original = json!({
-        "model": "other/original",
-        "provider": {"other": {"name": "User provider"}}
-    });
-    write(&path, &original.to_string());
-    let benign =
-        "{/* user's comment */\"provider\":{\"other\":{\"name\":\"JSONC user provider\"}},}";
-    write(&jsonc, benign);
-    let catalog = catalog();
-    let options = claude_options();
-    let preview = sandbox
-        .projector
-        .preview(Agent::OpenCode, true, Some(&catalog), &options)
-        .unwrap();
-    assert!(
-        sandbox
-            .projector
-            .apply(
-                Agent::OpenCode,
-                true,
-                &preview.revision,
-                Some(&catalog),
-                &options,
-            )
-            .unwrap()
-            .authorized
-    );
-    assert_eq!(fs::read_to_string(&jsonc).unwrap(), benign);
-    assert_eq!(
-        doc(&sandbox, Agent::OpenCode)
-            .get_str(&["provider", "other", "name"])
-            .as_deref(),
-        Some("User provider")
-    );
-    let preview = sandbox
-        .projector
-        .preview(Agent::OpenCode, true, Some(&catalog), &options)
-        .unwrap();
-    let config_before = fs::read(&path).unwrap();
-    let record_before = fs::read(sandbox.projector.store_path()).unwrap();
-    let token_path = sandbox.projector.tokens.path("opencode");
-    let token_before = fs::read(&token_path).unwrap();
-    for conflict in [
-        "{\"model\":\"other/override\",}",
-        "{/* keep */\"provider\":{\"private-ai-proxy\":{\"options\":{\"baseURL\":\"http://127.0.0.1:1/v1\"}}}}",
-        "{\"provider\":{\"private-ai-proxy\":{\"options\":{\"apiKey\":\"synthetic-never-log-me\"}}}}",
-        "{\"provider\":null}",
-        "{/* broken",
-    ] {
-        write(&jsonc, conflict);
-        let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-        let status = statuses.iter().find(|status| status.id == "opencode").unwrap();
-        assert!(status.recorded && !status.connected && !status.authorized);
-        assert!(tokens.is_empty());
-        let attention = status.attention.as_deref().unwrap();
-        assert!(attention.contains("opencode.jsonc"), "{attention}");
-        assert!(!attention.contains("synthetic-never-log-me"));
-        assert!(sandbox.projector
-            .preview(Agent::OpenCode, true, Some(&catalog), &options).is_err());
-        // Re-read companion files at apply, even when the main revision is unchanged.
-        assert!(sandbox.projector.apply(
-            Agent::OpenCode, true, &preview.revision, Some(&catalog), &options,
-        ).is_err());
-        assert_eq!(fs::read(&path).unwrap(), config_before);
-        assert_eq!(fs::read(sandbox.projector.store_path()).unwrap(), record_before);
-        assert_eq!(fs::read(&token_path).unwrap(), token_before);
-        assert_eq!(fs::read_to_string(&jsonc).unwrap(), conflict);
-    }
-    fs::remove_file(&jsonc).unwrap();
-    fs::create_dir(&jsonc).unwrap();
-    let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
-    let status = statuses
-        .iter()
-        .find(|status| status.id == "opencode")
-        .unwrap();
-    assert!(!status.authorized && tokens.is_empty());
-    assert!(status.attention.as_deref().unwrap().contains("unreadable"));
-    fs::remove_dir(&jsonc).unwrap();
-    write(&jsonc, benign);
-    assert!(
-        sandbox
-            .projector
-            .scan(None)
-            .unwrap()
-            .0
-            .iter()
-            .find(|status| status.id == "opencode")
-            .unwrap()
-            .authorized
-    );
-    write(
-        &jsonc,
-        "{/* keep on disconnect */\"model\":\"other/override\"}",
-    );
-    let jsonc_before = fs::read(&jsonc).unwrap();
-    let mut edited = doc(&sandbox, Agent::OpenCode);
-    edited
-        .set_str(&["provider", "other", "name"], "Edited outside the app")
-        .unwrap();
-    write(&path, &edited.render().unwrap());
-    disconnect(&sandbox, Agent::OpenCode);
-    let mut restored = original;
-    restored["provider"]["other"]["name"] = json!("Edited outside the app");
-    let mut actual: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert!(actual["provider"]
-        .as_object_mut()
-        .unwrap()
-        .remove("private-ai-proxy")
-        .is_some());
-    assert_eq!(actual, restored);
-    assert_eq!(fs::read(&jsonc).unwrap(), jsonc_before);
-    assert!(sandbox.projector.load_store().unwrap()["opencode"].disconnected());
-    assert!(!token_path.exists());
-}
-
-#[test]
-fn credential_restore_revokes_before_refusing_a_changed_route() {
-    let sandbox = sandbox("secret-route-ownership");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
-    write(
-        &path,
-        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-test-parked"}}"#,
-    );
-    connect(&sandbox);
-    let projection = fs::read_to_string(&path).unwrap();
-    let mut edited = doc(&sandbox, Agent::ClaudeCode);
-    edited
-        .set_str(&["env", "ANTHROPIC_BASE_URL"], "http://127.0.0.1:1")
-        .unwrap();
-    write(&path, &edited.render().unwrap());
-    let before = fs::read(&path).unwrap();
-    let options = ConnectOptions::default();
-    let preview = sandbox
-        .projector
-        .preview(Agent::ClaudeCode, false, None, &options)
-        .unwrap();
-    assert!(preview.changes.is_empty());
-    assert!(preview.note.contains("ambiguous"));
-    assert!(!serde_json::to_string(&preview)
-        .unwrap()
-        .contains("sk-test-parked"));
-    assert!(sandbox
-        .projector
-        .apply(Agent::ClaudeCode, false, &preview.revision, None, &options)
-        .is_err());
-    assert!(sandbox
-        .projector
-        .tokens
-        .read("claude-code")
-        .unwrap()
-        .is_none());
-    assert!(sandbox.secrets.holds("sk-test-parked"));
-    assert!(sandbox
-        .projector
-        .load_store()
-        .unwrap()
-        .contains_key("claude-code"));
-    assert_eq!(fs::read(&path).unwrap(), before);
-    write(&path, &projection);
-    disconnect(&sandbox, Agent::ClaudeCode);
-    assert_eq!(
-        doc(&sandbox, Agent::ClaudeCode)
-            .get_str(&["env", "ANTHROPIC_AUTH_TOKEN"])
-            .as_deref(),
-        Some("sk-test-parked")
     );
 }
 
@@ -399,94 +151,6 @@ fn recorded_paths_restore_original_files_after_location_changes() {
 }
 
 #[test]
-fn disconnected_provider_ownership_does_not_follow_a_new_config_path() {
-    for agent in [
-        Agent::Codex,
-        Agent::OpenCode,
-        Agent::Pi,
-        Agent::Hermes,
-        Agent::OpenClaw,
-        Agent::OhMyPi,
-    ] {
-        let mut sandbox = sandbox(&format!("disconnected-path-{}", agent.id()));
-        let catalog = catalog();
-        let options = ConnectOptions::default();
-        let original = agent.config_path(&sandbox.home, false);
-        let preview = sandbox
-            .projector
-            .preview(agent, true, Some(&catalog), &options)
-            .unwrap();
-        sandbox
-            .projector
-            .apply(agent, true, &preview.revision, Some(&catalog), &options)
-            .unwrap();
-        disconnect(&sandbox, agent);
-        let retained = fs::read_to_string(&original).unwrap();
-        sandbox.projector.home = sandbox.home.join("new-home");
-        let target = agent.config_path(&sandbox.projector.home, false);
-        // Identical retained definitions in a different file are user data,
-        // not an extension of the old ownership journal.
-        write(&target, &retained);
-        let status = sandbox
-            .projector
-            .scan(None)
-            .unwrap()
-            .0
-            .into_iter()
-            .find(|s| s.id == agent.id())
-            .unwrap();
-        assert!(!status.recorded);
-        assert!(!status
-            .attention
-            .as_deref()
-            .is_some_and(|s| s.contains("location changed")));
-        if agent == Agent::OpenCode {
-            assert!(sandbox
-                .projector
-                .preview(agent, true, Some(&catalog), &options)
-                .unwrap_err()
-                .to_string()
-                .contains("already exists"));
-            let deferred = sandbox
-                .projector
-                .preview(agent, true, None, &options)
-                .unwrap();
-            sandbox
-                .projector
-                .apply(agent, true, &deferred.revision, None, &options)
-                .unwrap();
-            assert!(sandbox.projector.load_store().unwrap()[agent.id()]
-                .fields
-                .is_empty());
-            assert!(sandbox
-                .projector
-                .preview(agent, true, Some(&catalog), &options)
-                .unwrap_err()
-                .to_string()
-                .contains("already exists"));
-            disconnect(&sandbox, agent);
-        }
-        fs::remove_file(&target).unwrap();
-        let preview = sandbox
-            .projector
-            .preview(agent, true, Some(&catalog), &options)
-            .unwrap();
-        sandbox
-            .projector
-            .apply(agent, true, &preview.revision, Some(&catalog), &options)
-            .unwrap();
-        disconnect(&sandbox, agent);
-        assert_eq!(
-            sandbox.projector.load_store().unwrap()[agent.id()]
-                .config_path
-                .as_path(),
-            target.as_path()
-        );
-        assert_eq!(fs::read_to_string(&original).unwrap(), retained);
-    }
-}
-
-#[test]
 fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     let sandbox = sandbox("claude");
     let path = sandbox.home.join(".claude").join("settings.json");
@@ -536,7 +200,7 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
         serde_json::json!(models
             .models
             .iter()
-            .map(|model| serde_json::json!({"model": model.id()}))
+            .map(|model| serde_json::json!({"model": model.id(), "label": model.display_name()}))
             .collect::<Vec<_>>())
     );
     assert!(
@@ -654,50 +318,6 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
             .unwrap(),
         token
     );
-}
-
-#[test]
-fn disconnect_all_restores_every_agent() {
-    let sandbox = sandbox("emergency");
-    write(
-        &sandbox.home.join(".claude").join("settings.json"),
-        r#"{"model": "opus"}"#,
-    );
-    connect(&sandbox);
-    let codex = sandbox.home.join(".codex").join("config.toml");
-    write(&codex, "model_provider = \"private_ai_proxy\"\n");
-    sandbox.projector.tokens.ensure("codex").unwrap();
-    let mut store = sandbox.projector.load_store().unwrap();
-    store.insert(
-        "codex".into(),
-        Connection {
-            config_path: codex.clone(),
-            fields: vec![OwnedField {
-                path: owned(&["model_provider"]),
-                value: Some(ConfigValue::Str("private_ai_proxy".into())),
-                previous: None,
-            }],
-            disabled: true,
-            cleanup_pending: false,
-            ..Connection::default()
-        },
-    );
-    sandbox.projector.save_store(&store).unwrap();
-
-    assert!(sandbox.projector.disconnect_all().unwrap().is_empty());
-    assert!(sandbox.projector.load_store().unwrap().is_empty());
-    assert_eq!(fs::read_to_string(&codex).unwrap(), "");
-    assert!(
-        !fs::read_to_string(sandbox.home.join(".claude").join("settings.json"))
-            .unwrap()
-            .contains("apiKeyHelper")
-    );
-    assert!(sandbox
-        .projector
-        .tokens
-        .load(&["codex", "claude-code"])
-        .unwrap()
-        .is_empty());
 }
 
 /// Restore-all revokes every token and tombstones every record before

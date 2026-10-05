@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "private-ai-proxy-helper"
 path = "src/bin/private-ai-proxy-helper.rs"
 
+[features]
+default = []
+mac-app-store = []
+
 [dependencies]
 desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 axum = "0.8"
@@ -23,13 +27,15 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 futures-util = "0.3"
 hex = "0.4"
 jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }
-rand = "0.8"
+rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
+# Keep serde_json's default float parsing: config_doc's `recorded` depends on
+# it, and a test fails if `float_roundtrip` is enabled by feature unification.
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
+sha2 = "0.11"
 shlex = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "rt-multi-thread", "macros", "net", "process", "sync", "time"] }
 tokio-util = "0.7"
 toml_edit = "0.25"
 yaml-edit = { version = "0.3.1", default-features = false }

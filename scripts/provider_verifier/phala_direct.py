@@ -21,9 +21,11 @@ from .common import (
 )
 
 
-def _phala_direct_compose_hash_ok(info: dict[str, Any]) -> tuple[bool, str]:
-    """Verify SHA256(app_compose) == reported compose_hash, mirroring the dstack
-    verifiers. Returns (ok, reason)."""
+def _phala_direct_compose_hash_ok(
+    info: dict[str, Any], dstack_result: dict[str, Any]
+) -> tuple[bool, str]:
+    """Verify SHA256(app_compose) == the compose-hash event the dstack verifier
+    replayed into RTMR3. Returns (ok, reason)."""
     tcb_info = info.get("tcb_info") or {}
     if isinstance(tcb_info, str):
         try:
@@ -31,12 +33,16 @@ def _phala_direct_compose_hash_ok(info: dict[str, Any]) -> tuple[bool, str]:
         except json.JSONDecodeError:
             tcb_info = {}
     app_compose = tcb_info.get("app_compose")
-    reported = info.get("compose_hash")
-    if not app_compose or not reported:
-        return False, "PhalaDirect report is missing app_compose or compose_hash"
+    if not app_compose:
+        return False, "PhalaDirect report is missing app_compose"
+    details = dstack_result.get("details") or {}
+    app_info = details.get("app_info") or {}
+    measured = app_info.get("compose_hash")
+    if not measured:
+        return False, "dstack verifier returned no event-log compose hash"
     calculated = hashlib.sha256(app_compose.encode("utf-8")).hexdigest()
-    if calculated.lower() != str(reported).lower():
-        return False, "PhalaDirect compose hash mismatch"
+    if calculated.lower() != str(measured).lower():
+        return False, "PhalaDirect app_compose does not match the RTMR3 compose hash"
     return True, ""
 
 
@@ -161,8 +167,8 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
-    # 2. Compose hash: SHA256(app_compose) == reported compose_hash.
-    compose_ok, compose_reason = _phala_direct_compose_hash_ok(info)
+    # 2. Compose hash: SHA256(app_compose) == the RTMR3-measured compose hash.
+    compose_ok, compose_reason = _phala_direct_compose_hash_ok(info, dstack_result)
     if not compose_ok:
         failed(provider, compose_reason, evidence=evidence, verifier_id=verifier_id)
         return

@@ -6,7 +6,7 @@ directory, which holds nothing else:
 | File | Holds | Permissions |
 | --- | --- | --- |
 | `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
-| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password hash | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
+| `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 
 The layout follows established tools: one `config.toml` like Cargo
@@ -16,9 +16,9 @@ separate owner-only `credentials.toml` like Cargo's `credentials.toml` and the
 AWS CLI's `credentials`. Keys are kebab-case, like
 [Cargo's configuration](https://doc.rust-lang.org/cargo/reference/config.html),
 [`Tauri.toml`](https://v2.tauri.app/develop/configuration-files/) and
-[Helix](https://docs.helix-editor.com/configuration.html). `pap settings set`
-names a key by its dotted path in the file (`web-ui.port`), as `git config`
-and `cargo config get` do, and `pap settings show` prints the same names.
+[Helix](https://docs.helix-editor.com/configuration.html).
+[`pap settings`](cli.md#settings) names each key by its dotted path in the file,
+such as `web-ui.port`.
 
 ```toml
 #:schema ./config.schema.json
@@ -44,8 +44,12 @@ remote-url = "https://gateway.example"
 api-key = "sk-..."
 
 [web-ui]
-password-hash = "$argon2id$..."
+password = "..."
 ```
+
+The service generates the web UI password when none is set; see
+[Web UI](cli.md#web-ui). A `password-hash` in its place comes from an earlier
+version and keeps signing in until a new password replaces it.
 
 Usage history, agent connection records, agent tokens, caches, locks and logs
 are state, not settings; they stay in the app data directory. So does
@@ -60,18 +64,33 @@ beside it, it must not be copied to another device.
 | Platform | Settings directory | App data (state) |
 | --- | --- | --- |
 | Linux | `$XDG_CONFIG_HOME/private-ai-proxy` (default `~/.config/private-ai-proxy`) | `$XDG_DATA_HOME/org.dstack.private-ai-proxy` (default `~/.local/share/org.dstack.private-ai-proxy`) |
-| macOS (direct download) | `~/Library/Application Support/org.dstack.private-ai-proxy/Config` | `~/Library/Application Support/org.dstack.private-ai-proxy` |
+| macOS (direct download) | `~/.config/private-ai-proxy` | `~/Library/Application Support/org.dstack.private-ai-proxy` |
 | macOS (Mac App Store) | `~/Library/Containers/org.dstack.private-ai-proxy/Data/Library/Application Support/org.dstack.private-ai-proxy/Config` | The same path without `Config` |
-| Windows | `%APPDATA%\org.dstack.private-ai-proxy\Config` | `%APPDATA%\org.dstack.private-ai-proxy` |
+| Windows | `%USERPROFILE%\.config\private-ai-proxy` | `%APPDATA%\org.dstack.private-ai-proxy` |
 
 The settings directory is always separate from state, so it can be synced as a
-whole. Linux follows the [XDG base directories](https://specifications.freedesktop.org/basedir/latest/);
-as the specification requires, a relative `XDG_CONFIG_HOME` or `XDG_DATA_HOME`
-is ignored.
-macOS and Windows keep one directory per app (Tauri's `app_data_dir`); settings
-get their own `Config` subdirectory in it, as VS Code keeps its settings in
-`~/Library/Application Support/Code/User` and `%APPDATA%\Code\User`, the
-directory its Settings Sync syncs. `pap settings show` prints the paths in use.
+whole. It is `~/.config/private-ai-proxy` on every platform, the default of
+the [XDG base directories](https://specifications.freedesktop.org/basedir/latest/),
+so one dotfiles setup works everywhere; command-line tools such as GitHub CLI
+(`~/.config/gh`) and starship (`~/.config/starship.toml`) use `~/.config` on
+macOS and Windows too. Only Linux honours `XDG_CONFIG_HOME` (and
+`XDG_DATA_HOME`); as the specification requires, a relative value is ignored.
+On macOS and Windows an app started from Finder, the Dock or the Start menu
+does not see a shell's environment, so honouring the variable there would give
+the backend a different settings directory depending on how it was started.
+App data follows each platform's convention (Tauri's `app_data_dir`). The Mac
+App Store build is sandboxed and cannot write the real home directory, so its
+settings stay in the `Config` subdirectory of its container's app directory.
+`pap settings show` prints the paths in use.
+
+On Windows the settings directory is in the user profile, not in the roaming
+`%APPDATA%`: roaming profiles and folder redirection of AppData no longer carry
+the settings to other machines (sync the directory instead; see
+[Syncing between devices](#syncing-between-devices)). Uninstalling with the
+installer's option to delete the app data removes `%APPDATA%` and
+`%LOCALAPPDATA%` data only; delete `%USERPROFILE%\.config\private-ai-proxy`
+yourself to remove the settings and the credentials in `credentials.toml`.
+Likewise, on macOS and Linux removing the app leaves `~/.config/private-ai-proxy`.
 
 Overrides follow the existing `PRIVATE_AI_PROXY_*` variables:
 
@@ -81,6 +100,45 @@ Overrides follow the existing `PRIVATE_AI_PROXY_*` variables:
   build sets it to its container).
 - `PRIVATE_AI_PROXY_HOME`: test home; data in `<home>/.private-ai-proxy`,
   settings in `<home>/.private-ai-proxy/Config`.
+
+### Moving from the earlier macOS and Windows location
+
+Up to 0.2.0-beta.8, the direct macOS and Windows builds kept the settings in
+the `Config` subdirectory of the app data directory
+(`~/Library/Application Support/org.dstack.private-ai-proxy/Config`,
+`%APPDATA%\org.dstack.private-ai-proxy\Config`). On start, before it reads
+the settings, the backend moves `config.toml` and `credentials.toml` from there
+to the settings directory above (`core/src/relocation.rs`); the service log
+records each move. State stays in the app data directory. Until the backend
+has moved them, the desktop app and the CLI read the settings where they are,
+so nothing shows defaults in between.
+
+- Both old files are read before anything is placed. Contents, comments and
+  permissions are kept: on the same volume each file is hard-linked into
+  place, so it is the same file (with the owner-only `0600` or DACL of
+  `credentials.toml`); otherwise it is copied, synced to disk and made
+  owner-only for `credentials.toml`. A symlinked `config.toml` becomes a link
+  to the same file; on Windows creating it needs Developer Mode or the "Create
+  symbolic links" privilege, and without it the move fails as described below.
+- Nothing in the settings directory is overwritten. If it already has a file
+  with other content, that file is used and the old one is kept. Settings
+  reports the old file when the backend starts, again only if the old file
+  changes (an earlier version wrote it), and `pap doctor` reports it for as
+  long as it is there, with or without the backend. A kept old file is never
+  brought back, also not after you delete the new one.
+- The old files are removed only after every file is in place,
+  `credentials.toml` last, so an interrupted move leaves each file in at least
+  one place and the next start finishes it. The old `Config` directory is
+  removed once it is empty.
+- A settings directory that is a link to the old one, or the reverse, counts
+  as moved: nothing is removed from either. A symlinked old directory that
+  points elsewhere is left in place and reported.
+- If a file cannot be read or moved, nothing placed in that start remains, the
+  settings are used from the old directory, the error is shown in Settings and
+  `pap doctor`, and the move is retried on the next start.
+
+Linux, the Mac App Store build and the overrides above keep their location;
+nothing moves there.
 
 ## Editing
 
@@ -131,6 +189,16 @@ watcher watches the settings directory only, so an edit made to the
 target itself applies when the service next starts. The app refuses to replace
 a symlinked `credentials.toml`; sync the directory rather than linking it.
 
+## Appearance
+
+`appearance` is `system`, `light` or `dark`. The desktop app opens its window
+in the saved appearance; the web UI applies it once you sign in (the sign-in
+page follows the browser).
+
+On Linux, `system` follows GTK's light or dark preference, which WebKitGTK
+uses and which does not always track the desktop's dark style (for example
+GNOME's Style setting). Choose `light` or `dark` for a fixed appearance.
+
 ## Syncing between devices
 
 The settings directory contains only settings, so it can be synced as a whole
@@ -139,7 +207,7 @@ The settings directory contains only settings, so it can be synced as a whole
 - `config.toml` is always safe to sync. Listener addresses and ports apply to
   every synced device.
 - `credentials.toml` holds only the user's credentials (API keys, the web UI
-  password hash), so it is safe to sync with `config.toml`, but it is
+  password), so it is safe to sync with `config.toml`, but it is
   plaintext: sync it only through storage you trust with those secrets.
   Otherwise leave it out and enter keys on each device.
 - `config.schema.json` is generated; each version rewrites it on start.
@@ -164,6 +232,44 @@ owner-only from the moment they are created. Neither file is ever shown by the a
 Anyone who can read your files as you can read it, which is also true of an
 unlocked OS keychain for a process running as you.
 
+## Upgrade notes for 0.2.0
+
+- **Credentials leave the OS keychain.** API keys move from the macOS
+  Keychain, Windows Credential Manager or Secret Service to
+  `~/.config/private-ai-proxy/credentials.toml` (the Mac App Store build keeps
+  it in its container; see [Locations](#locations)), a plaintext file readable
+  only by you (`0600`). The keychain entries are deleted once the import has
+  been verified. Do not sync that file anywhere public, such as a public
+  dotfiles repository. The import is tried once: if the keychain is
+  unavailable or its prompt is denied, sign in again or re-enter the key of
+  any profile that shows none. Only if the app cannot write its own settings
+  files during the import does it try again, and may prompt again, on the
+  next start.
+- **Receipt audits report; they do not block.** Responses stream to your
+  agent as they arrive. Each signed receipt is fetched and audited after the
+  response was delivered, and a failed audit is reported in Usage; it cannot
+  retract bytes the agent already received.
+- **The production OS check relies on the service's own report.** It
+  compares the OS image hash that the service records in its RTMR3 event log
+  with a reviewed allowlist. It does not rebuild the MRTD and RTMR0-2 boot
+  measurements from the OS image, so it does not prove on its own which
+  image booted. For that assurance, run a dstack verifier over the same quote
+  (see the [CLI README](../cli/README.md)).
+- **Verification failures fail closed.** When verification fails or is
+  blocked, connected agents stay pointed at the Local API, which refuses
+  their requests until protection is verified again; they never fall back to
+  their original provider. A Local API address change rewrites them to the
+  new address, unless the backend has not verified a catalog since it
+  started; then they are restored until verification projects them again.
+  Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
+  or disconnecting an agent restores its own configuration. Quitting the app
+  from the tray or menu leaves the backend running and the agents pointed at
+  it. A backend that is not running cannot restore agents;
+  `pap stop --offline` restores them without it, and the Windows uninstaller
+  runs it.
+  Before removing the app on macOS or Linux, choose Stop All and Quit, or run
+  `pap --yes service stop` and then `pap stop --offline`.
+
 ## Upgrading from 0.1
 
 0.1 stored settings in `confidential-ai.json`, `local-api.json` and
@@ -186,12 +292,16 @@ steps (`runtime/src/settings/legacy.rs`):
    key you replaced since) is left alone.
    `migrated-0.1/import-complete` records the step once every entry is
    deleted. Each store operation may take at most 60 seconds, which leaves
-   time to answer a macOS Keychain prompt. Until the step is recorded, even
-   across restarts after a timeout or a denied prompt, disconnecting an agent
-   whose original key has not been imported yet fails with the same "agent
-   credential could not be restored" error 0.1 gave while the credential
-   store was unavailable, and succeeds once the key is imported, instead of
-   dropping that key.
+   time to answer a macOS Keychain prompt. If the store itself fails,
+   `migrated-0.1/import-abandoned` records that with the reason and the store
+   is never asked again, so a denied Keychain prompt does not come back on
+   every start. A problem with this app's own files (for example a damaged
+   `local-state.json`) leaves the step pending for the next start instead.
+   While the step runs, disconnecting an agent whose original key has not
+   been imported yet fails with the same "agent credential could not be
+   restored" error 0.1 gave while the credential store was unavailable,
+   instead of dropping that key. Once the step is recorded, a disconnect
+   restores what was imported and leaves a key that was not unset.
 
 Progress is recorded in the app data directory, never by the existence of
 `config.toml`, because the settings directory may have been synced from
@@ -201,34 +311,37 @@ another device that upgraded first. Values already in the files win:
   device's 0.1 profiles whose IDs it lacks are added. Otherwise it is created
   from the 0.1 settings. Settings not taken over are listed in a notice and
   kept in `migrated-0.1/`.
-- `credentials.toml`: an existing API key or password hash stays. A 0.1 API
-  key is imported only for a profile that has none and uses the same service
-  URL and the same sign-in (a manual key, or the same provider account) as
-  this device's 0.1 profile of that ID, so a key never lands in another
-  account's profile.
+- `credentials.toml`: an existing API key, password or password hash stays.
+  A 0.1 API key is imported only for a profile that has none and uses the
+  same service URL and the same sign-in (a manual key, or the same provider
+  account) as this device's 0.1 profile of that ID, so a key never lands in
+  another account's profile.
 - `local-state.json`: always this device's; existing entries stay.
 
-A step that fails writes nothing that records it: the old files and the
+A step 1 that fails writes nothing that records it: the old files and the
 credential store entries stay where they are, the error stays in Settings,
 `pap status` and `pap doctor`, and the step runs again on the next start. While
 step 1 has not succeeded, settings cannot be changed, so nothing can be saved
-that the import would then have to merge with. If the credential store is
-locked, unavailable (for example Linux without a Secret Service) or a macOS
-prompt is denied or left unanswered, the settings are still in effect,
-Settings and `pap doctor` name the profiles whose API key to re-enter, and the
-next start tries the store again. Keys you entered in the meantime are kept.
+that the import would then have to merge with. If step 2 fails because the
+credential store is locked, unavailable (for example Linux without a Secret
+Service) or a macOS prompt is denied or left unanswered, the settings are
+still in effect, Settings and
+`pap doctor` name the profiles whose API key to re-enter once, and those
+profiles show no saved key until you sign in again or enter one. The entries
+stay in the credential store; remove them there if you like.
 
 The backup contains no API keys; `preferences.json` contains the web UI
 password hash. Delete `migrated-0.1/` once you are satisfied (keep
-`import-complete`, or the next start looks for credentials to import once
-more, which is harmless).
+`import-complete` or `import-abandoned`, or the next start looks for
+credentials to import once more).
 
 ## Removal in 0.3
 
 The single list of compatibility code to remove in 0.3, once upgrading from
 0.1 directly to 0.3 is no longer supported. Each item exists only for
-installations of 0.1 or for command-line options deprecated in 0.2; other
-documents link here instead of keeping their own lists.
+installations of 0.1 or of 0.2 prereleases, or for command-line options
+deprecated in 0.2; other documents link here instead of keeping their own
+lists.
 
 - `runtime/src/settings/legacy.rs` (with its tests) and the `keyring`
   dependency, the only remaining users of the OS credential store.
@@ -256,9 +369,13 @@ documents link here instead of keeping their own lists.
   to 0.1.7-beta refuses it because Private AI Proxy is running.
 - `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
   (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
+- The move of the settings from the earlier macOS and Windows location
+  (`core/src/relocation.rs`, `paths::legacy_config_dir`, the calls in
+  `DesktopRuntime::launch`, `config::config_path`, `config::credentials_path`
+  and the `legacySettingsDirectory` warning of `pap doctor`), for
+  installations of 0.2 prereleases.
 - `src-tauri/src/autostart/migration.rs`, the bridge from the
   tauri-plugin-autostart login item.
-- The legacy default window size shim in `src-tauri/src/window_state.rs`.
 - The per-platform update manifests `latest-<os>-<arch>.json` that clients up
   to 0.1.7-beta.4 read (see [Updates by installation](distribution.md#updates-by-installation)):
   the legacy branch of `updateFeeds` in `scripts/update-feeds.mjs`. Delete the

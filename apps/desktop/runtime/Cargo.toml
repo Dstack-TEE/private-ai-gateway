@@ -8,7 +8,7 @@ rust-version = "1.98"
 
 [features]
 default = []
-mac-app-store = ["desktop-core/mac-app-store"]
+mac-app-store = ["agent-bridge/mac-app-store", "desktop-core/mac-app-store"]
 web-ui = ["dep:axum-extra", "dep:governor", "dep:mime", "dep:rust-embed", "dep:time"]
 
 [lib]
@@ -25,7 +25,6 @@ backon = { version = "1", default-features = false, features = ["std"] }
 async-stream = "0.3"
 base64 = "0.23"
 csv = "1"
-futures-core = "0.3"
 governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
 hex = "0.4"
 indexmap = { version = "2", features = ["serde"] }
@@ -33,11 +32,12 @@ indexmap = { version = "2", features = ["serde"] }
 keyring = "4"
 notify-debouncer-mini = "0.7"
 oauth2 = { version = "5", default-features = false }
-rand = "0.8"
+rand = "0.10"
 mime = { version = "0.3", optional = true }
 rust-embed = { version = "8", features = ["mime-guess"], optional = true }
-sha2 = "0.10"
+sha2 = "0.11"
 subtle = "2.6"
+thiserror = "2"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["limit"] }

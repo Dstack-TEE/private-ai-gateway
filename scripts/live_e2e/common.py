@@ -215,10 +215,11 @@ def run_cmd_json(
     env: dict[str, str] | None = None,
     input_value: Any | None = None,
     timeout: int = 120,
+    ok_returncodes: tuple[int, ...] = (0,),
 ) -> dict[str, Any]:
     input_bytes = None if input_value is None else json_bytes(input_value)
     result = run_cmd(cmd, cwd=cwd, env=env, input_bytes=input_bytes, timeout=timeout)
-    if result.returncode != 0:
+    if result.returncode not in ok_returncodes:
         printable = " ".join(shlex.quote(part) for part in cmd)
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"command failed ({result.returncode}): {printable}\n{stderr}")
@@ -230,6 +231,46 @@ def run_cmd_json(
     if not isinstance(parsed, dict):
         raise RuntimeError("command returned non-object JSON")
     return parsed
+
+
+def pap_bin() -> str:
+    """The Private AI Proxy CLI: `PAP_BIN`, else `pap` on PATH."""
+    return os.environ.get("PAP_BIN") or "pap"
+
+
+# Offline `pap audit` skips the quote and live-channel checks, so its verdict is
+# PARTIAL (exit 1). The binding and receipt checks must still pass.
+OFFLINE_AUDIT_PASSES = ("id-2", "id-3", "receipt-1", "receipt-2", "receipt-3", "receipt-4", "upstream-1")
+
+
+def run_pap_audit(
+    report: Path, receipt: Path, nonce: str, request_body: Path, response_body: Path
+) -> dict[str, Any]:
+    transcript = run_cmd_json(
+        [
+            pap_bin(),
+            "audit",
+            "--report",
+            str(report),
+            "--receipt",
+            str(receipt),
+            "--nonce",
+            nonce,
+            "--request-body",
+            str(request_body),
+            "--response-body",
+            str(response_body),
+            "--json",
+        ],
+        timeout=240,
+        ok_returncodes=(0, 1),
+    )
+    statuses = {check.get("id"): check.get("status") for check in transcript.get("checks", [])}
+    bad = {check: status for check, status in statuses.items() if status == "fail"}
+    bad |= {check: statuses.get(check) for check in OFFLINE_AUDIT_PASSES if statuses.get(check) != "pass"}
+    if bad:
+        raise RuntimeError(f"pap audit checks did not pass: {bad}")
+    return transcript
 
 
 def request_json(

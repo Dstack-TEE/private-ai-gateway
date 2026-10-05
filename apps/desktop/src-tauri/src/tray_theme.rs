@@ -1,27 +1,12 @@
 //! Observe system appearance independently of the app's selected window theme.
 
-use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
-
-pub use platform::{setup, shutdown};
+pub use platform::setup;
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::*;
+    use std::sync::Mutex;
+    use tauri::{AppHandle, Manager};
     use windows::{Foundation::TypedEventHandler, UI::ViewManagement::UISettings};
-
-    struct Watcher {
-        settings: UISettings,
-        token: i64,
-    }
-
-    impl Drop for Watcher {
-        fn drop(&mut self) {
-            if let Err(error) = self.settings.RemoveColorValuesChanged(self.token) {
-                tracing::warn!("Cannot remove system appearance observer: {error}");
-            }
-        }
-    }
 
     pub fn setup(app: &AppHandle) -> Result<(), String> {
         let settings = UISettings::new().map_err(|e| e.to_string())?;
@@ -43,12 +28,13 @@ mod platform {
         let token = settings
             .ColorValuesChanged(&handler)
             .map_err(|e| e.to_string())?;
-        let watcher = Watcher { settings, token };
         // Subscribe before reading to avoid missing a change during startup.
-        apply(app)?;
-        if !app.manage(Mutex::new(Some(watcher))) {
-            return Err("System appearance observer is already running".into());
+        if let Err(error) = apply(app) {
+            let _ = settings.RemoveColorValuesChanged(token);
+            return Err(error);
         }
+        // The subscription lasts as long as `settings`, which the app keeps.
+        app.manage(Mutex::new(settings));
         Ok(())
     }
 
@@ -62,26 +48,13 @@ mod platform {
             .map_err(|e| e.to_string())?;
         crate::tray::set_dark(app, light == 0).map_err(|e| e.to_string())
     }
-
-    pub fn shutdown(app: &AppHandle) {
-        if let Some(watcher) = app.try_state::<Mutex<Option<Watcher>>>() {
-            match watcher.lock() {
-                Ok(mut guard) => {
-                    guard.take();
-                }
-                Err(error) => {
-                    tracing::warn!("Cannot stop system appearance observer: {error}")
-                }
-            }
-        }
-    }
 }
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::*;
     use futures_util::StreamExt;
     use std::collections::HashMap;
+    use tauri::AppHandle;
     use zbus::{proxy, zvariant::OwnedValue};
 
     const NAMESPACE: &str = "org.freedesktop.appearance";
@@ -107,24 +80,13 @@ mod platform {
         ) -> zbus::Result<()>;
     }
 
-    struct Watcher(tauri::async_runtime::JoinHandle<()>);
-
-    impl Drop for Watcher {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
     pub fn setup(app: &AppHandle) -> Result<(), String> {
         let handle = app.clone();
-        let task = tauri::async_runtime::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             if let Err(error) = observe(&handle).await {
                 tracing::warn!("System tray appearance observer stopped: {error}");
             }
         });
-        if !app.manage(Mutex::new(Some(Watcher(task)))) {
-            return Err("System appearance observer is already running".into());
-        }
         Ok(())
     }
 
@@ -167,18 +129,5 @@ mod platform {
         let preference = u32::try_from(value).map_err(|e| e.to_string())?;
         // XDG: 0 = no preference, 1 = dark, 2 = light; unknown means no preference.
         crate::tray::set_dark(app, preference == 1).map_err(|e| e.to_string())
-    }
-
-    pub fn shutdown(app: &AppHandle) {
-        if let Some(watcher) = app.try_state::<Mutex<Option<Watcher>>>() {
-            match watcher.lock() {
-                Ok(mut guard) => {
-                    guard.take();
-                }
-                Err(error) => {
-                    tracing::warn!("Cannot stop system appearance observer: {error}")
-                }
-            }
-        }
     }
 }

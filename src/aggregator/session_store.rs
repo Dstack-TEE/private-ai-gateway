@@ -559,8 +559,12 @@ mod tests {
     /// hits this — it holds one lock for its whole life and never re-acquires —
     /// so the retry belongs only in the test harness.
     fn open_store(path: &Path) -> JsonlSessionStore {
+        open_store_at(path, 0)
+    }
+
+    fn open_store_at(path: &Path, now: u64) -> JsonlSessionStore {
         for _ in 0..200 {
-            match JsonlSessionStore::open(path, 0) {
+            match JsonlSessionStore::open(path, now) {
                 Ok(store) => return store,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -612,7 +616,7 @@ mod tests {
         assert_eq!(count_lines(&path), 2, "both records are on disk");
 
         // Reopened past the lapsed record's deadline but before the live one's.
-        let reopened = JsonlSessionStore::open(&path, 5_000).unwrap();
+        let reopened = open_store_at(&path, 5_000);
         let index = reopened.index.lock().unwrap();
         assert_eq!(
             index.by_id.len(),
@@ -643,7 +647,7 @@ mod tests {
                 .put_session("fp-b", session("b", 0, 1_000), 1_000, 0)
                 .unwrap();
         }
-        let reopened = JsonlSessionStore::open(&path, 0).unwrap();
+        let reopened = open_store(&path);
         assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
     }
 

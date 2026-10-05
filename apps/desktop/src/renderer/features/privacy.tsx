@@ -1,20 +1,22 @@
 import React from "react";
 import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
-import { AppDialog, DoneFooter } from "../components/app-dialog";
-import type { AppState, VerificationCheck } from "../../shared/contracts";
+import { AppDialog, AppDialogBody, DoneFooter, type DialogControl } from "../components/app-dialog";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import type { AppState, Tone, VerificationCheck } from "../../shared/contracts";
 import { hasLiveVerification } from "../lib/protection";
+import { useShell } from "../lib/shell";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
 import { VerificationVerdict } from "../components/verification-verdict";
 import { cn } from "../lib/utils";
-import { toneTextClass, type Tone } from "../lib/tone";
+import { toneTextClass } from "../lib/tone";
 
 const CHECK_ICON_CLASS = "grid size-4.5 flex-none place-items-center rounded-full";
 const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: string; tone: Tone }> = {
   pass: { iconClass: "bg-primary text-primary-foreground", tone: "success" },
-  fail: { iconClass: "bg-[var(--danger-bg)] text-destructive", tone: "danger" },
-  skip: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
-  info: { iconClass: "bg-[var(--warning-bg)] text-warning", tone: "warning" },
+  fail: { iconClass: "bg-destructive/10 text-destructive", tone: "danger" },
+  skip: { iconClass: "bg-warning/10 text-warning", tone: "warning" },
+  info: { iconClass: "bg-warning/10 text-warning", tone: "warning" },
 };
 
 const CHECK_TITLES: Record<string, string> = {
@@ -24,7 +26,7 @@ const CHECK_TITLES: Record<string, string> = {
   "id-4": "Service is built from public source",
   "id-5": "Private key stays inside the enclave",
   "id-6": "Connection uses the attested key",
-  "policy-os": "Production OS image",
+  "policy-os": "Production OS image (reported by the service)",
   "receipt-1": "Receipt signature",
   "receipt-2": "Receipt matches verified service",
   "receipt-3": "Request bytes match receipt",
@@ -34,9 +36,13 @@ const CHECK_TITLES: Record<string, string> = {
   "upstream-2": "Upstream session evidence",
 };
 
-export function PrivacyDialog({ state, onClose }: { state: AppState; onClose(): void }): React.JSX.Element {
-  return <AppDialog title="Privacy verification" className="sm:max-w-2xl" onClose={onClose}>
-    <div className="-mx-6 min-h-0 overflow-y-auto px-6"><PrivacyVerification state={state} /></div>
+export function PrivacyDialog(control: DialogControl): React.JSX.Element {
+  const { state } = useShell();
+  // Why protection failed; the window shows only the title.
+  const failure = state.protection.tone === "danger" ? state.endpointError ?? state.error : undefined;
+  return <AppDialog {...control} title="Privacy verification" className="sm:max-w-2xl">
+    {failure && <Alert variant="destructive"><AlertTitle>{state.protection.title}</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
+    <AppDialogBody><PrivacyVerification state={state} /></AppDialogBody>
     <DoneFooter />
   </AppDialog>;
 }
@@ -80,11 +86,11 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         tone={verdictTone}
         icon={VerdictIcon}
         title={verified ? "Service identity and connection verified" : state.status === "verifying" ? "Checking the service" : "No verified live connection"}
-        detail={verified ? "This app checked the service's hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
+        detail={verified ? "This app checked the service’s hardware evidence and bound the encrypted connection to its attested key." : "A saved profile is not evidence of a currently protected connection. Protection must establish a new verified session."}
       />
-      <div className="privacy-facts mt-4">
+      <div className="mt-4">
         {facts.map((fact) => (
-          <div className="fact flex min-h-12.5 items-start gap-3 border-b border-border p-3.5 last:border-b-0" key={fact.title}>
+          <div className="flex min-h-12.5 items-start gap-3 border-b border-border p-3.5 last:border-b-0" key={fact.title}>
             <span className={cn(CHECK_ICON_CLASS, CHECK_PRESENTATION[fact.ok ? "pass" : "skip"].iconClass)} aria-hidden="true">
               {fact.ok ? <Check size={12} /> : <LockOpen size={11} />}
             </span>
@@ -95,11 +101,11 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
           </div>
         ))}
       </div>
-      <p className="proof-boundary mt-3 mr-0 mb-4.5 ml-0 text-muted-foreground text-xs">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
+      <p className="mt-3 mb-4.5 text-xs text-muted-foreground">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. {!state.config.requireProductionOs && "Development OS images are allowed."}</p>
       {identity && (
-        <section className="privacy-section mt-6" aria-labelledby="verified-identity-title">
+        <section className="mt-6" aria-labelledby="verified-identity-title">
           <SectionHeading id="verified-identity-title" title={verified ? "Current service identity" : "Last reported identity"} summary={`${checkCount(checks)} checks passed`} />
-          <div className="identity-grid grid grid-cols-2 gap-x-5 gap-y-4 p-3.5 [&_.wide]:col-span-full [&_>_div]:min-w-0 [&_span]:mb-0.5 [&_span]:block [&_span]:text-xs [&_span]:text-muted-foreground [&_strong]:block [&_strong]:select-text [&_strong]:font-semibold [&_strong.mono]:whitespace-normal [&_strong.mono]:font-medium [&_strong.mono]:wrap-anywhere">
+          <div className="grid grid-cols-2 gap-x-5 gap-y-4 p-3.5">
             <Detail label="Hardware" value={hardwareName(identity.teeType)} />
             <Detail label="Trust" value={trustName(identity.trustLevel)} />
             <Detail label="Source commit" value={identity.source.repoCommit ?? "Unknown"} mono wide />
@@ -114,9 +120,9 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         </section>
       )}
       {checks.length > 0 && (
-        <section className="privacy-section mt-6" aria-labelledby="verification-checks-title">
+        <section className="mt-6" aria-labelledby="verification-checks-title">
           <SectionHeading id="verification-checks-title" title="Verification checks" summary={`${checks.length} total`} />
-          <div className="check-list">{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
+          <div>{checks.map((check) => <CheckRow key={check.id} check={check} />)}</div>
         </section>
       )}
     </section>
@@ -127,7 +133,7 @@ function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
   const title = CHECK_TITLES[check.id] ?? check.title;
   const presentation = CHECK_PRESENTATION[check.status];
   return (
-    <div className="check-row grid min-h-9 grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 border-b border-border px-3.5 py-3 last:border-b-0">
+    <div className="grid min-h-9 grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 border-b border-border px-3.5 py-3 last:border-b-0">
       <span className={cn(CHECK_ICON_CLASS, presentation.iconClass)} aria-hidden="true">
         {check.status === "pass" && <Check size={12} />}
       </span>

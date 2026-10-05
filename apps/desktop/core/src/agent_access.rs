@@ -21,18 +21,20 @@ mod mac_app_store {
         io::Write,
         os::unix::ffi::OsStrExt,
         path::{Path, PathBuf},
-        sync::{Mutex, OnceLock},
     };
 
     const BOOKMARK_FILE: &str = "agent-home.bookmark";
     const SERVICE_BOOKMARK_FILE: &str = "agent-home.service-bookmark";
     const MAX_BOOKMARK_BYTES: u64 = 1024 * 1024;
 
-    static ACTIVE_ACCESS: OnceLock<Mutex<Option<AgentHomeAccess>>> = OnceLock::new();
-
+    /// A resolved Home bookmark. Apple requires each successful
+    /// `startAccessingSecurityScopedResource` to be balanced by one
+    /// `stopAccessingSecurityScopedResource`, so the access records whether
+    /// it started and `Drop` stops only that.
     pub struct AgentHomeAccess {
         url: Retained<NSURL>,
         home: PathBuf,
+        started: bool,
     }
 
     impl AgentHomeAccess {
@@ -43,20 +45,10 @@ mod mac_app_store {
 
     impl Drop for AgentHomeAccess {
         fn drop(&mut self) {
-            unsafe { self.url.stopAccessingSecurityScopedResource() };
+            if self.started {
+                unsafe { self.url.stopAccessingSecurityScopedResource() };
+            }
         }
-    }
-
-    fn active_access() -> &'static Mutex<Option<AgentHomeAccess>> {
-        ACTIVE_ACCESS.get_or_init(|| Mutex::new(None))
-    }
-
-    fn retain(access: Option<AgentHomeAccess>) -> bool {
-        let Ok(mut active) = active_access().lock() else {
-            return false;
-        };
-        *active = access;
-        true
     }
 
     pub fn expected_home() -> Result<PathBuf, String> {
@@ -88,34 +80,20 @@ mod mac_app_store {
         Ok(path)
     }
 
+    /// Whether the saved bookmark still resolves to the Home folder. The app
+    /// never reads the folder itself (the backend does), so the access this
+    /// check starts is stopped again when it returns.
     pub fn status() -> AgentAccessStatus {
-        let path = match bookmark_path() {
-            Ok(path) => path,
-            Err(_) => {
-                retain(None);
-                return AgentAccessStatus::ReauthorizationRequired;
-            }
+        let Ok(path) = bookmark_path() else {
+            return AgentAccessStatus::ReauthorizationRequired;
         };
         if !path.exists() {
-            retain(None);
             return AgentAccessStatus::AuthorizationRequired;
         }
         match acquire_app() {
-            Ok(Some(access)) => {
-                if retain(Some(access)) {
-                    AgentAccessStatus::Authorized
-                } else {
-                    AgentAccessStatus::ReauthorizationRequired
-                }
-            }
-            Ok(None) => {
-                retain(None);
-                AgentAccessStatus::AuthorizationRequired
-            }
-            Err(_) => {
-                retain(None);
-                AgentAccessStatus::ReauthorizationRequired
-            }
+            Ok(Some(_access)) => AgentAccessStatus::Authorized,
+            Ok(None) => AgentAccessStatus::AuthorizationRequired,
+            Err(_) => AgentAccessStatus::ReauthorizationRequired,
         }
     }
 
@@ -157,15 +135,21 @@ mod mac_app_store {
             }
             return Ok(None);
         };
+        // The implicit scope is conferred on the process resolving the
+        // bookmark, which starts (and on drop stops) access like any other
+        // security-scoped URL.
         let (access, _) =
             resolve_bookmark(&bytes, NSURLBookmarkResolutionOptions::WithoutUI, false)?;
         Ok(Some(access))
     }
 
+    /// Resolve `bytes` and start accessing the URL. `require_start` is set
+    /// for the app's explicit security-scoped bookmark, which grants nothing
+    /// unless the start succeeds.
     fn resolve_bookmark(
         bytes: &[u8],
         options: NSURLBookmarkResolutionOptions,
-        start_explicitly: bool,
+        require_start: bool,
     ) -> Result<(AgentHomeAccess, bool), String> {
         let bookmark = NSData::with_bytes(bytes);
         let mut stale = Bool::NO;
@@ -182,10 +166,11 @@ mod mac_app_store {
             .path()
             .map(|path| PathBuf::from(path.to_string()))
             .ok_or_else(|| "Agent Home access is invalid".to_string())?;
-        if start_explicitly && !unsafe { url.startAccessingSecurityScopedResource() } {
+        let started = unsafe { url.startAccessingSecurityScopedResource() };
+        if require_start && !started {
             return Err("Agent Home access is no longer valid".to_string());
         }
-        let access = AgentHomeAccess { url, home };
+        let access = AgentHomeAccess { url, home, started };
         let expected = expected_home()?
             .canonicalize()
             .map_err(|_| "Cannot access the current user's Home folder".to_string())?;
@@ -206,7 +191,10 @@ mod mac_app_store {
                 return Err(error);
             }
         };
-        if let Err(error) = persist_service_bookmark(&access.url) {
+        let persisted = persist_service_bookmark(&access.url);
+        // The app's access was only needed to create the bookmark.
+        drop(access);
+        if let Err(error) = persisted {
             let _ = clear_service_bookmark();
             return Err(error);
         }
@@ -242,10 +230,15 @@ mod mac_app_store {
 
     fn persist_service_bookmark(url: &NSURL) -> Result<(), String> {
         // A bookmark created without security-scope options carries an
-        // ephemeral sandbox extension that another process can resolve. The
-        // app regenerates it from its persistent app-scoped bookmark before
-        // every backend launch because the shared extension does not survive
-        // indefinitely across system restarts.
+        // implicit ephemeral security scope that "confers access to the
+        // resource to any other process that resolves the bookmark" and is
+        // "valid until reboot at the latest"
+        // (https://developer.apple.com/documentation/foundation/nsurl/bookmarkcreationoptions/withoutimplicitsecurityscope).
+        // Apple DTS names this implicit security-scoped bookmark as the way
+        // to pass access between processes
+        // (https://developer.apple.com/forums/thread/678819). The app
+        // regenerates it from its persistent app-scoped bookmark before every
+        // backend launch because the implicit scope does not survive a reboot.
         let bookmark = url
             .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
                 NSURLBookmarkCreationOptions::empty(),

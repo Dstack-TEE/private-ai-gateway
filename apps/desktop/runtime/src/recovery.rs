@@ -1,5 +1,5 @@
 use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
-use desktop_core::contracts::AppState;
+use desktop_core::contracts::{AppState, VerificationStatus};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -145,17 +145,29 @@ impl Backoff {
 }
 
 pub fn connection_intended(state: &AppState) -> bool {
-    state.session_active && !state.configuration_verification && state.status != "blocked"
+    state.session_active
+        && !state.configuration_verification
+        && state.status != VerificationStatus::Blocked
 }
 
 pub fn should_retry(state: &AppState) -> bool {
     connection_intended(state)
-        && (matches!(state.status.as_str(), "error" | "stopped") || state.endpoint_error.is_some())
+        && (matches!(
+            state.status,
+            VerificationStatus::Error | VerificationStatus::Stopped
+        ) || state.endpoint_error.is_some())
 }
 
-pub fn should_recover(status: &str, configuration_verification: bool, pending: bool) -> bool {
+pub fn should_recover(
+    status: VerificationStatus,
+    configuration_verification: bool,
+    pending: bool,
+) -> bool {
     !configuration_verification
-        && (matches!(status, "verified" | "verifying") || (pending && status == "stopped"))
+        && (matches!(
+            status,
+            VerificationStatus::Verified | VerificationStatus::Verifying
+        ) || (pending && status == VerificationStatus::Stopped))
 }
 
 #[cfg(test)]
@@ -172,7 +184,7 @@ mod tests {
             failed_at += Duration::from_secs(2 * delay + 45);
         }
         let mut state = AppState {
-            status: "error".into(),
+            status: VerificationStatus::Error,
             session_active: true,
             api_key_saved: true,
             ..Default::default()
@@ -181,23 +193,23 @@ mod tests {
         state.configuration_verification = true;
         assert!(!should_retry(&state));
         state.configuration_verification = false;
-        state.status = "blocked".into();
+        state.status = VerificationStatus::Blocked;
         assert!(!should_retry(&state));
-        state.status = "error".into();
+        state.status = VerificationStatus::Error;
         state.session_active = false;
         assert!(!should_retry(&state));
     }
 
     #[test]
     fn address_changes_do_not_override_stop_or_security_block() {
-        assert!(should_recover("verified", false, false));
-        assert!(should_recover("stopped", false, true));
-        assert!(should_recover("verifying", false, false));
-        for status in ["blocked", "error"] {
+        assert!(should_recover(VerificationStatus::Verified, false, false));
+        assert!(should_recover(VerificationStatus::Stopped, false, true));
+        assert!(should_recover(VerificationStatus::Verifying, false, false));
+        for status in [VerificationStatus::Blocked, VerificationStatus::Error] {
             assert!(!should_recover(status, false, true));
         }
-        assert!(!should_recover("stopped", false, false));
-        assert!(!should_recover("verified", true, true));
+        assert!(!should_recover(VerificationStatus::Stopped, false, false));
+        assert!(!should_recover(VerificationStatus::Verified, true, true));
         let state = Recovery::default();
         state.wait();
         state.cancel();

@@ -6,6 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { stringify } from "smol-toml";
 
 import { binaries } from "./package-cli.mjs";
 import { aliases } from "./package-linux.mjs";
@@ -28,6 +29,8 @@ const version = execFileSync(pap, ["--version"], {
 }).trim();
 assert.equal(version, `private-ai-proxy ${expectedVersion}`);
 for (const alias of aliases) {
+  // A .cmd shim runs only through cmd.exe, which parses its own command line
+  // and has no quoting library; Windows paths cannot contain the `"` it uses.
   const aliasVersion = process.platform === "win32"
     ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(aliasDirectory, `${alias}.cmd`)}" --version"`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true })
     : execFileSync(path.join(aliasDirectory, alias), ["--version"], { encoding: "utf8", timeout: 10_000 });
@@ -105,7 +108,7 @@ try {
   await chmod(data, 0o700);
   await mkdir(path.join(data, "Config"), { mode: 0o700 });
   const config = path.join(data, "Config", "config.toml");
-  await writeFile(config, `[local-api]\nport = ${port}\n`, { mode: 0o600 });
+  await writeFile(config, stringify({ "local-api": { port } }), { mode: 0o600 });
   await chmod(config, 0o600);
 
   assert.equal((await runJson(["service", "status"])).status, "not_running");

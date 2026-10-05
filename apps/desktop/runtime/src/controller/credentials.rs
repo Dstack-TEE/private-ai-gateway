@@ -60,15 +60,10 @@ impl DesktopRuntime {
     ) -> Result<StartConfig, Error> {
         let snapshot = self.settings.snapshot()?;
         let config = snapshot.config.runtime_config();
-        let profiles = self.settings.profile_views(&snapshot);
-        let credential_saved = profiles.iter().any(|profile| {
-            profile.id == snapshot.config.active_profile && profile.credential_saved
-        });
         self.manager.set_service_configuration(
             config.clone(),
-            profiles,
+            self.settings.profile_views(&snapshot),
             snapshot.config.active_profile,
-            credential_saved,
             retain_catalog,
         );
         Ok(config)
@@ -147,7 +142,7 @@ impl DesktopRuntime {
                     Ok(crate::account_login::CredentialTransition::Unavailable)
                         if record.action == "activate" =>
                     {
-                        self.manager.report_error("Account: This device authorization is no longer active. Reconnect the account.".into());
+                        self.report_error("Account: This device authorization is no longer active. Reconnect the account.");
                     }
                     _ => {}
                 }

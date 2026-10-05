@@ -30,7 +30,7 @@ impl DesktopRuntime {
         // Under the lifecycle lock, so switching the settings in effect and
         // applying them is one step for every other operation.
         let _operation = self.lifecycle.lock().await;
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return;
         }
         let Some((previous, current)) = self.settings.reload() else {
@@ -98,12 +98,14 @@ impl DesktopRuntime {
             || key(previous) != key(current)
         {
             // As when switching profiles: protection restarts on the new one.
-            let state = self.manager.snapshot()?;
-            let reconnect = state.session_active
-                || (self.manager.is_running()? && !state.configuration_verification);
+            // Unlike a switch, an edited file cannot be refused when the new
+            // active profile has no credential: the files are already the
+            // settings in effect, and protection must not keep running on a
+            // profile they no longer name. The start then fails with its
+            // reason, and the session, still active, offers Stop.
+            let reconnect = self.restart_needed(&self.state())?;
             if reconnect {
-                self.stop_with_reconnect(true)?;
-                self.manager.cancel_reconnection();
+                self.pause_protection()?;
             }
             self.proxy.set_api_key(None);
             self.recovery.cancel();
@@ -118,7 +120,7 @@ impl DesktopRuntime {
         }
         if previous.credentials.web_ui != current.credentials.web_ui {
             self.web_ui
-                .set_password(current.credentials.web_ui.password_hash.clone());
+                .set_password(current.credentials.web_ui.secret());
         }
         if old.web_ui != new.web_ui || previous.credentials.web_ui != current.credentials.web_ui {
             self.apply_web_ui(&new.web_ui).await;

@@ -1,117 +1,128 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { LoginPresentation, ConfidentialProfileInput, DesktopApi, AccountLoginDetails } from "../../shared/contracts";
+import { useEffect, useId, useRef } from "react";
+import { QueryObserver, queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AccountLoginDetails, ConfidentialProfileInput, LoginPresentation } from "../../shared/contracts";
+import { desktopApi } from "./environment";
+import { AuthoredError } from "./error-message";
 
-type LoginApi = Pick<DesktopApi, "beginAccountLogin" | "pollAccountLogin" | "cancelAccountLogin" | "completeAccountLogin">;
-type LoginState =
-  | { phase: "idle" }
-  | { phase: "authorizing"; session: LoginPresentation }
-  | { phase: "authorized"; session: LoginPresentation; details: AccountLoginDetails };
+export interface Authorization {
+  login: LoginPresentation;
+  details: AccountLoginDetails;
+}
 
-/** Owns a draft authorization, independently of the form's save operation. */
-export function useAccountLogin(api: LoginApi, onError: (error: unknown) => void) {
-  const [state, setState] = useState<LoginState>({ phase: "idle" });
-  const [working, setWorking] = useState(false);
-  const session = useRef<LoginPresentation | undefined>(undefined);
-  const mounted = useRef(false);
-  const operation = useRef(false);
-
+/**
+ * Owns a draft authorization, independently of the form's save operation.
+ * Starting, cancelling and completing it run one after another (the mutation
+ * scope); failures go to `onError`.
+ */
+export function useAccountLogin(onError: (error: unknown) => void) {
+  const client = useQueryClient();
+  const scope = { id: `account-login:${useId()}` };
+  // The authorization to discard when the form closes, including one that
+  // is still being created then, and the wait for it to complete.
+  const pending = useRef<LoginPresentation | undefined>(undefined);
+  const stopWaiting = useRef<(() => void) | undefined>(undefined);
+  const closed = useRef(false);
   useEffect(() => {
-    mounted.current = true;
+    closed.current = false;
     return () => {
-      mounted.current = false;
-      const current = session.current;
-      session.current = undefined;
-      if (current) void api.cancelAccountLogin(current.id).catch(() => console.error("Could not discard account authorization"));
+      closed.current = true;
+      stopWaiting.current?.();
+      const login = pending.current;
+      pending.current = undefined;
+      if (login) void desktopApi.cancelAccountLogin(login.id).catch(() => console.error("Could not discard account authorization"));
     };
-  }, [api]);
-
-  const consume = useCallback(() => {
-    session.current = undefined;
-    if (mounted.current) setState({ phase: "idle" });
   }, []);
 
-  const discard = useCallback(async () => {
-    if (session.current) await api.cancelAccountLogin(session.current.id);
-    consume();
-  }, [api, consume]);
+  const discard = async () => {
+    stopWaiting.current?.();
+    const login = pending.current;
+    if (login) await desktopApi.cancelAccountLogin(login.id);
+    pending.current = undefined;
+  };
+  const start = useMutation({
+    scope,
+    mutationFn: async (profile: ConfidentialProfileInput) => {
+      await discard();
+      const login = await desktopApi.beginAccountLogin(profile);
+      if (closed.current) await desktopApi.cancelAccountLogin(login.id);
+      else pending.current = login;
+      return login;
+    },
+    onError,
+  });
+  const cancel = useMutation({ scope, mutationFn: discard, onSuccess: () => start.reset(), onError });
+  const complete = useMutation({
+    scope,
+    mutationFn: (callbackUrl: string) => {
+      if (!pending.current) throw new AuthoredError("Account connection is no longer active");
+      return desktopApi.completeAccountLogin(pending.current.id, callbackUrl);
+    },
+    onError,
+  });
+  const working = start.isPending || cancel.isPending || complete.isPending;
+  const session = start.data;
 
-  const perform = useCallback(async (action: () => Promise<void>) => {
-    if (operation.current || !mounted.current) return false;
-    operation.current = true;
-    setWorking(true);
-    try {
-      await action();
-      return true;
-    } catch (error) {
-      if (mounted.current) onError(error);
-      else console.error("Could not clean up account authorization");
-      return false;
-    } finally {
-      operation.current = false;
-      if (mounted.current) setWorking(false);
-    }
-  }, [onError]);
+  // Polls until the browser sign-in completes or fails; pauses while another
+  // operation on the authorization runs. The user is in the browser, so it
+  // keeps polling while the window is in the background.
+  const poll = (id: string | undefined) => queryOptions({
+    queryKey: ["account-login", id],
+    queryFn: id ? () => desktopApi.pollAccountLogin(id) : skipToken,
+    refetchInterval: (query) => query.state.data || query.state.error ? false : 1_000,
+    refetchIntervalInBackground: true,
+    retry: false,
+    gcTime: 0,
+  });
+  const { data } = useQuery({ ...poll(session?.id), enabled: !working });
+  const details = session ? data ?? undefined : undefined;
 
-  const cancel = useCallback(() => perform(discard), [discard, perform]);
-  const start = useCallback((profile: ConfidentialProfileInput) => perform(async () => {
-    await discard();
-    if (!mounted.current) return;
-    const created = await api.beginAccountLogin(profile);
-    if (!mounted.current) {
-      await api.cancelAccountLogin(created.id);
-      return;
-    }
-    session.current = created;
-    setState({ phase: "authorizing", session: created });
-  }), [api, discard, perform]);
-
-  const complete = useCallback((callbackUrl: string) => perform(async () => {
-    const current = session.current;
-    if (!current) throw new Error("Account connection is no longer active");
-    await api.completeAccountLogin(current.id, callbackUrl);
-  }), [api, perform]);
-
-  const pending = state.phase === "authorizing" ? state.session : undefined;
-  useEffect(() => {
-    if (!pending) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const current = () => !disposed && session.current?.id === pending.id;
-    const poll = async () => {
-      if (!current()) return;
-      if (!operation.current) {
-        try {
-          const details = await api.pollAccountLogin(pending.id);
-          if (!current()) return;
-          if (details && !operation.current) {
-            setState({ phase: "authorized", session: pending, details });
-            return;
-          }
-        } catch (error) {
-          if (!current()) return;
-          if (!operation.current) {
-            onError(error);
-            // Keep the handle until cancellation succeeds, so cleanup is retryable.
-            await cancel();
-            return;
-          }
-        }
-      }
-      if (current()) timer = setTimeout(() => void poll(), 1000);
+  /** Follows the poll above: the account once signed in, or `null` once discarded. */
+  const authorization = (login: LoginPresentation) => new Promise<AccountLoginDetails | null>((resolve, reject) => {
+    const observer = new QueryObserver(client, { ...poll(login.id), enabled: false });
+    const settle = (result: { data?: AccountLoginDetails | null; error: Error | null }) => {
+      if (result.data) resolve(result.data);
+      else if (result.error) reject(result.error);
+      else return;
+      stop();
     };
-    void poll();
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [api, cancel, onError, pending]);
+    const unsubscribe = observer.subscribe(settle);
+    const stop = () => {
+      unsubscribe();
+      stopWaiting.current = undefined;
+      resolve(null);
+    };
+    stopWaiting.current = stop;
+    settle(observer.getCurrentResult());
+  });
 
   return {
-    session: state.phase === "idle" ? undefined : state.session,
-    auth: state.phase === "authorized" ? state.details.auth : undefined,
-    details: state.phase === "authorized" ? state.details : undefined,
-    busy: working || state.phase === "authorizing",
+    session,
+    auth: details?.auth,
+    details,
+    busy: working || Boolean(session && !details),
     working,
-    start,
-    cancel,
-    consume,
-    complete,
+    /**
+     * Signs in for `profile` and resolves once the browser authorization
+     * completes, or with `null` when it is cancelled. A failed sign-in is
+     * discarded before the promise rejects.
+     */
+    authorize: async (profile: ConfidentialProfileInput): Promise<Authorization | null> => {
+      const login = await start.mutateAsync(profile);
+      try {
+        const details = await authorization(login);
+        return details && { login, details };
+      } catch (error) {
+        await cancel.mutateAsync();
+        throw error;
+      }
+    },
+    /** Resolves whether no authorization is left. */
+    cancel: () => cancel.mutateAsync().then(() => true, () => false),
+    /** The saved profile took the authorization. */
+    consume: () => {
+      pending.current = undefined;
+      start.reset();
+    },
+    complete: (callbackUrl: string) => complete.mutate(callbackUrl),
   };
 }

@@ -23,7 +23,7 @@ use crate::aci::receipt::receipt_signing_input;
 use crate::aci::types::{AttestationReport, WorkloadKeyset};
 use crate::aci::verifier::{
     appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
-    DstackEventLog, Outcome,
+    CustodyPolicy, DstackEventLog, Outcome,
 };
 pub use crate::aci::verifier::{ChannelEvidence, QuoteSource};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -59,15 +59,23 @@ pub struct ReportCheckContext<'a> {
     pub expiry_skipped: bool,
     pub quote: QuoteSource<'a>,
     pub channel: ChannelEvidence<'a>,
-    /// Verifier policy (§1.3): compose hashes this caller accepts. Empty
-    /// means the measurement is verified and reported, not pinned — the
-    /// operator appraises the provenance themselves.
-    pub accepted_composes: &'a [String],
+    pub policy: &'a VerifierPolicy,
     /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
     /// reviewed production allowlist. A separate dstack verifier must first
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
+}
+
+/// The verifier policy (§1.3) a report is appraised under.
+#[derive(Clone, Debug, Default)]
+pub struct VerifierPolicy {
+    /// Compose hashes this caller accepts. Empty means the measurement is
+    /// verified and reported, not pinned — the operator appraises the
+    /// provenance themselves.
+    pub accepted_composes: Vec<String>,
+    /// The §9.1(5) custody policy. Without one, id-5 is an honest skip.
+    pub custody: Option<CustodyPolicy>,
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset
@@ -114,6 +122,15 @@ pub fn established_identity(report: &AttestationReport) -> Result<EstablishedIde
     })
 }
 
+/// What the id-1–id-6 checks establish for the caller to act on.
+pub struct ReportOutcome {
+    /// The identity id-2 established, when it did.
+    pub identity: Option<EstablishedIdentity>,
+    /// The attested TLS SPKIs id-6 bound for this deployment's clients to pin
+    /// (§4.2 `downstream_tls_binding`); empty unless id-6 passed.
+    pub tls_pins: Vec<String>,
+}
+
 /// Run the id-1–id-6 checks over a parsed report, appending to `transcript`.
 ///
 /// Returns `Err` only for protocol-gate problems (the report is not an
@@ -122,7 +139,7 @@ pub async fn run_report_checks(
     transcript: &mut Transcript,
     report: &AttestationReport,
     cx: ReportCheckContext<'_>,
-) -> Result<Option<EstablishedIdentity>, String> {
+) -> Result<ReportOutcome, String> {
     transcript.workload_keyset_digest = Some(report.workload_keyset_digest.clone());
     // The checks, their order, and what each outcome means are the shared
     // appraisal's (`aci::verifier`); this renders the outcomes.
@@ -132,12 +149,13 @@ pub async fn run_report_checks(
         now_secs: cx.now_secs,
         expiry_waived: cx.expiry_skipped,
         quote: cx.quote,
-        accepted_composes: cx.accepted_composes,
-        // §9.1(5) needs a custody policy this CLI does not implement yet
-        // (docs/reviews/aci-spec-conformance-gaps.md item 1).
-        custody: CustodyEvidence {
-            reason: "custody policy not implemented in this CLI yet \
-                     (no client policy is configured)",
+        accepted_composes: &cx.policy.accepted_composes,
+        custody: match &cx.policy.custody {
+            Some(policy) => CustodyEvidence::DstackKms { policy },
+            None => CustodyEvidence::NotConfigured {
+                reason: "no custody policy configured (--accept-dstack-kms-root-public-key \
+                         with --accept-subject)",
+            },
         },
         channel: cx.channel,
         explain: cx.explain,
@@ -162,19 +180,19 @@ pub async fn run_report_checks(
             );
         }
     }
-    Ok(appraisal.identity.map(|binding| EstablishedIdentity {
-        keyset: binding.keyset,
-        keyset_digest: binding.keyset_digest,
-    }))
+    Ok(ReportOutcome {
+        identity: appraisal.identity.map(|binding| EstablishedIdentity {
+            keyset: binding.keyset,
+            keyset_digest: binding.keyset_digest,
+        }),
+        tls_pins: appraisal.tls_pins,
+    })
 }
 
 fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
     let result = (|| {
-        let event_log = report
-            .attestation
-            .evidence
-            .get("event_log")
-            .and_then(Value::as_str)
+        let event_log = report.attestation.evidence["event_log"]
+            .as_str()
             .ok_or("attestation evidence carries no dstack event_log")?;
         // id-4 already established that this exact log replays to the quote.
         let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
@@ -209,7 +227,7 @@ fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationRep
 pub fn parse_receipt_document(payload: Value) -> Result<Value, String> {
     // Appendix B: artifacts with a foreign api_version are rejected, same as
     // the report gate in run_report_checks.
-    if field_str(&payload, "api_version") != Some("aci/1") {
+    if payload["api_version"].as_str() != Some("aci/1") {
         return Err(format!(
             "unsupported receipt api_version {:?} (expected \"aci/1\")",
             payload.get("api_version").unwrap_or(&Value::Null)
@@ -274,19 +292,11 @@ impl<'a> ReceiptContext<'a> {
 }
 
 fn events(payload: &Value) -> impl Iterator<Item = &Value> {
-    payload
-        .get("event_log")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+    payload["event_log"].as_array().into_iter().flatten()
 }
 
 fn event_by_type<'a>(payload: &'a Value, event_type: &str) -> Option<&'a Value> {
-    events(payload).find(|event| field_str(event, "type") == Some(event_type))
-}
-
-fn field_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
+    events(payload).find(|event| event["type"].as_str() == Some(event_type))
 }
 
 /// The `session_id` the serving (verified) `upstream.verified` event commits
@@ -296,10 +306,10 @@ fn field_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
     events(payload)
         .filter(|event| {
-            field_str(event, "type") == Some("upstream.verified")
-                && field_str(event, "result") == Some("verified")
+            event["type"].as_str() == Some("upstream.verified")
+                && event["result"].as_str() == Some("verified")
         })
-        .find_map(|event| field_str(event, "session_id").map(str::to_string))
+        .find_map(|event| event["session_id"].as_str().map(str::to_string))
 }
 
 /// Fetch the attested session record the receipt commits to — the live
@@ -338,7 +348,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     check_signature(transcript, &cx);
 
     // receipt-2 — the payload binds back to the established keyset digest.
-    let payload_digest = field_str(cx.receipt, "workload_keyset_digest");
+    let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
     if payload_digest == Some(cx.workload_keyset_digest) {
         transcript.pass(
             RECEIPT_2,
@@ -364,7 +374,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         ),
         Some(digest) => {
             match event_by_type(cx.receipt, "request.received")
-                .and_then(|event| field_str(event, "body_hash"))
+                .and_then(|event| event["body_hash"].as_str())
             {
                 None => transcript.fail(RECEIPT_3, "receipt has no request.received body_hash"),
                 Some(recorded) if recorded == digest.sha256 => {
@@ -391,7 +401,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         ),
         Some(digest) => {
             match event_by_type(cx.receipt, "response.returned")
-                .and_then(|event| field_str(event, "body_hash"))
+                .and_then(|event| event["body_hash"].as_str())
             {
                 None => transcript.fail(RECEIPT_4, "receipt has no response.returned body_hash"),
                 Some(recorded) if recorded == digest.sha256 => {
@@ -411,10 +421,10 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     // §9.3 rewrite note: differing request.forwarded/request.received hashes
     // are the service-side rewrite. ACI records it, nothing more — whether a
     // rewrite is acceptable is local policy, so this is an info line.
-    let received = event_by_type(cx.receipt, "request.received")
-        .and_then(|event| field_str(event, "body_hash"));
+    let received =
+        event_by_type(cx.receipt, "request.received").and_then(|event| event["body_hash"].as_str());
     let forwarded = event_by_type(cx.receipt, "request.forwarded")
-        .and_then(|event| field_str(event, "body_hash"));
+        .and_then(|event| event["body_hash"].as_str());
     if let (Some(received), Some(forwarded)) = (received, forwarded) {
         if received != forwarded {
             transcript.info(
@@ -430,7 +440,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
 }
 
 fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
-    let Some(key_id) = field_str(cx.receipt, "key_id") else {
+    let Some(key_id) = cx.receipt["key_id"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no key_id");
         return;
     };
@@ -446,7 +456,7 @@ fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
         );
         return;
     };
-    let Some(signature_hex) = field_str(cx.receipt, "signature") else {
+    let Some(signature_hex) = cx.receipt["signature"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no signature");
         return;
     };
@@ -583,11 +593,11 @@ pub fn unmet_claims(record: &Value, required: &[RequiredClaim]) -> Vec<String> {
             let claim = record
                 .get("claims")
                 .and_then(|claims| claims.get(&req.name));
-            let asserted = claim.and_then(|claim| field_str(claim, "status")) == Some("asserted");
+            let asserted = claim.and_then(|claim| claim["status"].as_str()) == Some("asserted");
             let source_ok = match &req.source {
                 None => true,
                 Some(source) => {
-                    claim.and_then(|claim| field_str(claim, "source")) == Some(source.as_str())
+                    claim.and_then(|claim| claim["source"].as_str()) == Some(source.as_str())
                 }
             };
             !(asserted && source_ok)
@@ -629,11 +639,11 @@ pub fn audit_session_record(
         .map(|bytes| hex::encode(sha256_raw(&bytes)))
         .map_err(|e| format!("session record violates the ACI document constraints: {e}"))?;
     // Appendix B: a session document with a foreign api_version is rejected.
-    let version_ok = field_str(&record, "api_version") == Some("aci/1");
+    let version_ok = record["api_version"].as_str() == Some("aci/1");
     let id_matches = recomputed_id == expected_id;
     let window = (
-        record.get("established_at").and_then(Value::as_u64),
-        record.get("expires_at").and_then(Value::as_u64),
+        record["established_at"].as_u64(),
+        record["expires_at"].as_u64(),
     );
     let in_window = match (at, window) {
         (Some(at), (Some(from), Some(until))) => from <= at && at <= until,
@@ -673,11 +683,11 @@ fn check_upstream_event(
     requires_verified: bool,
 ) {
     let upstream_events: Vec<&Value> = events(payload)
-        .filter(|event| field_str(event, "type") == Some("upstream.verified"))
+        .filter(|event| event["type"].as_str() == Some("upstream.verified"))
         .collect();
     let verified = upstream_events
         .iter()
-        .find(|event| field_str(event, "result") == Some("verified"));
+        .find(|event| event["result"].as_str() == Some("verified"));
     match verified {
         // §5.3: a direct service satisfies verified serving by construction —
         // the workload verified in §9.1 is the one serving, with no second
@@ -702,19 +712,16 @@ fn check_upstream_event(
             "no upstream.verified event reports a verified upstream",
         ),
         None => transcript.info(UPSTREAM_1, "the receipt records unverified serving"),
-        Some(event)
-            if requires_verified
-                && event.get("required").and_then(Value::as_bool) != Some(true) =>
-        {
+        Some(event) if requires_verified && event["required"].as_bool() != Some(true) => {
             transcript.fail(UPSTREAM_1, "verified upstream but required is not true")
         }
-        Some(event) => match field_str(event, "session_id") {
+        Some(event) => match event["session_id"].as_str() {
             None => transcript.fail(UPSTREAM_1, "verified upstream but cites no session_id"),
             Some(session) => transcript.pass(
                 UPSTREAM_1,
                 format!(
                     "model={} session={session} ({} attempt(s))",
-                    field_str(event, "model_id").unwrap_or("?"),
+                    event["model_id"].as_str().unwrap_or("?"),
                     upstream_events.len()
                 ),
             ),
@@ -768,7 +775,7 @@ fn check_session_audit(
         transcript.fail(UPSTREAM_2, "receipt cites no session_id to audit against");
         return;
     };
-    let served_at = payload.get("served_at").and_then(Value::as_u64);
+    let served_at = payload["served_at"].as_u64();
     let audit = match audit_session_record(bytes, &cited, served_at) {
         Ok(audit) => audit,
         Err(e) => {
@@ -827,8 +834,8 @@ fn claims_summary(claims: Option<&Value>) -> String {
         .iter()
         .filter(|(name, _)| name.as_str() != "extra")
         .map(|(name, claim)| {
-            let status = field_str(claim, "status").unwrap_or("?");
-            match field_str(claim, "source") {
+            let status = claim["status"].as_str().unwrap_or("?");
+            match claim["source"].as_str() {
                 Some(source) => format!("{name}={status}({source})"),
                 None => format!("{name}={status}"),
             }
@@ -845,8 +852,8 @@ fn claims_summary(claims: Option<&Value>) -> String {
 /// or malformed evidence rejects too — the deep audit never assumes.
 fn evidence_check(evidence: Option<&Value>) -> Result<(), String> {
     let (Some(digest), Some(data_uri)) = (
-        evidence.and_then(|e| field_str(e, "digest")),
-        evidence.and_then(|e| field_str(e, "data")),
+        evidence.and_then(|e| e["digest"].as_str()),
+        evidence.and_then(|e| e["data"].as_str()),
     ) else {
         return Err("record carries no spec 8.2 evidence digest+data".to_string());
     };
@@ -873,6 +880,11 @@ mod tests {
     };
     use crate::transcript::Status;
 
+    static NO_POLICY: VerifierPolicy = VerifierPolicy {
+        accepted_composes: Vec::new(),
+        custody: None,
+    };
+
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
         ReportCheckContext {
             nonce,
@@ -881,7 +893,7 @@ mod tests {
             quote: QuoteSource::Offline {
                 reason: "quote collateral offline",
             },
-            accepted_composes: &[],
+            policy: &NO_POLICY,
             require_production_os: false,
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
@@ -975,31 +987,89 @@ mod tests {
         assert_eq!(status_of(&t, "id-3"), Status::Skip);
     }
 
+    /// A fixture-shaped report over `tls_public_keys`, bound to `TEST_NONCE`.
+    fn report_with_tls(tls_public_keys: Value, evidence: Value) -> AttestationReport {
+        let mut report = vector_report();
+        report.attestation.workload_keyset["tls_public_keys"] = tls_public_keys;
+        let digest = identity::workload_keyset_digest(&report.attestation.workload_keyset).unwrap();
+        let statement = identity::attestation_statement(&digest, Some(TEST_NONCE)).unwrap();
+        report.attestation.report_data_hex = hex::encode(identity::report_data(&statement));
+        report.workload_keyset_digest = digest;
+        report.attestation.evidence = evidence;
+        report
+    }
+
+    /// Evidence declaring the entry clients of this deployment pin (§4.2).
+    fn declaring(domain: &str, spki_sha256: &str) -> Value {
+        serde_json::json!({
+            "downstream_tls_binding": { "domain": domain, "spki_sha256": spki_sha256 },
+        })
+    }
+
+    async fn observe(
+        report: &AttestationReport,
+        origin: &str,
+        spki: &str,
+    ) -> (Status, Vec<String>) {
+        let mut t = Transcript::default();
+        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
+        cx.channel = ChannelEvidence::Observed {
+            origin,
+            spki_sha256: spki,
+        };
+        let outcome = run_report_checks(&mut t, report, cx).await.unwrap();
+        (status_of(&t, "id-6"), outcome.tls_pins)
+    }
+
     #[tokio::test]
-    async fn channel_binding_matches_domain_scoped_entry() {
+    async fn channel_binding_matches_the_declared_domain_scoped_entry() {
         let report = vector_report();
-        let identity = established_identity(&report).unwrap();
-        let spki = identity.keyset.tls_public_keys[0].spki_sha256_hex.clone();
-        let domain = identity.keyset.tls_public_keys[0].domain.clone().unwrap();
+        let declared = "c0".repeat(32);
 
-        let mut t = Transcript::default();
-        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
-        cx.channel = ChannelEvidence::Observed {
-            host: &domain,
-            spki_sha256: &spki,
-        };
-        run_report_checks(&mut t, &report, cx).await.unwrap();
-        assert_eq!(status_of(&t, "id-6"), Status::Pass);
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Pass);
+        assert_eq!(pins, vec![declared.clone()]);
 
-        // Same SPKI presented for a hostname the keyset does not scope it to.
-        let mut t = Transcript::default();
-        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
-        cx.channel = ChannelEvidence::Observed {
-            host: "other.example.com",
-            spki_sha256: &spki,
-        };
-        run_report_checks(&mut t, &report, cx).await.unwrap();
-        assert_eq!(status_of(&t, "id-6"), Status::Fail);
+        // Same SPKI presented for a hostname the report does not declare it for.
+        let (status, pins) = observe(&report, "https://other.example.com", &declared).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_binding_pins_only_the_declared_entry_among_host_keys() {
+        // Both entries apply to the host (§3.1), but the report declares that
+        // clients of this deployment pin the first (§4.2).
+        let declared = "c0".repeat(32);
+        let other = "d1".repeat(32);
+        let report = report_with_tls(
+            serde_json::json!([
+                { "domain": "api.example.com", "spki_sha256": declared },
+                { "domain": null, "spki_sha256": other },
+            ]),
+            declaring("api.example.com", &declared),
+        );
+
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Pass);
+        assert_eq!(pins, vec![declared]);
+
+        let (status, pins) = observe(&report, "https://api.example.com", &other).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_binding_fails_without_a_declared_entry() {
+        let declared = "c0".repeat(32);
+        let report = report_with_tls(
+            serde_json::json!([{ "domain": "api.example.com", "spki_sha256": declared }]),
+            serde_json::json!({}),
+        );
+
+        let (status, pins) = observe(&report, "https://api.example.com", &declared).await;
+        assert_eq!(status, Status::Fail);
+        assert!(pins.is_empty());
     }
 
     static REQUEST_DIGEST: std::sync::LazyLock<BodyDigest> =

@@ -3,8 +3,6 @@ use super::*;
 /// How the bridge reaches and configures each agent.
 pub(crate) trait AgentIntegration {
     fn surface(self) -> Surface;
-    /// The official CLI executable name, for install detection on PATH.
-    fn cli_names(self) -> &'static [&'static str];
     fn format(self) -> Format;
     /// The live user-level config file. With `tool_env` each tool's own
     /// location override is honored.
@@ -17,21 +15,12 @@ impl AgentIntegration for Agent {
         match self {
             Self::Codex => Surface::Responses,
             Self::ClaudeCode => Surface::Messages,
-            Self::OpenCode | Self::Pi | Self::Hermes | Self::OpenClaw | Self::OhMyPi => {
-                Surface::ChatCompletions
-            }
-        }
-    }
-
-    fn cli_names(self) -> &'static [&'static str] {
-        match self {
-            Agent::Codex => &["codex"],
-            Agent::ClaudeCode => &["claude"],
-            Agent::OpenCode => &["opencode"],
-            Agent::Pi => &["pi"],
-            Agent::Hermes => &["hermes"],
-            Agent::OpenClaw => &["openclaw"],
-            Agent::OhMyPi => &["omp"],
+            Self::OpenCode
+            | Self::Pi
+            | Self::Hermes
+            | Self::OpenClaw
+            | Self::OhMyPi
+            | Self::Dsh => Surface::ChatCompletions,
         }
     }
 
@@ -42,6 +31,7 @@ impl AgentIntegration for Agent {
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,
+            Agent::Dsh => Format::YamlList,
         }
     }
 
@@ -50,6 +40,7 @@ impl AgentIntegration for Agent {
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
+            Agent::Dsh => dsh::config_path(home, tool_env),
             Agent::Codex => override_dir("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("config.toml"),
@@ -70,12 +61,7 @@ impl AgentIntegration for Agent {
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("models.json"),
             Agent::Hermes => override_dir("HERMES_HOME")
-                .and_then(|path| {
-                    path.to_str()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                })
+                .and_then(nonblank)
                 .unwrap_or_else(|| hermes_native_dir(home, tool_env))
                 .join("config.yaml"),
         }
@@ -89,12 +75,24 @@ impl AgentIntegration for Agent {
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
+            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to its web, headless and acp profiles and the dsh desktop app, and reads the token from dsh's own credential store. This app reads DSH_HOME only from its own environment, never in the Mac App Store build, so a DSH_HOME exported in your shell points dsh at a folder this connection does not cover. Also not protected: runs started with --patch, a PRIVATE_AI_PROXY_DSH_TOKEN exported in your shell, and the sdk and sdk-minimal profiles for embedding dsh, which choose their provider in code. Only new sessions go through the proxy: existing sessions, resumed acp sessions included, keep the provider and model they were recorded with. dsh web and the dsh desktop app apply the change at once; restart running dsh headless or acp processes. DeepSeek web search is turned off while connected; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
+            Agent::Codex if super::codex_service::AVAILABLE => {
+                "Codex will use its official custom model provider with the Responses API, the \
+                 selected model from the verified catalog, command-backed authentication, and \
+                 the app-owned model catalog. Only the Codex baseline pinned by this app is \
+                 supported; other versions are not checked or supported. Codex keeps a background \
+                 service with the previous settings. The app offers to stop it; otherwise run \
+                 \"codex app-server daemon restart\" in your terminal. Either stops running \
+                 Codex sessions. Then quit and reopen the Codex app."
+            }
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
                  the app-owned model catalog. Only the Codex baseline pinned by this app is \
-                 supported; other versions are not checked or supported. Restart Codex after applying."
+                 supported; other versions are not checked or supported. Codex keeps a background \
+                 server, so after applying run \"codex app-server daemon restart\" (this stops \
+                 running Codex sessions), then quit and reopen the Codex app."
             }
             Agent::OpenCode => {
                 "OpenCode will use an app-owned provider catalog generated from the verified \

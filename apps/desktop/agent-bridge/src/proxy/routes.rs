@@ -55,13 +55,13 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
 async fn chat_completions(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
-        query,
+        uri,
         body,
         Surface::ChatCompletions,
         "/v1/chat/completions",
@@ -72,30 +72,22 @@ async fn chat_completions(
 async fn messages(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     body: Body,
 ) -> Response {
-    relay(
-        state,
-        headers,
-        query,
-        body,
-        Surface::Messages,
-        "/v1/messages",
-    )
-    .await
+    relay(state, headers, uri, body, Surface::Messages, "/v1/messages").await
 }
 
 async fn responses(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
-        query,
+        uri,
         body,
         Surface::Responses,
         "/v1/responses",
@@ -109,13 +101,13 @@ async fn responses(
 async fn count_tokens(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
-        query,
+        uri,
         body,
         Surface::Messages,
         "/v1/messages/count_tokens",
@@ -126,13 +118,13 @@ async fn count_tokens(
 async fn responses_compact(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
-    RawQuery(query): RawQuery,
+    uri: Uri,
     body: Body,
 ) -> Response {
     relay(
         state,
         headers,
-        query,
+        uri,
         body,
         Surface::Responses,
         "/v1/responses/compact",

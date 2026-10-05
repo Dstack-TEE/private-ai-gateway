@@ -3,24 +3,27 @@ import { Network } from "lucide-react";
 import { brand } from "../brand/brand";
 import { useAppearance } from "./appearance";
 import { macOS } from "../lib/environment";
-import { servicePreset } from "../lib/services";
+import { SERVICE_ICONS } from "../lib/services";
+import type { ServiceProvider } from "../../shared/contracts";
+import { cn } from "../lib/utils";
 
-export function BrandMark({ className = "", busy = false }: { className?: string; busy?: boolean }): React.JSX.Element {
+export function BrandMark({ className }: { className?: string }): React.JSX.Element {
   const selectedAppearance = useAppearance();
   const appearance = macOS ? selectedAppearance : "light";
-  const classes = ["brand-logo inline-grid place-items-center flex-none [&>img]:block [&>img]:size-full [&>img]:object-contain motion-reduce:animate-none", className, busy ? "is-busy animate-brand-icon-pulse" : ""].filter(Boolean).join(" ");
   return (
-    <picture className={classes} aria-hidden="true">
+    <picture className={cn("inline-grid flex-none place-items-center", className)} aria-hidden="true">
       {appearance === "system" && <source media="(prefers-color-scheme: dark)" srcSet={brand.appIcon.dark} />}
-      <img src={appearance === "dark" ? brand.appIcon.dark : brand.appIcon.light} alt="" />
+      <img className="block size-full object-contain" src={appearance === "dark" ? brand.appIcon.dark : brand.appIcon.light} alt="" />
     </picture>
   );
 }
 
-export function ServiceLogo({ url, size = "regular" }: { url: string; size?: "regular" | "large" }): React.JSX.Element {
-  const service = servicePreset(url);
-  if (!service) {
-    return <span className={`service-custom-icon w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&.service-logo-large]:w-7.5 [&.service-logo-large]:h-7.5 text-muted-foreground service-logo-${size}`}><Network size={size === "large" ? 16 : 14} /></span>;
+/** `size` enlarges only the generic icon of a custom service; `className` sizes either. */
+export function ServiceLogo({ provider, size = "regular", className }: { provider: ServiceProvider; size?: "regular" | "large"; className?: string }): React.JSX.Element {
+  const icon = SERVICE_ICONS[provider];
+  const frame = "grid size-6 flex-none place-items-center overflow-hidden rounded-md";
+  if (!icon) {
+    return <span className={cn(frame, size === "large" && "size-7.5", "text-muted-foreground", className)}><Network size={size === "large" ? 16 : 14} /></span>;
   }
-  return <span className={`service-logo w-6 h-6 flex-none grid place-items-center overflow-hidden rounded-md [&_img]:w-full [&_img]:h-full [&_img]:object-contain service-${service.id} service-logo-${size}`}><img src={service.icon} alt="" /></span>;
+  return <span className={cn(frame, className)}><img className="size-full object-contain" src={icon} alt="" /></span>;
 }

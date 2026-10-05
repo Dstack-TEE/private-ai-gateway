@@ -11,7 +11,9 @@ pub(super) async fn phala(
 /// Polls Phala's device authorization (RFC 8628). Its endpoints take JSON and
 /// nest errors under `detail`, as Phala's own CLI expects, rather than the
 /// form bodies and top-level errors of RFC 8628 §3.4-3.5 that the `oauth2`
-/// crate speaks, so the polling is written out here.
+/// crate speaks, so the polling is written out here. Phala's CLI polls the
+/// same way (`extractRfc8628Error`,
+/// https://github.com/Phala-Network/phala-cloud/blob/main/cli/src/commands/login/error-handling.ts).
 pub(super) async fn phala_at(
     client: Client,
     device: String,
@@ -20,7 +22,7 @@ pub(super) async fn phala_at(
 ) -> Result<Credential, Error> {
     loop {
         tokio::time::sleep(Duration::from_secs(interval)).await;
-        let (status, data) = request_json(client.post(format!("{base}/api/v1/auth/device/token"))
+        let (status, data) = request_json(client.post(desktop_core::endpoint(base, &["api", "v1", "auth", "device", "token"])?)
             .json(&json!({"device_code":device,"client_id":"private-ai-proxy","grant_type":"urn:ietf:params:oauth:grant-type:device_code"}))).await?;
         if !status.is_success() {
             match protocol_error(&data) {
@@ -36,7 +38,10 @@ pub(super) async fn phala_at(
         let key = desktop_core::config::validate_api_key(&string(&data, "access_token")?)?;
         let metadata = response(
             client
-                .get(format!("{base}/api/v1/private_ai/self"))
+                .get(desktop_core::endpoint(
+                    base,
+                    &["api", "v1", "private_ai", "self"],
+                )?)
                 .timeout(Duration::from_secs(5))
                 .bearer_auth(&key),
         )

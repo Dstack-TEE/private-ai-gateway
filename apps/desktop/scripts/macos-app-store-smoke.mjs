@@ -80,9 +80,10 @@ async function backendIsReady(pid) {
       ["-n", "-P", "-a", "-p", String(pid), "-U", "-Fn"],
       { timeout: 2_000, maxBuffer: 1024 * 1024 },
     );
+    // The backend listens on SOCKET_FILE (core/src/transport/unix.rs).
     return stdout
       .split("\n")
-      .some((line) => /\/backend\.sock(?:\s|$)/.test(line));
+      .some((line) => /\/api\.sock(?:\s|$)/.test(line));
   } catch {
     return false;
   }

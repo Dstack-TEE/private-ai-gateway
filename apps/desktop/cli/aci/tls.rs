@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use rustls::{
+    CertificateError, DigitallySignedStruct, Error as RustlsError, OtherError, SignatureScheme,
+};
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::parse_x509_certificate;
 
@@ -46,7 +48,51 @@ pub fn observing_spki_client(
 #[derive(Debug, Default)]
 pub struct SpkiObservations {
     observed: Mutex<HashMap<String, String>>,
-    pins: Mutex<HashMap<String, String>>,
+    pins: Mutex<HashMap<String, Vec<String>>>,
+}
+
+/// A handshake presented a leaf key outside the pin set registered for its
+/// host. The verifier returns it as the documented custom-verifier error
+/// (`CertificateError::Other`), so the refusal is attributable to the one
+/// request whose handshake it failed; see [`is_pin_mismatch`].
+#[derive(Debug)]
+pub struct PinMismatch;
+
+impl fmt::Display for PinMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("server TLS key is not in the pinned set")
+    }
+}
+
+impl std::error::Error for PinMismatch {}
+
+/// Whether `error` (for example a `reqwest::Error`) failed because the TLS
+/// pin refused this request's handshake.
+pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
+    error_chain(error).any(|error| {
+        matches!(
+            error.downcast_ref::<RustlsError>(),
+            Some(RustlsError::InvalidCertificate(CertificateError::Other(OtherError(inner))))
+                if inner.is::<PinMismatch>()
+        )
+    })
+}
+
+/// `error` and its causes. The connector surfaces a handshake's
+/// `rustls::Error` as the payload of (possibly nested) `io::Error`s, which
+/// `source()` skips, so an `io::Error` link is descended through
+/// `io::Error::get_ref` and every other link through `source()`.
+pub fn error_chain<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(error), |error| {
+        match error.downcast_ref::<std::io::Error>() {
+            Some(io) => io
+                .get_ref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static)),
+            None => error.source(),
+        }
+    })
 }
 
 impl SpkiObservations {
@@ -60,13 +106,27 @@ impl SpkiObservations {
             .cloned()
     }
 
-    /// Enforce `spki_sha256` (hex) on every future TLS handshake to `host`;
-    /// a handshake presenting any other key fails closed.
-    pub fn pin(&self, host: &str, spki_sha256: &str) {
+    /// Enforce the pin set `spkis` (sha256 hex) on every future TLS handshake
+    /// to `host`: a handshake presenting any other key fails closed. Like an
+    /// HPKP pin set (RFC 7469 §2.6), any one member satisfies the pin.
+    pub fn pin(&self, host: &str, spkis: &[String]) {
+        let mut spkis: Vec<String> = spkis.iter().map(|s| s.to_ascii_lowercase()).collect();
+        spkis.sort();
+        spkis.dedup();
         self.pins
             .lock()
             .expect("SPKI pin map poisoned")
-            .insert(host.to_ascii_lowercase(), spki_sha256.to_ascii_lowercase());
+            .insert(host.to_ascii_lowercase(), spkis);
+    }
+
+    /// The pin set currently enforced for `host`, sorted; empty when unpinned.
+    pub fn pinned_spkis(&self, host: &str) -> Vec<String> {
+        self.pins
+            .lock()
+            .expect("SPKI pin map poisoned")
+            .get(&host.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Enforce any pin registered for `host`, then record the SPKI observed.
@@ -74,10 +134,10 @@ impl SpkiObservations {
     /// transcripts, which must never report a key that was refused.
     fn observe(&self, host: String, spki: String) -> Result<(), RustlsError> {
         if let Some(expected) = self.pins.lock().expect("SPKI pin map poisoned").get(&host) {
-            if *expected != spki {
-                return Err(RustlsError::InvalidCertificate(
-                    CertificateError::ApplicationVerificationFailure,
-                ));
+            if !expected.contains(&spki) {
+                return Err(RustlsError::InvalidCertificate(CertificateError::Other(
+                    OtherError(Arc::new(PinMismatch)),
+                )));
             }
         }
         self.observed
@@ -144,7 +204,7 @@ impl ServerCertVerifier for ObservingSpkiVerifier {
     }
 }
 
-fn leaf_spki_sha256_hex(end_entity: &CertificateDer<'_>) -> Result<String, RustlsError> {
+pub(crate) fn leaf_spki_sha256_hex(end_entity: &CertificateDer<'_>) -> Result<String, RustlsError> {
     let (_, cert) = parse_x509_certificate(end_entity.as_ref())
         .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
     Ok(hex::encode(Sha256::digest(cert.public_key().raw)))
@@ -155,5 +215,48 @@ fn server_name_string(name: &ServerName<'_>) -> String {
         ServerName::DnsName(dns) => dns.as_ref().to_ascii_lowercase(),
         ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
         other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pin_set_accepts_any_member() {
+        let observations = SpkiObservations::default();
+        let (a, b) = ("aa".repeat(32), "bb".repeat(32));
+        observations.pin("Host.Example", &[b.to_ascii_uppercase(), a.clone()]);
+        assert_eq!(
+            observations.pinned_spkis("host.example"),
+            vec![a.clone(), b.clone()]
+        );
+
+        assert!(observations
+            .observe("host.example".into(), b.clone())
+            .is_ok());
+
+        let refused = observations.observe("host.example".into(), "cc".repeat(32));
+        assert!(refused.is_err());
+        // A refused key is never reported as observed.
+        assert_eq!(observations.observed_spki("host.example"), Some(b));
+    }
+
+    /// Pins are registered under `host_of(url)` and enforced under the
+    /// handshake's server name; the two must agree or a pin never applies.
+    #[test]
+    fn url_hosts_match_tls_server_names() {
+        for (url, name) in [
+            ("https://[::1]:8443/v1", "::1"),
+            ("https://127.0.0.1:8443", "127.0.0.1"),
+            ("https://API.Example.com", "api.example.com"),
+        ] {
+            let server_name = ServerName::try_from(name).unwrap();
+            assert_eq!(
+                crate::client::host_of(url).unwrap(),
+                server_name_string(&server_name),
+                "{url}"
+            );
+        }
     }
 }

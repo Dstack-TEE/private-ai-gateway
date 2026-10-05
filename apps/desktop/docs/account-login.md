@@ -24,7 +24,8 @@ crate's form-encoded RFC 8628 client. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
 RedPill uses public OAuth client `cGrHCOWG3S91oa0A` on `clerk.redpill.ai` with
-exact callback `http://127.0.0.1:4181/oauth/callback`. Discovery must support code
+a loopback callback `http://127.0.0.1:<port>/oauth/callback` on a port the OS
+assigns for each sign-in (RFC 8252 §7.3). Discovery must support code
 flow, S256 PKCE and public token exchange. The `oauth2` crate builds the
 authorization request (random state, S256 PKCE) and exchanges the code. The
 callback checks Host, state, unique code and the RFC 9207 issuer when present.
@@ -54,19 +55,19 @@ profile IDs. RedPill owns its managed credential lifecycle, including activation
 revocation and expiry of abandoned pending credentials. The retry queue below
 applies to RedPill only.
 
-Save validates the configuration and credential format. A replacement is written to a
-new OS credential-store entry, then the profile JSON atomically switches its
-non-secret credential reference. Failure before that switch keeps the previous
-credential selected. Account saves run independently of an individual IPC
+Save validates the configuration and credential format. It writes the new key
+to `credentials.toml`, then the profile to `config.toml`
+([Settings files](configuration.md)); if the profile write fails, the previous
+key is put back. Account saves run independently of an individual IPC
 request; the client polls an operation ID for a definite outcome. A concurrent
 save receives an explicit busy failure. Saving reconnects protection only if it
 was previously running.
 
-RedPill activation and retirement use a persistent retry queue. Each record has
-its own OS credential-store item; an atomic, non-secret manifest holds only item
-names. This avoids Windows credential blob size limits. Cleanup compares secrets
-against every currently saved profile before revocation, so reselecting a stable
-key cannot cause a stale queue entry to disable it. Activation precedes retirement.
+RedPill activation and retirement use a persistent retry queue in the owner-only
+`local-state.json` in the app data directory, which stays on this device.
+Cleanup compares secrets against every currently saved profile before
+revocation, so reselecting a stable key cannot cause a stale queue entry to
+disable it. Activation precedes retirement.
 Ordinary network failures retain records silently for bounded background retries;
 unavailable activation is reported once and requires sign-in again.
 
@@ -90,14 +91,14 @@ RedPill requires its managed-credential backend; Phala uses its existing device 
   client-based key naming only; no new migration, lifecycle endpoint or worker.
 
 The Clerk public app is registered, but registration does not deploy the API
-endpoints. No provider credentials belong in renderer state, profile JSON,
+endpoints. No provider credentials belong in renderer state, `config.toml`,
 command arguments, agent configuration or logs.
 
 Focused checks cover real PostgreSQL concurrency and migrations, provisioning,
 permission failures, budget preservation, pending expiry, local HTTP authorization
 contracts, offline deletion, stable-key reselection, save concurrency and the
-renderer flow. Packaged OS credential-store checks and real consent through
-inference and billed usage remain release acceptance checks.
+renderer flow. Real consent through inference and billed usage remains a release acceptance
+check.
 
 ## Organization, workspace and billing
 
@@ -115,7 +116,8 @@ has no separate organization tier: its workspace (team) is selected in the brows
 
 Balances load in the profile editor after authorization or when opening a saved
 account. Overview does not query balances or read credentials for this purpose.
-The editor refreshes every minute and revalidates on focus after 30 seconds.
+The editor refreshes every minute and whenever the window becomes active, as on
+returning from the billing page.
 The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
 A replaced credential cannot reuse an old cache entry. Balance reads do not update

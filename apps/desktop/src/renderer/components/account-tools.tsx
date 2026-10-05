@@ -1,22 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useId } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
-import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, DesktopApi, ServiceProvider } from "../../shared/contracts";
-import { useQuery } from "@tanstack/react-query";
+import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, ServiceProvider } from "../../shared/contracts";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
-import { toastError } from "../lib/error-message";
+import { Hint } from "./hint";
+import { useReportFailure } from "./confirm";
 import { Item, ItemActions, ItemContent, ItemTitle } from "./ui/item";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 
-import { distributionCapabilities } from "../lib/environment";
+import { desktopApi, distributionCapabilities } from "../lib/environment";
 
-type Props = {
-  api: Pick<DesktopApi, "getAccountBalance" | "openOrganization" | "openTopUp">;
+/** Whose balance: the account behind a profile's credential, or behind a sign-in. */
+type BalanceIdentity = {
   provider: ServiceProvider;
   target: AccountBalanceTarget;
-  scope?: AccountScope;
   credentialRef?: string;
+};
+
+type Props = BalanceIdentity & {
+  scope?: AccountScope;
   images?: AccountImages;
   onSignIn?(): void;
   /** Presents a failure to open an account page. */
@@ -24,39 +28,33 @@ type Props = {
   disabled?: boolean;
 };
 
-type BalanceIdentity = Pick<Props, "provider" | "target" | "credentialRef">;
-type BalanceQueryProps = BalanceIdentity & {
-  api: Pick<DesktopApi, "getAccountBalance">;
-};
-type BalanceProps = BalanceIdentity & {
-  api: Pick<DesktopApi, "getAccountBalance" | "openTopUp">;
-  enabled: boolean;
-};
-
-function balanceCacheKey({ provider, target, credentialRef }: Pick<Props, "provider" | "target" | "credentialRef">) {
+function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
   const id = target.kind === "login" ? target.id : target.profileId;
   return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
 
-function useAccountBalance({ api, provider, target, credentialRef, enabled = true }: BalanceQueryProps & { enabled?: boolean }) {
-  const cacheKey = balanceCacheKey({ provider, target, credentialRef });
+function useAccountBalance({ enabled = true, ...identity }: BalanceIdentity & { enabled?: boolean }) {
   return useQuery({
-    queryKey: ["account-balance", cacheKey],
-    queryFn: () => api.getAccountBalance(target),
+    queryKey: ["account-balance", balanceCacheKey(identity)],
+    queryFn: () => desktopApi.getAccountBalance(identity.target),
     enabled,
     refetchInterval: enabled ? 60_000 : false,
+    // Returning from the billing page shows the balance it changed.
+    refetchOnWindowFocus: "always",
     staleTime: 30_000,
     retry: false,
+    meta: { errorTitle: "Could not read the account balance" },
   });
 }
 
 /** Compact account balance for a profile whose credential is already in active use. */
-export function AccountBalanceValue(props: BalanceProps) {
-  const { data: balance, isFetching, refetch } = useAccountBalance(props);
-  const { opening, openPage } = useAccountPage((error) => toastError("Could not open billing", error), refetch);
+export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean }) {
+  const { data: balance, isFetching } = useAccountBalance(props);
+  const reportFailure = useReportFailure();
+  const { opening, openPage } = useAccountPage((error) => reportFailure("Could not open billing", error));
   if (!balance) return null;
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
-    onOpen={(scopeSlug) => openPage(() => props.api.openTopUp(props.provider, scopeSlug))} />;
+    onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(props.provider, scopeSlug))} />;
 }
 
 /** Changing account or credential must never display the previous account's balance. */
@@ -65,11 +63,11 @@ export function AccountTools(props: Props) {
   return <AccountDetailsView key={cacheKey} {...props} />;
 }
 
-function AccountDetailsView({ api, provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
-  const { data: balance, isFetching: busy, refetch } = useAccountBalance({ api, provider, target, credentialRef });
-  const { opening, openPage } = useAccountPage(onError, refetch, disabled);
+function AccountDetailsView({ provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
+  const { data: balance, isFetching: busy } = useAccountBalance({ provider, target, credentialRef });
+  const { opening, openPage } = useAccountPage(onError, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
-  const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => api.openOrganization(organizationSlug)) : undefined;
+  const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => desktopApi.openOrganization(organizationSlug)) : undefined;
   const displayScope = provider === "redpill" ? scope ?? balance?.scope : balance?.scope ?? scope;
   const owner = displayScope?.organization ?? displayScope?.workspace;
   const name = owner ?? "Account";
@@ -81,7 +79,7 @@ function AccountDetailsView({ api, provider, target, scope, credentialRef, image
       </ItemContent>
       <ItemActions>
         {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
-          onOpen={(scopeSlug) => openPage(() => api.openTopUp(provider, scopeSlug))} />}
+          onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(provider, scopeSlug))} />}
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
     </Item>
@@ -98,41 +96,25 @@ function BillingBalanceButton({ balance, provider, busy, disabled = false, onOpe
   const scopeSlug = provider === "phala" ? balance.scope.workspaceSlug : balance.scope.organizationSlug;
   const amount = currency(Number(balance.balanceUsd));
   const canOpen = balance.canTopUp && Boolean(scopeSlug);
-  return <Button type="button" variant="outline" size="sm" className="tabular-nums"
+  const promoId = useId();
+  const promo = balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined;
+  const button = <Button type="button" variant="outline" size="sm" className="tabular-nums"
     aria-label={canOpen ? `Current balance: ${amount}. Open billing` : `Current balance: ${amount}`}
-    aria-busy={busy} disabled={disabled || !canOpen}
-    title={balance.grantedUsd != null && Number(balance.grantedUsd) > 0 ? `${currency(Number(balance.grantedUsd))} promo credits` : undefined}
+    aria-describedby={promo ? promoId : undefined} aria-busy={busy} disabled={disabled || !canOpen}
     onClick={() => { if (scopeSlug) onOpen(scopeSlug); }}>{amount}</Button>;
+  // A disabled button gets no pointer events, so a wrapper takes the hint;
+  // the hint is for pointer users, and the hidden text describes the button.
+  return promo ? <Hint content={promo}><span className="inline-flex">{button}<span id={promoId} className="sr-only">{promo}</span></span></Hint> : button;
 }
 
-function useAccountPage(onError: (error: unknown) => void, refetch: () => Promise<unknown>, disabled = false) {
-  const [opening, setOpening] = useState(false);
-  const openingRef = useRef(false);
-  const returningFromAccountPage = useRef(false);
-  useEffect(() => {
-    const refreshAfterBilling = () => {
-      if (!returningFromAccountPage.current || document.visibilityState === "hidden") return;
-      returningFromAccountPage.current = false;
-      void refetch();
-    };
-    window.addEventListener("focus", refreshAfterBilling);
-    document.addEventListener("visibilitychange", refreshAfterBilling);
-    return () => {
-      window.removeEventListener("focus", refreshAfterBilling);
-      document.removeEventListener("visibilitychange", refreshAfterBilling);
-    };
-  }, [refetch]);
-
-  const openPage = useCallback(async (action: () => Promise<void>) => {
-    if (openingRef.current || disabled) return;
-    openingRef.current = true;
-    setOpening(true);
-    returningFromAccountPage.current = true;
-    try { await action(); }
-    catch (error) { onError(error); returningFromAccountPage.current = false; }
-    finally { openingRef.current = false; setOpening(false); }
-  }, [disabled, onError]);
-  return { opening, openPage };
+function useAccountPage(onError: (error: unknown) => void, disabled = false) {
+  const open = useMutation({ mutationFn: (action: () => Promise<void>) => action(), onError });
+  return {
+    opening: open.isPending,
+    openPage: (action: () => Promise<void>) => {
+      if (!open.isPending && !disabled) open.mutate(action);
+    },
+  };
 }
 
 function AccountAvatar({ name, src }: { name: string; src?: string | null }) {

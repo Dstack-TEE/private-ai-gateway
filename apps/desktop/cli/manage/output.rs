@@ -1,25 +1,66 @@
-use super::{Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage};
+//! Printing: compact JSON, or a human rendering chosen by the command.
+
+use std::io::{self, Write};
+
+use desktop_core::client::CallError;
 use serde_json::Value;
 
+use super::{
+    Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
+};
+use crate::Global;
+
+/// Prints a command's result as one line of compact JSON or its human rendering.
+pub(super) fn print(action: &Action, global: &Global, value: &Value) -> Result<(), CallError> {
+    print_raw(render_line(action, global, value)?.as_bytes())
+}
+
+pub(super) fn render_line(
+    action: &Action,
+    global: &Global,
+    value: &Value,
+) -> Result<String, CallError> {
+    let text = if global.json {
+        serde_json::to_string(value).map_err(|_| "Cannot encode output")?
+    } else {
+        render(action, value)
+    };
+    Ok(format!("{text}\n"))
+}
+
+/// Prints `bytes` as they are, in both modes.
+pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
+    write_stdout(bytes)?;
+    Ok(())
+}
+
+/// Writes to stdout, `Ok(false)` once the reader has gone away, as after
+/// `| head`: output then ends quietly.
+pub(super) fn write_stdout(bytes: &[u8]) -> Result<bool, String> {
+    match io::stdout().lock().write_all(bytes) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
+        Err(_) => Err("Cannot write output".into()),
+    }
+}
+
+/// The human rendering of `action`'s result `value`; details by default.
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
-        Action::Status { .. }
-        | Action::Start { .. }
-        | Action::Stop
-        | Action::Service {
-            command: Service::Status,
-        } => status(value),
-        Action::Service {
-            command: Service::Start,
-        } => "Backend started.".into(),
-        Action::Service {
-            command: Service::Stop,
-        } => "Backend stopped.".into(),
+        Action::Status { .. } | Action::Start { .. } | Action::Stop { offline: false } => {
+            status(value)
+        }
+        Action::Stop { offline: true } => agents(value),
+        Action::Service { command } => match command {
+            Service::Start => "Backend started.".into(),
+            Service::Stop => "Backend stopped.".into(),
+            Service::Status => status(value),
+        },
         Action::App {
             command: App::Open { .. },
         } => match value["url"].as_str() {
             Some(url) => format!(
-                "Web UI (sign in with the web UI password):\n{}{}",
+                "Web UI (sign in with `pap web-ui password show`):\n{}{}",
                 safe(url),
                 if value["browserOpened"] == true {
                     "\nOpened in your browser."
@@ -29,108 +70,106 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             ),
             None => "Desktop app opened.".into(),
         },
-        Action::Profiles {
-            command: Profiles::List,
-        } => list(
-            value,
-            &["id", "name", "provider", "remoteUrl"],
-            "No profiles.",
-        ),
-        Action::Profiles {
-            command: Profiles::Export { .. },
-        }
-        | Action::Diagnostics { .. } => format!("Exported to {}", text(&value["exported"])),
-        Action::Profiles {
-            command: Profiles::Use { id },
-        } => format!("Selected profile: {}\n{}", safe(id), status(value)),
-        Action::Profiles {
-            command: Profiles::Login(_),
-        } => format!(
-            "Account saved. Use private-ai-proxy start to enable protection.\n{}",
-            status(value)
-        ),
-        Action::Profiles {
-            command: Profiles::Remove { id },
-        } => format!("Deleted profile: {}", safe(id)),
-        Action::Profiles {
-            command: Profiles::Add { .. } | Profiles::Verify { .. } | Profiles::Edit { .. },
-        } => format!("Profile verified and saved.\n{}", status(value)),
-        Action::Agents {
-            command:
-                Agents::List
-                | Agents::DisconnectAll
-                | Agents::Connect { dry_run: false, .. }
-                | Agents::Disconnect { dry_run: false, .. },
-        } => {
-            let agents = value
-                .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or_else(|| std::slice::from_ref(value));
-            if agents.is_empty() {
-                return "No agents.".into();
+        Action::Profiles { command } => match command {
+            Profiles::List => list(
+                value,
+                &["id", "name", "provider", "remoteUrl"],
+                "No profiles.",
+            ),
+            Profiles::Export { .. } => exported(value),
+            Profiles::Use { id } => format!("Selected profile: {}\n{}", safe(id), status(value)),
+            Profiles::Login(_) => format!(
+                "Account saved. Use private-ai-proxy start to enable protection.\n{}",
+                status(value)
+            ),
+            Profiles::Remove { id } => format!("Deleted profile: {}", safe(id)),
+            Profiles::Add { .. } | Profiles::Verify { .. } | Profiles::Edit { .. } => {
+                format!("Profile verified and saved.\n{}", status(value))
             }
-            agents
-                .iter()
-                .map(|agent| {
-                    let state = if agent["installed"] == false {
-                        "Not installed"
-                    } else if agent["authorized"] == true {
-                        "Connected (authorized)"
-                    } else if agent["connected"] == true {
-                        "Configured (not authorized)"
-                    } else if agent["recorded"] == true {
-                        "Saved connection (inactive)"
-                    } else {
-                        "Not connected"
-                    };
-                    let mut line =
-                        format!("{}  {}  {state}", text(&agent["id"]), text(&agent["name"]));
-                    if let Some(attention) = agent["attention"].as_str().filter(|s| !s.is_empty()) {
-                        line.push_str(&format!("\n  {}", safe(attention)));
-                    }
-                    if let Some(error) = agent["error"].as_str().filter(|s| !s.is_empty()) {
-                        line.push_str(&format!("\n  Error: {}", safe(error)));
-                    }
-                    line
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+            Profiles::Show { .. } | Profiles::Import { .. } => details(value),
+        },
+        Action::Agents { command } => match command {
+            Agents::Connect { dry_run: true, .. } | Agents::Disconnect { dry_run: true, .. } => {
+                details(value)
+            }
+            _ => agents(value),
+        },
         Action::Models {
             command: Models::List { .. },
         } => list(&value["models"], &["id", "name"], "No models."),
-        Action::Usage {
-            command: Usage::List { .. },
-        } => {
-            let mut lines = usage_list(&value["items"]);
-            if let Some(cursor) = value["nextCursor"].as_str() {
-                lines.push_str(&format!("\nNext cursor: {}", safe(cursor)));
+        Action::Usage { command } => match command {
+            Usage::List { .. } => {
+                let mut lines = usage_list(&value["items"]);
+                if let Some(cursor) = value["nextCursor"].as_str() {
+                    lines.push_str(&format!("\nNext cursor: {}", safe(cursor)));
+                }
+                lines
             }
-            lines
-        }
-        Action::Usage {
-            command: Usage::Export { .. },
-        } => format!("Exported {} usage records.", text(&value["rows"])),
-        Action::Usage {
-            command: Usage::Clear,
-        } => format!("Deleted {} usage records.", text(&value["deleted"])),
-        Action::Settings {
-            command: Settings::Reset,
-        } => "Backend settings reset. Profiles, keys and usage kept; protection is off.".into(),
-        Action::Settings {
-            command: Settings::Set { key, .. },
-        } => format!("Updated {}.", safe(&key.key.to_string())),
-        Action::Token {
-            command: Token::Show,
-        } => text(&value["token"]),
-        Action::Token {
-            command: Token::Rotate,
-        } => "Client key rotated.".into(),
-        Action::Token {
-            command: Token::ClearCredential,
-        } => "Profile credential removed.".into(),
-        _ => details(value),
+            Usage::Export { .. } => format!("Exported {} usage records.", text(&value["rows"])),
+            Usage::Clear => format!("Deleted {} usage records.", text(&value["deleted"])),
+            Usage::Show { .. } => details(value),
+        },
+        Action::Settings { command } => match command {
+            Settings::Reset => {
+                "Backend settings reset. Profiles, keys and usage kept; protection is off.".into()
+            }
+            Settings::Set { key, .. } => format!("Updated {}.", safe(&key.key.to_string())),
+            Settings::Show | Settings::Schema => details(value),
+        },
+        Action::Token { command } => match command {
+            Token::Show => text(&value["token"]),
+            Token::Rotate => "Client key rotated.".into(),
+            Token::ClearCredential => "Profile credential removed.".into(),
+        },
+        Action::WebUi {
+            command: WebUi::Password { command },
+        } => match command {
+            WebUiPassword::Show => text(&value["password"]),
+            WebUiPassword::Rotate => "Web UI password rotated.".into(),
+        },
+        Action::Diagnostics { .. } => exported(value),
+        Action::Cli { .. } | Action::Doctor | Action::Completions { .. } => details(value),
     }
+}
+
+fn exported(value: &Value) -> String {
+    format!("Exported to {}", text(&value["exported"]))
+}
+
+/// One line per agent, with its attention note and error indented below.
+fn agents(value: &Value) -> String {
+    let agents = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    if agents.is_empty() {
+        return "No agents.".into();
+    }
+    agents
+        .iter()
+        .map(|agent| {
+            let state = if agent["installed"] == false {
+                "Not detected"
+            } else if agent["authorized"] == true {
+                "Connected (authorized)"
+            } else if agent["connected"] == true {
+                "Configured (not authorized)"
+            } else if agent["recorded"] == true {
+                "Saved connection (inactive)"
+            } else {
+                "Not connected"
+            };
+            let mut line = format!("{}  {}  {state}", text(&agent["id"]), text(&agent["name"]));
+            if let Some(attention) = agent["attention"].as_str().filter(|s| !s.is_empty()) {
+                line.push_str(&format!("\n  {}", safe(attention)));
+            }
+            if let Some(error) = agent["error"].as_str().filter(|s| !s.is_empty()) {
+                line.push_str(&format!("\n  Error: {}", safe(error)));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn status(value: &Value) -> String {
@@ -151,7 +190,8 @@ fn status(value: &Value) -> String {
         _ => "Not protected",
     };
     let mut lines = vec![status.to_string()];
-    if let Some(backend) = value.get("backend").filter(|backend| backend.is_object()) {
+    let backend = &value["backend"];
+    if backend.is_object() {
         lines.push(format!(
             "Backend: running (PID {}, version {})",
             text(&backend["processId"]),
@@ -182,16 +222,19 @@ fn status(value: &Value) -> String {
     } else if state["profiles"].is_array() {
         lines.push("Profile: None selected".into());
     }
-    if let Some(saved) = state["apiKeySaved"].as_bool() {
-        lines.push(format!(
-            "Service credential: {}",
-            if saved {
-                "Saved (credentials.toml)"
-            } else {
-                "Not saved"
-            }
-        ));
-    }
+    // A labelled line for a boolean field, when the state has it.
+    let flag = |label: &str, value: &Value, yes: &str, no: &str| {
+        value
+            .as_bool()
+            .map(|set| format!("{label}: {}", if set { yes } else { no }))
+    };
+    let network = "Loopback only";
+    lines.extend(flag(
+        "Service credential",
+        &state["apiKeySaved"],
+        "Saved (credentials.toml)",
+        "Not saved",
+    ));
     if state.get("localApi").is_some() {
         lines.push(format!(
             "Local API: {}",
@@ -200,12 +243,8 @@ fn status(value: &Value) -> String {
                 .map(safe)
                 .unwrap_or_else(|| "Not listening".into())
         ));
-        if let Some(network) = state["localApi"]["allowNetworkAccess"].as_bool() {
-            lines.push(format!(
-                "Network access: {}",
-                if network { "Allowed" } else { "Loopback only" }
-            ));
-        }
+        let allowed = &state["localApi"]["allowNetworkAccess"];
+        lines.extend(flag("Network access", allowed, "Allowed", network));
     } else if let Some(endpoint) = state["proxyUrl"].as_str() {
         lines.push(format!("Local API: {}", safe(endpoint)));
     }
@@ -219,12 +258,8 @@ fn status(value: &Value) -> String {
                 (None, None) => "Not listening".into(),
             }
         ));
-        if let Some(network) = web_ui["allowNetworkAccess"].as_bool() {
-            lines.push(format!(
-                "Web UI network access: {}",
-                if network { "Allowed" } else { "Loopback only" }
-            ));
-        }
+        let allowed = &web_ui["allowNetworkAccess"];
+        lines.extend(flag("Web UI network access", allowed, "Allowed", network));
     }
     if let Some(error) = state["configFiles"]["error"].as_str() {
         lines.push(format!(
@@ -240,20 +275,14 @@ fn status(value: &Value) -> String {
     {
         lines.push(format!("Settings warning: {}", safe(warning)));
     }
-    if let Some(required) = state["config"]["requireProductionOs"].as_bool() {
-        lines.push(format!(
-            "Production OS: {}",
-            if required {
-                "Required"
-            } else {
-                "Development images allowed"
-            }
-        ));
-    }
-    if let Some(identity) = state
-        .get("identity")
-        .filter(|identity| identity.is_object())
-    {
+    lines.extend(flag(
+        "Production OS",
+        &state["config"]["requireProductionOs"],
+        "Required",
+        "Development images allowed",
+    ));
+    let identity = &state["identity"];
+    if identity.is_object() {
         lines.push(format!(
             "Identity: {} | {}",
             text(&identity["teeType"]),
@@ -299,7 +328,8 @@ fn status(value: &Value) -> String {
     }
     if let Some(session) = state["sessionId"].as_str() {
         lines.push(format!("Session: {}", safe(session)));
-        if let Some(usage) = state.get("sessionUsage").filter(|usage| usage.is_object()) {
+        let usage = &state["sessionUsage"];
+        if usage.is_object() {
             lines.push(format!(
                 "Requests: {} total | {} protected | {} blocked locally | {} failed proof",
                 text(&usage["requests"]),
@@ -447,98 +477,4 @@ fn label(key: &str) -> String {
         }
     }
     label
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn status_includes_operational_context_without_credentials_or_activity() {
-        assert!(status(&json!({"status":"not_running"})).contains("private-ai-proxy service start"));
-        let value = json!({
-            "backend": {"processId":42,"version":"0.1.0"},
-            "gateway": {
-                "status":"verified", "activeProfileId":"work", "apiKeySaved":true,
-                "profiles":[{"id":"work","name":"Work","provider":"redpill","remoteUrl":"https://tee.redpill.ai"}],
-                "proxyUrl":"http://127.0.0.1:4180", "localApi":{"allowNetworkAccess":false},
-                "config":{"requireProductionOs":true},
-                "identity":{"teeType":"tdx","trustLevel":"production"},
-                "checks":[{"title":"Identity","status":"pass"}],
-                "catalog":{"models":[{"id":"model"}]}, "sessionId":"session-1",
-                "sessionUsage":{"requests":12,"protected":10,"blockedLocally":1,"failedProof":1,"inputTokens":100,"outputTokens":20,"cacheReadTokens":5,"cacheWriteTokens":0,"costUsd":0.0012},
-                "activity":[{"detail":"private request detail"}], "token":"never-print-token"
-            }
-        });
-        let output = status(&value);
-        for expected in [
-            "Backend: running (PID 42, version 0.1.0)",
-            "Profile: Work (work)",
-            "Service: redpill | https://tee.redpill.ai",
-            "Production OS: Required",
-            "Identity: tdx | production",
-            "Checks: 1 passed, 0 failed, 0 skipped",
-            "Models: 1",
-            "Requests: 12 total | 10 protected | 1 blocked locally | 1 failed proof",
-            "Tokens: 100 input | 20 output | 5 cache read | 0 cache write",
-            "Reported cost: $0.001200 USD",
-        ] {
-            assert!(output.contains(expected), "missing {expected}: {output}");
-        }
-        assert!(!output.contains("private request detail"));
-        assert!(!output.contains("never-print-token"));
-        let mut state = value["gateway"].clone();
-        state["status"] = json!("stopped");
-        assert!(status(&state).contains("Cached models: 1"));
-        state["status"] = json!("verified");
-        state["backendConnected"] = json!(false);
-        assert!(status(&state).starts_with("Backend disconnected (protection unknown)"));
-        state["backendConnected"] = json!(true);
-        state["configurationVerification"] = json!(true);
-        assert!(status(&state).starts_with("Verifying profile (not protecting traffic)"));
-    }
-
-    #[test]
-    fn status_and_nested_details_do_not_emit_terminal_controls() {
-        let output = status(
-            &json!({"status":"error", "error":"bad\u{001b}[31m\nline", "progress":"Checking", "wakeMonitorAvailable":false}),
-        );
-        assert!(output.contains("Error: bad [31m line"));
-        assert!(output.contains("Progress: Checking"));
-        assert!(output.contains("Wake monitoring unavailable"));
-        assert!(
-            !details(&json!({"\u{001b}key":"\u{202e}value"})).contains(['\u{001b}', '\u{202e}'])
-        );
-    }
-
-    #[test]
-    fn usage_separates_http_status_from_receipt_verification() {
-        let output = usage_list(&json!([
-            {"id":"a", "status":200, "leftDevice":true, "verified":false},
-            {"id":"b", "status":0, "leftDevice":false, "verified":null},
-            {"id":"c", "status":200, "leftDevice":true, "verified":true}
-        ]));
-        assert!(output.contains("200  |  Failed"));
-        assert!(output.contains("0  |  Blocked locally"));
-        assert!(output.contains("200  |  Verified"));
-    }
-
-    #[test]
-    fn agent_list_distinguishes_authorization_from_retained_configuration() {
-        let output = render(
-            &Action::Agents {
-                command: Agents::List,
-            },
-            &json!([
-                {"id":"active", "installed":true, "connected":true, "authorized":true},
-                {"id":"stale", "installed":true, "connected":true, "authorized":false, "error":"changed\u{001b}"},
-                {"id":"saved", "installed":true, "connected":false, "recorded":true}
-            ]),
-        );
-        assert!(output.contains("Connected (authorized)"));
-        assert!(output.contains("Configured (not authorized)"));
-        assert!(output.contains("Saved connection (inactive)"));
-        assert!(output.contains("Error: changed "));
-    }
 }

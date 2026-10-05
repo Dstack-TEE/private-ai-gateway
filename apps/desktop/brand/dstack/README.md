@@ -7,7 +7,7 @@ Source artwork for the committed icons, tray icon and installer images (see
 | --- | --- |
 | `icon/app-icon.png` | 1024 px app icon with the desktop canvas margin; input of `tauri icon` |
 | `icon/default.png`, `icon/dark.png` | Light and dark appearance exports; the renderer's `app-icon-light.png` and `app-icon-dark.png` are 256 px copies |
-| `icon/foreground.svg` | The mark used for the monochrome menu bar template (`assets/tray/trayTemplate@2x.png`) |
+| `icon/foreground.svg` | The mark used for the monochrome menu bar template (`assets/tray/protected.png`; the other tray icons are its unprotected and dark variants) |
 | `product-wordmark-light.svg` | Wordmark in the NSIS and DMG installer images |
 
 ## Provenance

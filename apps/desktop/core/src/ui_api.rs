@@ -6,13 +6,16 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    agent_access,
+    agent_access::{self, AgentAccessStatus},
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
     contracts::{
-        AccountSaveResult, AgentStatus, AppState, ConfidentialProfileInput, ServiceProvider,
+        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput,
+        NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
+        ServiceProvider,
     },
     protocol::{self, rpc, Call, Command, Preference},
+    updates::UpdateNotice,
 };
 
 const TASK_FAILED: &str = "The background operation could not complete. Please try again.";
@@ -56,6 +59,90 @@ macro_rules! methods {
 // the same parameters and answers the same result.
 crate::renderer_methods!(methods);
 
+impl Method {
+    /// Whether a web UI session may call the method. The web UI password is
+    /// read and changed only by the desktop app and CLI, as code-server and
+    /// Jupyter keep theirs outside the browser.
+    pub const fn browser_allowed(self) -> bool {
+        !matches!(
+            self,
+            Self::GetWebUiPassword | Self::RotateWebUiPassword | Self::SetWebUiPassword
+        )
+    }
+}
+
+/// A host method's parameters, bound to the result it answers.
+pub trait HostCall {
+    type Response: Serialize;
+}
+
+/// Expands the table below into one typed request per host method, as
+/// `protocol::commands!` does for the management commands. A request without
+/// parameters is never decoded, so it accepts any body.
+macro_rules! host_calls {
+    () => {};
+    ($(#[$meta:meta])* $name:ident -> $response:ty; $($rest:tt)*) => {
+        $(#[$meta])*
+        #[derive(ts_rs::TS)]
+        #[ts(type = "Record<string, never>")]
+        pub struct $name;
+        impl HostCall for $name {
+            type Response = $response;
+        }
+        host_calls!($($rest)*);
+    };
+    (
+        $(#[$meta:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? } -> $response:ty;
+        $($rest:tt)*
+    ) => {
+        $(#[$meta])*
+        #[derive(Deserialize, ts_rs::TS)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[ts(optional_fields)]
+        pub struct $name { $(pub $field: $type),* }
+        impl HostCall for $name {
+            type Response = $response;
+        }
+        host_calls!($($rest)*);
+    };
+}
+
+/// The parameters and result of each host method, which `invoke` decodes and
+/// answers; `contracts.generated.ts` declares them for the renderer. A host
+/// method that shares a command's name is that command's request.
+pub mod requests {
+    use super::*;
+
+    pub use crate::protocol::rpc::ResetSettings;
+
+    impl HostCall for ResetSettings {
+        type Response = <Self as Call>::Response;
+    }
+
+    host_calls! {
+        /// Starts the service if needed and answers its state.
+        StartBackendService -> <rpc::GetState as Call>::Response;
+        SaveAccountLogin {
+            id: String,
+            profile: ConfidentialProfileInput,
+            require_production_os: bool,
+            workspace_id: Option<i64>,
+        } -> AppStateWire;
+        GetOrganizationUrl { organization_slug: String } -> String;
+        GetTopUpUrl { provider: ServiceProvider, scope_slug: Option<String> } -> String;
+        ListListenAddresses -> Vec<ListenAddress>;
+        GetAgentAccess -> AgentAccessStatus;
+        RequestAgentAccess -> AgentAccessStatus;
+        GetAppearance -> Appearance;
+        SetAppearance { appearance: Appearance } -> ();
+        GetLaunchPreferences -> LaunchPreferences;
+        SetLaunchPreference { name: LaunchPreference, enabled: bool } -> LaunchPreferences;
+        GetNotificationSettings -> NotificationConfiguration;
+        SaveNotificationSettings { config: NotificationPreferences } -> ();
+        GetUpdateNotice -> UpdateNotice;
+    }
+}
+
 // Events the renderer subscribes to; `src/shared/contracts.generated.ts`
 // exports the same constants.
 pub const APPEARANCE_EVENT: &str = "pap://appearance";
@@ -64,11 +151,9 @@ pub const SETTINGS_RESET_EVENT: &str = "pap://settings-reset";
 pub const STATE_EVENT: &str = "pap://state";
 pub const CLIENT_KEY_CHANGED_EVENT: &str = "pap://client-key-changed";
 pub const AGENTS_CHANGED_EVENT: &str = "pap://agents-changed";
-/// A tray or menu item asks the window to show a page or dialog, or to open a
-/// documentation link the way Settings does.
+/// A tray or menu item left a `NavigationTarget` for the window, which takes
+/// it with the shell's `take_navigation` command.
 pub const NAVIGATE_EVENT: &str = "pap://navigate";
-/// The tray asks the window to confirm stopping everything and quitting.
-pub const CONFIRM_STOP_ALL_EVENT: &str = "pap://confirm-stop-all";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,12 +209,17 @@ impl StateEventProjection {
                 json!(state.client_key_available.unwrap_or(true)),
             ));
         }
-        events.push(Event::new(
-            STATE_EVENT,
-            serde_json::to_value(state).unwrap_or(Value::Null),
-        ));
+        events.push(state_event(state));
         events
     }
+}
+
+/// The state event: the state with the protection it presents.
+pub fn state_event(state: &AppState) -> Event {
+    Event::new(
+        STATE_EVENT,
+        serde_json::to_value(AppStateWire::from(state.clone())).unwrap_or(Value::Null),
+    )
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -137,6 +227,14 @@ impl StateEventProjection {
 pub struct LaunchPreferences {
     pub open_at_login: bool,
     pub connect_on_launch: bool,
+}
+
+/// One of the [`LaunchPreferences`].
+#[derive(Clone, Copy, Debug, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchPreference {
+    OpenAtLogin,
+    ConnectOnLaunch,
 }
 
 #[derive(Clone, Serialize, ts_rs::TS)]
@@ -207,18 +305,18 @@ pub trait Host: Clone + Send + Sync + 'static {
 
     fn present_account_login(&self, _url: &str) {}
 
-    fn sync_agents(&self, _agents: &[AgentStatus]) {}
-
     fn notification_configuration(
         &self,
         preferences: NotificationPreferences,
-    ) -> impl Future<Output = Result<Value, String>> + Send {
+    ) -> impl Future<Output = NotificationConfiguration> + Send {
         async move {
-            Ok(json!({
-                "preferences": preferences,
-                "permission": "unsupported",
-                "alertsEnabled": false
-            }))
+            NotificationConfiguration {
+                preferences,
+                system: NotificationPermissionStatus {
+                    permission: NotificationPermission::Unsupported,
+                    alerts_enabled: Some(false),
+                },
+            }
         }
     }
 
@@ -232,12 +330,14 @@ pub trait Host: Clone + Send + Sync + 'static {
     fn reset_settings(
         &self,
         backend: &impl Backend,
-    ) -> impl Future<Output = Result<AppState, CallError>> + Send {
+    ) -> impl Future<Output = Result<AppStateWire, CallError>> + Send {
         call(backend, rpc::ResetSettings)
     }
 
-    fn request_agent_access(&self) -> impl Future<Output = Result<Value, String>> + Send {
-        async { value(agent_access::status()) }
+    fn request_agent_access(
+        &self,
+    ) -> impl Future<Output = Result<AgentAccessStatus, String>> + Send {
+        async { Ok(agent_access::status()) }
     }
 }
 
@@ -251,7 +351,7 @@ pub async fn invoke(
         Method::GetState => match backend.execute(Command::GetState {}).await {
             Ok(state) => Ok(state),
             Err(error) => match backend.disconnected_state() {
-                Some(cached) => Ok(value(cached)?),
+                Some(cached) => Ok(value(AppStateWire::from(cached))?),
                 None => Err(error),
             },
         },
@@ -260,11 +360,6 @@ pub async fn invoke(
             let login = call(backend, rpc::BeginAccountLogin { profile }).await?;
             host.present_account_login(&login.url);
             Ok(value(login)?)
-        }
-        Method::ListAgents => {
-            let agents = call(backend, rpc::ListAgents).await?;
-            host.sync_agents(&agents);
-            Ok(value(agents)?)
         }
         method if method.is_command() => {
             backend
@@ -276,63 +371,65 @@ pub async fn invoke(
             backend.execute(Command::GetState {}).await
         }
         Method::SaveAccountLogin => {
-            let input: SaveLoginParams = params(input)?;
-            Ok(value(save_account_login(backend, input).await?)?)
+            answer::<requests::SaveAccountLogin>(save_account_login(backend, params(input)?).await?)
         }
         Method::GetOrganizationUrl => {
-            let input: OrganizationParams = params(input)?;
-            Ok(value(crate::account::organization_url(Some(
-                &input.organization_slug,
-            ))?)?)
+            let requests::GetOrganizationUrl { organization_slug } = params(input)?;
+            answer::<requests::GetOrganizationUrl>(crate::account::organization_url(Some(
+                &organization_slug,
+            ))?)
         }
         Method::GetTopUpUrl => {
-            let input: TopUpParams = params(input)?;
-            Ok(value(crate::account::top_up_url(
-                &input.provider,
-                input.scope_slug.as_deref(),
-            )?)?)
+            let requests::GetTopUpUrl {
+                provider,
+                scope_slug,
+            } = params(input)?;
+            answer::<requests::GetTopUpUrl>(crate::account::top_up_url(
+                &provider,
+                scope_slug.as_deref(),
+            )?)
         }
-        Method::ListListenAddresses => Ok(value(blocking(list_listen_addresses).await?)?),
-        Method::GetAgentAccess => Ok(value(agent_access::status())?),
-        Method::RequestAgentAccess => Ok(host.request_agent_access().await?),
-        Method::GetAppearance => Ok(value(preferences(backend).await?.appearance)?),
+        Method::ListListenAddresses => {
+            answer::<requests::ListListenAddresses>(blocking(list_listen_addresses).await?)
+        }
+        Method::GetAgentAccess => answer::<requests::GetAgentAccess>(agent_access::status()),
+        Method::RequestAgentAccess => {
+            answer::<requests::RequestAgentAccess>(host.request_agent_access().await?)
+        }
+        Method::GetAppearance => {
+            answer::<requests::GetAppearance>(preferences(backend).await?.appearance)
+        }
         Method::SetAppearance => {
-            let appearance = params::<AppearanceParams>(input)?.appearance;
+            let requests::SetAppearance { appearance } = params(input)?;
             set_preference(backend, Preference::Appearance(appearance)).await?;
             host.apply_appearance(appearance)?;
             host.emit(Event::serialized(APPEARANCE_EVENT, &appearance)?)
                 .map_err(|_| "Could not sync appearance".to_string())?;
-            Ok(Value::Null)
+            answer::<requests::SetAppearance>(())
         }
-        Method::GetLaunchPreferences => Ok(value(launch_preferences(backend, host).await?)?),
-        Method::GetUpdateNotice => Ok(value(crate::updates::check_installation().await?)?),
+        Method::GetLaunchPreferences => {
+            answer::<requests::GetLaunchPreferences>(launch_preferences(backend, host).await?)
+        }
+        Method::GetUpdateNotice => {
+            answer::<requests::GetUpdateNotice>(crate::updates::check_installation().await?)
+        }
         Method::SetLaunchPreference => {
-            let input: LaunchPreferenceParams = params(input)?;
-            match input.name.as_str() {
-                "openAtLogin" => {
-                    let host = host.clone();
-                    blocking(move || host.set_open_at_login(input.enabled)).await?;
-                }
-                "connectOnLaunch" => {
-                    set_preference(backend, Preference::ConnectOnLaunch(input.enabled)).await?;
-                }
-                _ => return Err("Unknown startup preference".into()),
-            }
-            let preferences = launch_preferences(backend, host).await?;
-            if let Ok(event) = Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences) {
-                let _ = host.emit(event);
-            }
-            Ok(value(preferences)?)
+            let requests::SetLaunchPreference { name, enabled } = params(input)?;
+            answer::<requests::SetLaunchPreference>(
+                set_launch_preference(backend, host, name, enabled).await?,
+            )
         }
         Method::GetNotificationSettings => {
             let preferences = preferences(backend).await?.notifications;
-            Ok(host.notification_configuration(preferences).await?)
+            answer::<requests::GetNotificationSettings>(
+                host.notification_configuration(preferences).await,
+            )
         }
         Method::SaveNotificationSettings => {
-            let preferences = params::<NotificationsParams>(input)?.config;
-            set_preference(backend, Preference::Notifications(preferences)).await?;
-            host.notification_preferences_saved(preferences)?;
-            Ok(Value::Null)
+            let requests::SaveNotificationSettings { config } = params(input)?;
+            set_preference(backend, Preference::Notifications(config)).await?;
+            host.notification_preferences_saved(config)?;
+            answer::<requests::SaveNotificationSettings>(())
         }
         Method::ResetSettings => {
             let result = host.reset_settings(backend).await;
@@ -342,7 +439,7 @@ pub async fn invoke(
             }
             let state = result?;
             host.emit(Event::new(SETTINGS_RESET_EVENT, Value::Null))?;
-            Ok(value(state)?)
+            answer::<requests::ResetSettings>(state)
         }
         _ => Err(CallError::Api(protocol::Error::method_not_found())),
     }
@@ -351,8 +448,8 @@ pub async fn invoke(
 /// Save can outlive one request; poll its operation until it settles.
 async fn save_account_login(
     backend: &impl Backend,
-    input: SaveLoginParams,
-) -> Result<AppState, CallError> {
+    input: requests::SaveAccountLogin,
+) -> Result<AppStateWire, CallError> {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let result = |operation_id: String| rpc::AccountSaveResult { operation_id };
     let initial = call(
@@ -422,6 +519,29 @@ pub async fn refresh_preferences(
     Ok(())
 }
 
+/// Changes one startup preference and announces the preferences that apply.
+pub async fn set_launch_preference(
+    backend: &impl Backend,
+    host: &impl Host,
+    preference: LaunchPreference,
+    enabled: bool,
+) -> Result<LaunchPreferences, CallError> {
+    match preference {
+        LaunchPreference::OpenAtLogin => {
+            let host = host.clone();
+            blocking(move || host.set_open_at_login(enabled)).await?;
+        }
+        LaunchPreference::ConnectOnLaunch => {
+            set_preference(backend, Preference::ConnectOnLaunch(enabled)).await?;
+        }
+    }
+    let preferences = launch_preferences(backend, host).await?;
+    if let Ok(event) = Event::serialized(LAUNCH_PREFERENCES_EVENT, &preferences) {
+        let _ = host.emit(event);
+    }
+    Ok(preferences)
+}
+
 pub async fn launch_preferences(
     backend: &impl Backend,
     host: &impl Host,
@@ -446,6 +566,11 @@ where
 
 fn value<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|_| "Management response failed".to_string())
+}
+
+/// A host method's result, as the type its request declares.
+fn answer<C: HostCall>(response: C::Response) -> Result<Value, CallError> {
+    Ok(value(response)?)
 }
 
 fn params<T: DeserializeOwned>(value: Value) -> Result<T, CallError> {
@@ -478,49 +603,8 @@ fn list_listen_addresses() -> Result<Vec<ListenAddress>, String> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct AppearanceParams {
-    appearance: Appearance,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LaunchPreferenceParams {
-    name: String,
-    enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BeginLoginParams {
     profile: ConfidentialProfileInput,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveLoginParams {
-    id: String,
-    profile: ConfidentialProfileInput,
-    require_production_os: bool,
-    workspace_id: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct OrganizationParams {
-    organization_slug: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TopUpParams {
-    provider: ServiceProvider,
-    scope_slug: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NotificationsParams {
-    config: NotificationPreferences,
 }
 
 #[cfg(test)]

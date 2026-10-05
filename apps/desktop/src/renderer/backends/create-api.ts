@@ -1,65 +1,23 @@
-import {
-  AGENTS_CHANGED_EVENT,
-  APPEARANCE_EVENT,
-  CLIENT_KEY_CHANGED_EVENT,
-  CONFIRM_STOP_ALL_EVENT,
-  LAUNCH_PREFERENCES_EVENT,
-  NAVIGATE_EVENT,
-  SETTINGS_RESET_EVENT,
-  STATE_EVENT,
-  type AgentAccessStatus,
-  type AgentPreview,
-  type AgentStatus,
-  type Appearance,
-  type CliRegistration,
-  type DesktopApi,
-  type DistributionCapabilities,
-  type AppState,
-  type ListenConfig,
-  type LoginPresentation,
-  type NotificationConfiguration,
-  type NotificationPreferences,
-  type ProfileBackup,
-  type RequestActivity,
-  type ServiceProvider,
-  type StartConfig,
-  type UiMethod,
-  type UpdateChannel,
-  type UpdateInfo,
-  type UsagePage,
-  type UsageQuery,
-  type WebUiConfig,
-} from "../../shared/contracts";
+// Node runs `npm run test:state` on this file as is, so a value import names its file.
+import { AGENTS_CHANGED_EVENT, APPEARANCE_EVENT, CLIENT_KEY_CHANGED_EVENT, LAUNCH_PREFERENCES_EVENT, SETTINGS_RESET_EVENT, STATE_EVENT } from "../../shared/contracts.generated.ts";
+import type { DesktopApi, DistributionCapabilities, LoginPresentation, UiEvent, UiEventPayloads, UiMethod, UiRequests, UiResponses } from "../../shared/contracts";
+
+/** A UI method's parameters, which a method that takes none may omit. */
+export type UiParams<M extends UiMethod> = {} extends UiRequests[M] ? [params?: UiRequests[M]] : [params: UiRequests[M]];
 
 export interface UiTransport {
-  call<T>(method: UiMethod, params?: Record<string, unknown>): Promise<T>;
-  subscribe<T>(event: string, listener: (payload: T) => void): () => void;
+  call<M extends UiMethod>(method: M, ...params: UiParams<M>): Promise<UiResponses[M]>;
+  subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void;
 }
 
-export interface UiPlatform {
-  showEditMenu(editable: boolean): Promise<void>;
-  getAppVersion(): Promise<string>;
-  setUpdateChannel(channel: UpdateChannel): Promise<UpdateChannel>;
-  prepareUpdate(): Promise<UpdateInfo>;
-  restartToUpdate(): Promise<void>;
-  getCliRegistration(): Promise<CliRegistration>;
-  setCliRegistration(installed: boolean): Promise<CliRegistration>;
-  stopAllAndQuit(): Promise<void>;
-  copyText(text: string): Promise<void>;
-  selectProfileBackup(): Promise<ProfileBackup | null>;
-  saveProfileExport(): Promise<boolean>;
-  saveDiagnosticsExport(): Promise<boolean>;
-  requestNotificationPermission(): Promise<Pick<NotificationConfiguration, "permission" | "alertsEnabled">>;
-  openNotificationSettings(): Promise<void>;
-  mainWindowReady(): Promise<void>;
-  openAboutLink: DesktopApi["openAboutLink"];
-  openWebUi(): Promise<void>;
-  openAgentWebsite(agentId: string): Promise<void>;
-  openApiKeyPage(provider: ServiceProvider): Promise<void>;
+/** What the shell or the browser does itself, without a UI method. */
+export type UiPlatform = Pick<DesktopApi, "showEditMenu" | "getAppVersion" | "setUpdateChannel" | "prepareUpdate" | "restartToUpdate"
+  | "getCliRegistration" | "setCliRegistration" | "stopAllAndQuit" | "onNavigate" | "closeWindow" | "quit" | "copyText"
+  | "selectProfileBackup" | "saveProfileExport" | "saveDiagnosticsExport" | "requestNotificationPermission"
+  | "openNotificationSettings" | "openAboutLink" | "openWebUi" | "openAgentWebsite" | "openApiKeyPage" | "openOrganization" | "openTopUp"> & {
+  /** Shows the page an account sign-in continues on. */
   presentAccountLogin(login: LoginPresentation): void;
-  openOrganization(organizationSlug: string): Promise<void>;
-  openTopUp(provider: ServiceProvider, scopeSlug?: string): Promise<void>;
-}
+};
 
 /** The browser's web UI session: the router signs in before any page loads. */
 export interface WebSession {
@@ -78,79 +36,67 @@ export interface Backend {
   distributionCapabilities: DistributionCapabilities;
   /** Only the web UI has one. */
   session: WebSession | undefined;
+  /**
+   * Follows the focus of the desktop window for TanStack Query's
+   * `focusManager`; a browser keeps the default, page visibility.
+   */
+  windowFocus: ((setFocused: (focused: boolean) => void) => () => void) | undefined;
 }
 
-export function createDesktopApi(transport: UiTransport, platform: UiPlatform): DesktopApi {
+export function createDesktopApi(transport: UiTransport, { presentAccountLogin, ...platform }: UiPlatform): DesktopApi {
   const call = transport.call.bind(transport);
   const subscribe = transport.subscribe.bind(transport);
   return {
-    startBackendService: () => call<AppState>("start_backend_service"),
-    showEditMenu: platform.showEditMenu,
-    getAppearance: () => call<Appearance>("get_appearance"),
+    startBackendService: () => call("start_backend_service"),
+    getAppearance: () => call("get_appearance"),
     setAppearance: (appearance) => call("set_appearance", { appearance }),
     onAppearanceChange: (listener) => subscribe(APPEARANCE_EVENT, listener),
-    getAppVersion: platform.getAppVersion,
-    setUpdateChannel: platform.setUpdateChannel,
-    prepareUpdate: platform.prepareUpdate,
-    restartToUpdate: platform.restartToUpdate,
     getLaunchPreferences: () => call("get_launch_preferences"),
     setLaunchPreference: (name, enabled) => call("set_launch_preference", { name, enabled }),
     onLaunchPreferencesChange: (listener) => subscribe(LAUNCH_PREFERENCES_EVENT, listener),
-    getCliRegistration: platform.getCliRegistration,
-    setCliRegistration: platform.setCliRegistration,
-    onStopAllRequest: (listener) => subscribe(CONFIRM_STOP_ALL_EVENT, listener),
-    stopAllAndQuit: platform.stopAllAndQuit,
-    copyText: platform.copyText,
-    getClientKey: () => call<string>("get_client_key"),
-    rotateClientKey: () => call<string>("rotate_client_key"),
-    saveLocalApiConfig: (config: ListenConfig) => call("save_local_api_config", { config }),
-    saveWebUi: (config: WebUiConfig) => call("save_web_ui", { config }),
-    setWebUiPassword: (password, currentPassword) => call("set_web_ui_password", currentPassword === undefined ? { password } : { password, currentPassword }),
-    openWebUi: platform.openWebUi,
+    getClientKey: () => call("get_client_key"),
+    rotateClientKey: () => call("rotate_client_key"),
+    saveLocalApiConfig: (config) => call("save_local_api_config", { config }),
+    saveWebUi: (config) => call("save_web_ui", { config }),
+    getWebUiPassword: () => call("get_web_ui_password"),
+    rotateWebUiPassword: () => call("rotate_web_ui_password"),
+    setWebUiPassword: (password) => call("set_web_ui_password", { password }),
     listListenAddresses: () => call("list_listen_addresses"),
     getNotificationSettings: () => call("get_notification_settings"),
-    selectProfileBackup: platform.selectProfileBackup,
-    saveProfileExport: platform.saveProfileExport,
-    saveDiagnosticsExport: platform.saveDiagnosticsExport,
     importProfiles: (backup) => call("import_profiles", { backup }),
-    saveNotificationSettings: (config: NotificationPreferences) => call("save_notification_settings", { config }),
-    requestNotificationPermission: platform.requestNotificationPermission,
-    openNotificationSettings: platform.openNotificationSettings,
-    getState: () => call<AppState>("get_state"),
-    resetSettings: () => call<AppState>("reset_settings"),
+    saveNotificationSettings: (config) => call("save_notification_settings", { config }),
+    getState: () => call("get_state"),
+    resetSettings: () => call("reset_settings"),
     onSettingsReset: (listener) => subscribe(SETTINGS_RESET_EVENT, listener),
     onStateChange: (listener) => subscribe(STATE_EVENT, listener),
-    onNavigate: (listener) => subscribe(NAVIGATE_EVENT, listener),
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
-    mainWindowReady: platform.mainWindowReady,
-    openAboutLink: platform.openAboutLink,
-    openAgentWebsite: platform.openAgentWebsite,
-    openApiKeyPage: platform.openApiKeyPage,
-    start: (config: StartConfig) => call<AppState>("start", { config }),
+    start: (config) => call("start", { config }),
+    setRequireProductionOs: (required) => call("set_require_production_os", { required }),
     saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
     completeAccountLogin: (id, callbackUrl) => call("complete_account_login", { id, callbackUrl }),
     beginAccountLogin: async (profile) => {
-      const login = await call<LoginPresentation>("begin_account_login", { profile });
-      platform.presentAccountLogin(login);
+      const login = await call("begin_account_login", { profile });
+      presentAccountLogin(login);
       return login;
     },
     pollAccountLogin: (id) => call("poll_account_login", { id }),
     saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => call("save_account_login", { id, profile, requireProductionOs, workspaceId }),
     getAccountDetails: (profileId) => call("get_account_details", { profileId }),
     getAccountBalance: (target) => call("get_account_balance", { target }),
-    openOrganization: platform.openOrganization,
-    openTopUp: platform.openTopUp,
     cancelAccountLogin: (id) => call("cancel_account_login", { id }),
-    activateProfile: (profileId) => call<AppState>("activate_profile", { profileId }),
-    deleteProfile: (profileId) => call<AppState>("delete_profile", { profileId }),
-    stop: () => call<AppState>("stop"),
-    queryUsage: (query: UsageQuery): Promise<UsagePage> => call("query_usage", { query }),
-    getUsageRecord: (recordId: string): Promise<RequestActivity> => call("get_usage_record", { recordId }),
-    listAgents: (): Promise<AgentStatus[]> => call("list_agents"),
-    getAgentAccess: (): Promise<AgentAccessStatus> => call("get_agent_access"),
-    requestAgentAccess: (): Promise<AgentAccessStatus> => call("request_agent_access"),
-    previewAgent: (agentId, connect, options): Promise<AgentPreview> => call("preview_agent", { agentId, connect, options }),
-    applyAgent: (agentId, connect, revision, options): Promise<AgentStatus> => call("apply_agent", { agentId, connect, revision, options }),
+    activateProfile: (profileId) => call("activate_profile", { profileId }),
+    deleteProfile: (profileId) => call("delete_profile", { profileId }),
+    stop: () => call("stop"),
+    queryUsage: (query) => call("query_usage", { query }),
+    getUsageRecord: (recordId) => call("get_usage_record", { recordId }),
+    getUsageReceipt: (recordId) => call("get_usage_receipt", { recordId }),
+    listAgents: () => call("list_agents"),
+    getAgentAccess: () => call("get_agent_access"),
+    requestAgentAccess: () => call("request_agent_access"),
+    setAgentConnection: (agentId, connect) => call("set_agent_connection", { agentId, connect }),
+    agentServiceRunning: (agentId) => call("agent_service_running", { agentId }),
+    stopAgentService: (agentId) => call("stop_agent_service", { agentId }),
+    ...platform,
   };
 }

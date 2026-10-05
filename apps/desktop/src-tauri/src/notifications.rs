@@ -1,48 +1,41 @@
-mod permission;
-use desktop_core::{client::CallError, config::NotificationPreferences, contracts::AppState};
+pub(crate) mod permission;
+use desktop_core::{
+    client::{CallError, Client},
+    config::NotificationPreferences,
+    contracts::{
+        AppState, NotificationPermission, NotificationPermissionStatus, VerificationStatus,
+    },
+    protocol::rpc,
+};
 use std::{
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
-#[derive(Default)]
-pub struct Settings(Mutex<NotificationPreferences>);
-
-#[derive(serde::Serialize)]
-pub struct Configuration {
-    preferences: NotificationPreferences,
-    #[serde(flatten)]
-    system: permission::PermissionStatus,
-}
-
-pub async fn configuration(
-    app: &AppHandle,
-    preferences: NotificationPreferences,
-) -> Result<serde_json::Value, String> {
-    serde_json::to_value(Configuration {
-        preferences,
-        system: permission::query(app).await,
-    })
-    .map_err(|_| "Management response failed".to_string())
-}
-
-pub fn set_cached_preferences(
-    app: &AppHandle,
-    preferences: NotificationPreferences,
-) -> Result<(), String> {
-    *app.state::<Settings>()
-        .0
-        .lock()
-        .map_err(|_| "Notification settings are unavailable")? = preferences;
-    Ok(())
+/// Asks for the system permission at startup while the backend's preferences
+/// have notifications on and the user has not decided yet, so alerts can show
+/// without opening Settings. Where the system has no prompt, it never opens
+/// anything. Returns whether the preferences could be read, which decides.
+pub async fn request_startup_permission(app: &AppHandle, client: &Arc<Client>) -> bool {
+    let Ok(settings) = desktop_core::ui_api::call(client, rpc::Settings).await else {
+        return false;
+    };
+    if settings.notifications.enabled
+        && permission::query(app).await.permission == NotificationPermission::NotDetermined
+    {
+        if let Err(error) = permission::request(app).await {
+            tracing::warn!("Cannot request notification permission: {error}");
+        }
+    }
+    true
 }
 
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::PermissionStatus, CallError> {
+) -> Result<NotificationPermissionStatus, CallError> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }
@@ -50,21 +43,23 @@ pub async fn request_notification_permission(
 #[tauri::command]
 pub fn open_notification_settings(app: AppHandle) -> Result<(), CallError> {
     use tauri_plugin_opener::OpenerExt;
-    let url = system_notification_settings()
-        .ok_or("Open Notifications in your desktop environment's settings.")?;
+    let url = if cfg!(target_os = "macos") {
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    } else if cfg!(target_os = "windows") {
+        "ms-settings:notifications"
+    } else {
+        return Err("Open Notifications in your desktop environment's settings.".into());
+    };
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| "Could not open system notification settings".into())
 }
 
-/// The system's notification settings page, where the platform has one.
-fn system_notification_settings() -> Option<&'static str> {
-    if cfg!(target_os = "macos") {
-        Some("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
-    } else if cfg!(target_os = "windows") {
-        Some("ms-settings:notifications")
-    } else {
-        None
+/// Reports an action the tray or the menu bar started, which has no window
+/// to show its failure in.
+pub fn show_failure(app: &AppHandle, title: &str, error: &str) {
+    if let Err(notification) = app.notification().builder().title(title).body(error).show() {
+        tracing::warn!("{title}: {error}; the notification failed too: {notification}");
     }
 }
 
@@ -93,7 +88,10 @@ impl Observer {
     ) -> Vec<(&'static str, &'static str)> {
         let faults = [
             !state.reconnecting
-                && (matches!(state.status.as_str(), "blocked" | "error") || state.error.is_some()),
+                && (matches!(
+                    state.status,
+                    VerificationStatus::Blocked | VerificationStatus::Error
+                ) || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
         let proof = if self.session == state.session_id {
@@ -135,7 +133,8 @@ impl Observer {
             .webview_windows()
             .values()
             .any(|window| window.is_focused().unwrap_or(true));
-        let Ok(config) = app.state::<Settings>().0.lock().map(|config| *config) else {
+        let preferences = app.state::<Mutex<NotificationPreferences>>();
+        let Ok(config) = preferences.lock().map(|config| *config) else {
             return;
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {
@@ -160,7 +159,7 @@ mod tests {
             gateway: false,
             ..Default::default()
         };
-        state.status = "error".into();
+        state.status = VerificationStatus::Error;
         assert!(observer.next(&state, true, config, now).is_empty());
         state.endpoint_error = Some("private detail".into());
         assert_eq!(observer.next(&state, true, config, now).len(), 1);

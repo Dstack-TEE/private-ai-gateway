@@ -8,7 +8,11 @@ on:
     branches:
       - main
     paths:
+      - '.github/workflows/desktop-release-please.yml'
       - 'apps/desktop/**'
+  # Refreshes the release PR after a merged PR's body changes, e.g. a
+  # BEGIN_COMMIT_OVERRIDE block, which pushes nothing.
+  workflow_dispatch:
 
 permissions: {}
 

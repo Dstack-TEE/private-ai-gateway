@@ -2,8 +2,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { MAC_APP_STORE_DISTRIBUTION, runtimeBuildVersion, takeDistributionArgument } from "./distribution.mjs";
-import { UNIVERSAL_MACOS_TARGET } from "./build-config.mjs";
+import { MAC_APP_STORE_DISTRIBUTION, runtimeBuildVersion, takeDistributionArgument, UNIVERSAL_MACOS_TARGET } from "./distribution.mjs";
 import { releaseConfig } from "./release-config.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

@@ -2,16 +2,15 @@
 
 Date: 2026-05-22 UTC.
 
-> **Historical audit snapshot.** The adapter and deployments changed after this
-> review. As of 2026-07-20, JEDI (SEV-SNP) and RYTN (TDX) expose canonical
-> evidence bound to the inference SPKI and pass the gateway verifier. The
-> implementation, current trust conditions, and limitations are documented in
-> [verification.md](verification.md). Statements below that the adapter is
-> deferred or that the channel binds a full certificate are superseded.
-
-> **Gateway verification:** not yet implemented — the SecretAI adapter is deferred
-> (see the roadmap). This review stands as the admissions audit; there is no
-> `verification.md` for SecretAI until the adapter lands.
+> [!NOTE]
+> This is a dated admissions audit, written before the gateway had a SecretAI
+> adapter. It records the evidence and decision from the date above, plus later
+> status notes that carry their own dates. Source paths refer to the repository
+> layout at the time. As of 2026-07-20, JEDI (SEV-SNP) and RYTN (TDX) expose
+> canonical evidence bound to the inference SPKI and pass the gateway verifier,
+> so statements below that the adapter is deferred or that the channel binds a
+> full certificate are superseded. Use [verification.md](verification.md) for
+> the adapter algorithm, claims, and limitations.
 
 Source repos reviewed:
 

@@ -8,19 +8,12 @@ use crate::contracts::{RequestActivity, UsageSummary};
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct UsageQuery {
-    #[serde(default)]
     pub agent: Option<String>,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
     pub since: Option<u64>,
-    #[serde(default)]
     pub until: Option<u64>,
-    #[serde(default)]
     pub cursor: Option<String>,
-    #[serde(default)]
     pub limit: Option<usize>,
 }
 

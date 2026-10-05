@@ -9,7 +9,9 @@
 //! custom-provider settings. Disconnecting never depends on the endpoint or
 //! the catalog, so current connections can be restored while offline.
 
+mod codex_service;
 mod discovery;
+mod dsh;
 mod error;
 mod projection;
 mod providers;
@@ -17,6 +19,7 @@ mod registry;
 mod transactions;
 mod validation;
 
+pub use codex_service::{CodexService, StopFailed};
 use discovery::*;
 pub use error::AgentError;
 use projection::*;
@@ -50,7 +53,7 @@ use desktop_core::{
 
 use crate::{
     catalog::{Catalog, Surface},
-    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, Format},
+    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, EntryKey, Format},
     secrets::SecretStore,
     tokens::{TokenFiles, TokenSet},
 };
@@ -110,6 +113,15 @@ struct Connection {
     options: ConnectOptions,
     #[serde(default)]
     attention: Option<String>,
+    /// The Local API endpoint the fields name. Reconcile projects a record
+    /// that names another one again, so an interrupted address change heals;
+    /// a record from before this field is taken to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    /// A YAML list config that was empty before the connection: restoring
+    /// the list to empty puts back exactly this rather than `[]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_original: Option<EmptyOriginal>,
     /// The agent is not authorized (disconnect in progress).
     disabled: bool,
     /// A disconnect started; the record stays until token, parked secrets,
@@ -154,13 +166,68 @@ impl Connection {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct OwnedField {
     path: Vec<String>,
     /// What the connection wrote; `None` when it made the key absent.
     #[serde(default)]
     value: Option<ConfigValue>,
     previous: Option<Previous>,
+    /// The keyed list item `path` is relative to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry: Option<OwnedEntry>,
+    /// Written only by adding a key or replacing a scalar, and restored byte
+    /// for byte: the added key is removed, or the scalar's `source` put back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact: bool,
+    /// The previous scalar's YAML source text, quoting included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// `value` is the SHA-256 of what was written ([`value_digest`]): a
+    /// credential the connection writes is never kept in the record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hashed: bool,
+    /// An empty mapping an exact field needed as its parent: kept while it
+    /// is a mapping, and removed on restore only while it is still empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    container: bool,
+}
+
+impl OwnedField {
+    /// Whether `current` is what the connection wrote.
+    fn holds(&self, current: Option<&ConfigValue>) -> bool {
+        if self.container {
+            matches!(current, Some(ConfigValue::Json(value)) if value.is_object())
+        } else if self.hashed {
+            current.is_some_and(|current| {
+                self.value.as_ref() == Some(&ConfigValue::Str(value_digest(current)))
+            })
+        } else {
+            current == self.value.as_ref()
+        }
+    }
+}
+
+/// The SHA-256 a hashed field journals in place of the value it wrote.
+fn value_digest(value: &ConfigValue) -> String {
+    hex::encode(Sha256::digest(value.to_json().to_string()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum EmptyOriginal {
+    /// The file did not exist.
+    Absent,
+    /// The file held only this whitespace.
+    Blank(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnedEntry {
+    #[serde(flatten)]
+    key: EntryKey,
+    /// The connection appended the item, so restoring removes it whole.
+    created: bool,
 }
 
 /// The value a field held before the connection. Sensitive values are parked
@@ -368,7 +435,7 @@ impl Projector {
             path.as_ref()
                 .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
         }
-        let (text, read_error) = self.config_text_at(agent, &path);
+        let (text, read_error) = self.config_text_at(&path);
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
@@ -470,6 +537,18 @@ struct Rollback {
     revoke_token: bool,
     secrets: Vec<(String, Option<String>)>,
     configs: Vec<(PathBuf, Option<String>)>,
+    /// Puts back a companion file the connection wrote.
+    companion: Option<selection::Edit>,
+}
+
+/// Remove `path` if it still holds `expected`.
+fn remove_unchanged(path: &Path, expected: Option<&str>) -> io::Result<()> {
+    if fs::read_to_string(path).ok().as_deref() != expected {
+        return Err(io::Error::other(
+            "The file changed while it was being restored",
+        ));
+    }
+    fs::remove_file(path)
 }
 
 /// SHA-256 over everything a preview was computed from: the config text, the

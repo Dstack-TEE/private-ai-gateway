@@ -9,7 +9,7 @@
 //!   `{"error": Error}` with the status of its [`ErrorCode`].
 //! - `GET /api/events` streams server-sent `ui_api::Event`s, starting with a
 //!   full state snapshot.
-use std::{fmt, path::Path};
+use std::path::Path;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,7 +48,7 @@ pub struct Version {
     pub executable: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum ShutdownMode {
     Quit,
@@ -64,6 +64,9 @@ pub trait Call: Into<Command> {
 /// `rpc::*` request per command. The backend answers each command with its
 /// declared response in an exhaustive match over `Command`. Every command
 /// takes a JSON object, so commands without parameters are empty structs.
+/// Each request's TypeScript type is its JSON parameters, from which
+/// `contracts.generated.ts` declares the renderer's `UiRequests`; a field's
+/// `#[ts(…)]` attributes apply only to its request.
 macro_rules! commands {
     (@parse [$($variant:tt)*] [$($request:tt)*] [$($name:ident)*]) => {
         /// A command as `{"command": name, "params": {…}}`: the name is the
@@ -105,12 +108,18 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name {},]
-            [$($request)* $(#[$meta])* pub struct $name;]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(type = "Record<string, never>")]
+                pub struct $name;]
             [$($names)* $name]
             $($rest)*);
     };
     (@parse [$($variant:tt)*] [$($request:tt)*] [$($names:ident)*]
-        $(#[$meta:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? } -> $response:ty;
+        $(#[$meta:meta])* $name:ident {
+            $($(#[$field_meta:meta])* $field:ident: $type:ty),* $(,)?
+        } -> $response:ty;
         $($rest:tt)*) => {
         impl From<rpc::$name> for Command {
             fn from(request: rpc::$name) -> Self {
@@ -122,7 +131,11 @@ macro_rules! commands {
         }
         commands!(@parse
             [$($variant)* $(#[$meta])* $name { $($field: $type),* },]
-            [$($request)* $(#[$meta])* pub struct $name { $(pub $field: $type),* }]
+            [$($request)*
+                $(#[$meta])*
+                #[derive(ts_rs::TS)]
+                #[ts(rename_all = "camelCase", optional_fields)]
+                pub struct $name { $($(#[$field_meta])* pub $field: $type),* }]
             [$($names)* $name]
             $($rest)*);
     };
@@ -136,21 +149,21 @@ macro_rules! commands {
 // `desktop_runtime::server::execute`. Browsers may call only the commands the
 // renderer method table (`ui_api::Method`) forwards.
 commands! {
-    GetState -> AppState;
-    Start { config: StartConfig } -> AppState;
-    Stop -> AppState;
+    GetState -> AppStateWire;
+    Start { config: StartConfig } -> AppStateWire;
+    Stop -> AppStateWire;
     /// Answered under exclusive lifecycle admission; the service then exits.
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> AppState;
+    } -> AppStateWire;
     SaveConfiguration {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         key: Option<String>,
-    } -> AppState;
+    } -> AppStateWire;
     CompleteAccountLogin { id: String, callback_url: String } -> ();
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
     /// Starts saving a signed-in account; poll `AccountSaveResult`.
@@ -166,9 +179,9 @@ commands! {
     GetAccountBalance { target: AccountBalanceTarget } -> Option<AccountBalance>;
     PollAccountLogin { id: String } -> Option<AccountLoginDetails>;
     CancelAccountLogin { id: String } -> ();
-    ActivateProfile { profile_id: String } -> AppState;
-    DeleteProfile { profile_id: String } -> AppState;
-    ClearApiKey -> AppState;
+    ActivateProfile { profile_id: String } -> AppStateWire;
+    DeleteProfile { profile_id: String } -> AppStateWire;
+    ClearApiKey -> AppStateWire;
     ImportProfiles { backup: ProfileBackup } -> ImportResult;
     ExportProfiles { path: String } -> ();
     ExportProfilesContent -> String;
@@ -176,15 +189,24 @@ commands! {
     ExportDiagnosticsContent -> String;
     QueryUsage { query: UsageQuery } -> UsagePage;
     GetUsageRecord { record_id: String } -> RequestActivity;
+    /// The signed receipt document a record's audit checked, exactly as the
+    /// service returned it; `None` when no receipt was fetched. An unknown
+    /// record is `not_found`.
+    GetUsageReceipt { record_id: String } -> Option<String>;
     ExportUsage { query: UsageQuery, path: String } -> usize;
     ClearUsage -> u64;
     GetClientKey -> String;
     RotateClientKey -> String;
-    SaveLocalApiConfig { config: ListenConfig } -> AppState;
-    SaveWebUi { config: WebUiConfig } -> AppState;
-    /// Set or clear the web UI sign-in password; every browser session ends.
-    SetWebUiPassword { password: Option<String> } -> AppState;
-    RefreshCatalog -> AppState;
+    SaveLocalApiConfig { config: ListenConfig } -> AppStateWire;
+    SaveWebUi { config: WebUiConfig } -> AppStateWire;
+    /// The web UI sign-in password; `None` while only the hash an earlier
+    /// version kept is set.
+    GetWebUiPassword -> Option<String>;
+    /// Replace the web UI password with a generated one; every browser session ends.
+    RotateWebUiPassword -> String;
+    /// Set a chosen web UI password; every browser session ends.
+    SetWebUiPassword { password: String } -> AppStateWire;
+    RefreshCatalog -> AppStateWire;
     ListAgents -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
     ApplyAgent {
@@ -193,11 +215,28 @@ commands! {
         revision: String,
         options: ConnectOptions,
     } -> AgentStatus;
+    /// Stops protection and saves whether it requires a production OS image;
+    /// the next start uses the saved policy.
+    SetRequireProductionOs { required: bool } -> AppStateWire;
+    /// Connects or disconnects an agent with the configuration a preview
+    /// would show, in one step.
+    SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
+    /// Whether the agent's background service is running, still with the
+    /// settings from before a connection change: Codex's managed app-server
+    /// daemon. `false` when the build cannot tell or stop it.
+    AgentServiceRunning { agent_id: String } -> bool;
+    /// Stops that service, ending the agent's running sessions; the agent
+    /// starts it again with the new settings the next time it opens.
+    StopAgentService { agent_id: String } -> ();
     DisconnectAllAgents -> Vec<AgentStatus>;
-    ResetSettings -> AppState;
+    ResetSettings -> AppStateWire;
     /// The settings in effect (`config.toml`); never includes a secret.
     Settings -> Config;
-    SetPreference { change: Preference } -> Config;
+    SetPreference {
+        // Only the backend sends it, so the renderer needs no type for it.
+        #[ts(skip)]
+        change: Preference,
+    } -> Config;
 }
 
 impl Command {
@@ -312,6 +351,9 @@ pub enum ErrorCode {
     Busy,
     /// The account service, or signing in to it, failed; the message is authored locally.
     AccountError,
+    /// The Confidential AI service could not be reached or is not one; the
+    /// message names the host and the reason.
+    ServiceConnectionFailed,
     /// The backend kept running; its log has the reason (errdefs System, INTERNAL).
     ShutdownRefused,
     /// An unexpected failure whose details stay in the service (errdefs System, INTERNAL).
@@ -351,7 +393,7 @@ impl ErrorCode {
             | Self::RevisionConflict => 409,
             Self::UnsupportedMediaType => 415,
             Self::TooManyRequests => 429,
-            Self::AccountError => 502,
+            Self::AccountError | Self::ServiceConnectionFailed => 502,
             Self::Busy => 503,
             Self::ShutdownRefused
             | Self::OperationFailed
@@ -372,8 +414,10 @@ const BUSY: &str = "Another operation is in progress. Retry after it completes."
 
 /// An API error: a stable code and a message authored for the user. Other
 /// failures convert from their text into [`ErrorCode::OperationFailed`], which
-/// never carries OS, SQL or provider details.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// never carries OS, SQL or provider details. It displays as the message; the
+/// code travels beside it in every serialized error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[error("{message}")]
 pub struct Error {
     pub code: ErrorCode,
     pub message: String,
@@ -412,15 +456,6 @@ impl Error {
         Self::new(ErrorCode::OperationFailed, OPERATION_FAILED)
     }
 }
-
-/// The message; the code travels beside it in every serialized error.
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl From<String> for Error {
     fn from(_: String) -> Self {

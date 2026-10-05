@@ -26,12 +26,20 @@ pub fn channel_name(channel: UpdateChannel) -> &'static str {
 
 /// Whether a release version may be published in `feed`. Stable releases are
 /// also published to the beta feed, so beta users receive them too.
-pub fn belongs_to_feed(version: &str, feed: UpdateChannel) -> bool {
-    let Ok(version) = semver::Version::parse(version) else {
-        return false;
-    };
+pub fn belongs_to_feed(version: &semver::Version, feed: UpdateChannel) -> bool {
     version.pre.is_empty()
         || feed == UpdateChannel::Beta && version.pre.as_str().starts_with("beta.")
+}
+
+/// Whether `release`, announced by `feed`, updates `current`: a newer release
+/// of the feed, never a reinstall or a downgrade (after switching from beta to
+/// stable, the stable feed may still announce an older release).
+pub fn offers_update(
+    current: &semver::Version,
+    release: &semver::Version,
+    feed: UpdateChannel,
+) -> bool {
+    release > current && belongs_to_feed(release, feed)
 }
 
 /// The channel of the running build, used until one is saved.
@@ -104,11 +112,10 @@ pub fn installation() -> Installation {
     };
     let directory = executable.parent().unwrap_or(Path::new(""));
     let desktop = directory
-        .join(if cfg!(windows) {
-            "private-ai-proxy-desktop.exe"
-        } else {
-            "private-ai-proxy-desktop"
-        })
+        .join(format!(
+            "private-ai-proxy-desktop{}",
+            std::env::consts::EXE_SUFFIX
+        ))
         .is_file();
     let package_manager = std::fs::read_to_string(PACKAGE_MANAGER_MARKER).ok();
     classify(
@@ -157,7 +164,6 @@ pub struct UpdateNotice {
     pub commands: Vec<String>,
     /// Portable archive to extract into a fresh directory.
     pub download_url: Option<String>,
-    pub channel_published: bool,
 }
 
 /// The desktop app's update check result for the renderer.
@@ -169,7 +175,6 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub channel: UpdateChannel,
     pub version: Option<String>,
-    pub channel_published: bool,
     /// Steps that install `version` when a package manager or the user owns
     /// the installation.
     pub upgrade_commands: Vec<String>,
@@ -198,14 +203,13 @@ pub async fn check(
         .build()
         .map_err(|_| "Could not check for updates")?;
     let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
-    let channel_published = published.is_some();
-    let latest = published.filter(|version| *version > current);
+    let latest = offers_update(&current, &published, channel).then_some(published);
     let (commands, download_url) = match &latest {
         Some(version) => upgrade_steps(
             installation,
             release_root(configured)?.as_str(),
             &version.to_string(),
-        ),
+        )?,
         None => (Vec::new(), None),
     };
     Ok(UpdateNotice {
@@ -215,24 +219,20 @@ pub async fn check(
         version: latest.map(|version| version.to_string()),
         commands,
         download_url,
-        channel_published,
     })
 }
 
-/// The version a feed announces, or `None` when the feed is not published.
+/// The version a feed announces.
 async fn published_version(
     client: &reqwest::Client,
     url: url::Url,
     feed: UpdateChannel,
-) -> Result<Option<semver::Version>, String> {
+) -> Result<semver::Version, String> {
     let response = client
         .get(url)
         .send()
         .await
         .map_err(|_| "Could not check for updates. Try again later.")?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
     if !response.status().is_success() {
         return Err("Could not check for updates. Try again later.".into());
     }
@@ -240,12 +240,12 @@ async fn published_version(
         .json()
         .await
         .map_err(|_| "The update feed is invalid")?;
-    if !belongs_to_feed(&manifest.version, feed) {
+    let version =
+        semver::Version::parse(&manifest.version).map_err(|_| "The update feed is invalid")?;
+    if !belongs_to_feed(&version, feed) {
         return Err("The update does not match the selected channel".into());
     }
-    semver::Version::parse(&manifest.version)
-        .map(Some)
-        .map_err(|_| "The update feed is invalid".into())
+    Ok(version)
 }
 
 /// Checks the release feeds for the running executable's installation.
@@ -260,12 +260,13 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
 }
 
 /// `root` and `version` come from the compiled feed and a parsed SemVer, so the
-/// steps contain no text from the downloaded manifest.
+/// steps contain no text from the downloaded manifest. Commands are POSIX
+/// shell words joined by `shlex`.
 fn upgrade_steps(
     installation: Installation,
     root: &str,
     version: &str,
-) -> (Vec<String>, Option<String>) {
+) -> Result<(Vec<String>, Option<String>), String> {
     let platform = if cfg!(windows) {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -279,41 +280,53 @@ fn upgrade_steps(
         "x64"
     };
     // Mirrors artifactName() in scripts/release-artifacts.mjs.
-    let asset = |cli: bool, suffix: &str| {
+    let name = |cli: bool, suffix: &str| {
         let kind = if cli { "-cli" } else { "" };
-        format!(
-            "{root}desktop-v{version}/private-ai-proxy{kind}-{version}-{platform}-{arch}{suffix}"
-        )
+        format!("private-ai-proxy{kind}-{version}-{platform}-{arch}{suffix}")
     };
-    let stop = "private-ai-proxy --yes service stop".to_string();
-    match installation {
+    let tag = format!("desktop-v{version}");
+    let asset =
+        |name: &str| -> Result<String, String> { Ok(crate::endpoint(root, &[&tag, name])?.into()) };
+    let command = |words: &[&str]| {
+        shlex::try_join(words.iter().copied())
+            .map_err(|_| "Cannot write the upgrade command".to_string())
+    };
+    let stop = command(&["private-ai-proxy", "--yes", "service", "stop"])?;
+    Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
         Installation::DesktopPacman => (
             vec![
                 stop,
-                format!("sudo pacman -U {}", asset(false, ".pkg.tar.zst")),
+                command(&[
+                    "sudo",
+                    "pacman",
+                    "-U",
+                    &asset(&name(false, ".pkg.tar.zst"))?,
+                ])?,
             ],
             None,
         ),
         Installation::Pacman => (
             vec![
                 stop,
-                format!("sudo pacman -U {}", asset(true, ".pkg.tar.zst")),
+                command(&["sudo", "pacman", "-U", &asset(&name(true, ".pkg.tar.zst"))?])?,
             ],
             None,
         ),
         Installation::Rpm => (
-            vec![stop, format!("sudo rpm -U {}", asset(true, ".rpm"))],
+            vec![
+                stop,
+                command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
+            ],
             None,
         ),
         Installation::Deb => {
-            let url = asset(true, ".deb");
-            let file = url.rsplit('/').next().unwrap_or_default().to_owned();
+            let file = name(true, ".deb");
             (
                 vec![
                     stop,
-                    format!("curl -fLO {url}"),
-                    format!("sudo apt install ./{file}"),
+                    command(&["curl", "-fLO", &asset(&file)?])?,
+                    command(&["sudo", "apt", "install", &format!("./{file}")])?,
                 ],
                 None,
             )
@@ -321,15 +334,23 @@ fn upgrade_steps(
         Installation::Npm => (
             vec![
                 stop,
-                format!("npm install --global private-ai-proxy@{version}"),
+                command(&[
+                    "npm",
+                    "install",
+                    "--global",
+                    &format!("private-ai-proxy@{version}"),
+                ])?,
             ],
             None,
         ),
         Installation::Portable => (
             Vec::new(),
-            Some(asset(true, if cfg!(windows) { ".zip" } else { ".tar.gz" })),
+            Some(asset(&name(
+                true,
+                if cfg!(windows) { ".zip" } else { ".tar.gz" },
+            ))?),
         ),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -341,12 +362,44 @@ mod tests {
 
     #[test]
     fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {
-        assert!(belongs_to_feed("0.2.0", UpdateChannel::Stable));
-        assert!(belongs_to_feed("0.2.0", UpdateChannel::Beta));
-        assert!(belongs_to_feed("0.2.0-beta.10", UpdateChannel::Beta));
-        assert!(!belongs_to_feed("0.2.0-beta.1", UpdateChannel::Stable));
-        assert!(!belongs_to_feed("0.2.0-rc.1", UpdateChannel::Beta));
-        assert!(!belongs_to_feed("invalid", UpdateChannel::Stable));
+        let belongs =
+            |version: &str, feed| belongs_to_feed(&semver::Version::parse(version).unwrap(), feed);
+        assert!(belongs("0.2.0", UpdateChannel::Stable));
+        assert!(belongs("0.2.0", UpdateChannel::Beta));
+        assert!(belongs("0.2.0-beta.10", UpdateChannel::Beta));
+        assert!(!belongs("0.2.0-beta.1", UpdateChannel::Stable));
+        assert!(!belongs("0.2.0-rc.1", UpdateChannel::Beta));
+    }
+
+    #[test]
+    fn only_newer_releases_of_the_feed_are_updates() {
+        let offers = |current: &str, release: &str, feed| {
+            offers_update(
+                &semver::Version::parse(current).unwrap(),
+                &semver::Version::parse(release).unwrap(),
+                feed,
+            )
+        };
+        use UpdateChannel::{Beta, Stable};
+        assert!(offers("0.2.0-beta.8", "0.2.0-beta.9", Beta));
+        assert!(
+            offers("0.2.0-beta.8", "0.2.0", Beta),
+            "beta follows a newer stable release"
+        );
+        assert!(offers("0.2.0-beta.8", "0.2.0", Stable));
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.8", Beta),
+            "no reinstall"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.7", Beta),
+            "no downgrade"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.1.9", Stable),
+            "switching to stable waits for a newer stable release"
+        );
+        assert!(!offers("0.2.0", "0.2.1-beta.1", Stable));
     }
 
     #[test]
@@ -415,6 +468,9 @@ mod tests {
         let root = release_root(FEED).expect("valid feed");
         let root = root.as_str();
         assert_eq!(root, "https://example.test/o/r/releases/download/");
+        let upgrade_steps = |installation, root, version| {
+            super::upgrade_steps(installation, root, version).unwrap()
+        };
         let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
             npm,

@@ -1,4 +1,4 @@
-export type Tone = "success" | "warning" | "danger" | "neutral";
+import type { Tone } from "../../shared/contracts";
 
 export const toneTextClass: Record<Tone, string> = {
   success: "text-primary",

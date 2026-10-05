@@ -12,63 +12,42 @@ impl SessionManager {
         }
 
         let mut load_catalog = false;
-        let mut end_session = false;
         let mut retired_task = None;
         match event {
-            // Identity in (or rotated): a new epoch; the session stays closed
-            // until the catalog read through this identity is in too.
             VerifierEvent::Ready {
                 identity,
                 remote_url,
                 service,
             } => {
-                apply_identity_event(&mut runtime.state, &identity);
                 runtime.state.remote_url = Some(remote_url);
                 runtime.service = Some(service);
-                runtime.identity_ready = true;
-                runtime.epoch += 1;
-                runtime.state.status = "verifying".to_string();
-                runtime.state.progress = Some("Reading the verified model list".to_string());
-                runtime.state.catalog = None;
+                runtime.identify(&identity);
                 load_catalog = true;
             }
             VerifierEvent::IdentityUpdated { identity } => {
-                apply_identity_event(&mut runtime.state, &identity);
-                runtime.identity_ready = true;
-                runtime.epoch += 1;
-                runtime.state.status = "verifying".to_string();
-                runtime.state.progress = Some("Reading the verified model list".to_string());
-                runtime.state.catalog = None;
+                runtime.identify(&identity);
                 load_catalog = true;
             }
-            // Verification lost: one atomic barrier. The epoch moves so a
-            // read still in flight can neither publish nor clear this error,
-            // and the identity must be reported again before anything opens.
+            // Verification lost: one atomic barrier (`lose_verification`).
+            // The session goes on, also across a restart, until the user
+            // stops it: agents stay pointed at the refusing Local API. A key
+            // set change retires the verifier for a fresh verification.
             VerifierEvent::Blocked { code, reason } => {
-                let rotating =
-                    code.as_deref() == Some("keyset_changed") && runtime.state.status != "blocked";
-                end_session = !rotating && !runtime.verification_only;
-                runtime.epoch += 1;
-                runtime.identity_ready = false;
-                runtime.state.status = if rotating { "error" } else { "blocked" }.to_string();
-                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
+                let rotating = code.as_deref() == Some("keyset_changed")
+                    && runtime.state.status != VerificationStatus::Blocked;
                 if rotating {
                     retired_task = runtime.task.take();
+                } else {
+                    runtime.state.status = VerificationStatus::Blocked;
                 }
-                runtime.state.progress = None;
-                runtime.state.catalog = None;
+                runtime.lose_verification();
                 runtime.state.error = Some(reason);
+                runtime.failure = None;
             }
-            VerifierEvent::Fatal { message } => {
-                runtime.epoch += 1;
-                runtime.identity_ready = false;
-                if runtime.state.status != "blocked" {
-                    runtime.state.status = "error".to_string();
-                }
-                runtime.state.reconnecting = crate::recovery::connection_intended(&runtime.state);
-                runtime.state.progress = None;
-                runtime.state.catalog = None;
-                runtime.state.error = Some(message);
+            VerifierEvent::Fatal { error } => {
+                runtime.lose_verification();
+                runtime.state.error = Some(error.to_string());
+                runtime.failure = Some(error);
             }
             VerifierEvent::Terminated { error } => {
                 drop(runtime);
@@ -77,7 +56,7 @@ impl SessionManager {
         }
 
         let epoch = runtime.epoch;
-        if runtime.state.status != "verified" {
+        if runtime.state.status != VerificationStatus::Verified {
             // Any state other than verified revokes the session at once.
             self.proxy.publish(Session {
                 generation,
@@ -86,11 +65,6 @@ impl SessionManager {
                 service: runtime.service.clone(),
                 ..Session::default()
             });
-        }
-        // Use the same runtime -> usage lock order as start_inner, so this
-        // blocked event cannot delete the resume marker of a newer Start.
-        if end_session && self.usage.end_session().is_err() {
-            tracing::warn!("Could not persist the end of a blocked protection session");
         }
         drop(runtime);
         if let Some(mut task) = retired_task {
@@ -106,14 +80,6 @@ impl SessionManager {
         }
         Ok(())
     }
-}
-
-/// Record the verifier's identity and checks; the status is decided by the
-/// caller once the catalog is in.
-pub(super) fn apply_identity_event(state: &mut AppState, event: &IdentityEvent) {
-    state.identity = Some(parse_identity(event));
-    state.checks = parse_checks(Some(&event.verification));
-    state.error = None;
 }
 
 pub(super) fn parse_identity(event: &IdentityEvent) -> ServiceIdentity {

@@ -1,11 +1,11 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, open_browser, service_provider, value, Cli};
+use super::{args::AccountLoginOptions, open_browser};
+use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
     contracts::*,
     protocol::rpc,
 };
-use serde_json::Value;
 use std::{
     io::{self, IsTerminal, Read, Write},
     time::{Duration, Instant},
@@ -31,9 +31,9 @@ impl Drop for Pending<'_> {
 
 pub(super) fn login(
     client: &Client,
-    cli: &Cli,
+    global: &Global,
     options: &AccountLoginOptions,
-) -> Result<Value, CallError> {
+) -> Result<AppStateWire, CallError> {
     Client::ensure_service()?;
     let state = client.state()?;
     let existing = state
@@ -42,7 +42,7 @@ pub(super) fn login(
         .find(|profile| profile.id == options.id);
     let provider = options
         .provider
-        .map(service_provider)
+        .map(Into::into)
         .or_else(|| existing.map(|p| p.provider))
         .unwrap_or(ServiceProvider::Redpill);
     if provider == ServiceProvider::Custom {
@@ -101,47 +101,7 @@ pub(super) fn login(
         }
         std::thread::sleep(Duration::from_millis(500));
     };
-    let workspace_id = if details.workspaces.is_empty() {
-        None
-    } else if let Some(id) = options.workspace {
-        if !details
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == id)
-        {
-            return Err("The requested workspace is not available to this account.".into());
-        }
-        Some(id)
-    } else if details.workspaces.len() == 1 {
-        Some(details.workspaces[0].id)
-    } else {
-        for workspace in &details.workspaces {
-            eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
-        }
-        if cli.non_interactive || cli.json || !io::stdin().is_terminal() {
-            return Err("Choose a workspace with --workspace <id> and retry login.".into());
-        }
-        eprint!("Workspace ID: ");
-        io::stderr()
-            .flush()
-            .map_err(|_| "Cannot show workspace prompt")?;
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|_| "Cannot read workspace selection")?;
-        let id = input
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| "Invalid workspace ID")?;
-        if !details
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == id)
-        {
-            return Err("Choose a listed workspace.".into());
-        }
-        Some(id)
-    };
+    let workspace_id = workspace(&details, options.workspace, global)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
     let initial = client.call(rpc::BeginAccountSave {
         operation_id: operation_id.clone(),
@@ -161,7 +121,7 @@ pub(super) fn login(
 
     loop {
         match result {
-            AccountSaveResult::Complete { state } => return value(state),
+            AccountSaveResult::Complete { state } => return Ok(*state),
             AccountSaveResult::Failed { error } => return Err(error.into()),
             AccountSaveResult::Running => {
                 std::thread::sleep(Duration::from_millis(500));
@@ -170,6 +130,54 @@ pub(super) fn login(
                 })?;
             }
         }
+    }
+}
+
+/// The account workspace to save: the requested one, the only one, or one
+/// the user picks from the listed workspaces.
+fn workspace(
+    details: &AccountLoginDetails,
+    requested: Option<i64>,
+    global: &Global,
+) -> Result<Option<i64>, String> {
+    let listed = |id| {
+        details
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == id)
+    };
+    match (requested, details.workspaces.as_slice()) {
+        (_, []) => return Ok(None),
+        (Some(id), _) if !listed(id) => {
+            return Err("The requested workspace is not available to this account.".into())
+        }
+        (Some(id), _) => return Ok(Some(id)),
+        (None, [only]) => return Ok(Some(only.id)),
+        (None, workspaces) => {
+            for workspace in workspaces {
+                eprintln!("{}: {}", workspace.id, workspace.name.escape_default());
+            }
+        }
+    }
+    if !global.interactive() {
+        return Err("Choose a workspace with --workspace <id> and retry login.".into());
+    }
+    eprint!("Workspace ID: ");
+    io::stderr()
+        .flush()
+        .map_err(|_| "Cannot show workspace prompt")?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| "Cannot read workspace selection")?;
+    let id = input
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "Invalid workspace ID")?;
+    if listed(id) {
+        Ok(Some(id))
+    } else {
+        Err("Choose a listed workspace.".into())
     }
 }
 
@@ -195,7 +203,7 @@ mod tests {
 
     #[test]
     fn oauth_login_supports_headless_callback_without_a_secret_argument() {
-        let parsed = super::super::Cli::try_parse_from([
+        let parsed = crate::Cli::try_parse_from([
             "private-ai-proxy",
             "--yes",
             "profiles",
@@ -209,16 +217,16 @@ mod tests {
             "--callback-stdin",
         ])
         .unwrap();
-        let super::super::Action::Profiles {
+        let crate::Command::Manage(super::super::Action::Profiles {
             command: super::super::Profiles::Login(options),
-        } = parsed.command
+        }) = parsed.command
         else {
             panic!("Expected login")
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
         assert!(options.no_browser && options.callback_stdin);
-        assert!(super::super::Cli::try_parse_from([
+        assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",
             "profiles",
             "login",

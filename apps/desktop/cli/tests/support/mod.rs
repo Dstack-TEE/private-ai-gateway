@@ -6,11 +6,13 @@
 //! stdin closes). It stops the backend through `service stop`, kills anything
 //! still running from the sandbox, and removes the sandbox.
 
+use serde_json::Value;
 use std::{
     env, fs,
     io::{self, Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
-    process::{ChildStdin, ChildStdout, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
     time::{Duration, Instant},
 };
 
@@ -302,4 +304,144 @@ fn sandbox_prefixes(root: &Path) -> Vec<String> {
         .into_iter()
         .map(|root| format!("{}{}", root.display(), std::path::MAIN_SEPARATOR))
         .collect()
+}
+
+/// Readiness is bounded only to fail a hung startup; loaded hosts are slow.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A backend in its own install tree and home. Dropping it stops every process
+/// started from that tree and removes it; see `support`.
+pub struct Backend {
+    pub directory: Sandbox,
+    child: Child,
+}
+
+impl Backend {
+    pub fn start() -> Self {
+        Self::start_with_credentials("")
+    }
+
+    /// Starts with `credentials` as `credentials.toml`, when not empty.
+    pub fn start_with_credentials(credentials: &str) -> Self {
+        let directory = Sandbox::new();
+        let binary = |name: &str| directory.path().join(executable(name));
+        install(
+            env!("CARGO_BIN_EXE_private-ai-proxy"),
+            &binary("private-ai-proxy"),
+        );
+        install(
+            env!("CARGO_BIN_EXE_private-ai-proxy-service"),
+            &binary("private-ai-proxy-service"),
+        );
+        // No test requests agent credentials. Keep this unused helper tiny:
+        // startup durably stages it, so copying a debug CLI would fsync hundreds
+        // of megabytes per backend before its management endpoint becomes ready.
+        let helper = binary("private-ai-proxy-helper");
+        fs::write(&helper, b"#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = directory.path().join("home");
+        let data = home.join(".private-ai-proxy");
+        let settings = data.join("Config");
+        desktop_core::private_fs::create_private_dir(&settings).unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        desktop_core::private_fs::write_private(
+            &settings.join("config.toml"),
+            &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
+        )
+        .unwrap();
+        if !credentials.is_empty() {
+            desktop_core::private_fs::write_private(
+                &settings.join("credentials.toml"),
+                credentials,
+            )
+            .unwrap();
+        }
+        let child = Command::new(binary("private-ai-proxy-service"))
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
+            .spawn()
+            .unwrap();
+        let mut backend = Self { directory, child };
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            let output = backend.command(&["status", "--json"]).output().unwrap();
+            if output.status.success() {
+                let state: Value = serde_json::from_slice(&output.stdout).unwrap();
+                if !state["backend"].is_null() {
+                    break;
+                }
+            }
+            assert!(
+                backend.child.try_wait().unwrap().is_none(),
+                "Backend exited during startup: {}",
+                backend.startup_diagnostics(&output)
+            );
+            assert!(
+                Instant::now() < deadline,
+                "Backend readiness timed out: {}",
+                backend.startup_diagnostics(&output)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        backend
+    }
+    fn startup_diagnostics(&self, output: &Output) -> String {
+        format!(
+            "status: {}; stdout: {}; stderr: {}; backend: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(self.directory.path().join("backend.log")).unwrap()
+        )
+    }
+    pub fn cli(&self) -> PathBuf {
+        self.directory.path().join(executable("private-ai-proxy"))
+    }
+    pub fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.cli());
+        command.args(args).env(
+            desktop_core::paths::HOME_OVERRIDE_ENV,
+            self.directory.path().join("home"),
+        );
+        command
+    }
+    pub fn run(&self, args: &[&str]) -> Value {
+        let output = self.command(args).arg("--json").output().unwrap();
+        assert_success(&output);
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.directory.close();
+        // Teardown already killed it; this only reaps the process.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Places a build output in a sandbox. A hard link avoids copying hundreds of
+/// megabytes of debug binaries per backend; the launcher still sees a sibling.
+pub fn install(source: &str, destination: &Path) {
+    if fs::hard_link(source, destination).is_err() {
+        fs::copy(source, destination).unwrap();
+    }
+}
+
+pub fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
