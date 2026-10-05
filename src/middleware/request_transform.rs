@@ -327,6 +327,12 @@ fn candidate_params(
         object.remove("max_tokens");
         object.remove("max_completion_tokens");
     }
+    // The Anthropic adapter already lifts system messages into `system`.
+    if candidate.format == ProviderFormat::Openai && candidate.hoist_system_messages {
+        if let Some(Value::Array(messages)) = object.get_mut("messages") {
+            normalize_system_messages(messages);
+        }
+    }
     let Some(effective) = effective else {
         return Ok(params);
     };
@@ -388,6 +394,62 @@ fn candidate_params(
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
+}
+
+/// Merge every `system`/`developer` message into one leading `system` message,
+/// for chat templates that accept a system prompt only at index 0. Each
+/// message's text is its string content or its text parts concatenated; the
+/// non-empty texts are joined by a blank line in message order. Other messages
+/// keep their order. A list that already conforms is left as is, and so is one
+/// whose system content is not plain text, which a single string cannot carry.
+fn normalize_system_messages(messages: &mut Vec<Value>) {
+    let conforms =
+        messages
+            .iter()
+            .enumerate()
+            .all(|(index, msg)| match str_or_empty(msg.get("role")) {
+                "system" => index == 0,
+                "developer" => false,
+                _ => true,
+            });
+    if conforms {
+        return;
+    }
+    let mut texts: Vec<String> = Vec::new();
+    for msg in messages
+        .iter()
+        .filter(|msg| is_system_role(str_or_empty(msg.get("role"))))
+    {
+        let text = match msg.get("content") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(text)) => text.clone(),
+            Some(Value::Array(parts)) => {
+                let mut text = String::new();
+                for part in parts {
+                    let part_text = part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .filter(|_| part.get("type").and_then(Value::as_str) == Some("text"));
+                    let Some(part_text) = part_text else {
+                        return;
+                    };
+                    text.push_str(part_text);
+                }
+                text
+            }
+            Some(_) => return,
+        };
+        if !text.is_empty() {
+            texts.push(text);
+        }
+    }
+    messages.retain(|msg| !is_system_role(str_or_empty(msg.get("role"))));
+    if !texts.is_empty() {
+        messages.insert(
+            0,
+            json!({ "role": "system", "content": texts.join("\n\n") }),
+        );
+    }
 }
 
 fn has_callable_tools(params: &Value, key: &str) -> bool {
@@ -2453,6 +2515,7 @@ mod tests {
         let shapeable = |id: &str| RouteCandidate {
             route_id: id.into(),
             supported_endpoints: Vec::new(),
+            hoist_system_messages: false,
             format: ProviderFormat::Openai,
             engine: None,
             reasoning_format: None,
@@ -2463,6 +2526,7 @@ mod tests {
         let unshapeable = RouteCandidate {
             route_id: "anthropic:a".into(),
             supported_endpoints: Vec::new(),
+            hoist_system_messages: false,
             format: ProviderFormat::Anthropic,
             engine: None,
             reasoning_format: None,
@@ -2579,6 +2643,7 @@ mod tests {
             RouteCandidate {
                 route_id: "openai:a".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: Some(ReasoningFormat::Reasoning),
@@ -2590,6 +2655,7 @@ mod tests {
             RouteCandidate {
                 route_id: "openai:b".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Openai,
                 engine: Some(Engine::Sglang),
                 reasoning_format: None,
@@ -2601,6 +2667,7 @@ mod tests {
             RouteCandidate {
                 route_id: "openai:c".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -2678,6 +2745,183 @@ mod tests {
         assert_eq!(bodies[0].1["max_tokens"], 2000);
     }
 
+    fn hoisting_candidate(hoist: bool) -> RouteCandidate {
+        let mut fields = json!({ "routeId": "qwen:m", "format": "openai", "engine": "sglang" });
+        if hoist {
+            fields["hoistSystemMessages"] = json!(true);
+        }
+        serde_json::from_value(fields).unwrap()
+    }
+
+    fn hoisted_messages(candidate: &RouteCandidate, messages: Value) -> Value {
+        let params = json!({ "model": "m", "messages": messages });
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            std::slice::from_ref(candidate),
+            None,
+            None,
+        )
+        .unwrap();
+        bodies[0].1["messages"].clone()
+    }
+
+    #[test]
+    fn hoist_system_messages_flag_is_optional_and_omitted_when_false() {
+        let plain = hoisting_candidate(false);
+        assert!(!plain.hoist_system_messages);
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("hoistSystemMessages")
+            .is_none());
+
+        let hoisting = hoisting_candidate(true);
+        assert!(hoisting.hoist_system_messages);
+        assert_eq!(
+            serde_json::to_value(&hoisting).unwrap()["hoistSystemMessages"],
+            true
+        );
+    }
+
+    #[test]
+    fn hoist_system_messages_leaves_conforming_or_unflagged_requests_unchanged() {
+        let late_system = json!([
+            { "role": "user", "content": "hi" },
+            { "role": "system", "content": "be brief" }
+        ]);
+        assert_eq!(
+            hoisted_messages(&hoisting_candidate(false), late_system.clone()),
+            late_system
+        );
+
+        let leading_system = json!([
+            { "role": "system", "content": "be brief", "name": "ops" },
+            { "role": "user", "content": "hi" }
+        ]);
+        assert_eq!(
+            hoisted_messages(&hoisting_candidate(true), leading_system.clone()),
+            leading_system
+        );
+
+        let no_system = json!([{ "role": "user", "content": "hi" }]);
+        assert_eq!(
+            hoisted_messages(&hoisting_candidate(true), no_system.clone()),
+            no_system
+        );
+    }
+
+    #[test]
+    fn hoist_system_messages_merges_system_and_developer_into_one_leading_system() {
+        let candidate = hoisting_candidate(true);
+        let messages = hoisted_messages(
+            &candidate,
+            json!([
+                { "role": "system", "content": "first" },
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "hello", "tool_calls": [] },
+                {
+                    "role": "developer",
+                    "name": "ops",
+                    "content": [
+                        { "type": "text", "text": "second ", "cache_control": { "type": "ephemeral" } },
+                        { "type": "text", "text": "part" }
+                    ]
+                },
+                { "role": "tool", "tool_call_id": "c1", "content": "42" },
+                { "role": "system", "content": "" },
+                { "role": "system", "content": [{ "type": "text", "text": "" }] },
+                { "role": "system", "content": "third" }
+            ]),
+        );
+        assert_eq!(
+            messages,
+            json!([
+                { "role": "system", "content": "first\n\nsecond part\n\nthird" },
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "hello", "tool_calls": [] },
+                { "role": "tool", "tool_call_id": "c1", "content": "42" }
+            ])
+        );
+
+        let developer_first = hoisted_messages(
+            &candidate,
+            json!([
+                { "role": "developer", "content": "rules" },
+                { "role": "user", "content": "hi" }
+            ]),
+        );
+        assert_eq!(
+            developer_first,
+            json!([
+                { "role": "system", "content": "rules" },
+                { "role": "user", "content": "hi" }
+            ])
+        );
+
+        let only_empty = hoisted_messages(
+            &candidate,
+            json!([
+                { "role": "user", "content": "hi" },
+                { "role": "system", "content": "" }
+            ]),
+        );
+        assert_eq!(only_empty, json!([{ "role": "user", "content": "hi" }]));
+    }
+
+    #[test]
+    fn hoist_system_messages_keeps_non_text_system_content_unchanged() {
+        let messages = json!([
+            { "role": "user", "content": "hi" },
+            {
+                "role": "system",
+                "content": [
+                    { "type": "text", "text": "look" },
+                    { "type": "image_url", "image_url": { "url": "https://example.com/a.png" } }
+                ]
+            }
+        ]);
+        assert_eq!(
+            hoisted_messages(&hoisting_candidate(true), messages.clone()),
+            messages
+        );
+    }
+
+    #[test]
+    fn hoist_system_messages_covers_responses_bridged_chat() {
+        let original = json!({
+            "model": "m",
+            "instructions": "be brief",
+            "input": [
+                { "type": "message", "role": "user", "content": "hi" },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "use tools" }]
+                }
+            ]
+        });
+        let chat = responses_to_chat_params(&original).unwrap();
+        let bodies = build_candidates(
+            &chat,
+            Endpoint::ChatComplete,
+            &[hoisting_candidate(true)],
+            None,
+            Some(ResponsesCandidateInput {
+                original: &original,
+                bridge_error: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(bodies[0].2, Endpoint::ChatComplete);
+        assert_eq!(
+            bodies[0].1["messages"],
+            json!([
+                { "role": "system", "content": "be brief\n\nuse tools" },
+                { "role": "user", "content": "hi" }
+            ])
+        );
+    }
+
     #[test]
     fn selected_reasoning_reconciles_chat_template_aliases() {
         for (engine, requested, controlled, original, expected) in [
@@ -2714,6 +2958,7 @@ mod tests {
             let candidate = RouteCandidate {
                 route_id: "self-hosted:m".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Openai,
                 engine: Some(engine),
                 reasoning_format: None,
@@ -3134,6 +3379,7 @@ mod tests {
             RouteCandidate {
                 route_id: "openai:m".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Openai,
                 engine: None,
                 reasoning_format: None,
@@ -3142,6 +3388,7 @@ mod tests {
             RouteCandidate {
                 route_id: "anthropic:m".into(),
                 supported_endpoints: Vec::new(),
+                hoist_system_messages: false,
                 format: ProviderFormat::Anthropic,
                 engine: None,
                 reasoning_format: None,

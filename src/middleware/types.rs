@@ -143,6 +143,10 @@ pub struct RouteCandidate {
     /// may still be served through a gateway conversion when one exists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_endpoints: Vec<String>,
+    /// Merge every `system`/`developer` chat message into one leading `system`
+    /// message, for chat templates that reject a system message elsewhere.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hoist_system_messages: bool,
 }
 
 impl RouteCandidate {

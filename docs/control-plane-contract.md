@@ -114,6 +114,7 @@ An allow response:
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
 | `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. A `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion, and the gateway converts the response back to the Responses shape. |
+| `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
 | `spendMode` | No | `regular`, `subscription`, or `subscription_overflow`. |
@@ -129,6 +130,26 @@ which the gateway encodes in the declared dialect. An explicit `reasoning` or
 `reasoning_effort` value wins over the switch. A `true` switch is not
 translated, because that would require the gateway to invent an effort level.
 Without a declared `reasoningFormat`, the gateway does not interpret the switch.
+
+### System message hoisting
+
+Some chat templates, including Qwen's, reject a `system` message anywhere but
+the first position. For a candidate with `hoistSystemMessages: true`, the
+gateway rewrites `messages` when a `system` message appears after index 0 or
+any `developer` message appears:
+
+1. It removes every `system` and `developer` message.
+2. It takes each removed message's text: string content as is, or the `text`
+   of its `text` parts concatenated. Other message fields, such as `name` and
+   `cache_control`, are dropped.
+3. It joins the non-empty texts with a blank line, in message order, into one
+   `system` message at index 0. When every text is empty, no `system` message
+   remains.
+
+Other messages keep their order and content. When a removed message has a part
+other than `text`, the gateway leaves `messages` unchanged and the upstream
+decides. Anthropic candidates ignore the flag, because the Anthropic adapter
+already moves these messages into `system`.
 
 ### Reasoning policy
 

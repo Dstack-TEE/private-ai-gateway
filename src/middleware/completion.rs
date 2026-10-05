@@ -1677,6 +1677,7 @@ mod tests {
         RouteCandidate {
             route_id: route_id.into(),
             supported_endpoints: Vec::new(),
+            hoist_system_messages: false,
             format,
             engine: None,
             reasoning_format: None,
