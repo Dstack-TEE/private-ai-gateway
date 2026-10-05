@@ -46,8 +46,8 @@ use private_ai_gateway::aci::receipt::{
 };
 use private_ai_gateway::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
-    OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
-    UpstreamBackend, UpstreamError, UpstreamRequest,
+    ModelRoute, ModelRouterBackend, OpenAICompatibleBackend, PrivatemodeProviderBackend,
+    PrivatemodeProxyDeployment, StreamingUsage, UpstreamBackend, UpstreamError, UpstreamRequest,
 };
 use private_ai_gateway::aci::verifier::{PrivatemodeProviderVerifier, StaticUpstreamVerifier};
 use private_ai_gateway::aggregator::service::{
@@ -770,6 +770,7 @@ fn privatemode_upstream_config(base_url: String, verifier_cache_seconds: u64) ->
         provider: UpstreamProvider::Privatemode,
         base_url,
         path: None,
+        streaming_usage: None,
         models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -980,6 +981,7 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
             provider: UpstreamProvider::OpenAiCompatible,
             base_url,
             path: None,
+            streaming_usage: Some(StreamingUsage::Continuous),
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("scoped-credential".to_string()),
             basic_auth: true,
@@ -1028,6 +1030,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
             path: None,
+            streaming_usage: Some(StreamingUsage::Continuous),
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
             basic_auth: false,
@@ -1055,7 +1058,8 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     let models: Value = serde_json::from_slice(&models_body).unwrap();
     assert_eq!(models["data"][0]["id"], "public-model");
 
-    let (status, headers, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
+    let (status, headers, body) =
+        call(app.clone(), "POST", "/v1/chat/completions", CHAT_REQUEST).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(body, CHAT_RESPONSE);
     let receipt_id = headers
@@ -1065,14 +1069,14 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
 
     let calls = provider_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    let call = &calls[0];
-    assert_eq!(call.path, "/v1/chat/completions");
+    let provider_call = &calls[0];
+    assert_eq!(provider_call.path, "/v1/chat/completions");
     assert_eq!(
-        call.authorization.as_deref(),
+        provider_call.authorization.as_deref(),
         Some("Bearer provider-secret")
     );
-    assert_eq!(call.accept.as_deref(), Some("application/json"));
-    let forwarded: Value = serde_json::from_slice(&call.body).unwrap();
+    assert_eq!(provider_call.accept.as_deref(), Some("application/json"));
+    let forwarded: Value = serde_json::from_slice(&provider_call.body).unwrap();
     assert_eq!(forwarded["model"], "provider-model");
 
     let receipt = service
@@ -1081,7 +1085,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     assert_eq!(receipt.chat_id.as_deref(), Some("chat-provider-1"));
     assert_eq!(
         receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
-        sha256_hex(&call.body)
+        sha256_hex(&provider_call.body)
     );
     // The `preverified` mode is an operator assertion made out of band: it pins
     // no channel, so §1.2 leaves nothing enforceable and §7.5 has no session to
@@ -1097,6 +1101,28 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     );
     assert!(upstream_verified.get("session_id").is_none());
 
+    assert!(
+        forwarded.get("stream_options").is_none(),
+        "nonstream remains unchanged"
+    );
+    drop(calls);
+    let stream_request = serde_json::to_vec(&json!({"model":"public-model", "stream":true,
+        "messages":[{"role":"user","content":"hello"}]}))
+    .unwrap();
+    let (status, headers, _) = call(app, "POST", "/v1/chat/completions", stream_request).await;
+    assert_eq!(status, StatusCode::OK);
+    let receipt_id = headers.get("x-receipt-id").unwrap().to_str().unwrap();
+    let calls = provider_calls.lock().unwrap();
+    let forwarded: Value = serde_json::from_slice(&calls[1].body).unwrap();
+    assert_eq!(
+        forwarded["stream_options"],
+        json!({"include_usage":true,"continuous_usage_stats":true})
+    );
+    let receipt = service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(
+        receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+        sha256_hex(&calls[1].body)
+    );
     let _ = std::fs::remove_file(path);
 }
 
@@ -1610,6 +1636,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
             path: None,
+            streaming_usage: Some(StreamingUsage::Continuous),
             models: BTreeMap::from([
                 ("public-model".to_string(), "provider-model".to_string()),
                 (
@@ -1705,6 +1732,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
             path: None,
+            streaming_usage: Some(StreamingUsage::Continuous),
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
             basic_auth: false,
@@ -2240,11 +2268,32 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         channel_bindings: vec![chutes_key_binding(&e2e_pubkey)],
         ..verified_event("chutes-provider", "provider-model")
     });
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "provider-model",
+                "provider-model",
+                Arc::new(backend),
+                "route",
+            )
+            .unwrap()
+            .with_is_tee(Some(true))
+            .with_streaming_usage(Some(StreamingUsage::Continuous)),
+        )
+        .unwrap();
+    let expected = router
+        .prepare(UpstreamRequest {
+            body: STREAM_CHAT_REQUEST.to_vec(),
+            path: Some("/v1/chat/completions".into()),
+            ..Default::default()
+        })
+        .unwrap();
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(backend),
+            Arc::new(router),
             Arc::new(verifier),
             Arc::new(InMemoryReceiptStore::default()),
             AciServiceConfig::for_test(),
@@ -2252,9 +2301,10 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         )
         .unwrap(),
     );
-    let app = build_router(service);
+    let app = build_router(service.clone());
 
-    let (status, _, body) = call(app, "POST", "/v1/chat/completions", STREAM_CHAT_REQUEST).await;
+    let (status, headers, body) =
+        call(app, "POST", "/v1/chat/completions", STREAM_CHAT_REQUEST).await;
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body).unwrap();
     assert!(body.contains(r#""id":"chat-provider-1""#));
@@ -2264,6 +2314,17 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].x_e2e_stream.as_deref(), Some("true"));
     assert_ne!(calls[0].body, STREAM_CHAT_REQUEST);
+    let plaintext = calls[0].decrypted_body.as_ref().unwrap();
+    assert_eq!(
+        plaintext["stream_options"],
+        json!({"include_usage":true,"continuous_usage_stats":true})
+    );
+    let receipt_id = headers.get("x-receipt-id").unwrap().to_str().unwrap();
+    let receipt = service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert_eq!(
+        receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+        sha256_hex(&expected.request.body)
+    );
 }
 
 #[tokio::test]

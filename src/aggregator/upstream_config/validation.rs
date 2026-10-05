@@ -172,6 +172,17 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.streaming_usage.is_some()
+            && upstream
+                .path
+                .as_deref()
+                .is_some_and(|path| !crate::aci::upstream::supports_streaming_usage(path))
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} streaming_usage requires an OpenAI chat/completions path",
+                upstream.name
+            )));
+        }
         if upstream.models.is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} must route at least one public model",

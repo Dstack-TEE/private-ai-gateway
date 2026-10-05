@@ -31,6 +31,7 @@ mod chutes;
 mod openai;
 mod privatemode;
 mod router;
+mod streaming_usage;
 mod tls;
 
 pub use chutes::{
@@ -42,6 +43,8 @@ pub use privatemode::{
     PrivatemodeDeploymentConfigError, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
 };
 pub use router::{ModelRoute, ModelRouterBackend};
+pub(crate) use streaming_usage::supports_streaming_usage;
+pub use streaming_usage::StreamingUsage;
 pub use tls::{observing_spki_client, SpkiObservations};
 
 use openai::request_model_id;

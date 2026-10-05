@@ -256,6 +256,7 @@ request time.
 | `path` | string | unset | Upstream path for chat requests. Leading `/` is added when missing. See [Chat request path](#chat-request-path). |
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
+| `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
 | `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, or optional SecretAI measured-workload pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
@@ -406,3 +407,21 @@ The repository entrypoint and deployment manifest also use:
 Provider credentials belong in the upstream config or the deployment mechanism
 that renders it. The live test harness reads its own provider key variables; see
 the [testing guide](live-e2e-test-suite.md).
+
+### Streaming usage policy
+
+Set `streaming_usage` on an upstream entry through the existing admin upstream
+configuration API. It applies to every model mapped by that entry, independently
+of its provider name. Enable `continuous` only after checking that the endpoint
+accepts the flag; acceptance does not guarantee partial usage frames.
+
+The policy preserves unrelated client stream options and forces the requested
+booleans true. `final` does not remove a continuous flag supplied by the client.
+Neither mode adds flags to nonstream requests, Responses, embeddings, or native
+Anthropic messages. When `path` is configured alongside the policy, it must end
+in `/chat/completions` or `/completions`.
+
+Existing configurations without this field keep their behavior: middleware
+continues requesting `include_usage`, while direct forwarding adds no new flags.
+Deploy gateway support before sending this field: older gateways reject unknown
+configuration fields. Removing the field restores the previous injection policy.

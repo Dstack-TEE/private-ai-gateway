@@ -8,8 +8,8 @@ use serde_json::json;
 
 use super::openai::{request_model_id, rewrite_request_model};
 use super::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    PreparedUpstreamRequest, StreamingUsage, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
@@ -24,6 +24,8 @@ pub struct ModelRoute {
     /// caller-supplied path. See [`ModelRouterBackend::prepare`] for the
     /// resolution.
     pub path: Option<String>,
+    /// Usage flags requested from this configured upstream deployment.
+    pub streaming_usage: Option<StreamingUsage>,
     /// Whether this route's provider is an attested (TEE) provider. `None`
     /// means unclassified and therefore ineligible for requests constrained by
     /// `provider.aci_verified`. See [`PreparedUpstreamRequest::is_tee`].
@@ -61,6 +63,7 @@ impl ModelRoute {
             upstream,
             route_id,
             path: None,
+            streaming_usage: None,
             is_tee: None,
         })
     }
@@ -74,6 +77,11 @@ impl ModelRoute {
             }
             p
         });
+        self
+    }
+
+    pub fn with_streaming_usage(mut self, policy: Option<StreamingUsage>) -> Self {
+        self.streaming_usage = policy;
         self
     }
 
@@ -194,6 +202,9 @@ impl UpstreamBackend for ModelRouterBackend {
                     .clone()
                     .unwrap_or_else(|| "/v1/chat/completions".to_string()),
             );
+        }
+        if let Some(policy) = route.streaming_usage {
+            policy.apply(&mut request)?;
         }
         Ok(PreparedUpstreamRequest {
             request,
@@ -316,6 +327,99 @@ mod tests {
 
         async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             Err(UpstreamError::Transport("not used".to_string()))
+        }
+    }
+
+    #[test]
+    fn streaming_usage_is_owned_by_the_selected_deployment() {
+        let mut router = ModelRouterBackend::new("router");
+        for (id, policy) in [
+            ("a", Some(StreamingUsage::Continuous)),
+            ("b", Some(StreamingUsage::Final)),
+            ("c", None),
+        ] {
+            router
+                .add_route(
+                    ModelRoute::new(
+                        "public",
+                        format!("model-{id}"),
+                        Arc::new(StubBackend { name: "fixture" }),
+                        id,
+                    )
+                    .unwrap()
+                    .with_streaming_usage(policy),
+                )
+                .unwrap();
+        }
+        let body = serde_json::to_vec(&json!({"model":"public", "stream":true,
+            "stream_options":{"include_usage":false,"continuous_usage_stats":false,"custom":7}}))
+        .unwrap();
+        for (id, include, continuous) in
+            [("a", true, true), ("b", true, false), ("c", false, false)]
+        {
+            let prepared = router
+                .prepare(UpstreamRequest {
+                    body: body.clone(),
+                    target_route_id: Some(id.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let actual: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+            assert_eq!(actual["model"], format!("model-{id}"));
+            assert_eq!(actual["stream_options"]["include_usage"], include);
+            assert_eq!(
+                actual["stream_options"]["continuous_usage_stats"],
+                continuous
+            );
+            assert_eq!(actual["stream_options"]["custom"], 7);
+        }
+    }
+
+    #[test]
+    fn streaming_usage_respects_wire_surface_and_stream_boolean() {
+        for (downstream, configured, eligible) in [
+            ("/v1/chat/completions", None, true),
+            ("/v1/messages", None, true),
+            ("/v1/messages", Some("/v1/messages"), false),
+            ("/v1/chat/completions", Some("/chat/completions"), true),
+            ("/v1/completions", None, true),
+            ("/v1/responses", None, false),
+            ("/v1/embeddings", None, false),
+        ] {
+            for stream in [json!(true), json!(false), json!("true"), json!(null)] {
+                let mut router = ModelRouterBackend::new("router");
+                router
+                    .add_route(
+                        ModelRoute::new(
+                            "public",
+                            "actual",
+                            Arc::new(StubBackend { name: "fixture" }),
+                            "a",
+                        )
+                        .unwrap()
+                        .with_path(configured.map(str::to_string))
+                        .with_streaming_usage(Some(StreamingUsage::Continuous)),
+                    )
+                    .unwrap();
+                let body = serde_json::to_vec(&json!({"model":"public", "stream":stream})).unwrap();
+                let prepared = router
+                    .prepare(UpstreamRequest {
+                        body,
+                        path: Some(downstream.into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let actual: serde_json::Value =
+                    serde_json::from_slice(&prepared.request.body).unwrap();
+                if eligible && stream == json!(true) {
+                    assert_eq!(
+                        actual["stream_options"],
+                        json!({"include_usage":true,"continuous_usage_stats":true})
+                    );
+                } else {
+                    assert!(actual.get("stream_options").is_none());
+                }
+            }
         }
     }
 
