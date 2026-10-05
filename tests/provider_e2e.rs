@@ -1067,45 +1067,46 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         .and_then(|value| value.to_str().ok())
         .expect("successful provider response must include x-receipt-id");
 
-    let calls = provider_calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let provider_call = &calls[0];
-    assert_eq!(provider_call.path, "/v1/chat/completions");
-    assert_eq!(
-        provider_call.authorization.as_deref(),
-        Some("Bearer provider-secret")
-    );
-    assert_eq!(provider_call.accept.as_deref(), Some("application/json"));
-    let forwarded: Value = serde_json::from_slice(&provider_call.body).unwrap();
-    assert_eq!(forwarded["model"], "provider-model");
+    {
+        let calls = provider_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let provider_call = &calls[0];
+        assert_eq!(provider_call.path, "/v1/chat/completions");
+        assert_eq!(
+            provider_call.authorization.as_deref(),
+            Some("Bearer provider-secret")
+        );
+        assert_eq!(provider_call.accept.as_deref(), Some("application/json"));
+        let forwarded: Value = serde_json::from_slice(&provider_call.body).unwrap();
+        assert_eq!(forwarded["model"], "provider-model");
 
-    let receipt = service
-        .get_receipt_by_receipt_id(receipt_id)
-        .expect("provider E2E response must persist a receipt");
-    assert_eq!(receipt.chat_id.as_deref(), Some("chat-provider-1"));
-    assert_eq!(
-        receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
-        sha256_hex(&provider_call.body)
-    );
-    // The `preverified` mode is an operator assertion made out of band: it pins
-    // no channel, so §1.2 leaves nothing enforceable and §7.5 has no session to
-    // cite. The receipt says exactly that rather than claiming a verified
-    // channel. The request is still served — this upstream is not TEE-only.
-    let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
-    assert_eq!(upstream_verified["model_id"], "provider-model");
-    assert_eq!(upstream_verified["result"], "failed");
-    assert_eq!(upstream_verified["required"], false);
-    assert_eq!(
-        upstream_verified["reason"],
-        "no enforceable verified binding"
-    );
-    assert!(upstream_verified.get("session_id").is_none());
+        let receipt = service
+            .get_receipt_by_receipt_id(receipt_id)
+            .expect("provider E2E response must persist a receipt");
+        assert_eq!(receipt.chat_id.as_deref(), Some("chat-provider-1"));
+        assert_eq!(
+            receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+            sha256_hex(&provider_call.body)
+        );
+        // The `preverified` mode is an operator assertion made out of band: it pins
+        // no channel, so §1.2 leaves nothing enforceable and §7.5 has no session to
+        // cite. The receipt says exactly that rather than claiming a verified
+        // channel. The request is still served — this upstream is not TEE-only.
+        let upstream_verified = receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED);
+        assert_eq!(upstream_verified["model_id"], "provider-model");
+        assert_eq!(upstream_verified["result"], "failed");
+        assert_eq!(upstream_verified["required"], false);
+        assert_eq!(
+            upstream_verified["reason"],
+            "no enforceable verified binding"
+        );
+        assert!(upstream_verified.get("session_id").is_none());
 
-    assert!(
-        forwarded.get("stream_options").is_none(),
-        "nonstream remains unchanged"
-    );
-    drop(calls);
+        assert!(
+            forwarded.get("stream_options").is_none(),
+            "nonstream remains unchanged"
+        );
+    }
     let stream_request = serde_json::to_vec(&json!({"model":"public-model", "stream":true,
         "messages":[{"role":"user","content":"hello"}]}))
     .unwrap();
