@@ -24,11 +24,12 @@ crate's form-encoded RFC 8628 client. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
 RedPill uses public OAuth client `cGrHCOWG3S91oa0A` on `clerk.redpill.ai` with
-a loopback callback `http://127.0.0.1:<port>/oauth/callback` on a port the OS
-assigns for each sign-in (RFC 8252 §7.3). Discovery must support code
-flow, S256 PKCE and public token exchange. The `oauth2` crate builds the
-authorization request (random state, S256 PKCE) and exchanges the code. The
-callback checks Host, state, unique code and the RFC 9207 issuer when present.
+the device authorization grant (RFC 8628); there is no local callback listener.
+Discovery must advertise the device code grant and public token exchange, and
+the device authorization and token endpoints must be on the issuer's origin.
+The `oauth2` crate requests the device code and polls the token endpoint,
+honoring pending, slowdown and expiry. The verification link must be on
+`https://accounts.redpill.ai`; the app shows it with the user code.
 Requests do not follow redirects. The requested scopes are
 `openid profile user:org:read`; no client secret or refresh token is used.
 Clerk tokens stay in runtime memory. Once the workspace is resolved,
@@ -150,35 +151,25 @@ tenant query parameters, credentials in URLs, automatic checkout, or payment
 mutation is used.
 
 
-## Callback fallback and CLI
+## Device code and CLI
 
-The browser callback uses the app's generated brand mark, system typography and
-light/dark appearance. It says Authorization received, not Connected: token
-exchange and local saving may still be pending. The page never echoes the code,
-state or error details; it has no scripts or external assets and sends no-store,
-no-referrer and restrictive CSP headers.
-
-If the automatic loopback redirect cannot reach this machine, expand Paste
-callback link in the RedPill account panel. Paste the complete URL from the
-browser. The runtime accepts only the registered callback origin/path, current
-state and optional issuer, using the same one-shot receiver and PKCE exchange as
-the HTTP callback. Wrong, expired and reused callbacks are rejected. The temporary
-password input is cleared immediately on submission and is not persisted. Copy
-sign-in link is available if the system browser launcher fails.
+Both providers show the verification link and user code in the account panel.
+The sign-in can be approved from any browser, including on another device, so a
+remote service machine needs no callback forwarding. Copy sign-in link is
+available if the system browser launcher fails.
 
 CLI account login shares the runtime authorization and save state:
 
 ```sh
 pap profiles login work --provider redpill
 pap profiles login personal --provider phala
-pap profiles login work --provider redpill --workspace 123 --no-browser --callback-stdin
+pap profiles login work --provider redpill --workspace 123 --no-browser
 pap start --profile work
 ```
 
-Login prints/opens the authorization URL. Multiple workspaces prompt in an
-interactive terminal; automation supplies --workspace. RedPill callback fallback
-reads a hidden terminal prompt or a bounded stdin stream, never a command-line
-credential argument. No-browser supports remote terminals. CLI JSON mode returns
+Login prints/opens the verification URL and prints the device code. Multiple
+workspaces prompt in an interactive terminal; automation supplies --workspace.
+No-browser supports remote terminals. CLI JSON mode returns
 non-secret profile state; login links/prompts go to stderr. A lost save response
 is reconciled by operation ID. Explicit `pap profiles verify` remains available;
 normal UI Save does not verify. Starting protection always performs attestation
@@ -220,14 +211,10 @@ Profile readiness means a saved credential is available, not that a previous
 verification timestamp exists. The main view, profile list, tray and CLI use that
 rule. Saving a profile does not perform attestation; starting protection does.
 
-RedPill authorization codes still return to the loopback callback and undergo
-state/issuer/PKCE checks. After receipt, the page offers an Open App button using
-`{bundle identifier}://oauth/return`. The Tauri deep-link plugin registers the
-scheme for the packaged app and integrates with single-instance handling. This
-link only focuses the app and open account editor; it carries no code or token
-and cannot finish authorization. CLI users can return to their terminal instead.
-Native scheme registration and browser-to-app focus require packaged platform
-acceptance; a browser may ask permission to open the application.
+Device authorization completes by polling, so the browser never returns to the
+app. The Tauri deep-link plugin still registers
+`{bundle identifier}://oauth/return`; that link only focuses the app and open
+account editor, carries no code or token and cannot finish authorization.
 
 Phala billing links use the workspace slug returned by `/private_ai/self`;
 `/cost` is Usage History and must not be used for topping up.

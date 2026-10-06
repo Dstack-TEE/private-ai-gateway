@@ -208,9 +208,6 @@ pub struct AccountLoginOptions {
     /// Workspace ID; required if the organization has several workspaces.
     #[arg(long)]
     pub workspace: Option<i64>,
-    /// Read a pasted loopback callback URL from stdin (RedPill only).
-    #[arg(long)]
-    pub callback_stdin: bool,
     /// Print the authorization URL without launching a browser.
     #[arg(long)]
     pub no_browser: bool,

@@ -12,30 +12,16 @@ use phala::*;
 pub(crate) use redpill::transition_credential;
 use redpill::*;
 
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::time::Duration;
 
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode, Uri},
-    response::Html,
-    routing::get,
-    Router,
-};
-use base64::{engine::general_purpose::STANDARD, Engine};
+use axum::http::StatusCode;
 use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
-    net::TcpListener,
-    sync::{oneshot, Mutex},
     task::JoinHandle,
     time::{timeout, Instant},
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 use uuid::Uuid;
 
@@ -43,7 +29,7 @@ use crate::Error;
 
 use desktop_core::account::LoginPresentation;
 #[cfg(test)]
-use desktop_core::account::{account_return_url, organization_url, top_up_url};
+use desktop_core::account::{organization_url, top_up_url};
 use desktop_core::contracts::{
     AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
     ConfidentialProfileInput, ProfileAuth, ServiceProvider,
@@ -51,20 +37,12 @@ use desktop_core::contracts::{
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
-const CALLBACK_PATH: &str = "/oauth/callback";
+/// Where Clerk's device authorization sends the user to enter the code.
+const VERIFICATION_ORIGIN: &str = "https://accounts.redpill.ai";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
 const ACCOUNT_URL: &str = "https://service.redpill.ai/api/oauth/account";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
-
-/// The loopback redirect URI for a callback listener bound to `address`.
-fn callback_url(address: SocketAddr) -> Result<Url, ()> {
-    let mut url = Url::parse("http://localhost").map_err(|_| ())?;
-    url.set_ip_host(address.ip())?;
-    url.set_port(Some(address.port()))?;
-    url.set_path(CALLBACK_PATH);
-    Ok(url)
-}
 
 #[derive(Clone)]
 pub(crate) struct Credential {
@@ -189,7 +167,6 @@ pub(crate) struct PendingLogin {
     state: LoginState,
     deadline: Instant,
     saved: bool,
-    callback: Option<Arc<CallbackState>>,
 }
 
 impl PendingLogin {
@@ -204,7 +181,6 @@ impl PendingLogin {
             state: LoginState::Authorizing(worker),
             deadline: Instant::now() + LOGIN_TIMEOUT,
             saved: false,
-            callback: None,
         }
     }
 
@@ -284,43 +260,6 @@ impl PendingLogin {
         Ok((provider, secret))
     }
 
-    pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), Error> {
-        self.validate(id)?;
-        let state = self.callback.as_ref().ok_or(Error::account(
-            "Account: This provider uses a device code, not a callback link.",
-        ))?;
-        if value.len() > 16384 {
-            return Err(Error::account("Account: Callback link is too long."));
-        }
-        let url = Url::parse(value.trim())
-            .map_err(|_| Error::account("Account: Paste the complete callback URL."))?;
-        if url.scheme() != "http"
-            || url.host() != Some(url::Host::Ipv4(Ipv4Addr::LOCALHOST))
-            || url.port() != Some(state.address.port())
-            || url.path() != CALLBACK_PATH
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(Error::account(
-                "Account: This callback URL does not match the current sign-in.",
-            ));
-        }
-        let uri: Uri = url[url::Position::BeforePath..url::Position::AfterQuery]
-            .parse()
-            .map_err(|_| Error::account("Account: Invalid callback URL."))?;
-        let mut headers = HeaderMap::new();
-        let host = state
-            .address
-            .to_string()
-            .parse()
-            .map_err(|_| Error::account("Account: Invalid callback URL."))?;
-        headers.insert("host", host);
-        state.accept(&uri, &headers).await.map_err(|_| {
-            Error::account("Account: This callback is invalid or has already been used.")
-        })
-    }
-
     pub fn profile_id(&self) -> &str {
         &self.profile.id
     }
@@ -367,7 +306,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
     profile.remote_url = desktop_core::config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
-    let (url, user_code, worker, callback_state) = match profile.provider {
+    let (url, user_code, worker) = match profile.provider {
         ServiceProvider::Phala => {
             let data = response(
                 client
@@ -397,7 +336,7 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                 .map_err(|_| "Authorization expired; reconnect the account".to_string())?
                 .map(Authorization::Inference)
             });
-            (url, Some(code), worker, None)
+            (url, Some(code), worker)
         }
         ServiceProvider::Redpill => {
             let discovery = response(client.get(desktop_core::endpoint(
@@ -406,53 +345,42 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
             )?))
             .await?;
             validate_discovery(&discovery)?;
-            // RFC 8252 §7.3: a loopback redirect on an OS-assigned port, which
-            // the authorization server must accept for any port.
-            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                .await
-                .map_err(|_| "Cannot open the connection callback listener")?;
-            let address = listener
-                .local_addr()
-                .map_err(|_| "Cannot open the connection callback listener")?;
             let oauth = redpill_client(
-                trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?,
-                trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?,
-                address,
-            )?;
+                DeviceAuthorizationUrl::from_url(trusted_url(
+                    &string(&discovery, "device_authorization_endpoint")?,
+                    ISSUER,
+                )?),
+                TokenUrl::from_url(trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?),
+            );
             let userinfo = desktop_core::endpoint(ISSUER, &["oauth", "userinfo"])?;
-            let (url, state, verifier) = authorization_request(&oauth);
-            let (sender, receiver) = oneshot::channel();
-            let callback = Arc::new(CallbackState {
-                expected: state.into_secret(),
-                address,
-                sender: Mutex::new(Some(sender)),
-            });
-            let worker_callback = callback.clone();
+            let device = device_authorization(&client, &oauth).await?;
+            let url = trusted_url(
+                device
+                    .verification_uri_complete()
+                    .map(|url| url.secret().as_str())
+                    .unwrap_or(device.verification_uri().as_str()),
+                VERIFICATION_ORIGIN,
+            )?
+            .to_string();
+            let code = device.user_code().secret().clone();
             let worker = tokio::spawn(async move {
                 timeout(LOGIN_TIMEOUT, async move {
-                    let code = receive_code(listener, worker_callback, receiver).await?;
-                    redpill(
-                        &client,
-                        &oauth,
-                        code,
-                        verifier,
-                        userinfo.as_str(),
-                        ACCOUNT_URL,
-                    )
-                    .await
+                    redpill(&client, &oauth, &device, userinfo.as_str(), ACCOUNT_URL).await
                 })
                 .await
                 .map_err(|_| "Authorization expired; reconnect the account".to_string())?
             });
-            (url.to_string(), None, worker, Some(callback))
+            (url, Some(code), worker)
         }
         ServiceProvider::Custom => {
             return Err("Account connection is only available for Phala and RedPill".into())
         }
     };
-    let mut pending = PendingLogin::new(LoginPresentation { id, url, user_code }, profile, worker);
-    pending.callback = callback_state;
-    Ok(pending)
+    Ok(PendingLogin::new(
+        LoginPresentation { id, url, user_code },
+        profile,
+        worker,
+    ))
 }
 
 #[cfg(test)]

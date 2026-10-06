@@ -43,11 +43,6 @@ pub(crate) async fn dispatch(
                 .save_configuration(profile, require_production_os, key)
                 .await,
         ),
-        Command::CompleteAccountLogin { id, callback_url } => {
-            respond::<rpc::CompleteAccountLogin, _>(
-                runtime.complete_account_login(id, callback_url).await,
-            )
-        }
         Command::BeginAccountLogin { profile } => {
             respond::<rpc::BeginAccountLogin, _>(runtime.begin_account_login(profile).await)
         }

@@ -164,7 +164,6 @@ commands! {
         require_production_os: bool,
         key: Option<String>,
     } -> AppStateWire;
-    CompleteAccountLogin { id: String, callback_url: String } -> ();
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
     /// Starts saving a signed-in account; poll `AccountSaveResult`.
     BeginAccountSave {

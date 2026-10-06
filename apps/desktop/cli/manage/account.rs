@@ -7,7 +7,7 @@ use desktop_core::{
     protocol::rpc,
 };
 use std::{
-    io::{self, IsTerminal, Read, Write},
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
@@ -51,9 +51,6 @@ pub(super) fn login(
                 .into(),
         );
     }
-    if options.callback_stdin && provider != ServiceProvider::Redpill {
-        return Err("Phala uses a browser device code; omit --callback-stdin.".into());
-    }
     let label = provider.label();
     let remote_url = provider
         .preset_url()
@@ -81,13 +78,6 @@ pub(super) fn login(
     }
     if !options.no_browser && open_browser(&login.url).is_err() {
         eprintln!("Browser did not open. Open the URL above manually.");
-    }
-    if options.callback_stdin {
-        let callback = read_callback()?;
-        client.call(rpc::CompleteAccountLogin {
-            id: login.id.clone(),
-            callback_url: callback,
-        })?;
     }
     let deadline = Instant::now() + Duration::from_secs(options.timeout);
     let details: AccountLoginDetails = loop {
@@ -181,28 +171,12 @@ fn workspace(
     }
 }
 
-fn read_callback() -> Result<String, String> {
-    if io::stdin().is_terminal() {
-        return rpassword::prompt_password("Paste callback URL: ")
-            .map_err(|_| "Cannot read callback URL".into());
-    }
-    let mut bytes = Vec::new();
-    io::stdin()
-        .take(16385)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read callback URL")?;
-    if bytes.len() > 16384 {
-        return Err("Callback URL is too long".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "Callback URL must be UTF-8".into())
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     #[test]
-    fn oauth_login_supports_headless_callback_without_a_secret_argument() {
+    fn oauth_login_supports_headless_device_code() {
         let parsed = crate::Cli::try_parse_from([
             "private-ai-proxy",
             "--yes",
@@ -214,7 +188,6 @@ mod tests {
             "--workspace",
             "123",
             "--no-browser",
-            "--callback-stdin",
         ])
         .unwrap();
         let crate::Command::Manage(super::super::Action::Profiles {
@@ -225,14 +198,13 @@ mod tests {
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
-        assert!(options.no_browser && options.callback_stdin);
+        assert!(options.no_browser);
         assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",
             "profiles",
             "login",
             "work",
-            "--callback-url",
-            "secret"
+            "--callback-stdin",
         ])
         .is_err());
     }

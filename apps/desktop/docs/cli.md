@@ -458,7 +458,7 @@ The browser UI degrades desktop-only integration:
 | OS notifications | Hidden. |
 | Software updates | Settings > About announces a newer release in the saved channel with the exact upgrade steps for the backend's installation; it never installs anything. |
 | CLI registration | Hidden. |
-| RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach the sign-in's loopback callback on the service machine. Phala device flow is unchanged. |
+| Account sign-in | RedPill and Phala both use a device code, so the sign-in can be approved from any browser; no callback reaches the service machine. |
 
 ### Remote Access
 

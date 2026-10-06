@@ -122,7 +122,7 @@ export type ServiceProvider = "phala" | "redpill" | "custom";
 /**
  * A provider as the profile editor presents it.
  */
-export type ServiceProviderInfo = { id: ServiceProvider, label: string, presetUrl: string | null, keyLabel: string, accountLogin: boolean, workspaces: boolean, callbackUrl: boolean, };
+export type ServiceProviderInfo = { id: ServiceProvider, label: string, presetUrl: string | null, keyLabel: string, accountLogin: boolean, workspaces: boolean, };
 export type ProfileAuth = { "kind": "apiKey" } | { "kind": "oauth", accountId: string, accountName?: string, images?: AccountImages, scope?: AccountScope, };
 export type AccountImages = { user: string | null, organization: string | null, };
 export type AccountScope = { organizationId?: string | null, organizationSlug?: string | null, organization: string | null, workspace: string | null, workspaceSlug?: string | null, workspaceId: number | null, };
@@ -324,7 +324,6 @@ export type UiRequests = {
   activate_profile: { profileId: string, };
   delete_profile: { profileId: string, };
   save_configuration: { profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string, };
-  complete_account_login: { id: string, callbackUrl: string, };
   begin_account_login: { profile: ConfidentialProfileInput, };
   poll_account_login: { id: string, };
   get_account_details: { profileId: string, };
@@ -372,7 +371,6 @@ export type UiResponses = {
   activate_profile: AppState;
   delete_profile: AppState;
   save_configuration: AppState;
-  complete_account_login: void;
   begin_account_login: LoginPresentation;
   poll_account_login: AccountLoginDetails | null;
   get_account_details: AccountLoginDetails;
@@ -426,7 +424,7 @@ export type UiEvent = keyof UiEventPayloads;
 export const ABOUT_LINKS: Record<AboutLink, string> = {"documentation":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md","github":"https://github.com/Dstack-TEE/private-ai-gateway","aci":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md"};
 export const AGENTS: ReadonlyArray<{ id: string, name: string, website: string }> = [{"id":"claude-code","name":"Claude Code","website":"https://code.claude.com"},{"id":"codex","name":"Codex","website":"https://developers.openai.com/codex/cli/"},{"id":"dsh","name":"DeepSeek Harness","website":"https://deepseek-harness.github.io/deepseek-harness/"},{"id":"hermes","name":"Hermes Agent","website":"https://hermes-agent.nousresearch.com"},{"id":"pi","name":"Pi","website":"https://pi.dev"},{"id":"oh-my-pi","name":"Oh My Pi","website":"https://omp.sh"},{"id":"opencode","name":"OpenCode","website":"https://opencode.ai"},{"id":"openclaw","name":"OpenClaw","website":"https://openclaw.ai"}];
 export const API_KEY_PAGES: Partial<Record<ServiceProvider, string>> = {"phala":"https://cloud.phala.com/dashboard","redpill":"https://www.redpill.ai/dashboard"};
-export const SERVICE_PROVIDERS: Readonly<Record<ServiceProvider, ServiceProviderInfo>> = {"phala":{"id":"phala","label":"Phala","presetUrl":"https://inference.phala.com","keyLabel":"Phala API key","accountLogin":true,"workspaces":false,"callbackUrl":false},"redpill":{"id":"redpill","label":"RedPill","presetUrl":"https://tee.redpill.ai","keyLabel":"RedPill API key","accountLogin":true,"workspaces":true,"callbackUrl":true},"custom":{"id":"custom","label":"Custom","presetUrl":null,"keyLabel":"API key","accountLogin":false,"workspaces":false,"callbackUrl":false}};
+export const SERVICE_PROVIDERS: Readonly<Record<ServiceProvider, ServiceProviderInfo>> = {"phala":{"id":"phala","label":"Phala","presetUrl":"https://inference.phala.com","keyLabel":"Phala API key","accountLogin":true,"workspaces":false},"redpill":{"id":"redpill","label":"RedPill","presetUrl":"https://tee.redpill.ai","keyLabel":"RedPill API key","accountLogin":true,"workspaces":true},"custom":{"id":"custom","label":"Custom","presetUrl":null,"keyLabel":"API key","accountLogin":false,"workspaces":false}};
 export const DEFAULT_SERVICE_PROVIDER: ServiceProvider = "redpill";
 export const BYLINE: string = "by dstack TEE";
 export const INITIAL_STATE: AppState = {"sequence":0,"clientKeyRevision":0,"status":"stopped","configurationVerification":false,"checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4180},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"","credentialsPath":"","warnings":[],"revision":0},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}};

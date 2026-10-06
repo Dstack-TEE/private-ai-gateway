@@ -1,4 +1,9 @@
 use super::*;
+use std::sync::Arc;
+
+use axum::{http::HeaderMap, routing::get, Router};
+use tokio::net::TcpListener;
+use tokio_util::task::AbortOnDropHandle;
 
 #[test]
 fn account_presentation_uses_clerk_identity_and_restricts_avatar_sources() {
@@ -284,104 +289,6 @@ fn structured_account_errors_survive_the_management_boundary_without_raw_details
     assert!(!public.message.contains("secret"));
 }
 
-#[tokio::test]
-async fn pasted_callback_is_bound_to_session_and_consumed_once() {
-    let profile = ConfidentialProfileInput {
-        id: "test".into(),
-        name: "Test".into(),
-        provider: ServiceProvider::Redpill,
-        remote_url: "https://tee.redpill.ai".into(),
-    };
-    let mut pending = PendingLogin::new(
-        LoginPresentation {
-            id: "login".into(),
-            url: "https://clerk.redpill.ai".into(),
-            user_code: None,
-        },
-        profile,
-        tokio::spawn(std::future::pending()),
-    );
-    let (sender, receiver) = oneshot::channel();
-    pending.callback = Some(Arc::new(CallbackState {
-        expected: "expected".into(),
-        address: "127.0.0.1:50123".parse().unwrap(),
-        sender: Mutex::new(Some(sender)),
-    }));
-    for url in [
-        "https://attacker.test/oauth/callback?state=expected&code=secret",
-        "http://127.0.0.1:50124/oauth/callback?state=expected&code=secret",
-        "http://127.0.0.1:50123/oauth/callback?state=wrong&code=secret",
-        "http://127.0.0.1:50123/other?state=expected&code=secret",
-        "http://127.0.0.1:50123/oauth/callback?state=expected&state=expected&code=secret",
-    ] {
-        assert!(pending.complete_callback("login", url).await.is_err());
-    }
-    let url = "http://127.0.0.1:50123/oauth/callback?state=expected&code=secret";
-    assert!(pending.complete_callback("other-login", url).await.is_err());
-    pending.complete_callback("login", url).await.unwrap();
-    assert_eq!(receiver.await.unwrap().unwrap(), "secret");
-    assert!(pending.complete_callback("login", url).await.is_err());
-    assert!(!callback_page(true).contains("secret"));
-    assert!(callback_page(true).contains(&account_return_url()));
-    assert!(!callback_page(false).contains(&account_return_url()));
-    let return_url = Url::parse(&account_return_url()).unwrap();
-    assert!(return_url.query().is_none() && return_url.fragment().is_none());
-}
-
-#[test]
-fn callback_pages_need_no_escaping() {
-    // The pages include these unescaped, as compile-time constants.
-    use desktop_core::brand::{APP_IDENTIFIER, BYLINE, PRODUCT_NAME};
-    for text in [APP_IDENTIFIER, BYLINE, PRODUCT_NAME] {
-        assert!(!text.contains(['&', '<', '>', '"', '\'']), "{text}");
-    }
-    // The icon's base64 goes inside a double-quoted attribute unescaped.
-    assert!(STANDARD
-        .encode(CALLBACK_ICON)
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')));
-    for accepted in [true, false] {
-        let page = callback_page(accepted);
-        assert!(page.starts_with("<!doctype html>") && page.ends_with("</html>\n"));
-        assert!(page.contains("<img src=\"data:image/png;base64,iVBORw0KGgo"));
-        assert!(page.contains(&format!(
-            "<title>{}",
-            if accepted {
-                "Authorization received"
-            } else {
-                "Account connection could not complete"
-            }
-        )));
-    }
-}
-
-#[test]
-fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
-    let address = "127.0.0.1:50123".parse().unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert("host", "127.0.0.1:50123".parse().unwrap());
-    let valid: Uri =
-        "/oauth/callback?state=expected&code=one-use&iss=https%3A%2F%2Fclerk.redpill.ai"
-            .parse()
-            .unwrap();
-    assert_eq!(
-        callback_code(&valid, &headers, "expected", address).unwrap(),
-        "one-use"
-    );
-    for query in [
-        "state=wrong&code=x",
-        "state=expected&state=other&code=x",
-        "state=expected&code=x&code=y",
-        "state=expected&code=x&iss=https://attacker.invalid",
-        "state=expected&code=x&iss=https://clerk.redpill.ai&iss=https://attacker.invalid",
-    ] {
-        let uri = format!("/oauth/callback?{query}").parse().unwrap();
-        assert!(callback_code(&uri, &headers, "expected", address).is_err());
-    }
-    headers.insert("host", "attacker.invalid:50123".parse().unwrap());
-    assert!(callback_code(&valid, &headers, "expected", address).is_err());
-}
-
 #[test]
 fn authorization_urls_cannot_redirect_credentials_to_another_origin() {
     for url in [
@@ -396,45 +303,56 @@ fn authorization_urls_cannot_redirect_credentials_to_another_origin() {
 }
 
 #[test]
-fn unsupported_pkce_discovery_fails_closed() {
-    let mut discovery = json!({"issuer":ISSUER,"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]});
+fn discovery_without_device_authorization_fails_closed() {
+    let mut discovery = json!({"issuer":ISSUER,"grant_types_supported":["authorization_code","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"]});
     assert!(validate_discovery(&discovery).is_ok());
-    discovery["code_challenge_methods_supported"] = json!(["plain"]);
+    discovery["grant_types_supported"] = json!(["authorization_code"]);
     assert!(validate_discovery(&discovery).is_err());
 }
 
-#[tokio::test]
-async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
+/// A Clerk stand-in: device authorization, then one pending poll before the
+/// token, or the token endpoint's `rejection` on every poll.
+async fn device_server(rejection: Option<&'static str>) -> (String, AbortOnDropHandle<()>) {
     use axum::{routing::post, Form, Json};
-    // The loopback callback on an OS-assigned port (RFC 8252 §7.3).
-    let callback_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let callback_address = callback_listener.local_addr().unwrap();
-    let challenge = Arc::new(std::sync::Mutex::new(String::new()));
-    let expected_challenge = challenge.clone();
-    let token = post(
-        move |Form(form): Form<std::collections::HashMap<String, String>>| {
-            let challenge = expected_challenge.lock().unwrap().clone();
-            async move {
-                assert_eq!(form["grant_type"], "authorization_code");
-                assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
-                assert_eq!(
-                    form["redirect_uri"],
-                    callback_url(callback_address).unwrap().as_str()
-                );
-                assert_eq!(form["code"], "one-use");
-                let verifier = Sha256::digest(form["code_verifier"].as_bytes());
-                assert_eq!(
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifier),
-                    challenge
-                );
-                Json(
-                    json!({"access_token": "clerk-access", "token_type": "Bearer", "expires_in": 60}),
-                )
-            }
-        },
-    );
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    type Fields = Form<std::collections::HashMap<String, String>>;
+    let polls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
-        .route("/oauth/token", token)
+        .route(
+            "/oauth/device_authorization",
+            post(|Form(form): Fields| async move {
+                assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
+                assert_eq!(form["scope"], "openid profile user:org:read");
+                Json(json!({
+                    "device_code": "device-secret", "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://accounts.redpill.ai/device",
+                    "verification_uri_complete": "https://accounts.redpill.ai/device?user_code=ABCD-EFGH",
+                    "expires_in": 600, "interval": 1
+                }))
+            }),
+        )
+        .route(
+            "/oauth/token",
+            post(move |Form(form): Fields| {
+                let poll = polls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(form["grant_type"], "urn:ietf:params:oauth:grant-type:device_code");
+                    assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
+                    assert_eq!(form["device_code"], "device-secret");
+                    let error = rejection.or((poll == 0).then_some("authorization_pending"));
+                    match error {
+                        Some(error) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": error, "error_description": "secret-detail"})),
+                        ),
+                        None => (
+                            StatusCode::OK,
+                            Json(json!({"access_token": "clerk-access", "token_type": "Bearer", "expires_in": 60})),
+                        ),
+                    }
+                }
+            }),
+        )
         .route(
             "/oauth/userinfo",
             get(|headers: HeaderMap| async move {
@@ -454,57 +372,30 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let _server = AbortOnDropHandle::new(tokio::spawn(
-        async move { axum::serve(listener, app).await },
-    ));
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    (base, server)
+}
 
-    let oauth = redpill_client(
-        Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
-        Url::parse(&format!("{base}/oauth/token")).unwrap(),
-        callback_address,
+fn device_client(base: &str) -> RedpillClient {
+    redpill_client(
+        DeviceAuthorizationUrl::new(format!("{base}/oauth/device_authorization")).unwrap(),
+        TokenUrl::new(format!("{base}/oauth/token")).unwrap(),
     )
-    .unwrap();
-    let (url, state, verifier) = authorization_request(&oauth);
-    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    assert_eq!(url.origin().ascii_serialization(), ISSUER);
-    assert_eq!(query["response_type"], "code");
-    assert_eq!(query["response_mode"], "query");
-    assert_eq!(query["client_id"], REDPILL_CLIENT_ID);
-    assert_eq!(
-        query["redirect_uri"],
-        callback_url(callback_address).unwrap().as_str()
-    );
-    assert_eq!(query["scope"], "openid profile user:org:read");
-    assert_eq!(query["code_challenge_method"], "S256");
-    assert_eq!(query["state"], *state.secret());
-    *challenge.lock().unwrap() = query["code_challenge"].clone();
+}
 
-    // The browser redirect reaches the loopback callback.
-    let (sender, receiver) = oneshot::channel();
-    let callback = Arc::new(CallbackState {
-        expected: state.secret().clone(),
-        address: callback_address,
-        sender: Mutex::new(Some(sender)),
-    });
-    let code = tokio::spawn(receive_code(callback_listener, callback, receiver));
-    let redirect = client()
-        .unwrap()
-        .get(format!(
-            "http://{callback_address}/oauth/callback?state={}&code=one-use&iss={}",
-            state.secret(),
-            url::form_urlencoded::byte_serialize(ISSUER.as_bytes()).collect::<String>()
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(redirect.status(), StatusCode::OK);
-    let code = code.await.unwrap().unwrap();
-
+#[tokio::test]
+async fn redpill_device_flow_polls_until_the_user_approves() {
+    let (base, _server) = device_server(None).await;
+    let client = client().unwrap();
+    let oauth = device_client(&base);
+    let device = device_authorization(&client, &oauth).await.unwrap();
+    assert_eq!(device.user_code().secret(), "ABCD-EFGH");
     let authorization = redpill(
-        &client().unwrap(),
+        &client,
         &oauth,
-        code,
-        verifier,
+        &device,
         &format!("{base}/oauth/userinfo"),
         &format!("{base}/api/oauth/account"),
     )
@@ -522,45 +413,23 @@ async fn redpill_code_flow_binds_state_issuer_and_pkce_to_one_exchange() {
 }
 
 #[tokio::test]
-async fn redpill_token_errors_never_echo_the_response() {
-    let app = Router::new().route(
-        "/oauth/token",
-        axum::routing::post(|| async {
-            (
-                StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "invalid_grant", "error_description": "secret-detail"})),
-            )
-        }),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let _server = AbortOnDropHandle::new(tokio::spawn(
-        async move { axum::serve(listener, app).await },
-    ));
-    let oauth = redpill_client(
-        Url::parse(&format!("{ISSUER}/oauth/authorize")).unwrap(),
-        Url::parse(&format!("{base}/oauth/token")).unwrap(),
-        "127.0.0.1:50123".parse().unwrap(),
-    )
-    .unwrap();
-    let (_, _, verifier) = authorization_request(&oauth);
-    let error = redpill(
-        &client().unwrap(),
-        &oauth,
-        "used".into(),
-        verifier,
-        &base,
-        &base,
-    )
-    .await
-    .err()
-    .unwrap();
-    let error = error.to_string();
-    assert!(
-        error.starts_with("Account: Service rejected the request"),
-        "{error}"
-    );
-    assert!(!error.contains("secret"));
+async fn redpill_device_errors_never_echo_the_response() {
+    for (rejection, message) in [
+        ("access_denied", "Account: Authorization was declined."),
+        ("invalid_grant", "Account: Service rejected the request"),
+    ] {
+        let (base, _server) = device_server(Some(rejection)).await;
+        let client = client().unwrap();
+        let oauth = device_client(&base);
+        let device = device_authorization(&client, &oauth).await.unwrap();
+        let error = redpill(&client, &oauth, &device, &base, &base)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.starts_with(message), "{error}");
+        assert!(!error.contains("secret"));
+    }
 }
 
 #[test]

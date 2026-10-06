@@ -145,17 +145,6 @@ impl DesktopRuntime {
         self.finish_configuration(saved)
     }
 
-    pub async fn complete_account_login(
-        &self,
-        id: String,
-        callback_url: String,
-    ) -> Result<(), Error> {
-        self.pending_login()
-            .await?
-            .complete_callback(&id, &callback_url)
-            .await
-    }
-
     pub async fn account_details(&self, profile_id: String) -> Result<AccountLoginDetails, Error> {
         let state = self.state();
         let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
