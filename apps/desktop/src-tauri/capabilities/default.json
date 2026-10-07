@@ -32,7 +32,6 @@
     "allow-start",
     "allow-stop",
     "allow-set-require-production-os",
-    "allow-complete-account-login",
     "allow-begin-account-login",
     "allow-poll-account-login",
     "allow-save-account-login",

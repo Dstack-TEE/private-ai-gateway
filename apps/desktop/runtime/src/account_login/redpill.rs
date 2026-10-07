@@ -1,50 +1,14 @@
 use super::*;
 use desktop_core::private_fs;
 use oauth2::{
-    basic::{BasicClient, BasicErrorResponse},
-    AuthUrl, AuthorizationCode, ClientId, CsrfToken, EndpointNotSet, EndpointSet,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope, TokenResponse,
-    TokenUrl,
+    basic::BasicClient, ClientId, EndpointNotSet, EndpointSet, ErrorResponseType,
+    RequestTokenError, Scope, StandardDeviceAuthorizationResponse, StandardErrorResponse,
+    TokenResponse,
 };
+pub(super) use oauth2::{DeviceAuthorizationUrl, TokenUrl};
 
-impl CallbackState {
-    pub(super) async fn accept(&self, uri: &Uri, headers: &HeaderMap) -> Result<(), CallbackError> {
-        let result = match callback_code(uri, headers, &self.expected, self.address) {
-            Ok(code) => Ok(code),
-            Err(CallbackError::Declined) => {
-                Err(Error::account("Account: Authorization was declined."))
-            }
-            Err(error) => return Err(error),
-        };
-        let declined = result.is_err();
-        let sender = self
-            .sender
-            .lock()
-            .await
-            .take()
-            .ok_or(CallbackError::Invalid)?;
-        sender.send(result).map_err(|_| CallbackError::Invalid)?;
-        if declined {
-            Err(CallbackError::Declined)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum CallbackError {
-    Invalid,
-    Declined,
-}
-
-pub(super) struct CallbackState {
-    pub(super) expected: String,
-    /// The loopback address the callback listener bound; its port is in the
-    /// redirect URI.
-    pub(super) address: SocketAddr,
-    pub(super) sender: Mutex<Option<oneshot::Sender<Result<String, Error>>>>,
-}
+/// The device authorization grant (RFC 8628) Clerk advertises in discovery.
+const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 pub(crate) async fn transition_credential(
     provider: &ServiceProvider,
@@ -116,38 +80,17 @@ pub(super) fn installation_id(profile_id: &str) -> Result<Uuid, Error> {
 /// The RedPill public client: no secret, so `oauth2` sends the client ID in
 /// the token request body (RFC 6749 §2.3.1 does not apply).
 pub(super) type RedpillClient =
-    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+    BasicClient<EndpointNotSet, EndpointSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
-pub(super) fn redpill_client(
-    authorize: Url,
-    token: Url,
-    callback: SocketAddr,
-) -> Result<RedpillClient, Error> {
-    Ok(BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
-        .set_auth_uri(AuthUrl::from_url(authorize))
-        .set_token_uri(TokenUrl::from_url(token))
-        .set_redirect_uri(RedirectUrl::from_url(
-            callback_url(callback).map_err(|()| "Invalid account callback URL")?,
-        )))
-}
-
-/// The browser URL of an authorization code request with S256 PKCE
-/// (RFC 7636) and a random `state`, which the callback must return.
-pub(super) fn authorization_request(oauth: &RedpillClient) -> (Url, CsrfToken, PkceCodeVerifier) {
-    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state) = oauth
-        .authorize_url(CsrfToken::new_random)
-        .add_scopes(["openid", "profile", "user:org:read"].map(|scope| Scope::new(scope.into())))
-        .add_extra_param("response_mode", "query")
-        .set_pkce_challenge(challenge)
-        .url();
-    (url, state, verifier)
+pub(super) fn redpill_client(device: DeviceAuthorizationUrl, token: TokenUrl) -> RedpillClient {
+    BasicClient::new(ClientId::new(REDPILL_CLIENT_ID.into()))
+        .set_device_authorization_url(device)
+        .set_token_uri(token)
 }
 
 pub(super) fn validate_discovery(data: &Value) -> Result<(), Error> {
     for (field, required) in [
-        ("grant_types_supported", "authorization_code"),
-        ("code_challenge_methods_supported", "S256"),
+        ("grant_types_supported", DEVICE_CODE_GRANT),
         ("token_endpoint_auth_methods_supported", "none"),
     ] {
         if !data
@@ -164,181 +107,34 @@ pub(super) fn validate_discovery(data: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-pub(super) fn callback_code(
-    uri: &Uri,
-    headers: &HeaderMap,
-    expected: &str,
-    address: SocketAddr,
-) -> Result<String, CallbackError> {
-    if uri.path() != CALLBACK_PATH
-        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(address.to_string().as_str())
-    {
-        return Err(CallbackError::Invalid);
-    }
-    let pairs: Vec<_> = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
-    let single = |field: &str| -> Option<&str> {
-        let mut values = pairs
-            .iter()
-            .filter(|(key, _)| key == field)
-            .map(|(_, v)| v.as_ref());
-        let first = values.next()?;
-        if values.next().is_some() {
-            None
-        } else {
-            Some(first)
-        }
-    };
-    if single("state") != Some(expected) {
-        return Err(CallbackError::Invalid);
-    }
-    if pairs.iter().any(|(k, _)| k == "iss") && single("iss") != Some(ISSUER) {
-        return Err(CallbackError::Invalid);
-    }
-    if single("error").is_some() {
-        return Err(CallbackError::Declined);
-    }
-    single("code")
-        .filter(|v| !v.is_empty() && v.len() <= 4096)
-        .map(str::to_owned)
-        .ok_or(CallbackError::Invalid)
+/// Starts a device authorization (RFC 8628 §3.1-3.2) for the account scopes.
+pub(super) async fn device_authorization(
+    client: &Client,
+    oauth: &RedpillClient,
+) -> Result<StandardDeviceAuthorizationResponse, Error> {
+    let http = |request| oauth_http(client.clone(), request);
+    oauth
+        .exchange_device_code()
+        .add_scopes(["openid", "profile", "user:org:read"].map(|scope| Scope::new(scope.into())))
+        .request_async(&http)
+        .await
+        .map_err(token_error)
 }
 
-/// The icon the callback page shows, inlined: the loopback listener may stop
-/// before a browser would fetch a separate image.
-pub(super) const CALLBACK_ICON: &[u8] =
-    include_bytes!("../../../src/renderer/brand/app-icon-light.png");
-
-/// A callback page as the markup before and after its base64 icon. Every
-/// part is a compile-time constant; `callback_pages_need_no_escaping` checks
-/// the brand strings and the icon's base64 alphabet.
-macro_rules! callback_page {
-    ($title:literal, $tone:literal, $symbol:literal, $message:literal, $open_app:expr) => {
-        [
-            concat!(
-                "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n",
-                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n",
-                "<meta name=\"color-scheme\" content=\"light dark\">\n",
-                "<title>",
-                $title,
-                " · ",
-                desktop_core::product_name!(),
-                "</title>\n",
-                "<style>\n",
-                include_str!("../account-callback.css"),
-                "</style>\n",
-                "</head>\n<body><main>\n",
-                "<div class=\"brand\"><img src=\"data:image/png;base64,",
-            ),
-            concat!(
-                "\" alt=\"\"><span>",
-                desktop_core::product_name!(),
-                "<small>",
-                desktop_core::byline!(),
-                "</small></span></div>\n",
-                "<div class=\"status ",
-                $tone,
-                "\" aria-hidden=\"true\">",
-                $symbol,
-                "</div>\n",
-                "<h1>",
-                $title,
-                "</h1><p>",
-                $message,
-                "</p>\n",
-                $open_app,
-                "<p class=\"footnote\">You can close this tab.</p>\n",
-                "</main></body></html>\n",
-            ),
-        ]
-    };
-}
-
-/// A window-activation link only; OAuth credentials stay on the loopback channel.
-const ACCEPTED_PAGE: [&str; 2] = callback_page!(
-    "Authorization received",
-    "",
-    "✓",
-    "Return to the app or terminal to finish setting up your account.",
-    concat!(
-        "<a class=\"open-app\" href=\"",
-        desktop_core::app_identifier!(),
-        "://oauth/return\">Open ",
-        desktop_core::product_name!(),
-        "</a>\n",
-    )
-);
-const DECLINED_PAGE: [&str; 2] = callback_page!(
-    "Account connection could not complete",
-    "error",
-    "!",
-    "Return to the app or terminal and try signing in again.",
-    ""
-);
-
-pub(super) fn callback_page(accepted: bool) -> String {
-    let [before, after] = if accepted {
-        ACCEPTED_PAGE
-    } else {
-        DECLINED_PAGE
-    };
-    // Base64 has no character that HTML treats specially in an attribute.
-    [before, &STANDARD.encode(CALLBACK_ICON), after].concat()
-}
-
-pub(super) async fn callback(
-    State(state): State<Arc<CallbackState>>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> (StatusCode, [(String, String); 4], Html<String>) {
-    let accepted = state.accept(&uri, &headers).await.is_ok();
-    (if accepted { StatusCode::OK } else { StatusCode::BAD_REQUEST }, [
-        ("Cache-Control".into(), "no-store".into()),
-        ("Content-Security-Policy".into(), "default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'".into()),
-        ("Referrer-Policy".into(), "no-referrer".into()),
-        ("X-Content-Type-Options".into(), "nosniff".into()),
-    ], Html(callback_page(accepted)))
-}
-
-/// Connections the loopback callback holds open at once: one browser's.
-const CALLBACK_CONNECTIONS: usize = 8;
-
-/// Serves the loopback callback until it (or a pasted link) delivers the code.
-pub(super) async fn receive_code(
-    listener: TcpListener,
-    state: Arc<CallbackState>,
-    receiver: oneshot::Receiver<Result<String, Error>>,
-) -> Result<String, Error> {
-    let shutdown = CancellationToken::new();
-    let stop = shutdown.clone();
-    let app = Router::new()
-        .route("/oauth/callback", get(callback))
-        .with_state(state);
-    let server = AbortOnDropHandle::new(tokio::spawn(async move {
-        desktop_core::serve::serve(listener, app, CALLBACK_CONNECTIONS, stop.cancelled_owned())
-            .await
-            .await
-    }));
-    let code = receiver.await.map_err(|_| "Login callback stopped")?;
-    shutdown.cancel();
-    let _ = timeout(Duration::from_secs(2), server).await;
-    code
-}
-
-/// Exchanges the code with its PKCE verifier and checks that the account
-/// service and the issuer name the same user.
+/// Polls for the device authorization's token (RFC 8628 §3.4-3.5) until it
+/// expires, then checks that the account service and the issuer name the
+/// same user.
 pub(super) async fn redpill(
     client: &Client,
     oauth: &RedpillClient,
-    code: String,
-    verifier: PkceCodeVerifier,
+    device: &StandardDeviceAuthorizationResponse,
     userinfo_url: &str,
     account_url: &str,
 ) -> Result<Authorization, Error> {
     let http = |request| oauth_http(client.clone(), request);
     let token = oauth
-        .exchange_code(AuthorizationCode::new(code))
-        .set_pkce_verifier(verifier)
-        .request_async(&http)
+        .exchange_device_access_token(device)
+        .request_async(&http, tokio::time::sleep, None)
         .await
         .map_err(token_error)?;
     let access_token = token.access_token().secret().clone();
@@ -355,7 +151,9 @@ pub(super) async fn redpill(
 
 /// Token endpoint errors (RFC 6749 §5.2, HTTP 400) as account errors; a
 /// malformed response is never echoed.
-fn token_error(error: RequestTokenError<std::io::Error, BasicErrorResponse>) -> Error {
+fn token_error<T: ErrorResponseType + AsRef<str> + std::fmt::Display + Send + Sync + 'static>(
+    error: RequestTokenError<std::io::Error, StandardErrorResponse<T>>,
+) -> Error {
     // RFC 6749 §5.1 requires a 200 JSON body with `token_type`; name only the
     // offending field, never a value.
     if let RequestTokenError::Parse(error, _) = &error {

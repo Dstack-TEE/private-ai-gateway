@@ -19,7 +19,6 @@ macro_rules! renderer_methods {
                 activate_profile => ActivateProfile,
                 delete_profile => DeleteProfile,
                 save_configuration => SaveConfiguration,
-                complete_account_login => CompleteAccountLogin,
                 begin_account_login => BeginAccountLogin,
                 poll_account_login => PollAccountLogin,
                 get_account_details => GetAccountDetails,

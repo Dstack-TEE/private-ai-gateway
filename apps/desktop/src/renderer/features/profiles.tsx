@@ -336,10 +336,6 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>
-                  {provider.callbackUrl && <details>
-                    <summary className="text-sm text-muted-foreground">Paste callback link</summary>
-                    <CallbackForm key={login.id} disabled={account.working} onContinue={account.complete} />
-                  </details>}
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
@@ -378,16 +374,4 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
       </form>
     </AppDialog>
   );
-}
-
-/** The callback link a sign-in returns to, pasted by hand; each sign-in starts empty. */
-function CallbackForm({ disabled, onContinue }: { disabled: boolean; onContinue(callbackUrl: string): void }): React.JSX.Element {
-  const [callbackUrl, setCallbackUrl] = useState("");
-  return <div className="mt-3 space-y-2">
-    <FormField id="account-callback" className="gap-2" label="Callback URL">
-      <Input id="account-callback" type="password" value={callbackUrl} autoComplete="off" spellCheck={false} disabled={disabled}
-        placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackUrl(event.target.value)} />
-    </FormField>
-    <Button type="button" variant="outline" disabled={disabled || !callbackUrl.trim()} onClick={() => { setCallbackUrl(""); onContinue(callbackUrl); }}>Continue</Button>
-  </div>;
 }

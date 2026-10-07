@@ -88,7 +88,6 @@ export interface DesktopApi {
   /** Stops protection and saves the OS policy the next start uses. */
   setRequireProductionOs(required: boolean): UiResult<"set_require_production_os">;
   saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): UiResult<"save_configuration">;
-  completeAccountLogin(id: string, callbackUrl: string): UiResult<"complete_account_login">;
   beginAccountLogin(profile: ConfidentialProfileInput): UiResult<"begin_account_login">;
   pollAccountLogin(id: string): UiResult<"poll_account_login">;
   saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): UiResult<"save_account_login">;

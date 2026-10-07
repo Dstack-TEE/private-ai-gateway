@@ -74,7 +74,6 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
     start: (config) => call("start", { config }),
     setRequireProductionOs: (required) => call("set_require_production_os", { required }),
     saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
-    completeAccountLogin: (id, callbackUrl) => call("complete_account_login", { id, callbackUrl }),
     beginAccountLogin: async (profile) => {
       const login = await call("begin_account_login", { profile });
       presentAccountLogin(login);

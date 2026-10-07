@@ -189,12 +189,6 @@ impl ServiceProvider {
     pub const fn workspaces(self) -> bool {
         matches!(self, Self::Redpill)
     }
-
-    /// Whether a sign-in returns to a loopback callback URL the user can also
-    /// paste; Phala signs in with a device code instead.
-    pub const fn callback_url(self) -> bool {
-        matches!(self, Self::Redpill)
-    }
 }
 
 /// A provider as the profile editor presents it.
@@ -207,7 +201,6 @@ pub struct ServiceProviderInfo {
     pub key_label: &'static str,
     pub account_login: bool,
     pub workspaces: bool,
-    pub callback_url: bool,
 }
 
 impl From<ServiceProvider> for ServiceProviderInfo {
@@ -219,7 +212,6 @@ impl From<ServiceProvider> for ServiceProviderInfo {
             key_label: provider.key_label(),
             account_login: provider.account_login(),
             workspaces: provider.workspaces(),
-            callback_url: provider.callback_url(),
         }
     }
 }
