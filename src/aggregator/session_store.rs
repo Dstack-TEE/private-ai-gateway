@@ -145,7 +145,6 @@ impl SessionIndex {
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
         let slot = channel_slot(&session);
-        let established_at = session.document().established_at;
         if let Some(prev) = self.by_id.insert(
             id.clone(),
             SessionEntry {
@@ -164,14 +163,23 @@ impl SessionIndex {
             .or_default()
             .insert(id.clone());
         self.by_fingerprint.insert(fingerprint, id.clone());
-        let incumbent_established_at = self
-            .by_slot
-            .get(&slot)
-            .and_then(|incumbent_id| self.by_id.get(incumbent_id))
-            .map(|incumbent| incumbent.session.document().established_at);
-        if incumbent_established_at.is_none_or(|incumbent| established_at >= incumbent) {
-            self.by_slot.insert(slot, id);
+        // The latest record of a slot is the one it lists. Appends happen in
+        // verification order and compaction writes each slot's listed session
+        // last, so replay reproduces the same choice — timestamps never decide.
+        self.by_slot.insert(slot, id);
+    }
+
+    /// Make `id` the session its channel slot lists.
+    fn promote(&mut self, id: &str) {
+        if let Some(entry) = self.by_id.get(id) {
+            self.by_slot.insert(entry.slot.clone(), id.to_string());
         }
+    }
+
+    fn is_listed(&self, id: &str) -> bool {
+        self.by_id
+            .get(id)
+            .is_some_and(|entry| self.by_slot.get(&entry.slot).map(String::as_str) == Some(id))
     }
 
     fn drop_retention_hint(&mut self, id: &str, retention_until: u64) {
@@ -223,9 +231,6 @@ impl SessionIndex {
         if now >= entry.session.document().expires_at {
             return None; // validity lapsed; record stays for retention only
         }
-        // The request path just derived this session from the current
-        // verification, so it is the one its channel lists.
-        self.by_slot.insert(entry.slot.clone(), id.clone());
         if retention_until > entry.retention_until {
             let old = entry.retention_until;
             entry.retention_until = retention_until;
@@ -269,9 +274,12 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
 /// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
 /// index sit behind separate locks, so a read never waits on a write.
 ///
-/// The hot path appends a line only when a *new* session is sealed; a repeat
-/// request extends the current session's retention in the index without
-/// writing (see [`SessionStore::current_session`]).
+/// The hot path appends a line only when a *new* session is sealed, or when a
+/// verification resolves to a session its channel no longer lists (the record
+/// is re-appended so replay lists it too); a repeat request extends the
+/// current session's retention in the index without writing (see
+/// [`SessionStore::current_session`]). The latest record of a channel is the
+/// one listed, so log order — not timestamps — decides the listing.
 /// [`JsonlSessionStore::compact`] then rewrites the file from the live index,
 /// dropping lapsed records and persisting the extended retention deadlines.
 ///
@@ -291,6 +299,44 @@ pub struct JsonlSessionStore {
 struct LogWriter {
     file: File,
     next_seq: u64,
+}
+
+impl LogWriter {
+    /// Append one session record and return its sequence number.
+    fn append(
+        &mut self,
+        fingerprint: &str,
+        session: &AttestedSession,
+        retention_until: u64,
+        now: u64,
+    ) -> io::Result<u64> {
+        let seq = self.next_seq;
+        // Refuse to write a record we cannot assign a successor to, rather than
+        // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
+        // the gateway's startup compaction renumbers from zero before serving.
+        let Some(next_seq) = seq.checked_add(1) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session log sequence number overflowed u64::MAX",
+            ));
+        };
+        let mut line = serde_json::to_string(&SessionLogRecord {
+            seq,
+            ts: now,
+            record_type: RECORD_TYPE_SESSION.to_string(),
+            fingerprint: fingerprint.to_string(),
+            retention_until,
+            payload_b64: BASE64.encode(session.bytes()),
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        line.push('\n');
+        // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
+        // `file` ever becomes a `BufWriter`, restore a flush or records can sit
+        // unwritten on a crash.
+        self.file.write_all(line.as_bytes())?;
+        self.next_seq = next_seq;
+        Ok(seq)
+    }
 }
 
 /// Take the advisory exclusive lock that enforces single-writer (see
@@ -428,10 +474,25 @@ impl JsonlSessionStore {
         let live: Vec<(String, AttestedSession, u64)> = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
             index.evict_lapsed(now);
-            index
+            // Each slot's listed session is written after its superseded ones,
+            // so replay (latest record wins) lists the same session.
+            let mut live: Vec<(bool, String, AttestedSession, u64)> = index
                 .by_id
                 .values()
-                .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
+                .map(|e| {
+                    (
+                        index.is_listed(e.session.session_id()),
+                        e.fingerprint.clone(),
+                        e.session.clone(),
+                        e.retention_until,
+                    )
+                })
+                .collect();
+            live.sort_by_key(|(listed, ..)| *listed);
+            live.into_iter()
+                .map(|(_, fingerprint, session, retention_until)| {
+                    (fingerprint, session, retention_until)
+                })
                 .collect()
         };
 
@@ -475,31 +536,7 @@ impl SessionStore for JsonlSessionStore {
         now: u64,
     ) -> io::Result<u64> {
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let seq = w.next_seq;
-        // Refuse to write a record we cannot assign a successor to, rather than
-        // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
-        // the gateway's startup compaction renumbers from zero before serving.
-        let Some(next_seq) = seq.checked_add(1) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log sequence number overflowed u64::MAX",
-            ));
-        };
-        let mut line = serde_json::to_string(&SessionLogRecord {
-            seq,
-            ts: now,
-            record_type: RECORD_TYPE_SESSION.to_string(),
-            fingerprint: fingerprint.to_string(),
-            retention_until,
-            payload_b64: BASE64.encode(session.bytes()),
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        line.push('\n');
-        // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
-        // `file` ever becomes a `BufWriter`, restore a flush or records can sit
-        // unwritten on a crash.
-        w.file.write_all(line.as_bytes())?;
-        w.next_seq = next_seq;
+        let seq = w.append(fingerprint, &session, retention_until, now)?;
         // Update the index under the writer lock so the log and index advance
         // together: `compact` rewrites the log *from* the index, so an index that
         // lagged a completed append could drop an on-disk record. Reads still
@@ -523,10 +560,38 @@ impl SessionStore for JsonlSessionStore {
         retention_until: u64,
         now: u64,
     ) -> Option<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
+        {
+            let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+            let session = index.current(fingerprint, retention_until, now)?;
+            if index.is_listed(session.session_id()) {
+                return Some(session);
+            }
+        }
+        // The current verification resolved to a session its channel no
+        // longer lists. Re-append its record so the log ends with it, as the
+        // index will, and replay lists the same session. Writer before index,
+        // as in `put_session`, so the two advance together.
+        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        let session = index.current(fingerprint, retention_until, now)?;
+        let id = session.session_id().to_string();
+        if index.is_listed(&id) {
+            return Some(session);
+        }
+        let retention_until = index
+            .by_id
+            .get(&id)
+            .map_or(retention_until, |e| e.retention_until);
+        match w.append(fingerprint, &session, retention_until, now) {
+            Ok(_) => index.promote(&id),
+            // The session still serves; only the listing keeps the newer one.
+            Err(err) => tracing::warn!(
+                session_id = %id,
+                error = %err,
+                "failed to persist the listed attested session for its channel"
+            ),
+        }
+        Some(session)
     }
 
     fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -574,10 +639,10 @@ impl SessionStore for InMemorySessionStore {
         retention_until: u64,
         now: u64,
     ) -> Option<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        let session = index.current(fingerprint, retention_until, now)?;
+        index.promote(session.session_id());
+        Some(session)
     }
 
     fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
@@ -723,6 +788,59 @@ mod tests {
         let listed = store.list_sessions(None, 2_200);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id(), first_id);
+    }
+
+    fn listed_ids(store: &dyn SessionStore, now: u64) -> Vec<String> {
+        store
+            .list_sessions(None, now)
+            .into_iter()
+            .map(|s| s.session_id().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_resolved_session_stays_listed_across_restart_and_compaction() {
+        let path = temp_path();
+        let first = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let second = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
+        let first_id = first.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store.put_session("fp-a", first, 9_000, 1_000).unwrap();
+            store.put_session("fp-b", second, 9_000, 2_000).unwrap();
+            assert!(store.current_session("fp-a", 9_500, 2_100).is_some());
+            assert_eq!(listed_ids(&store, 2_200), vec![first_id.clone()]);
+        }
+        // Restart without compaction (e.g. a crash before the hourly rewrite).
+        {
+            let store = open_store(&path);
+            assert_eq!(listed_ids(&store, 2_200), vec![first_id.clone()]);
+            store.compact(2_200).unwrap();
+        }
+        let reopened = open_store(&path);
+        assert_eq!(listed_ids(&reopened, 2_200), vec![first_id]);
+        drop(reopened);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn same_second_sessions_list_the_later_one_across_compactions() {
+        let path = temp_path();
+        let first = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let second = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-b");
+        let second_id = second.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store.put_session("fp-a", first, 9_000, 1_000).unwrap();
+            store.put_session("fp-b", second, 9_000, 1_000).unwrap();
+            assert_eq!(listed_ids(&store, 1_500), vec![second_id.clone()]);
+        }
+        for _ in 0..3 {
+            let store = open_store(&path);
+            assert_eq!(listed_ids(&store, 1_500), vec![second_id.clone()]);
+            store.compact(1_500).unwrap();
+        }
+        cleanup(&path);
     }
 
     #[test]
