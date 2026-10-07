@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::aci::digest;
 
-use super::session::{AttestedSession, SessionClaims, SessionDocument, WorkloadIdentityRef};
+use super::session::{AttestedSession, SessionClaims, WorkloadIdentityRef};
 use crate::aci::receipt::ChannelBinding;
 
 /// Record type tag for a session line.
@@ -111,9 +111,12 @@ struct ChannelSlotMaterial<'a> {
 
 /// Stable key for the channel material shared by successive verifications.
 /// Validity timestamps and evidence are deliberately excluded so a fresh
-/// verification supersedes the prior session in listings.
-pub(crate) fn channel_slot(doc: &SessionDocument) -> String {
-    let value = serde_json::to_value(ChannelSlotMaterial {
+/// verification supersedes the prior session in listings. Material that cannot
+/// be canonicalized falls back to the session's own id: it is listed on its own
+/// and never supersedes another session.
+fn channel_slot(session: &AttestedSession) -> String {
+    let doc = session.document();
+    serde_json::to_value(ChannelSlotMaterial {
         upstream_name: &doc.upstream_name,
         endpoint: &doc.endpoint,
         verifier_id: &doc.verifier_id,
@@ -121,9 +124,10 @@ pub(crate) fn channel_slot(doc: &SessionDocument) -> String {
         channel_binding: &doc.channel_binding,
         claims: &doc.claims,
     })
-    .expect("channel slot material must serialize");
-    let bytes = digest::jcs_bytes(&value).expect("channel slot material must canonicalize");
-    digest::sha256_hex(&bytes)
+    .ok()
+    .and_then(|value| digest::jcs_bytes(&value).ok())
+    .map(|bytes| digest::sha256_hex(&bytes))
+    .unwrap_or_else(|| session.session_id().to_string())
 }
 
 /// In-memory session index shared by both stores: id→entry plus
@@ -140,7 +144,7 @@ struct SessionIndex {
 impl SessionIndex {
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
-        let slot = channel_slot(session.document());
+        let slot = channel_slot(&session);
         let established_at = session.document().established_at;
         if let Some(prev) = self.by_id.insert(
             id.clone(),
@@ -219,6 +223,9 @@ impl SessionIndex {
         if now >= entry.session.document().expires_at {
             return None; // validity lapsed; record stays for retention only
         }
+        // The request path just derived this session from the current
+        // verification, so it is the one its channel lists.
+        self.by_slot.insert(entry.slot.clone(), id.clone());
         if retention_until > entry.retention_until {
             let old = entry.retention_until;
             entry.retention_until = retention_until;
@@ -699,6 +706,23 @@ mod tests {
             vec![newer.session_id().to_string()]
         );
         assert!(store.get_session(&older_id, 2_500).is_some());
+    }
+
+    #[test]
+    fn resolving_a_session_makes_it_the_listed_one_for_its_channel() {
+        let store = InMemorySessionStore::default();
+        let first = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let second = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
+        let first_id = first.session_id().to_string();
+        store.put_session("fp-a", first, 9_000, 1_000).unwrap();
+        store.put_session("fp-b", second, 9_000, 2_000).unwrap();
+
+        // The current verification resolves to the first session again, so
+        // that is the session a pin is checked against and the one listed.
+        assert!(store.current_session("fp-a", 9_500, 2_100).is_some());
+        let listed = store.list_sessions(None, 2_200);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id(), first_id);
     }
 
     #[test]
