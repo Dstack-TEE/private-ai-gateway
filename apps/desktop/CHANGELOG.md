@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0...desktop-v0.4.0) (2026-10-07)
+
+Private AI Proxy 0.4.0 signs in to RedPill with a device code, the way Phala sign-in already works.
+
+### ⚠ BREAKING CHANGES
+
+* **`pap profiles login --callback-stdin` is removed.** Run `pap profiles login` (add `--no-browser` on a remote machine) and approve the code it prints.
+
+### Features
+
+* **RedPill sign-in with a device code.** The app, the web UI and `pap profiles login` show a link and a short code. Approve it in any browser, even on another device. Nothing listens on a local port, so signing in to a remote or headless service no longer needs callback forwarding or a pasted link. The **Paste callback link** form is gone.
+
+### Bug Fixes
+
+* **Release notes.** Release pages list the installers, the standalone CLI archives and the integrity details again.
+
 ## [0.4.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0...desktop-v0.4.0-beta.1) (2026-10-07)
 
 
