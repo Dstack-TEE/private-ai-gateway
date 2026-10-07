@@ -80,7 +80,7 @@ A rejection carries `X-Receipt-Id` for a signed refusal receipt:
 
 | Status | `error.type` | Meaning |
 | --- | --- | --- |
-| `412` | `session_not_accepted` | None of the pinned `aci_session_ids` is current. Fetch the session list and pin again. |
+| `412` | `session_not_accepted` | None of the pinned `aci_session_ids` is current. Sessions rotate on re-verification; re-list `/v1/aci/sessions` and retry once. |
 | `503` | `upstream_verification_failed` | No eligible route passed verification with an enforceable binding. |
 
 In middleware mode, a request on a

@@ -34,7 +34,10 @@ use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
-use super::session::AttestedSession;
+use crate::aci::digest;
+
+use super::session::{AttestedSession, SessionClaims, SessionDocument, WorkloadIdentityRef};
+use crate::aci::receipt::ChannelBinding;
 
 /// Record type tag for a session line.
 const RECORD_TYPE_SESSION: &str = "session";
@@ -81,36 +84,70 @@ pub trait SessionStore: Send + Sync {
         now: u64,
     ) -> Option<AttestedSession>;
 
-    /// List sessions whose validity period covers `now`, optionally filtered
-    /// by `upstream_name` (the operator's upstream config name). Sessions are
-    /// per-TEE-channel; a model→channel lookup belongs to the caller.
+    /// List sessions whose validity period covers `now` and which have not
+    /// been superseded by a newer session of the same channel, optionally
+    /// filtered by `upstream_name` (the operator's upstream config name).
+    /// Sessions are per-TEE-channel; a model→channel lookup belongs to the
+    /// caller.
     fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession>;
 }
 
 struct SessionEntry {
     session: AttestedSession,
     fingerprint: String,
+    slot: String,
     retention_until: u64,
 }
 
-/// In-memory session index shared by both stores: id→entry plus a
-/// fingerprint→current-id map and a retention-deadline index so eviction
-/// costs only what actually lapsed.
+#[derive(Serialize)]
+struct ChannelSlotMaterial<'a> {
+    upstream_name: &'a str,
+    endpoint: &'a Option<String>,
+    verifier_id: &'a str,
+    identity: &'a Option<WorkloadIdentityRef>,
+    channel_binding: &'a [ChannelBinding],
+    claims: &'a SessionClaims,
+}
+
+/// Stable key for the channel material shared by successive verifications.
+/// Validity timestamps and evidence are deliberately excluded so a fresh
+/// verification supersedes the prior session in listings.
+pub(crate) fn channel_slot(doc: &SessionDocument) -> String {
+    let value = serde_json::to_value(ChannelSlotMaterial {
+        upstream_name: &doc.upstream_name,
+        endpoint: &doc.endpoint,
+        verifier_id: &doc.verifier_id,
+        identity: &doc.identity,
+        channel_binding: &doc.channel_binding,
+        claims: &doc.claims,
+    })
+    .expect("channel slot material must serialize");
+    let bytes = digest::jcs_bytes(&value).expect("channel slot material must canonicalize");
+    digest::sha256_hex(&bytes)
+}
+
+/// In-memory session index shared by both stores: id→entry plus
+/// fingerprint→current-id and channel-slot→current-id maps, and a
+/// retention-deadline index so eviction costs only what actually lapsed.
 #[derive(Default)]
 struct SessionIndex {
     by_id: HashMap<String, SessionEntry>,
     by_fingerprint: HashMap<String, String>,
+    by_slot: HashMap<String, String>,
     by_retention: BTreeMap<u64, HashSet<String>>,
 }
 
 impl SessionIndex {
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
+        let slot = channel_slot(session.document());
+        let established_at = session.document().established_at;
         if let Some(prev) = self.by_id.insert(
             id.clone(),
             SessionEntry {
                 session,
                 fingerprint: fingerprint.clone(),
+                slot: slot.clone(),
                 retention_until,
             },
         ) {
@@ -122,7 +159,15 @@ impl SessionIndex {
             .entry(retention_until)
             .or_default()
             .insert(id.clone());
-        self.by_fingerprint.insert(fingerprint, id);
+        self.by_fingerprint.insert(fingerprint, id.clone());
+        let incumbent_established_at = self
+            .by_slot
+            .get(&slot)
+            .and_then(|incumbent_id| self.by_id.get(incumbent_id))
+            .map(|incumbent| incumbent.session.document().established_at);
+        if incumbent_established_at.is_none_or(|incumbent| established_at >= incumbent) {
+            self.by_slot.insert(slot, id);
+        }
     }
 
     fn drop_retention_hint(&mut self, id: &str, retention_until: u64) {
@@ -148,6 +193,9 @@ impl SessionIndex {
                 if let Some(entry) = self.by_id.remove(&id) {
                     if self.by_fingerprint.get(&entry.fingerprint) == Some(&id) {
                         self.by_fingerprint.remove(&entry.fingerprint);
+                    }
+                    if self.by_slot.get(&entry.slot) == Some(&id) {
+                        self.by_slot.remove(&entry.slot);
                     }
                 }
             }
@@ -190,6 +238,9 @@ impl SessionIndex {
             .by_id
             .values()
             .filter(|e| now < e.session.document().expires_at)
+            .filter(|e| {
+                self.by_slot.get(&e.slot).map(String::as_str) == Some(e.session.session_id())
+            })
             .filter(|e| upstream_name.is_none_or(|p| e.session.document().upstream_name == p))
             .map(|e| e.session.clone())
             .collect();
@@ -533,6 +584,7 @@ impl SessionStore for InMemorySessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aci::receipt::ChannelBinding;
     use crate::aggregator::session::{EvidenceRef, SessionClaims, SessionDocument};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -597,6 +649,105 @@ mod tests {
             evidence: EvidenceRef::default(),
         })
         .unwrap()
+    }
+
+    fn session_with_material(
+        endpoint: &str,
+        established_at: u64,
+        expires_at: u64,
+        spki: &str,
+        evidence_digest: &str,
+    ) -> AttestedSession {
+        AttestedSession::seal(SessionDocument {
+            api_version: "aci/1".to_string(),
+            upstream_name: "phala-direct".to_string(),
+            endpoint: Some(endpoint.to_string()),
+            verifier_id: "phala-direct/1".to_string(),
+            established_at,
+            expires_at,
+            identity: None,
+            channel_binding: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: endpoint.to_string(),
+                spki_sha256: spki.repeat(32),
+            }],
+            claims: SessionClaims::default(),
+            evidence: EvidenceRef {
+                digest: Some(evidence_digest.to_string()),
+                data_uri: None,
+            },
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn listing_keeps_only_the_newest_session_for_a_channel_slot() {
+        let store = InMemorySessionStore::default();
+        let older = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let newer = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
+        let older_id = older.session_id().to_string();
+        store.put_session("fp-a", older, 9_000, 1_000).unwrap();
+        store
+            .put_session("fp-b", newer.clone(), 9_000, 2_000)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_sessions(None, 2_500)
+                .into_iter()
+                .map(|s| s.session_id().to_string())
+                .collect::<Vec<_>>(),
+            vec![newer.session_id().to_string()]
+        );
+        assert!(store.get_session(&older_id, 2_500).is_some());
+    }
+
+    #[test]
+    fn listing_keeps_sessions_for_distinct_channel_bindings() {
+        let store = InMemorySessionStore::default();
+        let first = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let second = session_with_material("https://x", 1_001, 9_000, "bb", "evidence-a");
+        store
+            .put_session("fp-a", first.clone(), 9_000, 1_000)
+            .unwrap();
+        store
+            .put_session("fp-b", second.clone(), 9_000, 1_001)
+            .unwrap();
+
+        let listed: HashSet<String> = store
+            .list_sessions(None, 2_500)
+            .into_iter()
+            .map(|s| s.session_id().to_string())
+            .collect();
+        assert_eq!(
+            listed,
+            HashSet::from([
+                first.session_id().to_string(),
+                second.session_id().to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn jsonl_replay_preserves_supersession_and_old_lookup() {
+        let path = temp_path();
+        let older = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
+        let newer = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
+        let older_id = older.session_id().to_string();
+        let newer_id = newer.session_id().to_string();
+        {
+            let store = open_store(&path);
+            store.put_session("fp-a", older, 9_000, 1_000).unwrap();
+            store.put_session("fp-b", newer, 9_000, 2_000).unwrap();
+            assert_eq!(store.compact(2_500).unwrap(), 2);
+        }
+
+        let reopened = open_store(&path);
+        let listed = reopened.list_sessions(None, 2_500);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id(), newer_id);
+        assert!(reopened.get_session(&older_id, 2_500).is_some());
+        drop(reopened);
+        cleanup(&path);
     }
 
     /// Replay must be proportional to the live set, not to everything appended

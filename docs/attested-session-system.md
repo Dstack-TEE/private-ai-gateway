@@ -48,6 +48,8 @@ inspect the verified identity, channel binding, and typed claims for a model,
 and check its pinned SPKI, before releasing any data. The forwarding path
 never trusts a stored session for freshness. It forwards only on a fresh
 verification result.
+The list shows only the current session per channel; superseded sessions remain
+retrievable by id until retention ends.
 
 ## Storage: compacted JSONL
 

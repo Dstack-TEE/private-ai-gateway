@@ -97,16 +97,15 @@ item.
    same captured request once unless the deployment provides affinity or a
    shared replay store.
 
-8. **Session validity is advertised far longer than a session can actually
-    serve.** `expires_at` is set to `now + receipt_ttl_seconds` (default
-    3600), but each verification round mints a fresh nonce, so the evidence
-    digest — part of the channel fingerprint — changes every
-    `verifier_cache_seconds` (default 300) and a new session supersedes the
-    old one. The list endpoint keeps advertising the superseded session as
-    current until its `expires_at`, so a client that verified and pinned it
-    (§5.3) is refused `session_not_accepted` while the service still lists
-    it. Fix direction: end a session's validity period when a re-verification
-    supersedes it, so "current" means current.
+8. **Fixed: session listings no longer advertise superseded sessions.** A
+   channel slot is derived from the stable channel material (excluding
+   validity timestamps and evidence), and the in-memory session index lists
+   only the newest session in each slot while retaining older sessions for
+   lookup by id until retention ends. The residual is that when the binding or
+   claims themselves change (for example, certificate rotation or a TCB
+   change), the old session remains listed until its `expires_at`. The session
+   store and verifier cache are per-process, so multi-replica deployments need
+   session affinity for pins.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry

@@ -7,6 +7,7 @@
 //! legacy E2EE request paths.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod common;
@@ -293,6 +294,28 @@ impl UpstreamVerifier for AlwaysFailed {
             verifier_id: "surface-verifier/v1".to_string(),
             reason: Some("quote verification failed".to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
+        }
+    }
+}
+
+struct RotatingVerifier {
+    verifications: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamVerifier for RotatingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let digest_byte = if self.verifications.fetch_add(1, Ordering::Relaxed) == 0 {
+            "11"
+        } else {
+            "22"
+        };
+        UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            evidence: Some(serde_json::json!({
+                "digest": format!("sha256:{}", digest_byte.repeat(32)),
+            })),
+            ..event_from_request(&request, VerificationResult::Verified)
         }
     }
 }
@@ -1951,6 +1974,87 @@ async fn pinned_current_session_serves_and_is_cited() {
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     let verified = payload_event(&receipt_payload(&receipt), "upstream.verified").clone();
     assert_eq!(verified["session_id"], Value::String(session_id));
+}
+
+#[tokio::test]
+async fn rotated_session_listing_rejects_old_pin_and_accepts_new_pin() {
+    let h = harness_with(
+        RecordingUpstream::default(),
+        Arc::new(RotatingVerifier {
+            verifications: AtomicUsize::new(0),
+        }),
+        false,
+    );
+
+    let first = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_receipt_id = header(&first.headers, "x-receipt-id");
+    let first_receipt = h
+        .service
+        .get_receipt_by_receipt_id(first_receipt_id)
+        .unwrap();
+    let old_id = payload_event(&receipt_payload(&first_receipt), "upstream.verified")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let second = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(second.status, StatusCode::OK);
+    let second_receipt_id = header(&second.headers, "x-receipt-id");
+    let second_receipt = h
+        .service
+        .get_receipt_by_receipt_id(second_receipt_id)
+        .unwrap();
+    let new_id = payload_event(&receipt_payload(&second_receipt), "upstream.verified")
+        ["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(old_id, new_id);
+
+    let listed = h
+        .requester
+        .get("/v1/aci/sessions?upstream_name=surface-upstream", &[])
+        .await;
+    assert_eq!(listed.status, StatusCode::OK);
+    let listed_body = json_body(&listed);
+    assert_eq!(listed_body["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(listed_body["sessions"][0]["session_id"], new_id);
+
+    let old_pin = format!(
+        r#"{{"model":"aci-model","messages":[],"provider":{{"aci_session_ids":["{old_id}"]}}}}"#
+    );
+    let refused = h
+        .requester
+        .post("/v1/chat/completions", old_pin.as_bytes(), &[])
+        .await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert!(h.service.get_attested_session(&old_id).is_some());
+
+    let new_pin = format!(
+        r#"{{"model":"aci-model","messages":[],"provider":{{"aci_session_ids":["{new_id}"]}}}}"#
+    );
+    let accepted = h
+        .requester
+        .post("/v1/chat/completions", new_pin.as_bytes(), &[])
+        .await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    let accepted_receipt_id = header(&accepted.headers, "x-receipt-id");
+    let accepted_receipt = h
+        .service
+        .get_receipt_by_receipt_id(accepted_receipt_id)
+        .unwrap();
+    assert_eq!(
+        payload_event(&receipt_payload(&accepted_receipt), "upstream.verified")["session_id"],
+        new_id
+    );
 }
 
 #[tokio::test]

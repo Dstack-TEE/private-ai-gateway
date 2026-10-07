@@ -495,6 +495,9 @@ async fn attested_session_id_changes_when_verification_material_changes() {
         .expect("second verified binding should produce a session id");
 
     assert_ne!(first_session_id, second_session_id);
+    let listed = svc.list_attested_sessions(Some("stub-upstream"));
+    assert_eq!(listed.len(), 1, "only the newest session should be listed");
+    assert_eq!(listed[0].session_id(), second_session_id);
     let first_session = svc
         .get_attested_session(first_session_id)
         .expect("first session should remain queryable");
