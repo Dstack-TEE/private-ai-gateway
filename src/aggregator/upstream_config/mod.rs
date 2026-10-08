@@ -489,15 +489,16 @@ impl UpstreamConfigManager {
             })
             .filter(|target| upstream_name.is_none_or(|name| target.upstream_name == name))
             .filter(|target| {
-                model.is_none_or(|model| {
-                    state.config.iter().any(|cfg| {
-                        cfg.name == target.upstream_name
-                            && if cfg.provider.attestation_scope().is_per_router() {
+                state.config.iter().any(|cfg| {
+                    cfg.name == target.upstream_name
+                        && builders::provider_is_tee(cfg.provider)
+                        && model.is_none_or(|model| {
+                            if cfg.provider.attestation_scope().is_per_router() {
                                 cfg.models.contains_key(model)
                             } else {
                                 cfg.models.get(model) == Some(&target.model_id)
                             }
-                    })
+                        })
                 })
             })
             .map(|target| target.request())

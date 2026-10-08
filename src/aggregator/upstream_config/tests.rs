@@ -280,6 +280,7 @@ async fn dynamic_verifier_forwards_invalidation_to_current_verifier() {
 #[derive(Default)]
 struct RefreshObservations {
     starts: HashMap<(String, String), Vec<(Instant, bool)>>,
+    replacements: Vec<(Instant, Instant)>,
     active: HashMap<String, usize>,
     peak: HashMap<String, usize>,
     global_peak: usize,
@@ -401,10 +402,18 @@ impl UpstreamVerifier for FakeVerifier {
         let result = if self.fail.load(Ordering::SeqCst) || failed_model.is_some() {
             VerificationResult::Failed
         } else {
-            self.cache
+            let previous_expiry = self
+                .cache
                 .lock()
                 .unwrap()
                 .insert(self.key(&request), started + self.ttl);
+            if let Some(expiry) = previous_expiry {
+                self.observations
+                    .lock()
+                    .unwrap()
+                    .replacements
+                    .push((Instant::now(), expiry));
+            }
             VerificationResult::Verified
         };
         Self::event(&request, result)
@@ -458,7 +467,7 @@ async fn stop_refresh(task: tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn eleven_sequential_targets_refresh_by_deadline_without_cold_starts() {
+async fn eleven_sequential_targets_replace_caches_before_expiry() {
     let mut cfg = test_upstream_config(
         "provider",
         UpstreamProvider::PhalaDirect,
@@ -469,7 +478,7 @@ async fn eleven_sequential_targets_refresh_by_deadline_without_cold_starts() {
         cfg.models
             .insert(format!("public-{i:02}"), format!("model-{i:02}"));
     }
-    let verifier = Arc::new(FakeVerifier::new(300, 25));
+    let verifier = Arc::new(FakeVerifier::new(300, 24));
     let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
     tokio::task::yield_now().await;
     advance(1800).await;
@@ -484,6 +493,20 @@ async fn eleven_sequential_targets_refresh_by_deadline_without_cold_starts() {
         total += starts.len();
     }
     assert!(total <= 1800_u64.div_ceil(250) as usize * 11 + 11);
+    assert!(!observations.replacements.is_empty());
+    for (completed, previous_expiry) in &observations.replacements {
+        assert!(
+            completed < previous_expiry,
+            "replacement completion relative to previous expiry: {:?}",
+            completed.checked_duration_since(*previous_expiry)
+        );
+    }
+    assert!(verifier
+        .cache
+        .lock()
+        .unwrap()
+        .values()
+        .all(|expiry| Instant::now() < *expiry));
 }
 
 #[tokio::test(start_paused = true)]
@@ -825,5 +848,35 @@ fn current_requests_follow_public_alias_mapping_and_default_route_order() {
             .current_verification_requests(None, None, true)
             .len(),
         3
+    );
+}
+
+#[test]
+fn current_requests_exclude_plain_routes_even_with_a_global_verifier() {
+    let plain = test_upstream_config("plain", UpstreamProvider::OpenAiCompatible, "shared", "m");
+    let tee = test_upstream_config("tee", UpstreamProvider::PhalaDirect, "shared", "m");
+    let verifier = Arc::new(crate::aci::verifier::StaticUpstreamVerifier::new(
+        UpstreamVerifiedEvent {
+            result: VerificationResult::Verified,
+            ..Default::default()
+        },
+    ));
+    assert!(verifier
+        .cached(&verification_targets(std::slice::from_ref(&plain))[0].request())
+        .is_some());
+    let manager = refresh_test_manager(vec![plain, tee], verifier);
+    for all_routes in [false, true] {
+        let requests = manager.current_verification_requests(None, None, all_routes);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].upstream_name, "tee");
+    }
+    assert!(manager
+        .current_verification_requests(Some("shared"), None, false)
+        .is_empty());
+    assert_eq!(
+        manager
+            .current_verification_requests(Some("shared"), None, true)
+            .len(),
+        1
     );
 }

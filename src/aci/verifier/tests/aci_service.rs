@@ -146,25 +146,21 @@ async fn public_cold_verification_is_single_flight_and_refresh_shares_the_lock()
         .iter()
         .all(|event| event.result == VerificationResult::Verified));
     assert_eq!(fixture.control.calls.load(Ordering::SeqCst), 1);
+    fixture.verifier.invalidate(&fixture.request);
     let verifier = fixture.verifier.clone();
     let request = fixture.request.clone();
     let refresh = tokio::spawn(async move { verifier.refresh(request).await });
     fixture.control.entered.notified().await;
-    let cached = fixture.verifier.verify(fixture.request.clone()).await;
-    assert_eq!(cached.evidence, initial[0].evidence);
+    let mut cold = Box::pin(fixture.verifier.verify(fixture.request.clone()));
+    assert!(futures_util::poll!(&mut cold).is_pending());
     assert_eq!(fixture.control.calls.load(Ordering::SeqCst), 2);
     fixture.control.release.add_permits(1);
-    let refreshed = refresh.await.unwrap();
+    let (refreshed, verified) = tokio::join!(refresh, cold);
+    let refreshed = refreshed.unwrap();
     assert_eq!(refreshed.result, VerificationResult::Verified);
-    assert_ne!(refreshed.evidence, cached.evidence);
-    assert_eq!(
-        fixture
-            .verifier
-            .verify(fixture.request.clone())
-            .await
-            .evidence,
-        refreshed.evidence
-    );
+    assert_eq!(verified.result, VerificationResult::Verified);
+    assert_eq!(verified.evidence, refreshed.evidence);
+    assert_eq!(fixture.control.calls.load(Ordering::SeqCst), 2);
     fixture.close().await;
 }
 

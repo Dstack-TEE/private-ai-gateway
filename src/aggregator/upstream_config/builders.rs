@@ -71,7 +71,7 @@ fn build_model_router(
 /// Whether a provider route may serve `provider.aci_verified` requests. Plain
 /// OpenAI-compatible cloud APIs have no provider attestation and are therefore
 /// ineligible for that constraint.
-fn provider_is_tee(provider: UpstreamProvider) -> bool {
+pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => false,
         UpstreamProvider::AciService

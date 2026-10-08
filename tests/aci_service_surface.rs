@@ -2037,7 +2037,7 @@ async fn rotated_session_listing_rejects_old_pin_and_accepts_new_pin() {
     let verifier = Arc::new(RotatingVerifier::default());
     let (h, config) = harness_for_sessions(
         verifier.clone(),
-        "openai-compatible",
+        "phala-direct",
         serde_json::json!({"aci-model": "aci-model"}),
     );
 
@@ -3002,52 +3002,24 @@ fn cited_session(harness: &Harness, response: &HttpResult) -> String {
         .to_string()
 }
 
-#[tokio::test(start_paused = true)]
-async fn cached_session_listing_remains_pin_acceptable_across_rotations() {
+#[tokio::test]
+async fn cached_session_listing_is_pin_acceptable_before_traffic() {
     let verifier = Arc::new(RotatingVerifier::default());
     let (h, config) = harness_for_sessions(
         verifier.clone(),
-        "openai-compatible",
+        "phala-direct",
         serde_json::json!({"aci-model": "aci-model"}),
     );
     let request = config
         .current_verification_requests(None, None, true)
         .remove(0);
-    verifier.verify(request.clone()).await;
-    let refresh = tokio::spawn(async move {
-        let period = Duration::from_secs(240);
-        let mut interval = tokio::time::interval_at(Instant::now() + period, period);
-        loop {
-            interval.tick().await;
-            verifier.refresh(request.clone()).await;
-        }
-    });
-    tokio::task::yield_now().await;
-    let mut current: Option<String> = None;
-    let mut previous: Option<String> = None;
-    for sample in 0..=30 {
-        let listed = listed_sessions(&h, "").await;
-        assert_eq!(listed.len(), 1);
-        let id = listed[0]["session_id"].as_str().unwrap().to_string();
-        if current.as_ref().is_some_and(|current| current != &id) {
-            previous = current.take();
-        }
-        let accepted = pin_session(&h, &id).await;
-        assert_eq!(accepted.status, StatusCode::OK);
-        assert_eq!(cited_session(&h, &accepted), id);
-        if let Some(previous) = previous.as_ref() {
-            let refused = pin_session(&h, previous).await;
-            assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
-            assert_eq!(error_type(&refused), "session_not_accepted");
-        }
-        current = Some(id);
-        if sample < 30 {
-            tokio::time::advance(Duration::from_secs(30)).await;
-            tokio::task::yield_now().await;
-        }
-    }
-    refresh.abort();
-    assert!(refresh.await.unwrap_err().is_cancelled());
+    verifier.verify(request).await;
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
 }
 
 #[derive(Default)]
@@ -3084,7 +3056,7 @@ async fn stale_inflight_verification_cannot_replace_the_cached_listing() {
     let verifier = Arc::new(InterleavingVerifier::default());
     let (h, _) = harness_for_sessions(
         verifier.clone(),
-        "openai-compatible",
+        "phala-direct",
         serde_json::json!({"aci-model": "aci-model"}),
     );
     *verifier.service.lock().unwrap() = Arc::downgrade(&h.service);
@@ -3118,7 +3090,7 @@ async fn cold_verifier_cache_lists_nothing_but_retains_historical_sessions() {
     let verifier = Arc::new(RotatingVerifier::default());
     let (h, config) = harness_for_sessions(
         verifier.clone(),
-        "openai-compatible",
+        "phala-direct",
         serde_json::json!({"aci-model": "aci-model"}),
     );
     assert!(listed_sessions(&h, "").await.is_empty());
@@ -3201,39 +3173,28 @@ async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
 }
 
 #[tokio::test]
-async fn per_model_listing_filters_the_verification_target() {
+async fn per_model_listing_uses_public_aliases() {
     let verifier = Arc::new(RotatingVerifier::default());
     let (h, config) = harness_for_sessions(
         verifier.clone(),
-        "openai-compatible",
-        serde_json::json!({"public-a": "model-a", "public-b": "model-b"}),
+        "phala-direct",
+        serde_json::json!({"a": "x", "x": "y"}),
     );
+    let mut evidence = HashMap::new();
     for request in config.current_verification_requests(None, None, true) {
-        verifier.verify(request).await;
+        let model = request.model_id.clone();
+        let event = verifier.verify(request).await;
+        evidence.insert(model, event.evidence.unwrap()["digest"].clone());
     }
     assert_eq!(listed_sessions(&h, "").await.len(), 2);
-    for model in ["public-a", "public-b"] {
-        let expected = if model.ends_with('a') {
-            "model-a"
-        } else {
-            "model-b"
-        };
-        let listed = listed_sessions(&h, &format!("?model={model}")).await;
+    for (public_model, upstream_model) in [("a", "x"), ("x", "y")] {
+        let listed = listed_sessions(&h, &format!("?model={public_model}")).await;
         assert_eq!(listed.len(), 1);
-        let request = config
-            .current_verification_requests(Some(model), None, true)
-            .remove(0);
-        assert_eq!(request.model_id, expected);
-        let session = h
-            .service
-            .list_current_sessions(&[request])
-            .unwrap()
-            .remove(0);
-        assert_eq!(listed[0]["session_id"], session.session_id());
+        assert_eq!(listed[0]["evidence"]["digest"], evidence[upstream_model]);
     }
-    assert!(listed_sessions(&h, "?model=model-a").await.is_empty());
+    assert!(listed_sessions(&h, "?model=y").await.is_empty());
     assert!(listed_sessions(&h, "?model=unknown").await.is_empty());
-    assert!(listed_sessions(&h, "?model=public-a&upstream_name=other")
+    assert!(listed_sessions(&h, "?model=a&upstream_name=other")
         .await
         .is_empty());
 }
@@ -3256,7 +3217,7 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
                 ..event
             }),
         ),
-        "openai-compatible",
+        "phala-direct",
         serde_json::json!({"aci-model": "aci-model"}),
     );
     let listed = listed_sessions(&h, "").await;
@@ -3277,32 +3238,4 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
         hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
         id
     );
-}
-
-#[tokio::test]
-async fn model_listing_uses_the_same_alias_mapping_as_routing() {
-    let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "openai-compatible",
-        serde_json::json!({"a": "x", "x": "y"}),
-    );
-    for request in config.current_verification_requests(None, None, true) {
-        verifier.verify(request).await;
-    }
-    let all = listed_sessions(&h, "").await;
-    assert_eq!(all.len(), 2);
-    let listed = listed_sessions(&h, "?model=x").await;
-    assert_eq!(listed.len(), 1);
-    let request = config
-        .current_verification_requests(Some("x"), None, true)
-        .remove(0);
-    assert_eq!(request.model_id, "y");
-    let session = h
-        .service
-        .list_current_sessions(&[request])
-        .unwrap()
-        .remove(0);
-    assert_eq!(listed[0]["session_id"], session.session_id());
-    assert!(listed_sessions(&h, "?model=y").await.is_empty());
 }

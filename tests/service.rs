@@ -844,6 +844,7 @@ async fn session_listing_propagates_persistence_failure() {
     assert!(service.list_current_sessions(&[request]).is_err());
     let config = common::session_config(serde_json::json!([{
         "name": "stub-upstream", "base_url": "http://stub-upstream",
+        "provider": "phala-direct",
         "models": {"model": "model"},
     }]));
     let router = private_ai_gateway::http::build_router_with_admin(Arc::new(service), config, None);
