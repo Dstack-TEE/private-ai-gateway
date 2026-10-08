@@ -357,15 +357,46 @@ struct RefreshObservations {
     peak: HashMap<String, usize>,
 }
 
+#[derive(Clone, Default)]
+struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 struct SleepingVerifier {
     latencies: HashMap<String, u64>,
     sleep_on_verify: bool,
     observations: Mutex<RefreshObservations>,
 }
 
+impl SleepingVerifier {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name.clone(),
+            model_id: request.model_id.clone(),
+            url_origin: request.url_origin.clone(),
+            verifier_id: "sleeping-verifier/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: request.required,
+            ..Default::default()
+        }
+    }
+}
+
 #[async_trait]
 impl UpstreamVerifier for SleepingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
         if self.sleep_on_verify {
             return self.refresh(request).await;
         }
@@ -376,15 +407,16 @@ impl UpstreamVerifier for SleepingVerifier {
             .entry((request.upstream_name.clone(), request.model_id.clone()))
             .or_default()
             .push(Instant::now());
-        UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
-            verifier_id: "sleeping-verifier/v1".to_string(),
-            result: VerificationResult::Verified,
-            required: request.required,
-            ..Default::default()
-        }
+        self.event_for(&request)
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let observations = self.observations.lock().unwrap();
+        let completed_at = observations
+            .completions
+            .get(&(request.upstream_name.clone(), request.model_id.clone()))?
+            .last()?;
+        (completed_at.elapsed() < Duration::from_secs(300)).then(|| self.event_for(request))
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -417,15 +449,7 @@ impl UpstreamVerifier for SleepingVerifier {
                 .or_default()
                 .push(Instant::now());
         }
-        UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
-            verifier_id: "sleeping-verifier/v1".to_string(),
-            result: VerificationResult::Verified,
-            required: request.required,
-            ..Default::default()
-        }
+        self.event_for(&request)
     }
 }
 
@@ -458,6 +482,24 @@ fn refresh_test_manager(
     })
 }
 
+fn replace_refresh_test_config(manager: &UpstreamConfigManager, config: Vec<UpstreamConfig>) {
+    let state = manager.state.read().unwrap().clone();
+    *manager.state.write().unwrap() = Arc::new(ConfiguredUpstreams {
+        config,
+        config_digest: "fixture".to_string(),
+        backend: state.backend.clone(),
+        verifier: state.verifier.clone(),
+        sessions: state.sessions.clone(),
+    });
+}
+
+async fn advance_refresh_time(seconds: u64) {
+    for _ in 0..seconds {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn drive_refresh_test(
     manager: Arc<UpstreamConfigManager>,
     verifier: &SleepingVerifier,
@@ -468,9 +510,12 @@ async fn drive_refresh_test(
     let refresh = tokio::spawn(manager.run_verification_refresh(|_| {}));
     tokio::task::yield_now().await;
     while started.elapsed() < Duration::from_secs(duration) {
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        advance_refresh_time(1).await;
     }
+    stop_refresh_test(refresh, verifier).await;
+}
+
+async fn stop_refresh_test(refresh: JoinHandle<()>, verifier: &SleepingVerifier) {
     refresh.abort();
     assert!(refresh.await.unwrap_err().is_cancelled());
     // Drain only the passes already started, leaving no detached test tasks.
@@ -482,13 +527,28 @@ async fn drive_refresh_test(
         .values()
         .any(|count| *count > 0)
     {
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        advance_refresh_time(1).await;
     }
+}
+
+fn refresh_load_bound(first_due: Duration, period: Duration, window: Duration) -> usize {
+    std::iter::successors(Some(first_due), |due| Some(*due + period))
+        .take_while(|due| *due <= window)
+        .count()
+        + 1
 }
 
 #[tokio::test(start_paused = true)]
 async fn tick_refresh_keeps_six_slow_upstreams_warm_without_extra_load() {
+    let writer = LogWriter::default();
+    let output = writer.0.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let config: Vec<_> = (0..6)
         .map(|i| {
             test_upstream_config(
@@ -505,21 +565,34 @@ async fn tick_refresh_keeps_six_slow_upstreams_warm_without_extra_load() {
         observations: Mutex::new(RefreshObservations::default()),
     });
     let manager = refresh_test_manager(config, verifier.clone());
+    let period = Duration::from_secs(manager.verification_refresh_interval_seconds().unwrap());
+    let ttl = Duration::from_secs(manager.options.verifier_cache_seconds);
+    let started = Instant::now();
     drive_refresh_test(manager, &verifier, 1800).await;
     let observations = verifier.observations.lock().unwrap();
     assert_eq!(observations.completions.len(), 6);
-    for times in observations.completions.values() {
-        assert!(times.len() >= 7);
-        // Prewarm is one-off; phased first refreshes can follow its expiry.
-        assert!(times[1..]
-            .windows(2)
-            .all(|pair| pair[1] - pair[0] < Duration::from_secs(300)));
+    for i in 0..6 {
+        let key = (format!("provider-{i}"), "model".to_string());
+        let starts = &observations.starts[&key];
+        let times = &observations.completions[&key];
+        let first_due = period * (i + 1) / 6;
+        assert_eq!(starts[0] - started, first_due);
+        assert!(starts[0] - started <= period);
         assert!(
-            times.len() <= 1800 / 240 + 1,
+            times[1] - times[0] < ttl,
+            "first replacement must precede prewarm expiry"
+        );
+        assert!(times.len() >= 7);
+        assert!(times.windows(2).all(|pair| pair[1] - pair[0] < ttl));
+        assert!(starts.windows(2).all(|pair| pair[1] - pair[0] == period));
+        assert!(
+            times.len() <= refresh_load_bound(first_due, period, Duration::from_secs(1800)),
             "no refresh load beyond tick cadence"
         );
     }
     assert!(observations.peak.values().all(|peak| *peak == 1));
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(!logs.contains("cache was cold before refresh"), "{logs}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -536,6 +609,7 @@ async fn slow_upstream_pass_is_isolated_and_never_overlaps_itself() {
         observations: Mutex::new(RefreshObservations::default()),
     });
     let manager = refresh_test_manager(vec![slow, healthy], verifier.clone());
+    let period = Duration::from_secs(manager.verification_refresh_interval_seconds().unwrap());
     drive_refresh_test(manager, &verifier, 1800).await;
     let observations = verifier.observations.lock().unwrap();
     let healthy_times = &observations.completions[&("healthy".to_string(), "model".to_string())];
@@ -544,8 +618,13 @@ async fn slow_upstream_pass_is_isolated_and_never_overlaps_itself() {
         .all(|pair| pair[1] - pair[0] < Duration::from_secs(300)));
     assert!(healthy_times.len() >= 5);
     assert_eq!(observations.peak["slow"], 1);
-    for times in observations.completions.values() {
-        assert!(times.len() <= 1800 / 240 + 1);
+    for (upstream, first_due) in [("healthy", period / 2), ("slow", period)] {
+        let bound = refresh_load_bound(first_due, period, Duration::from_secs(1800));
+        for ((name, _), times) in &observations.completions {
+            if name == upstream {
+                assert!(times.len() <= bound);
+            }
+        }
     }
 }
 
@@ -680,7 +759,7 @@ async fn refresh_groups_have_distinct_phases_and_keep_their_period() {
     let mut all_starts = std::collections::HashSet::new();
     for i in 0..6 {
         let starts = &observations.starts[&(format!("provider-{i}"), "model".to_string())];
-        assert_eq!(starts[0] - epoch, Duration::from_secs(240 + i * 240 / 6));
+        assert_eq!(starts[0] - epoch, Duration::from_secs((i + 1) * 240 / 6));
         assert!(starts.len() >= 6);
         assert!(starts
             .windows(2)
@@ -715,18 +794,6 @@ fn current_requests_resolve_aliases_before_upstream_model_ids() {
 
 #[tokio::test(start_paused = true)]
 async fn refresh_warns_only_when_a_previously_refreshed_targets_cache_is_cold() {
-    use std::io::Write;
-    #[derive(Clone)]
-    struct LogWriter(Arc<Mutex<Vec<u8>>>);
-    impl Write for LogWriter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
     struct ExpiringVerifier(Mutex<HashMap<String, (Instant, UpstreamVerifiedEvent)>>);
     #[async_trait]
     impl UpstreamVerifier for ExpiringVerifier {
@@ -836,13 +903,7 @@ async fn removed_targets_do_not_restore_history_when_their_inflight_refresh_fini
 }
 
 #[tokio::test(start_paused = true)]
-async fn config_changes_rephase_groups_without_restarting_inflight_passes() {
-    async fn advance(seconds: u64) {
-        for _ in 0..seconds {
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-        }
-    }
+async fn config_changes_preserve_due_times_without_restarting_inflight_passes() {
     let mut slow = test_upstream_config(
         "provider-0",
         UpstreamProvider::PhalaDirect,
@@ -864,44 +925,23 @@ async fn config_changes_rephase_groups_without_restarting_inflight_passes() {
         observations: Mutex::new(RefreshObservations::default()),
     });
     let manager = refresh_test_manager(vec![slow.clone()], verifier.clone());
-    let replace_config = |config| {
-        let state = manager.state.read().unwrap().clone();
-        *manager.state.write().unwrap() = Arc::new(ConfiguredUpstreams {
-            config,
-            config_digest: "fixture".to_string(),
-            backend: state.backend.clone(),
-            verifier: state.verifier.clone(),
-            sessions: state.sessions.clone(),
-        });
-    };
     let epoch = Instant::now();
     let refresh = tokio::spawn(manager.clone().run_verification_refresh(|_| {}));
     tokio::task::yield_now().await;
-    advance(300).await;
-    replace_config(vec![slow.clone(), healthy]);
-    advance(600).await;
+    advance_refresh_time(300).await;
+    replace_refresh_test_config(&manager, vec![slow.clone(), healthy]);
+    advance_refresh_time(600).await;
     slow.verification_refresh_seconds = Some(60);
-    replace_config(vec![slow]);
-    advance(700).await;
-    refresh.abort();
-    assert!(refresh.await.unwrap_err().is_cancelled());
-    while verifier
-        .observations
-        .lock()
-        .unwrap()
-        .active
-        .values()
-        .any(|count| *count > 0)
-    {
-        advance(1).await;
-    }
+    replace_refresh_test_config(&manager, vec![slow]);
+    advance_refresh_time(700).await;
+    stop_refresh_test(refresh, &verifier).await;
     let observations = verifier.observations.lock().unwrap();
     let slow = &observations.starts[&("provider-0".to_string(), "model".to_string())];
     assert_eq!(
         slow.iter()
             .map(|time| (*time - epoch).as_secs())
             .collect::<Vec<_>>(),
-        [240, 1020, 1560]
+        [240, 960, 1500]
     );
     let healthy = &observations.starts[&("provider-1".to_string(), "model".to_string())];
     assert_eq!(
@@ -909,7 +949,89 @@ async fn config_changes_rephase_groups_without_restarting_inflight_passes() {
             .iter()
             .map(|time| (*time - epoch).as_secs())
             .collect::<Vec<_>>(),
-        [840]
+        [720]
     );
     assert_eq!(observations.peak["provider-0"], 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn adding_an_upstream_preserves_existing_groups_next_refreshes() {
+    let config: Vec<_> = (0..3)
+        .map(|i| {
+            test_upstream_config(
+                &format!("provider-{i}"),
+                UpstreamProvider::PhalaDirect,
+                "public",
+                "model",
+            )
+        })
+        .collect();
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: config.iter().map(|cfg| (cfg.name.clone(), 1)).collect(),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager =
+        refresh_test_manager(vec![config[0].clone(), config[2].clone()], verifier.clone());
+    let epoch = Instant::now();
+    let refresh = tokio::spawn(manager.clone().run_verification_refresh(|_| {}));
+    tokio::task::yield_now().await;
+    advance_refresh_time(350).await;
+    replace_refresh_test_config(&manager, config);
+    advance_refresh_time(400).await;
+    stop_refresh_test(refresh, &verifier).await;
+    let observations = verifier.observations.lock().unwrap();
+    for (name, expected) in [
+        ("provider-0", vec![120, 360, 600]),
+        ("provider-1", vec![520]),
+        ("provider-2", vec![240, 480, 720]),
+    ] {
+        let starts = &observations.starts[&(name.to_string(), "model".to_string())];
+        assert_eq!(
+            starts
+                .iter()
+                .map(|time| (*time - epoch).as_secs())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reducing_the_interval_pulls_in_existing_due_times() {
+    let mut config: Vec<_> = (0..2)
+        .map(|i| {
+            test_upstream_config(
+                &format!("provider-{i}"),
+                UpstreamProvider::PhalaDirect,
+                "public",
+                "model",
+            )
+        })
+        .collect();
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: config.iter().map(|cfg| (cfg.name.clone(), 1)).collect(),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(config.clone(), verifier.clone());
+    let epoch = Instant::now();
+    let refresh = tokio::spawn(manager.clone().run_verification_refresh(|_| {}));
+    tokio::task::yield_now().await;
+    advance_refresh_time(110).await;
+    for cfg in &mut config {
+        cfg.verification_refresh_seconds = Some(60);
+    }
+    replace_refresh_test_config(&manager, config);
+    advance_refresh_time(390).await;
+    stop_refresh_test(refresh, &verifier).await;
+    let observations = verifier.observations.lock().unwrap();
+    for (name, first) in [("provider-0", 120), ("provider-1", 180)] {
+        let starts = &observations.starts[&(name.to_string(), "model".to_string())];
+        assert_eq!(starts[0] - epoch, Duration::from_secs(first));
+        assert!(starts.len() >= 6);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == Duration::from_secs(60)));
+    }
 }

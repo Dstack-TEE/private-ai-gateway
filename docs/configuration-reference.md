@@ -269,10 +269,14 @@ Verification refresh uses the effective cache lifetime and request timeout,
 including per-upstream overrides. The smallest enabled interval R drives
 independent upstream groups, with sequential targets within a group. Starts are
 spread in upstream-name order: group i of N is first due at
-`start + R + i * R / N`, then every R. Changes to R or the group set re-phase the
-schedule; in-flight groups skip starts rather than overlap. Prewarm stays
-concurrent, and a staggered first refresh may follow its cache expiry. Zero
-disables proactive verification refresh.
+`start + (i + 1) * R / N`, then every R. Changes to the group set preserve
+existing groups' due times; new groups get `now + (j + 1) * R / N_new` using
+their index j in the updated set. When R changes, existing due times become
+`min(existing_due, now + new_R)`, with the new period thereafter. In-flight
+groups skip starts rather than overlap. Prewarm stays concurrent; initial
+refresh starts are due within R, and completing before the prewarmed entry
+expires still depends on the verifier and pass duration. Zero disables
+proactive verification refresh.
 
 A cache stays warm while each target's replacement lands before the verifier's
 own expiry of its previous entry. External verifiers stamp expiry at cache

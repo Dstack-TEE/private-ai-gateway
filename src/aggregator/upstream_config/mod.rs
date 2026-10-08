@@ -557,15 +557,15 @@ impl UpstreamConfigManager {
             let groups = group_verification_targets(targets);
             let period = Duration::from_secs(seconds);
             if scheduled_seconds != Some(seconds) || next_due.keys().ne(groups.keys()) {
-                let start = Instant::now() + period;
-                next_due = groups
-                    .keys()
-                    .enumerate()
-                    .map(|(index, name)| {
-                        let phase = period.mul_f64(index as f64 / groups.len() as f64);
-                        (name.clone(), start + phase)
-                    })
-                    .collect();
+                let now = Instant::now();
+                next_due.retain(|name, _| groups.contains_key(name));
+                for (index, name) in groups.keys().enumerate() {
+                    let phase = period.mul_f64((index + 1) as f64 / groups.len() as f64);
+                    let due = next_due.entry(name.clone()).or_insert(now + phase);
+                    if scheduled_seconds != Some(seconds) {
+                        *due = (*due).min(now + period);
+                    }
+                }
                 scheduled_seconds = Some(seconds);
             }
             let Some(earliest) = next_due.values().copied().min() else {

@@ -45,19 +45,21 @@ defaults and zero values.
 
 The manager uses the smallest enabled interval R and refreshes only upstreams
 whose policy enables refresh. It spreads starts across R in upstream-name order:
-for N groups, group i is first due at `start + R + i * R / N`, then every R.
-Each group keeps its own due time. Changes to R or the group set re-phase the
-schedule in the same deterministic order; an in-flight group is never started
-twice. Configuration is re-read at each scheduled wake, or every five seconds
-when refresh is disabled.
+for N groups, group i is first due at `start + (i + 1) * R / N`, then every R.
+All initial starts are due within R of the refresh loop starting after prewarm.
+Adding or removing groups preserves existing groups' due times; only a new
+group gets `now + (j + 1) * R / N_new`, using its index j in the updated group
+set. When R changes, an existing group's next due time becomes the earlier of
+its current due time and `now + new_R`, then uses the new period. An in-flight
+group is never started twice. Configuration is re-read at each scheduled wake,
+or every five seconds when refresh is disabled.
 
 Groups refresh independently, with sequential targets within a group. A group
 still in flight skips its next start, while other groups keep their schedules.
 Refresh bypasses the existing cache. A successful result replaces the cached
 event; a failed refresh leaves the previous unexpired successful event in place.
-Prewarm remains a one-off concurrent pass. The staggered first refreshes can
-follow prewarm cache expiry, so startup does not guarantee continuously warm
-caches.
+Prewarm remains a one-off concurrent pass. Finishing the first refresh before
+the prewarmed entry expires still depends on the verifier and pass duration.
 
 The default R is `max(cache_seconds - request_timeout_seconds, 1)` (240 seconds
 with the defaults). A cache stays warm while each target's replacement lands
