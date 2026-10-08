@@ -1,12 +1,12 @@
 # ArmetAI Per-Model TDX Review
 
-Date: 2026-09-29 UTC.
+Date: 2026-09-29 UTC. Updated: 2026-10-07 UTC.
 
 > [!NOTE]
 > This is the provider's **self-assessment** against the
 > [audit criteria](../audit-criteria.md), submitted with the adapter. It is not
-> an independent audit. Items marked **Provider evidence required** are
-> commitments that a reviewer must confirm against source and a live endpoint
+> an independent audit. Items marked **Provider evidence through live review session** are
+> commitments that we want to show to a reviewer in a live review session to confirm against source and a live endpoint
 > before a decision. Use [verification.md](verification.md) for the adapter
 > algorithm, claims and limitations.
 
@@ -16,8 +16,10 @@ in-TD TLS proxy repositories with commits, to be listed before review).
 ## Verdict
 
 **Decision pending.** The adapter verifies the live `poc1.armet.ai` endpoint
-(see [Live probe](#live-probe-2026-10-02)), but source provenance, TLS key
-custody and the privacy boundary have not been reviewed.
+(see [Live probe](#live-probe-2026-10-02) and
+[Re-probe](#re-probe-after-redeploy-2026-10-07)), but source provenance, the
+Fortanix DSM key-release policy and the privacy boundary have not been
+reviewed.
 
 The proposed trust model is:
 
@@ -45,18 +47,33 @@ measurement pins and the TODOs under criteria 7 and 13.
   verification, and debug TDs rejected. The identity is the pinned measurement
   subject over MRTD, RTMR0-3, TD_ATTRIBUTES, XFAM, MRCONFIGID, MROWNER and
   MROWNERCONFIG.
-- **Provider evidence required:** the TLS private key is generated inside the
-  TD at boot, held only in TD memory, and never exported. The certificate is
-  obtained from inside the TD, for example with ACME.
+- **TLS key custody:** the TLS private key is not generated per boot. It is
+  held in Fortanix DSM and released directly into the TD through an
+  attestation-gated secure key release after attestation verification from Fortanix CCM. 
+  The key therefore persists across TD launches; the re-probe observed the same 
+  SPKI (`e3e15952…1cd5`) after a relaunch that changed `MRCONFIGID`.
+- **Provider evidence through live review session:** the gateway cannot check custody itself. It
+  only sees the SPKI the quote commits to, so we suggest to reviewers to have a call to check on:
+  - **the release policy:** the attestation claims DSM requires before it
+    releases the key. We will walk through the secure key release mechanism involving CCM and DSM.
+    We will explain the key release requires the same measurements the gateway pins, 
+    including `MRCONFIGID`, so a TD launched with different `initdata.toml` 
+    (for example, one allowing exec) cannot obtain the key;
+  - **policy updates:** the release policy is updated together with the
+    published pins for each release, and older accepted measurements are
+    removed from it on schedule;
+  - **blast radius:** one key serves every TD launch and release that satisfies
+    the policy, so a compromise of any accepted TD exposes the key for all of
+    them. Document the rotation plan.
 
 ### 2. Channel binding
 
 - **Met by the adapter:** `tls_spki_sha256`, committed in `report_data`, is
   enforced on every forwarded request by the SPKI-pinned client. A certificate
   rotation fails closed until the gateway re-verifies.
-- **Provider evidence required:** TLS terminates inside the TD. No load
+- **Provider evidence through live review session:** TLS terminates inside the TD. No load
   balancer, CDN or ingress terminates TLS outside it.
-- **Network path:** `poc1.armet.ai` resolves to an AWS address
+- **Network path:** `poc1.armet.ai` resolves to a server
   (`52.53.179.221`) running HAProxy in TCP passthrough mode, which forwards to
   the TD without terminating TLS. The live probe saw the TD-attested SPKI on
   the public origin. HAProxy is outside the trust boundary: SPKI pinning means
@@ -80,7 +97,7 @@ claim.
 
 ### 5. Privacy boundary
 
-**Provider evidence required.** Show the following, with source:
+**Provider evidence through live review session.** We plan to show the following, with source:
 
 - No prompt, completion or tool payload logging, persistence, metrics or
   traces leave the TD.
@@ -95,7 +112,10 @@ claim.
   hash of the TD's `initdata.toml`, the launch-time configuration it hands to
   the TD. `MRCONFIGID` is part of the pin, so any change to `initdata.toml`
   changes the subject and fails closed until re-pinned.
-- **Provider evidence required:**
+- **Exec disabled:** as of 2026-10-07, `initdata.toml` disallows exec into the
+  TD. The change produced a new `MRCONFIGID` and subject (see
+  [Re-probe](#re-probe-after-redeploy-2026-10-07)).
+- **Provider evidence through live review session** We plan to show the following
   - the TD recomputes the hash of the `initdata.toml` it actually consumes and
     refuses to start unless it equals its own `MRCONFIGID`. Otherwise the host
     could hand the TD different initdata from the one the pin covers;
@@ -120,7 +140,8 @@ production rollout:
 - a description of security-relevant changes.
 
 It must also publish an emergency-rollout policy. The adapter fails closed on
-any unpublished measurement.
+any unpublished measurement. The 2026-10-07 `initdata.toml` change shows this
+live: the previous pin was rejected until the new subject was pinned.
 
 ### 8. Lease lifecycle
 
@@ -130,7 +151,7 @@ provider-specific session material is used.
 ### 9. Request fidelity
 
 Chat and streaming pass end to end through the gateway (see
-[Live probe](#live-probe-2026-10-02)). **Provider evidence required:** tools,
+[Live probe](#live-probe-2026-10-02)). **Provider evidence through live review session:** tools,
 structured outputs and error paths, as advertised.
 
 ### 10. Load balancing and cache
@@ -149,9 +170,14 @@ Covered hermetically by `tests/provider_verifier/armet_ai_soundness.py`. It
 checks replayed nonces, a swapped TLS key, another model, swapped GPU evidence,
 each pinned field, debug, revoked TCB and the NRAS failure modes.
 
-Live: a request for a model the TD does not serve (`GLM-5.3-Other`) was
-refused by the endpoint with `409`, and the verifier failed closed. The
-certificate-rotation and VM-shape checks are **TODO**.
+Live:
+
+- A request for a model the TD does not serve (`GLM-5.3-Other`) was refused by
+  the endpoint with `409`, and the verifier failed closed.
+- After the 2026-10-07 relaunch changed `MRCONFIGID`, the previous pin was
+  rejected at the measurement step.
+
+The certificate-rotation and VM-shape checks are **TODO**.
 
 ### 13. Source and platform provenance
 
@@ -220,6 +246,29 @@ covered.
 
 The subject was pinned for this test only. It becomes an acceptance decision
 once the release behind it is published and reviewed (criteria 7 and 13).
+
+## Re-probe after redeploy (2026-10-07)
+
+ArmetAI relaunched the TD with an `initdata.toml` that disallows exec. The
+verifier checks were rerun against `https://poc1.armet.ai` for
+`GLM-5.3-Flash`. The gateway end-to-end suite was not rerun.
+
+| Check | Result |
+| --- | --- |
+| Wire contract and `report_data` commitment | Pass |
+| Reported SPKI equals live certificate SPKI | Pass (`e3e15952…1cd5`, unchanged) |
+| Previous pin (`0265ed94…88f6`) | Rejected at the measurement step |
+| New subject, pinned for the test | `verified`; TCB `UpToDate`; NRAS 8 × GH100, every GPU nonce-matched |
+| Wrong model | `409` from the endpoint; verifier failed closed |
+
+Changed values; every other pinned field and the TDX module are unchanged:
+
+| Field | Value |
+| --- | --- |
+| MRCONFIGID | `55a078a9…30a3bf` (was `a8b1759a…3c158b`) |
+| Subject | `tdx-measurement:sha256:b2032b5a98bce6e73227959f456fd3b63a8958c45c61c24e86e69bc0cb8147b8` |
+
+The new subject was pinned for this test only, as above.
 
 ## Hard reject conditions
 

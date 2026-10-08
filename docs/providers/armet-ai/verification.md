@@ -237,9 +237,12 @@ access for collateral and NRAS.
 - **Model binding is a claim of the measured software.** `report_data` commits
   to the model ID the TD says it serves. Whether the weights match that ID is
   only as strong as the measured software's loading logic.
-- **Key custody is not proved by the quote alone.** Reviewers must confirm the
-  TLS key is generated and held inside the TD, and that nothing outside the TD
-  terminates TLS.
+- **Key custody is not proved by the quote alone.** ArmetAI releases the TLS
+  key into the TD from Fortanix DSM through an attestation-gated secure key
+  release, so the same key persists across TD launches. Reviewers must confirm
+  that the DSM release policy requires the same measurements the gateway pins,
+  and that nothing outside the TD terminates TLS (see the
+  [review](review.md#1-workload-identity)).
 - **GPU-to-TD binding rests on the measured software.** The quote proves the
   pinned TD software presented this GPU evidence for this nonce. That the GPUs
   are the ones attached to the TD, in CC mode, and serving the requests, is a
