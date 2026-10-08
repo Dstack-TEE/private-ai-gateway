@@ -148,9 +148,10 @@ inference; the report handlers select the binding by `Host`.
 The session list is derived from the same cached verification that the pin gate
 uses. It is empty while the cache is cold, when no successful verification is
 available, or when no upstream configuration exists. A failed refresh preserves
-an existing successful cache entry until it expires. Filters resolve both public
-model aliases and upstream model IDs; per-model providers list only that model's
-channel. `expires_at` is an upper bound, not a promise that a pin remains accepted:
+an existing successful cache entry until it expires. Model filters use the same
+public alias mapping as request routing; per-model providers list only the
+channel for the mapped upstream model. `expires_at` is an upper bound, not a
+promise that a pin remains accepted:
 cache replacement can supersede a session sooner. Superseded sessions remain
 retrievable by id until retention ends. On `412 session_not_accepted`, re-list
 and retry once with a current session id.

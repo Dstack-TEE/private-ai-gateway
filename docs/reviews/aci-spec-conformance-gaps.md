@@ -102,11 +102,13 @@ item.
    seals only those successful events, so superseded bindings, claims,
    nonce-bound evidence, and removed Chutes instances disappear immediately.
    Cold caches list nothing; older sessions remain retrievable by id until
-   retention ends. Warm-cache availability requires the refresh cadence to fit
-   within the cache lifetime: ticks run isolated upstream groups concurrently,
-   and each group's pass must fit within `cache_seconds - request_timeout_seconds`
-   at the default interval. The session store and verifier cache are
-   per-process, so multi-replica deployments need session affinity for pins.
+   retention ends. Isolated upstream groups refresh at deterministic phases;
+   cache warmth requires each target's replacement to land before its verifier's
+   own expiry of the previous entry. Multi-target groups can drift, so warmth
+   is not guaranteed in all cases. A per-target warning reports a cache found
+   cold at refresh time after a prior successful refresh. The session store and
+   verifier cache are per-process, so multi-replica deployments need session
+   affinity for pins.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry

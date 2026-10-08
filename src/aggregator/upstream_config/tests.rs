@@ -351,6 +351,7 @@ async fn prewarm_verification_deduplicates_upstream_models() {
 
 #[derive(Default)]
 struct RefreshObservations {
+    starts: HashMap<(String, String), Vec<Instant>>,
     completions: HashMap<(String, String), Vec<Instant>>,
     active: HashMap<String, usize>,
     peak: HashMap<String, usize>,
@@ -389,6 +390,11 @@ impl UpstreamVerifier for SleepingVerifier {
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         {
             let mut observations = self.observations.lock().unwrap();
+            observations
+                .starts
+                .entry((request.upstream_name.clone(), request.model_id.clone()))
+                .or_default()
+                .push(Instant::now());
             let active = observations
                 .active
                 .entry(request.upstream_name.clone())
@@ -504,7 +510,8 @@ async fn tick_refresh_keeps_six_slow_upstreams_warm_without_extra_load() {
     assert_eq!(observations.completions.len(), 6);
     for times in observations.completions.values() {
         assert!(times.len() >= 7);
-        assert!(times
+        // Prewarm is one-off; phased first refreshes can follow its expiry.
+        assert!(times[1..]
             .windows(2)
             .all(|pair| pair[1] - pair[0] < Duration::from_secs(300)));
         assert!(
@@ -594,14 +601,14 @@ fn current_requests_filter_per_model_and_router_channels() {
         }),
     );
     assert_eq!(manager.current_verification_requests(None, None).len(), 3);
-    for model in ["public-b", "up-b"] {
+    for (model, expected) in [("public-b", "up-b"), ("public-a", "up-a")] {
         let requests = manager.current_verification_requests(Some(model), None);
         assert_eq!(requests.len(), 2);
         let per_model = requests
             .iter()
             .find(|request| request.upstream_name == "per-model")
             .unwrap();
-        assert_eq!(per_model.model_id, "up-b");
+        assert_eq!(per_model.model_id, expected);
         assert_eq!(per_model.forwarded_body_hash, digest::sha256_hex(b""));
         assert!(per_model.required);
         assert_eq!(
@@ -611,6 +618,9 @@ fn current_requests_filter_per_model_and_router_channels() {
             1
         );
     }
+    assert!(manager
+        .current_verification_requests(Some("up-b"), None)
+        .is_empty());
     assert!(manager
         .current_verification_requests(Some("unknown"), None)
         .is_empty());
@@ -644,4 +654,262 @@ async fn prewarm_groups_run_concurrently_with_sequential_targets() {
         observations.completions[&("second".to_string(), "model".to_string())][0] - started,
         Duration::from_secs(50)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_groups_have_distinct_phases_and_keep_their_period() {
+    let config: Vec<_> = (0..6)
+        .map(|i| {
+            test_upstream_config(
+                &format!("provider-{i}"),
+                UpstreamProvider::PhalaDirect,
+                "public",
+                "model",
+            )
+        })
+        .collect();
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: config.iter().map(|cfg| (cfg.name.clone(), 1)).collect(),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(config, verifier.clone());
+    let epoch = Instant::now();
+    drive_refresh_test(manager, &verifier, 1800).await;
+    let observations = verifier.observations.lock().unwrap();
+    let mut all_starts = std::collections::HashSet::new();
+    for i in 0..6 {
+        let starts = &observations.starts[&(format!("provider-{i}"), "model".to_string())];
+        assert_eq!(starts[0] - epoch, Duration::from_secs(240 + i * 240 / 6));
+        assert!(starts.len() >= 6);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == Duration::from_secs(240)));
+        for started in starts {
+            assert!(
+                all_starts.insert(*started),
+                "upstream groups must not burst together"
+            );
+        }
+    }
+}
+
+#[test]
+fn current_requests_resolve_aliases_before_upstream_model_ids() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "x");
+    cfg.models.insert("x".to_string(), "y".to_string());
+    let manager = refresh_test_manager(
+        vec![cfg],
+        Arc::new(CountingVerifier {
+            verifications: Arc::new(AtomicUsize::new(0)),
+            invalidations: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    let requests = manager.current_verification_requests(Some("x"), None);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model_id, "y");
+    assert!(manager
+        .current_verification_requests(Some("y"), None)
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_warns_only_when_a_previously_refreshed_targets_cache_is_cold() {
+    use std::io::Write;
+    #[derive(Clone)]
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct ExpiringVerifier(Mutex<HashMap<String, (Instant, UpstreamVerifiedEvent)>>);
+    #[async_trait]
+    impl UpstreamVerifier for ExpiringVerifier {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            if let Some(event) = self.cached(&request) {
+                return event;
+            }
+            self.refresh(request).await
+        }
+
+        fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(&request.model_id)
+                .filter(|(expires_at, _)| Instant::now() < *expires_at)
+                .map(|(_, event)| event.clone())
+        }
+
+        async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let ttl = if request.model_id == "model-a" {
+                600
+            } else {
+                100
+            };
+            let event = UpstreamVerifiedEvent {
+                upstream_name: request.upstream_name,
+                model_id: request.model_id,
+                result: VerificationResult::Verified,
+                ..Default::default()
+            };
+            self.0.lock().unwrap().insert(
+                event.model_id.clone(),
+                (Instant::now() + Duration::from_secs(ttl), event.clone()),
+            );
+            event
+        }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = LogWriter(output.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut cfg = test_upstream_config(
+        "provider",
+        UpstreamProvider::PhalaDirect,
+        "public-a",
+        "model-a",
+    );
+    cfg.models
+        .insert("public-b".to_string(), "model-b".to_string());
+    let targets = verification_targets(&[cfg]);
+    let verifier = Arc::new(ExpiringVerifier(Mutex::new(HashMap::new())));
+    let history = VerificationRefreshHistory::default();
+    history.set_targets(&targets);
+    run_verification_group(
+        verifier.clone(),
+        targets.clone(),
+        None,
+        Some(history.clone()),
+    )
+    .await;
+    assert!(
+        output.lock().unwrap().is_empty(),
+        "first refresh has no prior success"
+    );
+    tokio::time::advance(Duration::from_secs(240)).await;
+    assert!(verifier.cached(&targets[0].request()).is_some());
+    assert!(verifier.cached(&targets[1].request()).is_none());
+    run_verification_group(verifier.clone(), targets.clone(), None, Some(history)).await;
+    assert!(verifier.cached(&targets[1].request()).is_some());
+    let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert_eq!(logs.lines().count(), 1);
+    assert!(logs.contains("upstream=provider"), "{logs}");
+    assert!(logs.contains("model=model-b"), "{logs}");
+    assert!(logs.contains("seconds_since_last_success=241"), "{logs}");
+    assert!(logs.contains("cache was cold before refresh"), "{logs}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn removed_targets_do_not_restore_history_when_their_inflight_refresh_finishes() {
+    let cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+    let targets = verification_targets(&[cfg]);
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: HashMap::from([("provider".to_string(), 50)]),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let history = VerificationRefreshHistory::default();
+    history.set_targets(&targets);
+    let pass = tokio::spawn(run_verification_group(
+        verifier.clone(),
+        targets,
+        None,
+        Some(history.clone()),
+    ));
+    tokio::task::yield_now().await;
+    assert_eq!(verifier.observations.lock().unwrap().active["provider"], 1);
+    history.set_targets(&[]);
+    assert_eq!(pass.await.unwrap()[0].result, "verified");
+    assert!(history.last_success.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn config_changes_rephase_groups_without_restarting_inflight_passes() {
+    async fn advance(seconds: u64) {
+        for _ in 0..seconds {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+    }
+    let mut slow = test_upstream_config(
+        "provider-0",
+        UpstreamProvider::PhalaDirect,
+        "public",
+        "model",
+    );
+    let healthy = test_upstream_config(
+        "provider-1",
+        UpstreamProvider::PhalaDirect,
+        "public",
+        "model",
+    );
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: HashMap::from([
+            ("provider-0".to_string(), 500),
+            ("provider-1".to_string(), 1),
+        ]),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(vec![slow.clone()], verifier.clone());
+    let replace_config = |config| {
+        let state = manager.state.read().unwrap().clone();
+        *manager.state.write().unwrap() = Arc::new(ConfiguredUpstreams {
+            config,
+            config_digest: "fixture".to_string(),
+            backend: state.backend.clone(),
+            verifier: state.verifier.clone(),
+            sessions: state.sessions.clone(),
+        });
+    };
+    let epoch = Instant::now();
+    let refresh = tokio::spawn(manager.clone().run_verification_refresh(|_| {}));
+    tokio::task::yield_now().await;
+    advance(300).await;
+    replace_config(vec![slow.clone(), healthy]);
+    advance(600).await;
+    slow.verification_refresh_seconds = Some(60);
+    replace_config(vec![slow]);
+    advance(700).await;
+    refresh.abort();
+    assert!(refresh.await.unwrap_err().is_cancelled());
+    while verifier
+        .observations
+        .lock()
+        .unwrap()
+        .active
+        .values()
+        .any(|count| *count > 0)
+    {
+        advance(1).await;
+    }
+    let observations = verifier.observations.lock().unwrap();
+    let slow = &observations.starts[&("provider-0".to_string(), "model".to_string())];
+    assert_eq!(
+        slow.iter()
+            .map(|time| (*time - epoch).as_secs())
+            .collect::<Vec<_>>(),
+        [240, 1020, 1560]
+    );
+    let healthy = &observations.starts[&("provider-1".to_string(), "model".to_string())];
+    assert_eq!(
+        healthy
+            .iter()
+            .map(|time| (*time - epoch).as_secs())
+            .collect::<Vec<_>>(),
+        [840]
+    );
+    assert_eq!(observations.peak["provider-0"], 1);
 }

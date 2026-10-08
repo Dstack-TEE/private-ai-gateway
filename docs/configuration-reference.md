@@ -265,12 +265,27 @@ request time.
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
 
-Verification refresh uses the effective cache lifetime and request timeout, including
-per-upstream overrides. Ticks start independent upstream passes, with sequential
-targets within each pass. An explicit `verification_refresh_seconds` above
-`verifier_cache_seconds - verifier_request_timeout_seconds` can leave cold windows;
-the same applies when a group's pass exceeds that margin. Zero disables proactive
-verification refresh.
+Verification refresh uses the effective cache lifetime and request timeout,
+including per-upstream overrides. The smallest enabled interval R drives
+independent upstream groups, with sequential targets within a group. Starts are
+spread in upstream-name order: group i of N is first due at
+`start + R + i * R / N`, then every R. Changes to R or the group set re-phase the
+schedule; in-flight groups skip starts rather than overlap. Prewarm stays
+concurrent, and a staggered first refresh may follow its cache expiry. Zero
+disables proactive verification refresh.
+
+A cache stays warm while each target's replacement lands before the verifier's
+own expiry of its previous entry. External verifiers stamp expiry at cache
+insertion after verification; ACI-service stamps it at verification/appraisal
+start, before asynchronous appraisal completes, and also caps it at keyset
+expiry. Multi-target groups can drift, and skipped starts, failed refreshes,
+or invalidation can leave cold windows. Warmth is not guaranteed in all cases;
+an explicit R above `cache - request_timeout` reduces the refresh budget.
+Before refreshing a target that previously refreshed successfully in this
+process, the gateway calls the same `cached()` function used by the pin gate.
+If the cache is cold, it warns with upstream, model, and seconds since the last
+successful refresh completion. The warning observes the cache at refresh time
+rather than comparing completion gaps with a configured TTL.
 
 An `aci-service` entry must provide at least one accepted subject or image
 digest and at least one accepted KMS root public key. The verifier rejects an

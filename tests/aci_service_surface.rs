@@ -3205,7 +3205,7 @@ async fn per_model_listing_filters_the_verification_target() {
         h.service.record_session(&verifier.verify(request).await);
     }
     assert_eq!(listed_sessions(&h, "").await.len(), 2);
-    for model in ["public-a", "model-a", "public-b", "model-b"] {
+    for model in ["public-a", "public-b"] {
         let expected = if model.ends_with('a') {
             "model-a"
         } else {
@@ -3214,8 +3214,9 @@ async fn per_model_listing_filters_the_verification_target() {
         let listed = listed_sessions(&h, &format!("?model={model}")).await;
         assert_eq!(listed.len(), 1);
         let request = config
-            .current_verification_requests(Some(expected), None)
+            .current_verification_requests(Some(model), None)
             .remove(0);
+        assert_eq!(request.model_id, expected);
         let session = h
             .service
             .list_current_sessions(&[request])
@@ -3223,6 +3224,7 @@ async fn per_model_listing_filters_the_verification_target() {
             .remove(0);
         assert_eq!(listed[0]["session_id"], session.session_id());
     }
+    assert!(listed_sessions(&h, "?model=model-a").await.is_empty());
     assert!(listed_sessions(&h, "?model=unknown").await.is_empty());
     assert!(listed_sessions(&h, "?model=public-a&upstream_name=other")
         .await
@@ -3268,4 +3270,32 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
         hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
         id
     );
+}
+
+#[tokio::test]
+async fn model_listing_uses_the_same_alias_mapping_as_routing() {
+    let verifier = Arc::new(RotatingVerifier::default());
+    let (h, config) = harness_for_sessions(
+        verifier.clone(),
+        "openai-compatible",
+        serde_json::json!({"a": "x", "x": "y"}),
+    );
+    for request in config.current_verification_requests(None, None) {
+        h.service.record_session(&verifier.verify(request).await);
+    }
+    let all = listed_sessions(&h, "").await;
+    assert_eq!(all.len(), 2);
+    let listed = listed_sessions(&h, "?model=x").await;
+    assert_eq!(listed.len(), 1);
+    let request = config
+        .current_verification_requests(Some("x"), None)
+        .remove(0);
+    assert_eq!(request.model_id, "y");
+    let session = h
+        .service
+        .list_current_sessions(&[request])
+        .unwrap()
+        .remove(0);
+    assert_eq!(listed[0]["session_id"], session.session_id());
+    assert!(listed_sessions(&h, "?model=y").await.is_empty());
 }

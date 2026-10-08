@@ -43,11 +43,40 @@ results, and `verification_refresh_seconds` sets the proactive refresh cadence.
 [Upstream fields](configuration-reference.md#upstream-fields) lists their
 defaults and zero values.
 
-The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Ticks are anchored to that interval, with the first tick one interval after the refresh loop starts. The interval is rebuilt when configuration changes its value; disabled refresh keeps the five-second configuration poll. A delayed tick uses Tokio's `MissedTickBehavior::Delay`.
+The manager uses the smallest enabled interval R and refreshes only upstreams
+whose policy enables refresh. It spreads starts across R in upstream-name order:
+for N groups, group i is first due at `start + R + i * R / N`, then every R.
+Each group keeps its own due time. Changes to R or the group set re-phase the
+schedule in the same deterministic order; an in-flight group is never started
+twice. Configuration is re-read at each scheduled wake, or every five seconds
+when refresh is disabled.
 
-Each tick starts one pass per upstream with no pass already in flight. Upstream groups run concurrently and independently; targets within a group run sequentially. A slow upstream skips ticks until its pass finishes and cannot delay another upstream. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
+Groups refresh independently, with sequential targets within a group. A group
+still in flight skips its next start, while other groups keep their schedules.
+Refresh bypasses the existing cache. A successful result replaces the cached
+event; a failed refresh leaves the previous unexpired successful event in place.
+Prewarm remains a one-off concurrent pass. The staggered first refreshes can
+follow prewarm cache expiry, so startup does not guarantee continuously warm
+caches.
 
-The default interval is `max(cache_seconds - request_timeout_seconds, 1)`, using the effective per-upstream settings (240 seconds with the defaults). After prewarm, successful refreshes keep caches warm when each upstream's pass takes at most `cache_seconds - request_timeout_seconds` and the tick interval stays within that margin. Longer passes can leave cold windows; the gateway warns when a group's pass exceeds its margin. An explicit interval above the margin also leaves room for cache expiry before refresh completes.
+The default R is `max(cache_seconds - request_timeout_seconds, 1)` (240 seconds
+with the defaults). A cache stays warm while each target's replacement lands
+before the verifier's own expiry of its previous entry. Verifiers stamp expiry
+differently: external verifiers start the cache lifetime at insertion after
+verification, while ACI-service starts it at the report's verification/appraisal
+start, before asynchronous appraisal completes. Multi-target groups can drift
+as preceding targets take different amounts of time. Skipped starts, failed
+refreshes, or invalidation can also leave cold windows, so warmth is not
+guaranteed in all cases. An explicit R above `cache - request_timeout` reduces
+the available refresh budget.
+
+Before refreshing a target that has had a successful refresh in this process,
+the gateway checks `cached()` using the same function as the request pin gate.
+If it returns no event, a per-target warning reports that the cache was found
+cold at refresh time, with upstream, model, and seconds since the last successful
+refresh completion. This observes the cache rather than inferring warmth from
+completion gaps or configured TTL. Failed refreshes do not reset the timestamp,
+and removed targets lose their refresh history.
 
 The ACI-service verifier also limits its cached result to the workload keyset's
 `not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and
