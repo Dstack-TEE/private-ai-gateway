@@ -5,7 +5,7 @@
 //! configured yet". The admin API replaces that same file and swaps the
 //! in-memory backend/verifier state atomically.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::aci::digest;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::VerificationResult;
 use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError, UpstreamRequest};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -290,17 +290,6 @@ pub struct UpstreamConfigSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct UpstreamVerificationResult {
-    pub upstream_name: String,
-    pub model_id: String,
-    pub url_origin: Option<String>,
-    pub verifier_id: String,
-    pub result: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UpstreamSessionRefreshResult {
     pub upstream_name: String,
     pub model_id: String,
@@ -334,14 +323,6 @@ struct ConfiguredUpstreams {
     sessions: Arc<ProviderSessionRegistry>,
 }
 
-/// Sink that materializes verified upstream events into stored attested
-/// sessions. Implemented by the service; the background verification loop calls
-/// it after each verify/refresh so the session store is populated by the same
-/// verification used for serving, without a separate refresh path.
-pub trait UpstreamSessionSink: Send + Sync {
-    fn record_session(&self, event: &UpstreamVerifiedEvent);
-}
-
 #[derive(Clone)]
 pub struct UpstreamConfigManager {
     path: PathBuf,
@@ -349,7 +330,6 @@ pub struct UpstreamConfigManager {
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
     update_lock: Arc<Mutex<()>>,
     generation: watch::Sender<u64>,
-    session_sink: Arc<RwLock<Option<Arc<dyn UpstreamSessionSink>>>>,
 }
 
 impl UpstreamConfigManager {
@@ -366,15 +346,7 @@ impl UpstreamConfigManager {
             state: Arc::new(RwLock::new(state)),
             update_lock: Arc::new(Mutex::new(())),
             generation: watch::channel(0).0,
-            session_sink: Arc::new(RwLock::new(None)),
         })
-    }
-
-    /// Attach the sink that the background verification writes attested sessions
-    /// into. Set once after the service is built, before the lifecycle is
-    /// spawned.
-    pub fn set_session_sink(&self, sink: Arc<dyn UpstreamSessionSink>) {
-        *self.session_sink.write().unwrap_or_else(|p| p.into_inner()) = Some(sink);
     }
 
     pub fn backend(&self) -> Arc<dyn UpstreamBackend> {
@@ -532,21 +504,12 @@ impl UpstreamConfigManager {
             .collect()
     }
 
-    pub async fn run_verification_refresh(
-        self: Arc<Self>,
-        permits: Arc<Semaphore>,
-        log: fn(Vec<UpstreamVerificationResult>),
-    ) {
+    pub async fn run_verification_refresh(self: Arc<Self>, permits: Arc<Semaphore>) {
         let mut generation = self.generation.subscribe();
         let mut tasks = JoinSet::new();
         loop {
             generation.borrow_and_update();
             let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
-            let sink = self
-                .session_sink
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
             if let Some(verifier) = &state.verifier {
                 for cfg in &state.config {
                     if !builders::has_verifier_route(cfg, &state.config, &self.options) {
@@ -558,14 +521,24 @@ impl UpstreamConfigManager {
                     let cache_seconds = cfg
                         .verifier_cache_seconds
                         .unwrap_or(self.options.verifier_cache_seconds);
+                    let mut targets = verification_targets(std::slice::from_ref(cfg));
+                    if cfg.provider == UpstreamProvider::AciService
+                        || (matches!(
+                            cfg.provider,
+                            UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic
+                        ) && matches!(
+                            self.options.verifier_mode,
+                            UpstreamVerifierMode::AciService
+                        ))
+                    {
+                        targets.truncate(1);
+                    }
                     tasks.spawn(refresh_upstream(
                         verifier.clone(),
-                        verification_targets(std::slice::from_ref(cfg)),
+                        targets,
                         Duration::from_secs(cache_seconds.saturating_sub(period)),
                         Duration::from_secs(period),
                         permits.clone(),
-                        sink.clone(),
-                        log,
                     ));
                 }
             }
@@ -728,52 +701,58 @@ impl ProviderSessionRegistry {
     }
 }
 
+struct VerificationTargetState {
+    target: UpstreamVerificationTarget,
+    not_before: Instant,
+    last_start: Option<Instant>,
+    succeeded: bool,
+}
+
 async fn refresh_upstream(
     verifier: Arc<dyn UpstreamVerifier>,
     targets: Vec<UpstreamVerificationTarget>,
     lead: Duration,
     period: Duration,
     permits: Arc<Semaphore>,
-    sink: Option<Arc<dyn UpstreamSessionSink>>,
-    log: fn(Vec<UpstreamVerificationResult>),
 ) {
     let started = Instant::now();
-    let mut not_before = HashMap::new();
-    let mut succeeded = HashSet::new();
-    let mut cold_since = HashMap::new();
+    let mut targets: Vec<_> = targets
+        .into_iter()
+        .map(|target| VerificationTargetState {
+            target,
+            not_before: started,
+            last_start: None,
+            succeeded: false,
+        })
+        .collect();
     while !targets.is_empty() {
-        let (target, permit) = {
-            let mut select = || {
+        let (index, permit) = {
+            let select = || {
                 let now = Instant::now();
                 let mut selected = None;
                 let mut earliest_start = None;
-                for target in &targets {
-                    let expiry = match verifier.cache_remaining(&target.request()) {
-                        Some(remaining) => now + remaining,
-                        None => *cold_since.entry(target.clone()).or_insert_with(|| {
-                            if succeeded.contains(target) {
-                                now
-                            } else {
-                                started
-                            }
-                        }),
+                for (index, state) in targets.iter().enumerate() {
+                    let expiry = verifier
+                        .cache_remaining(&state.target.request())
+                        .map(|remaining| now + remaining);
+                    let (priority, due) = match (state.last_start, expiry) {
+                        (None, _) => ((0, None), state.not_before),
+                        (Some(_), Some(expiry)) => (
+                            (1, Some(expiry)),
+                            expiry
+                                .checked_sub(lead)
+                                .unwrap_or(expiry)
+                                .max(state.not_before),
+                        ),
+                        (Some(last_start), None) => ((2, Some(last_start)), state.not_before),
                     };
-                    let due = expiry.checked_sub(lead).unwrap_or(expiry);
-                    let due = not_before
-                        .get(target)
-                        .copied()
-                        .map_or(due, |retry| due.max(retry));
                     earliest_start =
                         Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
-                    if due <= now
-                        && selected
-                            .as_ref()
-                            .is_none_or(|(_, deadline)| expiry < *deadline)
-                    {
-                        selected = Some((target, expiry));
+                    if due <= now && selected.as_ref().is_none_or(|(_, key)| priority < *key) {
+                        selected = Some((index, priority));
                     }
                 }
-                (selected.map(|(target, _)| target.clone()), earliest_start)
+                (selected.map(|(index, _)| index), earliest_start)
             };
             let (selected, earliest_start) = select();
             if selected.is_none() {
@@ -786,41 +765,33 @@ async fn refresh_upstream(
                 return;
             };
             // Requests can replace caches and sibling deadlines can change while queued.
-            let Some(target) = select().0 else {
+            let Some(index) = select().0 else {
                 continue;
             };
-            (target, permit)
+            (index, permit)
         };
-        let request = target.request();
-        if succeeded.contains(&target) && verifier.cache_remaining(&request).is_none() {
-            tracing::warn!(upstream = %target.upstream_name, model = %target.model_id, "upstream verification cache was cold before refresh");
+        let state = &mut targets[index];
+        let request = state.target.request();
+        if state.succeeded && verifier.cache_remaining(&request).is_none() {
+            tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, "upstream verification cache was cold before refresh");
         }
         let refresh_started = Instant::now();
+        state.last_start = Some(refresh_started);
         let event = verifier.refresh(request.clone()).await;
         drop(permit);
+        let completed = Instant::now();
         let remaining = verifier.cache_remaining(&request);
         if event.result == VerificationResult::Verified {
-            succeeded.insert(target.clone());
-            not_before.insert(target.clone(), refresh_started + period);
-            cold_since.remove(&target);
+            state.succeeded = true;
+            state.not_before = refresh_started + period;
         } else {
-            not_before.insert(
-                target.clone(),
-                remaining.map_or(refresh_started + period, |remaining| {
-                    Instant::now() + remaining
-                }),
-            );
+            state.not_before =
+                remaining.map_or(refresh_started + period, |remaining| completed + remaining);
         }
-        if let Some(sink) = &sink {
-            sink.record_session(&event);
+        if let Some(reason) = &event.reason {
+            tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), reason = %reason, "upstream verification refresh finished");
+        } else {
+            tracing::info!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), "upstream verification refresh finished");
         }
-        log(vec![UpstreamVerificationResult {
-            upstream_name: target.upstream_name,
-            model_id: target.model_id,
-            url_origin: target.url_origin,
-            verifier_id: event.verifier_id,
-            result: event.result.as_str().to_string(),
-            reason: event.reason,
-        }]);
     }
 }

@@ -290,19 +290,24 @@ attempt's start plus p.
 
 The supervisor wakes on configuration replacement, cancels old tasks, and starts
 new tasks with fresh verifiers. Initial verification uses the same scheduling
-and concurrency limit as later refreshes; there is no separate prewarm. Each
-upstream runs sequentially and selects the earliest expiry among due targets;
-cold targets retain their first-observed time so they do not starve. Background
-tasks share `upstream_verification_concurrency` permits (default 4).
+and concurrency limit as later refreshes. Each
+upstream runs sequentially: never-attempted targets run first in stable order,
+then due warm entries by earliest expiry, then due cold retries by oldest
+attempt. Router-scoped and ACI-service upstreams schedule one representative
+model matching their shared cache. Background tasks share
+`upstream_verification_concurrency` permits (default 4).
 
 External and ACI-service cache TTLs both start at verification start. ACI-service
 appraisal uses wall-clock time after the response and rechecks keyset expiry
 after asynchronous verification completes; cached validity never exceeds
-keyset expiry. Its request-path verification and background refresh share a
-single-flight lock. A cache stays warm only while each replacement completes
-before the previous entry expires. Sequential targets, queues, failures, or invalidation can leave cold
-windows. A per-target warning reports upstream and model when a previously
-successful target's cache is found cold at refresh start.
+the keyset's absolute wall-clock expiry. Its request-path verification and
+background refresh share a single-flight lock. A cache stays warm only while
+each replacement completes before the previous entry expires. Sequential
+targets, queues, failures, or invalidation can leave cold windows. Under
+sustained overload of one serialized upstream (verification time
+per cycle greater than TTL), cold targets may get no background retry; requests
+still verify on demand. A per-target warning reports upstream and model when a
+previously successful target's cache is found cold at refresh start.
 
 An `aci-service` entry must provide at least one accepted subject or image
 digest and at least one accepted KMS root public key. The verifier rejects an

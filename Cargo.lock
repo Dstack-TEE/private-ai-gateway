@@ -3320,6 +3320,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "k256",
+ "libc",
  "ml-kem",
  "prometheus",
  "rand 0.8.6",

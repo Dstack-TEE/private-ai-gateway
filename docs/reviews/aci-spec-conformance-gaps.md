@@ -102,12 +102,14 @@ item.
    seals only those successful events, so superseded bindings, claims,
    nonce-bound evidence, and removed Chutes instances disappear immediately.
    Cold caches list nothing; older sessions remain retrievable by id until
-   retention ends. Per-upstream tasks refresh by earliest cache expiry, sharing
+   retention ends. Per-upstream tasks attempt every target initially, then
+   prioritize due warm entries by expiry ahead of cold retries, sharing
    a bounded background concurrency limit; configuration updates respawn them.
    Cache warmth requires each target's replacement to land before its verifier's
-   own expiry of the previous entry. Multi-target groups can drift, so warmth
-   is not guaranteed in all cases. A per-target warning reports a cache found
-   cold at refresh time after a prior successful refresh. The session store and
+   own expiry of the previous entry. Under sustained upstream overload, cold
+   targets may get no background retry; requests still verify on demand.
+   Warmth is not guaranteed in all cases. A per-target warning reports a cache
+   found cold at refresh time after a prior successful refresh. The session store and
    verifier cache are per-process, so multi-replica deployments need session
    affinity for pins.
 

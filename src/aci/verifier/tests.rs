@@ -21,6 +21,7 @@ use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
 
+mod aci_service;
 mod session_pinning;
 
 fn signing_key(byte: u8) -> SigningKey {
@@ -805,6 +806,7 @@ fi"#
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
         expires_at: tokio::time::Instant::now(),
+        not_after: u64::MAX,
         evidence: Some(json!({
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
@@ -848,6 +850,7 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     .unwrap()
     .with_cached(CachedAciServiceVerification {
         expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        not_after: u64::MAX,
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "http://127.0.0.1:1".to_string(),
@@ -882,138 +885,6 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     assert!(verifier.cached(&request).is_none());
     assert!(verifier.cache_remaining(&request).is_none());
-}
-
-fn aci_service_test_verifier() -> AciServiceUpstreamVerifier {
-    AciServiceUpstreamVerifier::new_with_timeouts(
-        "http://127.0.0.1:1",
-        "http://127.0.0.1:1",
-        AciServiceVerifierPolicy::new(
-            vec!["test-subject".to_string()],
-            Vec::new(),
-            vec![public_key_uncompressed_hex(&signing_key(1))],
-        )
-        .unwrap(),
-        300,
-        1,
-        60,
-    )
-    .unwrap()
-}
-
-#[tokio::test(start_paused = true)]
-async fn aci_service_concurrent_cold_verification_is_single_flight() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let verifier = aci_service_test_verifier();
-    let calls = AtomicUsize::new(0);
-    let request = UpstreamVerificationRequest {
-        upstream_name: "aci".to_string(),
-        model_id: "model".to_string(),
-        url_origin: Some("http://127.0.0.1:1".to_string()),
-        forwarded_body_hash: "22".repeat(32),
-        required: true,
-    };
-    // Inject the expensive fetch/appraisal future into the same path verify and refresh use.
-    let verify = || async {
-        calls.fetch_add(1, Ordering::SeqCst);
-        let started = tokio::time::Instant::now();
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        Ok(CachedAciServiceVerification {
-            expires_at: started + std::time::Duration::from_secs(300),
-            evidence: None,
-            channel_bindings: Vec::new(),
-        })
-    };
-    let results = futures_util::future::join_all(
-        (0..10).map(|_| verifier.verify_serialized(request.clone(), false, verify())),
-    )
-    .await;
-    assert!(results
-        .iter()
-        .all(|event| event.result == VerificationResult::Verified));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        verifier.verify(request.clone()).await.result,
-        VerificationResult::Verified
-    );
-    assert_eq!(
-        verifier
-            .verify_serialized(request, true, verify())
-            .await
-            .result,
-        VerificationResult::Verified
-    );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "forced refresh bypasses cache"
-    );
-}
-
-fn accepted_appraisal(not_after: u64) -> super::appraisal::Appraisal {
-    use crate::aci::identity::{self, SealedWorkloadKeyset};
-    let mut keyset = keyset_with_tls(Vec::new());
-    keyset.not_after = not_after;
-    let sealed = SealedWorkloadKeyset::seal(keyset).unwrap();
-    let nonce = "11".repeat(32);
-    let statement = identity::attestation_statement(sealed.digest(), Some(&nonce)).unwrap();
-    let report = AttestationReport {
-        api_version: "aci/1".to_string(),
-        workload_keyset_digest: sealed.digest().to_string(),
-        attestation: AttestationEnvelope {
-            tee_type: "tdx".to_string(),
-            workload_keyset: sealed.to_value(),
-            report_data_hex: hex::encode(identity::report_data(&statement)),
-            source_provenance: SourceProvenance::default(),
-            evidence: json!({}),
-        },
-        service_capabilities: Default::default(),
-    };
-    super::appraisal::Appraisal {
-        results: Vec::new(),
-        identity: Some(aci_verify::report::verify_report_binding(&report, Some(&nonce)).unwrap()),
-        channel_bindings: Vec::new(),
-    }
-}
-
-#[tokio::test]
-async fn aci_service_rejects_keysets_expired_during_verification() {
-    let verifier = aci_service_test_verifier();
-    let completed_at = current_unix_secs();
-    let started = tokio::time::Instant::now() - std::time::Duration::from_secs(5);
-    let appraisal = accepted_appraisal(completed_at - 1);
-    assert!(!appraisal
-        .identity
-        .as_ref()
-        .unwrap()
-        .keyset
-        .is_expired_at(completed_at - 5));
-    let request = UpstreamVerificationRequest {
-        upstream_name: "aci".to_string(),
-        model_id: "model".to_string(),
-        url_origin: Some("http://127.0.0.1:1".to_string()),
-        forwarded_body_hash: "22".repeat(32),
-        required: true,
-    };
-    let event = verifier
-        .verify_serialized(request.clone(), false, async {
-            verifier.finish_verification(started, b"{}", appraisal)
-        })
-        .await;
-    assert_eq!(event.result, VerificationResult::Failed);
-    assert!(event.reason.unwrap().contains("expired"));
-    assert!(verifier.cached(&request).is_none());
-
-    for validity in [20, 600] {
-        let cached = verifier
-            .finish_verification(started, b"{}", accepted_appraisal(completed_at + validity))
-            .unwrap();
-        assert!(cached.expires_at <= started + std::time::Duration::from_secs(300));
-        assert!(
-            cached.expires_at
-                <= tokio::time::Instant::now() + std::time::Duration::from_secs(validity)
-        );
-    }
 }
 
 #[test]

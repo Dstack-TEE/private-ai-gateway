@@ -2,7 +2,6 @@
 //! checks the identity/key policy and the evidence (a dstack DCAP/TDX quote today).
 
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -230,11 +229,21 @@ impl From<QuoteStepError> for AciServiceVerificationError {
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
     pub(super) expires_at: Instant,
+    pub(super) not_after: u64,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
 }
 
 impl CachedAciServiceVerification {
+    fn remaining(&self) -> Option<Duration> {
+        let ttl = self.expires_at.checked_duration_since(Instant::now())?;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is before UNIX_EPOCH");
+        let remaining = ttl.min(Duration::from_secs(self.not_after).checked_sub(wall)?);
+        (!remaining.is_zero()).then_some(remaining)
+    }
+
     pub(super) fn event_for(
         &self,
         request: UpstreamVerificationRequest,
@@ -314,6 +323,8 @@ pub struct AciServiceUpstreamVerifier {
     request_timeout_seconds: u64,
     cache: RwLock<Option<CachedAciServiceVerification>>,
     verify_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    appraisal: Option<fn(&AttestationReport, &str) -> Appraisal>,
     verifier_id: String,
 }
 
@@ -361,6 +372,8 @@ impl AciServiceUpstreamVerifier {
             request_timeout_seconds,
             cache: RwLock::new(None),
             verify_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            appraisal: None,
             verifier_id: "aci-service/v2".to_string(),
         })
     }
@@ -405,6 +418,15 @@ impl AciServiceUpstreamVerifier {
         self
     }
 
+    #[cfg(test)]
+    pub(super) fn with_appraisal(
+        mut self,
+        appraisal: fn(&AttestationReport, &str) -> Appraisal,
+    ) -> Self {
+        self.appraisal = Some(appraisal);
+        self
+    }
+
     async fn verify_uncached(
         &self,
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
@@ -435,6 +457,10 @@ impl AciServiceUpstreamVerifier {
 
         let report: AttestationReport = serde_json::from_slice(&body)
             .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
+        #[cfg(test)]
+        if let Some(appraise) = self.appraisal {
+            return self.finish_verification(started, &body, appraise(&report, &nonce));
+        }
         // One appraisal (`appraisal.rs`): this deployment folds the §9.1
         // outcomes into a single accept/reject.
         let appraisal = appraise_report(AppraisalInputs {
@@ -460,7 +486,7 @@ impl AciServiceUpstreamVerifier {
         self.finish_verification(started, &body, appraisal)
     }
 
-    pub(super) fn finish_verification(
+    fn finish_verification(
         &self,
         started: Instant,
         body: &[u8],
@@ -477,32 +503,24 @@ impl AciServiceUpstreamVerifier {
             .clone();
         // Recency of a cached verification is bounded by the cache TTL and the
         // keyset's own expiry — the report carries no other freshness metadata.
-        let completed = Instant::now();
-        let completed_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time is before UNIX_EPOCH");
-        if keyset.is_expired_at(completed_at.as_secs()) {
+        if keyset.is_expired_at(current_unix_secs()) {
             return Err(AciReportValidationError::KeysetExpired.into());
         }
-        let remaining = (started + Duration::from_secs(self.cache_ttl_seconds))
-            .saturating_duration_since(completed)
-            .min(Duration::from_secs(keyset.not_after).saturating_sub(completed_at));
         let evidence = Some(raw_evidence(body, "application/json", None));
         let channel_bindings = appraisal.channel_bindings;
 
         Ok(CachedAciServiceVerification {
-            expires_at: completed + remaining,
+            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
+            not_after: keyset.not_after,
             evidence,
             channel_bindings,
         })
     }
 
-    pub(super) async fn verify_serialized(
+    async fn verify_serialized(
         &self,
         request: UpstreamVerificationRequest,
         force: bool,
-        verification: impl Future<Output = Result<CachedAciServiceVerification, AciServiceVerificationError>>
-            + Send,
     ) -> UpstreamVerifiedEvent {
         if !force {
             if let Some(event) = self.cached(&request) {
@@ -517,7 +535,7 @@ impl AciServiceUpstreamVerifier {
         }
         match tokio::time::timeout(
             Duration::from_secs(self.request_timeout_seconds),
-            verification,
+            self.verify_uncached(),
         )
         .await
         .map_err(|_| AciServiceVerificationError::Timeout)
@@ -547,8 +565,7 @@ impl AciServiceUpstreamVerifier {
 #[async_trait]
 impl UpstreamVerifier for AciServiceUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        self.verify_serialized(request, false, self.verify_uncached())
-            .await
+        self.verify_serialized(request, false).await
     }
 
     fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
@@ -557,8 +574,9 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
             .read()
             .expect("ACI service verifier cache poisoned")
             .clone()?;
-        (Instant::now() < cached.expires_at)
-            .then(|| cached.event_for(request.clone(), &self.verifier_id))
+        cached
+            .remaining()
+            .map(|_| cached.event_for(request.clone(), &self.verifier_id))
     }
 
     fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {
@@ -566,14 +584,11 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
             .read()
             .expect("ACI service verifier cache poisoned")
             .as_ref()?
-            .expires_at
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
+            .remaining()
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        self.verify_serialized(request, true, self.verify_uncached())
-            .await
+        self.verify_serialized(request, true).await
     }
 
     fn invalidate(&self, _request: &UpstreamVerificationRequest) {

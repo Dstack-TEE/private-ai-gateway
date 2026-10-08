@@ -14,8 +14,8 @@ use std::time::Duration;
 use aci_verify::decode_hex_32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
@@ -27,6 +27,59 @@ use crate::aggregator::upstream_config::AttestationScope;
 pub enum ProviderVerifierConfigError {
     #[error("provider verifier command must not be empty")]
     EmptyCommand,
+}
+
+struct VerifierProcess {
+    child: Option<Child>,
+    #[cfg(unix)]
+    group: libc::pid_t,
+    #[cfg(test)]
+    reaped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl VerifierProcess {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.kill_on_drop(true).spawn()?;
+        Ok(Self {
+            #[cfg(unix)]
+            group: child.id().expect("spawned verifier has a pid") as libc::pid_t,
+            child: Some(child),
+            #[cfg(test)]
+            reaped: None,
+        })
+    }
+}
+
+impl Drop for VerifierProcess {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // The group belongs to this spawn; SIGKILL also stops bridge subprocesses.
+        if unsafe { libc::killpg(self.group, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "failed to kill provider verifier process group");
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            #[cfg(not(unix))]
+            if let Err(error) = child.start_kill() {
+                tracing::warn!(%error, "failed to kill provider verifier");
+            }
+            #[cfg(test)]
+            let reaped = self.reaped.take();
+            tokio::spawn(async move {
+                if let Err(error) = child.wait().await {
+                    tracing::warn!(%error, "failed to reap provider verifier");
+                }
+                #[cfg(test)]
+                if let Some(reaped) = reaped {
+                    let _ = reaped.send(());
+                }
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -307,31 +360,44 @@ impl ExternalProviderVerifier {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(current_dir) = &self.current_dir {
             command.current_dir(current_dir);
         }
         for (key, value) in &self.env {
             command.env(key, value);
         }
-        let mut child = command
-            .spawn()
+        let mut process = VerifierProcess::spawn(&mut command)
             .map_err(|e| format!("failed to spawn provider verifier {program:?}: {e}"))?;
+        let child = process.child.as_mut().expect("spawned verifier child");
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "failed to open provider verifier stdin".to_string())?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|e| format!("failed to write provider verifier stdin: {e}"))?;
-        drop(stdin);
-
-        let output = tokio::time::timeout(
-            Duration::from_secs(self.timeout_seconds),
-            child.wait_with_output(),
-        )
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stdout".to_string())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stderr".to_string())?;
+        let output = tokio::time::timeout(Duration::from_secs(self.timeout_seconds), async {
+            stdin.write_all(&input).await?;
+            drop(stdin);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (status, _, _) = tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+            )?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout: out,
+                stderr: err,
+            })
+        })
         .await
         .map_err(|_| {
             format!(
@@ -577,4 +643,102 @@ fn parse_external_channel_bindings(
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     decode_hex_32(value).map(hex::encode)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    async fn assert_tree_cancelled(timeout: bool) {
+        const HELPER_ENV: &str = "ACI_VERIFIER_PROCESS_TEST_HELPER";
+        if std::env::var_os(HELPER_ENV).is_none() {
+            let test = if timeout {
+                "timeout_kills_and_reaps_verifier_process_tree"
+            } else {
+                "abort_kills_and_reaps_verifier_process_tree"
+            };
+            let output = Command::new(std::env::current_exe().unwrap())
+                .env(HELPER_ENV, "1")
+                .args([
+                    "--exact",
+                    &format!("aci::verifier::external::process_tests::{test}"),
+                    "--nocapture",
+                ])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        // Only this isolated test process adopts killed grandchildren, so it can
+        // reap them without relying on init's timing or changing other tests.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+            0
+        );
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", r#"sleep 60 & printf '%s %s\n' "$$" "$!"; wait"#])
+            .stdout(Stdio::piped());
+        let mut process = VerifierProcess::spawn(&mut command).unwrap();
+        let group = process.group;
+        let mut stdout = BufReader::new(process.child.as_mut().unwrap().stdout.take().unwrap());
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).await.unwrap();
+        let pids: Vec<libc::pid_t> = ready
+            .split_whitespace()
+            .map(|pid| pid.parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2);
+        assert!(pids
+            .iter()
+            .all(|pid| unsafe { libc::getpgid(*pid) } == group));
+        let (reaped, waited) = tokio::sync::oneshot::channel();
+        process.reaped = Some(reaped);
+        let task = tokio::spawn(async move {
+            let child = process.child.as_mut().unwrap();
+            if timeout {
+                assert!(tokio::time::timeout(Duration::from_secs(1), child.wait())
+                    .await
+                    .is_err());
+            } else {
+                child.wait().await.unwrap();
+            }
+        });
+        if timeout {
+            task.await.unwrap();
+        } else {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        }
+        waited.await.unwrap();
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
+        assert!(libc::WIFSIGNALED(status));
+        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+        let mut tail = Vec::new();
+        stdout.read_to_end(&mut tail).await.unwrap();
+        // Both the leader and its grandchild are gone, not just the direct child.
+        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_kills_and_reaps_verifier_process_tree() {
+        assert_tree_cancelled(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_kills_and_reaps_verifier_process_tree() {
+        assert_tree_cancelled(true).await;
+    }
 }

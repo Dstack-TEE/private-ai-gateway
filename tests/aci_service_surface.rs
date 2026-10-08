@@ -39,7 +39,7 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
-use private_ai_gateway::aggregator::upstream_config::{UpstreamConfigManager, UpstreamSessionSink};
+use private_ai_gateway::aggregator::upstream_config::UpstreamConfigManager;
 use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -2059,7 +2059,7 @@ async fn rotated_session_listing_rejects_old_pin_and_accepts_new_pin() {
     let request = config
         .current_verification_requests(None, None, true)
         .remove(0);
-    h.service.record_session(&verifier.refresh(request).await);
+    verifier.refresh(request).await;
 
     let second = h
         .requester
@@ -3013,15 +3013,13 @@ async fn cached_session_listing_remains_pin_acceptable_across_rotations() {
     let request = config
         .current_verification_requests(None, None, true)
         .remove(0);
-    h.service
-        .record_session(&verifier.verify(request.clone()).await);
-    let service = h.service.clone();
+    verifier.verify(request.clone()).await;
     let refresh = tokio::spawn(async move {
         let period = Duration::from_secs(240);
         let mut interval = tokio::time::interval_at(Instant::now() + period, period);
         loop {
             interval.tick().await;
-            service.record_session(&verifier.refresh(request.clone()).await);
+            verifier.refresh(request.clone()).await;
         }
     });
     tokio::task::yield_now().await;
@@ -3065,13 +3063,14 @@ impl UpstreamVerifier for InterleavingVerifier {
             return event;
         }
         let first = self.inner.refresh(request.clone()).await;
-        let second = self.inner.refresh(request).await;
+        self.inner.refresh(request.clone()).await;
         self.service
             .lock()
             .unwrap()
             .upgrade()
             .unwrap()
-            .record_session(&second);
+            .list_current_sessions(&[request])
+            .unwrap();
         first
     }
 
@@ -3131,7 +3130,7 @@ async fn cold_verifier_cache_lists_nothing_but_retains_historical_sessions() {
     let request = config
         .current_verification_requests(None, None, true)
         .remove(0);
-    h.service.record_session(&verifier.verify(request).await);
+    verifier.verify(request).await;
     let listed = listed_sessions(&h, "").await;
     let id = listed[0]["session_id"].as_str().unwrap();
     tokio::time::advance(Duration::from_secs(300)).await;
@@ -3210,7 +3209,7 @@ async fn per_model_listing_filters_the_verification_target() {
         serde_json::json!({"public-a": "model-a", "public-b": "model-b"}),
     );
     for request in config.current_verification_requests(None, None, true) {
-        h.service.record_session(&verifier.verify(request).await);
+        verifier.verify(request).await;
     }
     assert_eq!(listed_sessions(&h, "").await.len(), 2);
     for model in ["public-a", "public-b"] {
@@ -3289,7 +3288,7 @@ async fn model_listing_uses_the_same_alias_mapping_as_routing() {
         serde_json::json!({"a": "x", "x": "y"}),
     );
     for request in config.current_verification_requests(None, None, true) {
-        h.service.record_session(&verifier.verify(request).await);
+        verifier.verify(request).await;
     }
     let all = listed_sessions(&h, "").await;
     assert_eq!(all.len(), 2);

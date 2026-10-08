@@ -289,9 +289,9 @@ struct FakeVerifier {
     ttl: Duration,
     latency: Duration,
     service_cache: bool,
+    failed_model: Option<(String, Duration)>,
     fail: std::sync::atomic::AtomicBool,
     cache: Mutex<HashMap<String, Instant>>,
-    serial: tokio::sync::Mutex<()>,
     observations: Arc<Mutex<RefreshObservations>>,
 }
 
@@ -301,9 +301,9 @@ impl FakeVerifier {
             ttl: Duration::from_secs(ttl),
             latency: Duration::from_secs(latency),
             service_cache: false,
+            failed_model: None,
             fail: std::sync::atomic::AtomicBool::new(false),
             cache: Mutex::new(HashMap::new()),
-            serial: tokio::sync::Mutex::new(()),
             observations: Arc::new(Mutex::new(RefreshObservations::default())),
         }
     }
@@ -368,7 +368,6 @@ impl UpstreamVerifier for FakeVerifier {
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let _serial = self.serial.lock().await;
         let started = Instant::now();
         let cold = self.cache_remaining(&request).is_none();
         {
@@ -394,8 +393,12 @@ impl UpstreamVerifier for FakeVerifier {
                 .max(observations.active.values().sum());
         }
         let _active = ActiveRefresh(self, request.upstream_name.clone());
-        tokio::time::sleep(self.latency).await;
-        let result = if self.fail.load(Ordering::SeqCst) {
+        let failed_model = self
+            .failed_model
+            .as_ref()
+            .filter(|(model, _)| *model == request.model_id);
+        tokio::time::sleep(failed_model.map_or(self.latency, |(_, latency)| *latency)).await;
+        let result = if self.fail.load(Ordering::SeqCst) || failed_model.is_some() {
             VerificationResult::Failed
         } else {
             self.cache
@@ -431,7 +434,6 @@ fn refresh_test_manager(
         state: Arc::new(RwLock::new(Arc::new(state))),
         update_lock: Arc::new(Mutex::new(())),
         generation: watch::channel(0).0,
-        session_sink: Arc::new(RwLock::new(None)),
     })
 }
 
@@ -446,7 +448,7 @@ fn start_refresh(
     manager: Arc<UpstreamConfigManager>,
     permits: usize,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(manager.run_verification_refresh(Arc::new(Semaphore::new(permits)), |_| {}))
+    tokio::spawn(manager.run_verification_refresh(Arc::new(Semaphore::new(permits))))
 }
 
 async fn stop_refresh(task: tokio::task::JoinHandle<()>) {
@@ -587,8 +589,42 @@ async fn failed_refresh_retries_at_expiry_then_once_per_period() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn slow_failed_target_does_not_starve_a_healthy_sibling() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
+    cfg.models.insert("b".to_string(), "b".to_string());
+    let mut verifier = FakeVerifier::new(300, 1);
+    verifier.failed_model = Some(("a".to_string(), Duration::from_secs(240)));
+    let verifier = Arc::new(verifier);
+    let epoch = Instant::now();
+    let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
+    tokio::task::yield_now().await;
+    advance(1800).await;
+    stop_refresh(task).await;
+    let observations = verifier.observations.lock().unwrap();
+    let healthy = &observations.starts[&("provider".to_string(), "b".to_string())];
+    assert!(healthy.len() >= 2);
+    assert!(healthy
+        .windows(2)
+        .all(|pair| pair[1].0 - pair[0].0 < Duration::from_secs(300)));
+    assert!(observations.starts[&("provider".to_string(), "a".to_string())].len() >= 3);
+    assert!(
+        healthy[1..].iter().all(|(_, cold)| !cold),
+        "healthy starts (seconds, cold): {:?}",
+        healthy
+            .iter()
+            .map(|(time, cold)| ((*time - epoch).as_secs(), *cold))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn aci_service_models_share_one_verification_per_period() {
-    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "x");
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::AciService, "a", "x");
+    cfg.accepted_subjects = Some(vec!["test-subject".to_string()]);
+    let root = k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap();
+    cfg.accepted_dstack_kms_root_public_keys = Some(vec![hex::encode(
+        root.verifying_key().to_encoded_point(false).as_bytes(),
+    )]);
     cfg.models.extend([
         ("b".to_string(), "y".to_string()),
         ("c".to_string(), "z".to_string()),
@@ -657,18 +693,13 @@ async fn permit_wait_reselects_the_most_urgent_sibling() {
     let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
     cfg.models.insert("b".to_string(), "b".to_string());
     let verifier = Arc::new(FakeVerifier::new(300, 25));
-    let now = Instant::now();
-    verifier.cache.lock().unwrap().extend([
-        ("a".to_string(), now + Duration::from_secs(300)),
-        ("b".to_string(), now + Duration::from_secs(320)),
-    ]);
     let permits = Arc::new(Semaphore::new(1));
-    let held = permits.clone().acquire_owned().await.unwrap();
     let manager = refresh_test_manager(vec![cfg], verifier.clone());
-    let task = tokio::spawn(manager.run_verification_refresh(permits, |_| {}));
+    let task = tokio::spawn(manager.run_verification_refresh(permits.clone()));
     tokio::task::yield_now().await;
-    advance(250).await; // A is due and waiting on the permit.
-    assert!(verifier.observations.lock().unwrap().starts.is_empty());
+    advance(50).await; // Both targets have completed their initial attempt.
+    let held = permits.acquire_owned().await.unwrap();
+    advance(215).await; // A is queued; B now also meets its minimum start interval.
     verifier
         .cache
         .lock()
@@ -678,10 +709,14 @@ async fn permit_wait_reselects_the_most_urgent_sibling() {
     advance(1).await;
     stop_refresh(task).await;
     let observations = verifier.observations.lock().unwrap();
-    assert_eq!(observations.starts.len(), 1);
-    assert!(observations
-        .starts
-        .contains_key(&("provider".to_string(), "b".to_string())));
+    assert_eq!(
+        observations.starts[&("provider".to_string(), "a".to_string())].len(),
+        1
+    );
+    assert_eq!(
+        observations.starts[&("provider".to_string(), "b".to_string())].len(),
+        2
+    );
 }
 
 #[tokio::test(start_paused = true)]

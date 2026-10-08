@@ -569,7 +569,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    upstream_config.set_session_sink(service.clone());
     spawn_upstream_lifecycle(
         upstream_config.clone(),
         gateway_config.upstream_verification_concurrency,
@@ -674,11 +673,7 @@ fn jittered_refresh_seconds(refresh_seconds: u64) -> u64 {
 
 fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>, concurrency: usize) {
     let permits = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    tokio::spawn(
-        upstream_config
-            .clone()
-            .run_verification_refresh(permits, log_verification_results),
-    );
+    tokio::spawn(upstream_config.clone().run_verification_refresh(permits));
 
     let session_config = upstream_config;
     tokio::spawn(async move {
@@ -742,32 +737,6 @@ async fn compact_session_log(store: Arc<JsonlSessionStore>) -> Result<usize, Str
         .await
         .map_err(|err| format!("compaction task failed: {err}"))?
         .map_err(|err| err.to_string())
-}
-
-fn log_verification_results(
-    results: Vec<private_ai_gateway::aggregator::upstream_config::UpstreamVerificationResult>,
-) {
-    for result in results {
-        match result.reason {
-            Some(reason) => tracing::warn!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                reason = %reason,
-                "upstream verification refresh finished"
-            ),
-            None => tracing::info!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                "upstream verification refresh finished"
-            ),
-        }
-    }
 }
 
 #[cfg(test)]

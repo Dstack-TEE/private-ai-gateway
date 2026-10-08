@@ -19,10 +19,10 @@ session document once. Those bytes are stored and always served
 byte-identically, and the session id is their SHA-256 (spec §8). Sealing never
 calls the model and never sees user data.
 
-Background upstream verification establishes and refreshes sessions before
-traffic. Request completion records the session actually served on the
-receipt's `upstream.verified` event. Both paths write through the same
-process-owned store. `tests/service.rs::verified_upstream_binding_creates_attested_session`
+Background upstream verification refreshes the verifier cache. Listing and the
+pin gate seal sessions on demand through the same process-owned store. Request
+completion records the session actually served on the receipt's
+`upstream.verified` event. `tests/service.rs::verified_upstream_binding_creates_attested_session`
 covers the session created from a verified binding.
 
 Two deadlines govern a stored session:
@@ -58,9 +58,9 @@ only the default first route is listed; with middleware, all configured routes
 serving the model are listed and pin-mismatched candidates are skipped. A broad
 list can contain sessions that a particular request will not route to.
 
-Failed refresh keeps the old successful entry until cache expiry. The session
-sink seals results promptly, but stored history does not define currency: an
-older in-flight result cannot replace the cached listing. Get-or-create under
+Failed refresh keeps the old successful entry until cache expiry. Stored
+history does not define currency: an older in-flight result cannot replace the
+cached listing. Get-or-create under
 the store lock makes concurrent sealing of identical material reuse one id.
 Superseded sessions stay retrievable by id until retention ends. `expires_at`
 is an upper bound; cache replacement can supersede a session earlier. If a

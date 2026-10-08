@@ -17,7 +17,6 @@ use private_ai_gateway::aggregator::service::{
 };
 use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
 use private_ai_gateway::aggregator::session_store::SessionStore;
-use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
@@ -715,7 +714,7 @@ fn service_refuses_test_keys_in_production_mode() {
 }
 
 #[tokio::test]
-async fn background_verification_writes_inspectable_session_into_the_store() {
+async fn listing_seals_an_inspectable_cached_session_on_demand() {
     let event = UpstreamVerifiedEvent {
         provider_type: Some("tinfoil".to_string()),
         url_origin: Some("https://preflight-upstream".to_string()),
@@ -741,9 +740,6 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
         forwarded_body_hash: private_ai_gateway::aci::digest::sha256_hex(b""),
         required: true,
     }];
-    // The sink seals the same cached verification that listing resolves.
-    service.record_session(&event);
-
     let listed = service.list_current_sessions(&requests).unwrap();
     assert_eq!(listed.len(), 1);
     let session = &listed[0];
@@ -759,11 +755,9 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
     // Resolvable by its content-addressed id too.
     assert!(service.get_attested_session(session.session_id()).is_some());
 
-    // Re-verifying the unchanged channel is idempotent: the store's channel
-    // dedup returns the live session instead of sealing a new document (and a
-    // later completion path references this same session rather than copying).
+    // Listing unchanged material reuses the sealed document; forwarding can
+    // reference the same session afterward.
     let id = session.session_id().to_string();
-    service.record_session(&event);
     let after = service.list_current_sessions(&requests).unwrap();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].session_id(), id);
