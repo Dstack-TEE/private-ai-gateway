@@ -250,8 +250,8 @@ once the release behind it is published and reviewed (criteria 7 and 13).
 ## Re-probe after redeploy (2026-10-07)
 
 ArmetAI relaunched the TD with an `initdata.toml` that disallows exec. The
-verifier checks were rerun against `https://poc1.armet.ai` for
-`GLM-5.3-Flash`. The gateway end-to-end suite was not rerun.
+verifier checks and the gateway end-to-end tests were rerun against
+`https://poc1.armet.ai` for `GLM-5.3-Flash`.
 
 | Check | Result |
 | --- | --- |
@@ -267,6 +267,21 @@ Changed values; every other pinned field and the TDX module are unchanged:
 | --- | --- |
 | MRCONFIGID | `55a078a9…30a3bf` (was `a8b1759a…3c158b`) |
 | Subject | `tdx-measurement:sha256:b2032b5a98bce6e73227959f456fd3b63a8958c45c61c24e86e69bc0cb8147b8` |
+
+End to end through a locally run gateway, pinned to the new subject:
+
+| Check | Result |
+| --- | --- |
+| Live E2E suite, quick profile | Pass: provider verification, SPKI-pinned forward, signed receipt, attested session |
+| Receipt audit (`pap audit`, offline) | Receipt and `upstream-1` checks pass. `id-4` (the gateway's own source provenance) fails only because the gateway ran outside a dstack CVM. |
+| Chat with `provider.aci_verified: true` | `200` with `X-Receipt-Id` |
+| Streaming with `provider.aci_verified: true` | `200` with `X-Receipt-Id`, terminated by `[DONE]` |
+| Pinned to a non-current `aci_session_ids` value | `412`, refused before forwarding |
+| Session claims | `tee_attested`, `tcb_up_to_date`, `serving_software_known_good`, `gpu_attested` asserted; `os_known_good`, `model_weights_provenance` unknown |
+
+The live E2E suite ran with the separate live-test session-label fix applied
+(see the PR notes); without it, the suite's attested-session check fails for
+any verified provider.
 
 The new subject was pinned for this test only, as above.
 
