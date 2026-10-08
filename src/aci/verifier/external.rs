@@ -96,6 +96,8 @@ pub(super) struct ExternalProviderVerifier {
     cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedExternalProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
+    #[cfg(test)]
+    reaped: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ExternalProviderVerifier {
@@ -133,6 +135,8 @@ impl ExternalProviderVerifier {
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         }
     }
 
@@ -158,6 +162,8 @@ impl ExternalProviderVerifier {
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         })
     }
 
@@ -357,6 +363,10 @@ impl ExternalProviderVerifier {
         }
         let mut process = VerifierProcess::spawn(&mut command)
             .map_err(|e| format!("failed to spawn provider verifier {program:?}: {e}"))?;
+        #[cfg(test)]
+        {
+            process.reaped = self.reaped.lock().unwrap().take();
+        }
         let child = process.child.as_mut().expect("spawned verifier child");
         let mut stdin = child
             .stdin
@@ -636,17 +646,18 @@ fn normalize_sha256_hex(value: &str) -> Result<String, String> {
 #[cfg(all(test, target_os = "linux"))]
 mod process_tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::{AsRawFd, FromRawFd};
 
     #[tokio::test(start_paused = true)]
-    async fn drop_kills_and_reaps_verifier_process_tree() {
+    async fn abort_and_timeout_kill_and_reap_verifier_process_tree() {
         const HELPER_ENV: &str = "ACI_VERIFIER_PROCESS_TEST_HELPER";
         if std::env::var_os(HELPER_ENV).is_none() {
             let output = Command::new(std::env::current_exe().unwrap())
                 .env(HELPER_ENV, "1")
                 .args([
                     "--exact",
-                    "aci::verifier::external::process_tests::drop_kills_and_reaps_verifier_process_tree",
+                    "aci::verifier::external::process_tests::abort_and_timeout_kill_and_reap_verifier_process_tree",
                     "--nocapture",
                 ])
                 .kill_on_drop(true)
@@ -666,42 +677,73 @@ mod process_tests {
             unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
             0
         );
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", r#"sleep 60 & printf '%s %s\n' "$$" "$!"; wait"#])
-            .stdout(Stdio::piped());
-        let mut process = VerifierProcess::spawn(&mut command).unwrap();
-        let group = process.group;
-        let mut stdout = BufReader::new(process.child.as_mut().unwrap().stdout.take().unwrap());
-        let mut ready = String::new();
-        stdout.read_line(&mut ready).await.unwrap();
-        let pids: Vec<libc::pid_t> = ready
-            .split_whitespace()
-            .map(|pid| pid.parse().unwrap())
-            .collect();
-        assert_eq!(pids.len(), 2);
-        assert!(pids
-            .iter()
-            .all(|pid| unsafe { libc::getpgid(*pid) } == group));
-        let (reaped, waited) = tokio::sync::oneshot::channel();
-        process.reaped = Some(reaped);
-        let task = tokio::spawn(async move {
-            process.child.as_mut().unwrap().wait().await.unwrap();
-        });
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        waited.await.unwrap();
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
-        assert!(libc::WIFSIGNALED(status));
-        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
-        let mut tail = Vec::new();
-        stdout.read_to_end(&mut tail).await.unwrap();
-        // Both the leader and its grandchild are gone, not just the direct child.
-        assert_eq!(unsafe { libc::killpg(group, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
+        for timeout in [false, true] {
+            // The inherited pipe confirms both processes exist before advancing time.
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+            let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+            let script = format!(
+                r#"sleep 60 & printf '%s %s\n' "$$" "$!" > /proc/self/fd/{}; wait"#,
+                writer.as_raw_fd()
+            );
+            let read_pids = || {
+                drop(writer);
+                let mut ready = String::new();
+                BufReader::new(reader).read_line(&mut ready).unwrap();
+                let pids: Vec<libc::pid_t> = ready
+                    .split_whitespace()
+                    .map(|pid| pid.parse().unwrap())
+                    .collect();
+                assert_eq!(pids.len(), 2);
+                assert!(pids
+                    .iter()
+                    .all(|pid| unsafe { libc::getpgid(*pid) } == pids[0]));
+                pids
+            };
+            let (reaped, waited) = tokio::sync::oneshot::channel();
+            let pids = if timeout {
+                let verifier = ExternalProviderVerifier::with_command(
+                    "tinfoil",
+                    AttestationScope::PerRouter,
+                    vec!["sh".to_string(), "-c".to_string(), script],
+                    1,
+                )
+                .unwrap();
+                *verifier.reaped.lock().unwrap() = Some(reaped);
+                let mut run = Box::pin(verifier.run(Vec::new()));
+                assert!(futures_util::poll!(&mut run).is_pending());
+                let pids = read_pids();
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert_eq!(
+                    run.await.unwrap_err(),
+                    "provider verifier timed out after 1s"
+                );
+                pids
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", &script]);
+                let mut process = VerifierProcess::spawn(&mut command).unwrap();
+                process.reaped = Some(reaped);
+                let pids = read_pids();
+                let task = tokio::spawn(async move {
+                    process.child.as_mut().unwrap().wait().await.unwrap();
+                });
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                pids
+            };
+            waited.await.unwrap();
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
+            assert!(libc::WIFSIGNALED(status));
+            assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+            // Both the leader and its grandchild are gone, not just the direct child.
+            assert_eq!(unsafe { libc::killpg(pids[0], 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
     }
 }

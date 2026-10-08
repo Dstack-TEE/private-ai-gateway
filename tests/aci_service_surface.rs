@@ -2446,15 +2446,26 @@ async fn aci_constraint_refuses_a_route_not_classed_as_attested() {
 // refuses (§5.3 "a direct service has no sessions").
 #[tokio::test]
 async fn direct_service_satisfies_aci_verified_by_construction() {
+    struct UnreadCache;
+    #[async_trait]
+    impl UpstreamVerifier for UnreadCache {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            event_from_request(&request, VerificationResult::Verified)
+        }
+        fn cached(&self, _: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+            panic!("direct services must not inspect the verifier cache");
+        }
+    }
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities.serving = "direct".to_string();
     let upstream = RecordingUpstream::default();
     let calls = upstream.calls();
     let service = Arc::new(
-        AciService::new(
+        AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(upstream),
+            Arc::new(UnreadCache),
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
             Arc::new(FixedClock(1_700_000_000)),
@@ -2468,6 +2479,17 @@ async fn direct_service_satisfies_aci_verified_by_construction() {
         service,
         upstream_calls: calls,
     };
+    assert!(h
+        .service
+        .list_current_sessions(&[UpstreamVerificationRequest {
+            upstream_name: "surface-upstream".to_string(),
+            model_id: "aci-model".to_string(),
+            url_origin: Some("https://surface-upstream.example".to_string()),
+            forwarded_body_hash: sha256_hex(b""),
+            required: true,
+        }])
+        .unwrap()
+        .is_empty());
 
     let body = br#"{"model":"aci-model","messages":[],"provider":{"aci_verified":true}}"#;
     let resp = h.requester.post("/v1/chat/completions", body, &[]).await;

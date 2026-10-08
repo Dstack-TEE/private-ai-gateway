@@ -32,8 +32,15 @@ fn request(origin: &str) -> UpstreamVerificationRequest {
 }
 
 async fn wait_until_wall(not_after: u64) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    tokio::time::sleep(Duration::from_secs(not_after).saturating_sub(now)).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+            <= Duration::from_secs(not_after)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("wall clock did not pass keyset expiry");
 }
 
 struct Control {

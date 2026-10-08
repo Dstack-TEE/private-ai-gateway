@@ -682,7 +682,12 @@ async fn aci_service_models_share_one_verification_per_period() {
 
 #[tokio::test(start_paused = true)]
 async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
-    for (cache, ttl, latency, period) in [(300, 300, 25, 10), (300, 30, 0, 240), (30, 30, 40, 30)] {
+    for (cache, ttl, latency, period) in [
+        (300, 300, 25, 10),
+        (300, 30, 0, 240),
+        (30, 30, 40, 30),
+        (300, 0, 0, 240),
+    ] {
         let mut cfg =
             test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
         cfg.verifier_cache_seconds = Some(cache);
@@ -696,6 +701,33 @@ async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
         assert!(starts
             .windows(2)
             .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(period)));
+        if ttl == 0 {
+            assert_eq!(starts.len(), 1800 / period as usize + 1);
+            assert!(starts.iter().all(|(_, cold)| *cold));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_configuration_controls_actual_start_times() {
+    for (timeout, refresh, period) in [(None, None, 240), (Some(90), None, 210), (None, Some(0), 0)]
+    {
+        let mut cfg =
+            test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+        cfg.verifier_request_timeout_seconds = timeout;
+        cfg.verification_refresh_seconds = refresh;
+        let verifier = Arc::new(FakeVerifier::new(300, 0));
+        run_refresh(vec![cfg], verifier.clone(), 600).await;
+        let observations = verifier.observations.lock().unwrap();
+        if period == 0 {
+            assert!(observations.starts.is_empty());
+        } else {
+            let starts = starts(&observations, "provider", "model");
+            assert_eq!(starts.len(), 600 / period as usize + 1);
+            assert!(starts
+                .windows(2)
+                .all(|pair| pair[1].0 - pair[0].0 == Duration::from_secs(period)));
+        }
     }
 }
 

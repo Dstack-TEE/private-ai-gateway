@@ -62,6 +62,9 @@ impl AciService {
         &self,
         requests: &[UpstreamVerificationRequest],
     ) -> Result<Vec<AttestedSession>, ServiceError> {
+        if self.serves_directly() {
+            return Ok(Vec::new());
+        }
         let Some(verifier) = self.upstream_verifier.as_ref() else {
             return Ok(Vec::new());
         };
