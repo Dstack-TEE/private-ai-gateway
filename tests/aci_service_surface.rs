@@ -2056,7 +2056,9 @@ async fn rotated_session_listing_rejects_old_pin_and_accepts_new_pin() {
         .unwrap()
         .to_string();
 
-    let request = config.current_verification_requests(None, None).remove(0);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
     h.service.record_session(&verifier.refresh(request).await);
 
     let second = h
@@ -3008,7 +3010,9 @@ async fn cached_session_listing_remains_pin_acceptable_across_rotations() {
         "openai-compatible",
         serde_json::json!({"aci-model": "aci-model"}),
     );
-    let request = config.current_verification_requests(None, None).remove(0);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
     h.service
         .record_session(&verifier.verify(request.clone()).await);
     let service = h.service.clone();
@@ -3124,7 +3128,9 @@ async fn cold_verifier_cache_lists_nothing_but_retains_historical_sessions() {
         0,
         "listing never verifies afresh"
     );
-    let request = config.current_verification_requests(None, None).remove(0);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
     h.service.record_session(&verifier.verify(request).await);
     let listed = listed_sessions(&h, "").await;
     let id = listed[0]["session_id"].as_str().unwrap();
@@ -3148,7 +3154,9 @@ async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
         "chutes",
         serde_json::json!({"aci-model": "aci-model"}),
     );
-    let request = config.current_verification_requests(None, None).remove(0);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
     let event = |instances: &[&str]| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         verifier_id: "chutes-fixture/v1".to_string(),
@@ -3201,7 +3209,7 @@ async fn per_model_listing_filters_the_verification_target() {
         "openai-compatible",
         serde_json::json!({"public-a": "model-a", "public-b": "model-b"}),
     );
-    for request in config.current_verification_requests(None, None) {
+    for request in config.current_verification_requests(None, None, true) {
         h.service.record_session(&verifier.verify(request).await);
     }
     assert_eq!(listed_sessions(&h, "").await.len(), 2);
@@ -3214,7 +3222,7 @@ async fn per_model_listing_filters_the_verification_target() {
         let listed = listed_sessions(&h, &format!("?model={model}")).await;
         assert_eq!(listed.len(), 1);
         let request = config
-            .current_verification_requests(Some(model), None)
+            .current_verification_requests(Some(model), None, true)
             .remove(0);
         assert_eq!(request.model_id, expected);
         let session = h
@@ -3280,7 +3288,7 @@ async fn model_listing_uses_the_same_alias_mapping_as_routing() {
         "openai-compatible",
         serde_json::json!({"a": "x", "x": "y"}),
     );
-    for request in config.current_verification_requests(None, None) {
+    for request in config.current_verification_requests(None, None, true) {
         h.service.record_session(&verifier.verify(request).await);
     }
     let all = listed_sessions(&h, "").await;
@@ -3288,7 +3296,7 @@ async fn model_listing_uses_the_same_alias_mapping_as_routing() {
     let listed = listed_sessions(&h, "?model=x").await;
     assert_eq!(listed.len(), 1);
     let request = config
-        .current_verification_requests(Some("x"), None)
+        .current_verification_requests(Some("x"), None, true)
         .remove(0);
     assert_eq!(request.model_id, "y");
     let session = h

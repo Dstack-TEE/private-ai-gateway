@@ -5,20 +5,20 @@
 //! configured yet". The admin API replaces that same file and swaps the
 //! in-memory backend/verifier state atomically.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use futures_util::future::join_all;
-use tokio::task::JoinHandle;
+use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::aci::digest;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
+use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError, UpstreamRequest};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
@@ -35,8 +35,8 @@ use builders::{build_chutes_provider_backend, build_state, config_digest};
 use dynamic::{DynamicUpstreamBackend, DynamicUpstreamVerifier};
 use validation::{
     read_config_file, session_refresh_seconds, snapshot_for, unique_upstream_models,
-    validate_config, verification_refresh_seconds, verification_targets,
-    verification_targets_for_refresh, write_config_file, UpstreamVerificationTarget,
+    validate_config, verification_refresh_seconds, verification_targets, write_config_file,
+    UpstreamVerificationTarget,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -348,6 +348,7 @@ pub struct UpstreamConfigManager {
     options: UpstreamRuntimeOptions,
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
     update_lock: Arc<Mutex<()>>,
+    generation: watch::Sender<u64>,
     session_sink: Arc<RwLock<Option<Arc<dyn UpstreamSessionSink>>>>,
 }
 
@@ -364,6 +365,7 @@ impl UpstreamConfigManager {
             options,
             state: Arc::new(RwLock::new(state)),
             update_lock: Arc::new(Mutex::new(())),
+            generation: watch::channel(0).0,
             session_sink: Arc::new(RwLock::new(None)),
         })
     }
@@ -469,39 +471,50 @@ impl UpstreamConfigManager {
         }
         let next = Arc::new(build_state(&config, &self.options)?);
         write_config_file(&self.path, &config)?;
-        *self
-            .state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+        self.install_state(next.clone());
         Ok(Some(snapshot_for(&self.path, &next)))
     }
 
-    pub async fn prewarm_upstream_verification(&self) -> Vec<UpstreamPrewarmResult> {
-        self.run_upstream_verification().await
-    }
-
-    pub fn verification_refresh_interval_seconds(&self) -> Option<u64> {
-        let state = self
-            .state
-            .read()
-            .expect("upstream config manager state poisoned")
-            .clone();
-        state.verifier.as_ref()?;
-        state
-            .config
-            .iter()
-            .filter_map(|cfg| verification_refresh_seconds(cfg, &self.options))
-            .min()
+    fn install_state(&self, state: Arc<ConfiguredUpstreams>) {
+        *self.state.write().unwrap_or_else(|p| p.into_inner()) = state;
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     pub fn current_verification_requests(
         &self,
         model: Option<&str>,
         upstream_name: Option<&str>,
+        all_routes: bool,
     ) -> Vec<UpstreamVerificationRequest> {
         let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let routed_upstream = if !all_routes {
+            if let Some(model) = model {
+                let Ok(body) = serde_json::to_vec(&serde_json::json!({"model": model})) else {
+                    return Vec::new();
+                };
+                let Ok(prepared) = state.backend.prepare(UpstreamRequest {
+                    body,
+                    path: None,
+                    target_route_id: None,
+                    headers: HashMap::new(),
+                }) else {
+                    return Vec::new();
+                };
+                Some(prepared.upstream_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         verification_targets(&state.config)
             .into_iter()
+            .filter(|target| {
+                routed_upstream
+                    .as_ref()
+                    .is_none_or(|name| target.upstream_name == *name)
+            })
             .filter(|target| upstream_name.is_none_or(|name| target.upstream_name == name))
             .filter(|target| {
                 model.is_none_or(|model| {
@@ -519,104 +532,55 @@ impl UpstreamConfigManager {
             .collect()
     }
 
-    pub async fn run_verification_refresh(self: Arc<Self>, log: fn(Vec<UpstreamPrewarmResult>)) {
-        let mut scheduled_seconds = None;
-        let mut next_due: BTreeMap<String, Instant> = BTreeMap::new();
-        let mut in_flight: HashMap<String, JoinHandle<()>> = HashMap::new();
-        let history = VerificationRefreshHistory::default();
+    pub async fn run_verification_refresh(
+        self: Arc<Self>,
+        permits: Arc<Semaphore>,
+        log: fn(Vec<UpstreamPrewarmResult>),
+    ) {
+        let mut generation = self.generation.subscribe();
+        let mut tasks = JoinSet::new();
         loop {
-            let finished: Vec<_> = in_flight
-                .iter()
-                .filter(|(_, handle)| handle.is_finished())
-                .map(|(name, _)| name.clone())
-                .collect();
-            for name in finished {
-                if let Some(handle) = in_flight.remove(&name) {
-                    if let Err(err) = handle.await {
-                        tracing::error!(upstream = %name, error = %err, "upstream verification refresh task failed");
-                    }
-                }
-            }
+            generation.borrow_and_update();
             let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
-            let seconds = state.verifier.as_ref().and_then(|_| {
-                state
-                    .config
-                    .iter()
-                    .filter_map(|cfg| verification_refresh_seconds(cfg, &self.options))
-                    .min()
-            });
-            let Some(seconds) = seconds else {
-                scheduled_seconds = None;
-                next_due.clear();
-                history.set_targets(&[]);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            };
-            let targets = verification_targets_for_refresh(&state.config, &self.options);
-            history.set_targets(&targets);
-            let groups = group_verification_targets(targets);
-            let period = Duration::from_secs(seconds);
-            if scheduled_seconds != Some(seconds) || next_due.keys().ne(groups.keys()) {
-                let now = Instant::now();
-                next_due.retain(|name, _| groups.contains_key(name));
-                for (index, name) in groups.keys().enumerate() {
-                    let phase = period.mul_f64((index + 1) as f64 / groups.len() as f64);
-                    let due = next_due.entry(name.clone()).or_insert(now + phase);
-                    if scheduled_seconds != Some(seconds) {
-                        *due = (*due).min(now + period);
-                    }
-                }
-                scheduled_seconds = Some(seconds);
-            }
-            let Some(earliest) = next_due.values().copied().min() else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            };
-            let now = Instant::now();
-            if earliest > now {
-                tokio::time::sleep_until(earliest).await;
-                continue;
-            }
-            let Some(verifier) = state.verifier.clone() else {
-                continue;
-            };
             let sink = self
                 .session_sink
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone();
-            for (name, targets) in groups {
-                let Some(due) = next_due.get_mut(&name) else {
-                    continue;
-                };
-                if *due > now {
-                    continue;
+            if let Some(verifier) = &state.verifier {
+                for cfg in &state.config {
+                    let Some(period) = verification_refresh_seconds(cfg, &self.options) else {
+                        continue;
+                    };
+                    let cache_seconds = cfg
+                        .verifier_cache_seconds
+                        .unwrap_or(self.options.verifier_cache_seconds);
+                    tasks.spawn(refresh_upstream(
+                        verifier.clone(),
+                        verification_targets(std::slice::from_ref(cfg)),
+                        Duration::from_secs(cache_seconds.saturating_sub(period)),
+                        Duration::from_secs(period),
+                        permits.clone(),
+                        sink.clone(),
+                        log,
+                    ));
                 }
-                // Skip missed starts while preserving this group's phase.
-                while *due <= now {
-                    *due += period;
-                }
-                if in_flight
-                    .get(&name)
-                    .is_some_and(|handle| !handle.is_finished())
-                {
-                    continue;
-                }
-                if let Some(handle) = in_flight.remove(&name) {
-                    if let Err(err) = handle.await {
-                        tracing::error!(upstream = %name, error = %err, "upstream verification refresh task failed");
+            }
+            loop {
+                tokio::select! {
+                    changed = generation.changed() => {
+                        if changed.is_err() { return; }
+                        break;
+                    }
+                    result = tasks.join_next(), if !tasks.is_empty() => {
+                        if let Some(Err(err)) = result {
+                            tracing::error!(error = %err, "upstream verification refresh task failed");
+                        }
                     }
                 }
-                let history = history.clone();
-                let verifier = verifier.clone();
-                let sink = sink.clone();
-                in_flight.insert(
-                    name,
-                    tokio::spawn(async move {
-                        log(run_verification_group(verifier, targets, sink, Some(history)).await);
-                    }),
-                );
             }
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
         }
     }
 
@@ -633,33 +597,6 @@ impl UpstreamConfigManager {
             .filter(|cfg| cfg.provider == UpstreamProvider::Chutes)
             .filter_map(session_refresh_seconds)
             .min()
-    }
-
-    async fn run_upstream_verification(&self) -> Vec<UpstreamPrewarmResult> {
-        let (verifier, targets, sink) = {
-            let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
-            let Some(verifier) = state.verifier.clone() else {
-                return Vec::new();
-            };
-            let targets = verification_targets(&state.config);
-            let sink = self
-                .session_sink
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            (verifier, targets, sink)
-        };
-        join_all(
-            group_verification_targets(targets)
-                .into_values()
-                .map(|targets| {
-                    run_verification_group(verifier.clone(), targets, sink.clone(), None)
-                }),
-        )
-        .await
-        .into_iter()
-        .flatten()
-        .collect()
     }
 
     pub async fn refresh_provider_sessions(&self) -> Vec<UpstreamSessionRefreshResult> {
@@ -788,107 +725,92 @@ impl ProviderSessionRegistry {
     }
 }
 
-fn group_verification_targets(
-    targets: Vec<UpstreamVerificationTarget>,
-) -> BTreeMap<String, Vec<UpstreamVerificationTarget>> {
-    let mut groups: BTreeMap<String, Vec<UpstreamVerificationTarget>> = BTreeMap::new();
-    for target in targets {
-        groups
-            .entry(target.upstream_name.clone())
-            .or_default()
-            .push(target);
-    }
-    groups
-}
-
-#[derive(Clone, Default)]
-struct VerificationRefreshHistory {
-    last_success: Arc<Mutex<HashMap<UpstreamVerificationTarget, Option<Instant>>>>,
-}
-
-impl VerificationRefreshHistory {
-    fn set_targets(&self, targets: &[UpstreamVerificationTarget]) {
-        let mut last_success = self.last_success.lock().unwrap_or_else(|p| p.into_inner());
-        last_success.retain(|target, _| targets.contains(target));
-        for target in targets {
-            last_success.entry(target.clone()).or_default();
-        }
-    }
-
-    fn last_success(&self, target: &UpstreamVerificationTarget) -> Option<Instant> {
-        self.last_success
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(target)
-            .copied()
-            .flatten()
-    }
-
-    fn record_success(&self, target: &UpstreamVerificationTarget, completed_at: Instant) {
-        // A removed target's in-flight pass must not recreate its history.
-        if let Some(last_success) = self
-            .last_success
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get_mut(target)
-        {
-            *last_success = Some(completed_at);
-        }
-    }
-}
-
-async fn run_verification_group(
+async fn refresh_upstream(
     verifier: Arc<dyn UpstreamVerifier>,
-    targets: Vec<UpstreamVerificationTarget>,
+    mut targets: Vec<UpstreamVerificationTarget>,
+    lead: Duration,
+    period: Duration,
+    permits: Arc<Semaphore>,
     sink: Option<Arc<dyn UpstreamSessionSink>>,
-    refresh: Option<VerificationRefreshHistory>,
-) -> Vec<UpstreamPrewarmResult> {
-    let mut results = Vec::with_capacity(targets.len());
-    for target in targets {
-        results.push(
-            run_verification_target(verifier.as_ref(), target, sink.as_deref(), refresh.as_ref())
-                .await,
-        );
-    }
-    results
-}
-
-async fn run_verification_target(
-    verifier: &dyn UpstreamVerifier,
-    target: UpstreamVerificationTarget,
-    sink: Option<&dyn UpstreamSessionSink>,
-    refresh: Option<&VerificationRefreshHistory>,
-) -> UpstreamPrewarmResult {
-    let request = target.request();
-    let event = if let Some(history) = refresh {
-        if let Some(previous) = history.last_success(&target) {
-            if verifier.cached(&request).is_none() {
-                tracing::warn!(
-                    upstream = %target.upstream_name,
-                    model = %target.model_id,
-                    seconds_since_last_success = previous.elapsed().as_secs_f64(),
-                    "upstream verification cache was cold before refresh",
-                );
+    log: fn(Vec<UpstreamPrewarmResult>),
+) {
+    let started = Instant::now();
+    let mut not_before = HashMap::new();
+    let mut succeeded = HashSet::new();
+    let mut cold_since = HashMap::new();
+    while !targets.is_empty() {
+        let now = Instant::now();
+        let mut selected = None;
+        let mut earliest_start = None;
+        for target in &targets {
+            let expiry = match verifier.cache_remaining(&target.request()) {
+                Some(remaining) => now + remaining,
+                None => *cold_since.entry(target.clone()).or_insert_with(|| {
+                    if succeeded.contains(target) {
+                        now
+                    } else {
+                        started
+                    }
+                }),
+            };
+            let due = expiry.checked_sub(lead).unwrap_or(expiry);
+            let due = not_before
+                .get(target)
+                .copied()
+                .map_or(due, |retry| due.max(retry));
+            earliest_start =
+                Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
+            if due <= now
+                && selected
+                    .as_ref()
+                    .is_none_or(|(_, deadline)| expiry < *deadline)
+            {
+                selected = Some((target.clone(), expiry));
             }
         }
-        verifier.refresh(request).await
-    } else {
-        verifier.verify(request).await
-    };
-    if event.result == VerificationResult::Verified {
-        if let Some(history) = refresh {
-            history.record_success(&target, Instant::now());
+        let Some((target, _)) = selected else {
+            if let Some(due) = earliest_start {
+                tokio::time::sleep_until(due).await;
+            }
+            continue;
+        };
+        let Ok(permit) = permits.acquire().await else {
+            return;
+        };
+        // A request may have refreshed this entry while we waited for a permit.
+        if verifier
+            .cache_remaining(&target.request())
+            .is_some_and(|remaining| remaining > lead)
+        {
+            continue;
         }
-    }
-    if let Some(sink) = sink {
-        sink.record_session(&event);
-    }
-    UpstreamPrewarmResult {
-        upstream_name: target.upstream_name,
-        model_id: target.model_id,
-        url_origin: target.url_origin,
-        verifier_id: event.verifier_id,
-        result: event.result.as_str().to_string(),
-        reason: event.reason,
+        let request = target.request();
+        if succeeded.contains(&target) && verifier.cache_remaining(&request).is_none() {
+            tracing::warn!(upstream = %target.upstream_name, model = %target.model_id, "upstream verification cache was cold before refresh");
+        }
+        let event = verifier.refresh(request.clone()).await;
+        drop(permit);
+        let remaining = verifier.cache_remaining(&request);
+        if event.result == VerificationResult::Verified {
+            succeeded.insert(target.clone());
+            not_before.remove(&target);
+            cold_since.remove(&target);
+            if remaining.is_none() {
+                targets.retain(|scheduled| *scheduled != target);
+            }
+        } else {
+            not_before.insert(target.clone(), Instant::now() + remaining.unwrap_or(period));
+        }
+        if let Some(sink) = &sink {
+            sink.record_session(&event);
+        }
+        log(vec![UpstreamPrewarmResult {
+            upstream_name: target.upstream_name,
+            model_id: target.model_id,
+            url_origin: target.url_origin,
+            verifier_id: event.verifier_id,
+            result: event.result.as_str().to_string(),
+            reason: event.reason,
+        }]);
     }
 }

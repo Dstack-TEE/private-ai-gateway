@@ -804,7 +804,7 @@ fi"#
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
-        expires_at: 10,
+        expires_at: tokio::time::Instant::now(),
         evidence: Some(json!({
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
@@ -829,7 +829,7 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
     assert_eq!(event.channel_bindings, cached.channel_bindings);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     // Nothing listens on port 1, so any fresh verification fails fast.
     let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
@@ -847,7 +847,7 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     )
     .unwrap()
     .with_cached(CachedAciServiceVerification {
-        expires_at: u64::MAX,
+        expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "http://127.0.0.1:1".to_string(),
@@ -863,6 +863,7 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     };
 
     let cached = verifier.verify(request.clone()).await;
+    tokio::time::advance(std::time::Duration::from_secs(240)).await;
     let refreshed = verifier.refresh(request.clone()).await;
 
     assert_eq!(cached.result, VerificationResult::Verified);
@@ -875,13 +876,12 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
         verifier.verify(request.clone()).await.channel_bindings,
         cached.channel_bindings
     );
-    // Production cache expiry uses wall time; seed the same entry at its boundary.
-    let expired = verifier.with_cached(CachedAciServiceVerification {
-        expires_at: current_unix_secs(),
-        evidence: cached.evidence,
-        channel_bindings: cached.channel_bindings,
-    });
-    assert!(expired.cached(&request).is_none());
+    let remaining = verifier.cache_remaining(&request).unwrap();
+    tokio::time::advance(remaining - std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_some());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_none());
+    assert!(verifier.cache_remaining(&request).is_none());
 }
 
 #[test]

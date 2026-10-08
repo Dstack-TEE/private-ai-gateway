@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::RwLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use aci_verify::channel::{declared_tls_pins, ChannelBindingError};
 use aci_verify::dstack::{compressed_k256_public_key_hex, KeyCustodyError};
@@ -11,6 +11,7 @@ use aci_verify::report::raw_evidence;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::appraisal::{
     appraise_report, AppraisalInputs, ChannelEvidence, CheckResult, CustodyEvidence, FailureCause,
@@ -18,7 +19,10 @@ use super::appraisal::{
 };
 use super::quote::QuoteStepError;
 use super::report::AciReportValidationError;
-use super::{DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS};
+use super::{
+    current_unix_secs, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
@@ -224,7 +228,7 @@ impl From<QuoteStepError> for AciServiceVerificationError {
 
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
-    pub(super) expires_at: u64,
+    pub(super) expires_at: Instant,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
 }
@@ -401,6 +405,8 @@ impl AciServiceUpstreamVerifier {
     async fn verify_uncached(
         &self,
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
+        let started = Instant::now();
+        let verified_at = current_unix_secs();
         let nonce = random_nonce_hex();
         // Canonical report, not the legacy alias: the binding check below expects
         // `report_data = sha256(statement bytes)` (§3.2), which only the canonical
@@ -427,7 +433,6 @@ impl AciServiceUpstreamVerifier {
 
         let report: AttestationReport = serde_json::from_slice(&body)
             .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
-        let verified_at = now_secs();
         // One appraisal (`appraisal.rs`): this deployment folds the §9.1
         // outcomes into a single accept/reject.
         let appraisal = appraise_report(AppraisalInputs {
@@ -468,7 +473,7 @@ impl AciServiceUpstreamVerifier {
         let channel_bindings = appraisal.channel_bindings;
 
         Ok(CachedAciServiceVerification {
-            expires_at,
+            expires_at: started + Duration::from_secs(expires_at.saturating_sub(verified_at)),
             evidence,
             channel_bindings,
         })
@@ -490,8 +495,18 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
             .read()
             .expect("ACI service verifier cache poisoned")
             .clone()?;
-        (now_secs() < cached.expires_at)
+        (Instant::now() < cached.expires_at)
             .then(|| cached.event_for(request.clone(), &self.verifier_id))
+    }
+
+    fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.cache
+            .read()
+            .expect("ACI service verifier cache poisoned")
+            .as_ref()?
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -539,13 +554,6 @@ fn random_nonce_hex() -> String {
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     hex::encode(nonce)
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .expect("system time is before UNIX_EPOCH")
 }
 
 /// The `report_data` field of a parsed DCAP quote, across report variants.

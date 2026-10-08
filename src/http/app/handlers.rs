@@ -210,34 +210,7 @@ pub(super) async fn admin_put_upstreams(
         Err(e) => return upstream_config_error_response(e),
     };
     match manager.replace(config) {
-        Ok(snapshot) => {
-            let manager = manager.clone();
-            tokio::spawn(async move {
-                let results = manager.prewarm_upstream_verification().await;
-                for result in results {
-                    match result.reason {
-                        Some(reason) => tracing::warn!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            reason = %reason,
-                            "upstream verification prewarm finished"
-                        ),
-                        None => tracing::info!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            "upstream verification prewarm finished"
-                        ),
-                    }
-                }
-            });
-            Json(snapshot).into_response()
-        }
+        Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => upstream_config_error_response(e),
     }
 }
@@ -910,7 +883,11 @@ pub(super) async fn aci_list_sessions(
         .upstream_config
         .as_ref()
         .map(|config| {
-            config.current_verification_requests(q.model.as_deref(), q.upstream_name.as_deref())
+            config.current_verification_requests(
+                q.model.as_deref(),
+                q.upstream_name.as_deref(),
+                state.middleware.is_some(),
+            )
         })
         .unwrap_or_default();
     let sessions = match state.service.list_current_sessions(&requests) {

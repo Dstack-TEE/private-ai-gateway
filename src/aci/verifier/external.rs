@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time::Instant;
 
-use super::current_unix_secs;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
@@ -166,6 +166,21 @@ impl ExternalProviderVerifier {
         self.cached_event(&self.cache_key(request), request)
     }
 
+    pub(super) fn cache_remaining(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<Duration> {
+        let cache = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned");
+        cache
+            .get(&self.cache_key(request))?
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+
     pub(super) async fn refresh(
         &self,
         request: UpstreamVerificationRequest,
@@ -180,6 +195,7 @@ impl ExternalProviderVerifier {
         request: UpstreamVerificationRequest,
         cache_key: ExternalProviderVerifierCacheKey,
     ) -> UpstreamVerifiedEvent {
+        let started = Instant::now();
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -218,7 +234,7 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
-                self.maybe_cache_event(cache_key, &event);
+                self.maybe_cache_event(cache_key, &event, started);
                 event
             }
             Err(err) => self.failed_event(request, err),
@@ -233,7 +249,7 @@ impl ExternalProviderVerifier {
         if self.cache_ttl_seconds == 0 {
             return None;
         }
-        let now = current_unix_secs();
+        let now = Instant::now();
         let cached = self
             .cache
             .read()
@@ -257,12 +273,13 @@ impl ExternalProviderVerifier {
         &self,
         cache_key: ExternalProviderVerifierCacheKey,
         event: &UpstreamVerifiedEvent,
+        started: Instant,
     ) {
         if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
             return;
         }
         let cached = CachedExternalProviderEvent {
-            expires_at: current_unix_secs().saturating_add(self.cache_ttl_seconds),
+            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
             event: event.clone(),
         };
         self.cache
@@ -471,7 +488,7 @@ impl ExternalProviderVerifierCacheKey {
 
 #[derive(Clone, Debug)]
 struct CachedExternalProviderEvent {
-    expires_at: u64,
+    expires_at: Instant,
     event: UpstreamVerifiedEvent,
 }
 

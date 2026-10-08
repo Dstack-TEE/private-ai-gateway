@@ -42,6 +42,10 @@ Minimal container configuration:
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
+| `upstream_verification_concurrency` | positive integer | `4` | Maximum concurrent background verifier-cache refreshes, including initial verification. Limits pressure on the shared verifier sidecar; request-time verification is independent. |
+
+Do not set `upstream_verification_concurrency` in production until the rollback
+window has passed: the older binary rejects unknown static configuration fields.
 
 ### Runtime state files
 
@@ -258,38 +262,36 @@ request time.
 | `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
 | `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
 | `verifier_request_timeout_seconds` | positive integer | `60` | Provider verification timeout. Zero is rejected. |
-| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` | Background verification refresh cadence (240 seconds with defaults). Zero disables proactive refresh for this entry. |
+| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` | Requested delay after verification start (240 seconds with defaults). Zero disables background verification for this entry. See scheduling semantics below. |
 | `session_refresh_seconds` | integer | `45` for Chutes; disabled otherwise | Chutes nonce-session refresh cadence. Zero disables it. |
 | `chutes_e2ee_api_base` | string | `https://api.chutes.ai` | Chutes discovery, evidence, and E2EE API base. Chutes only. |
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
 
-Verification refresh uses the effective cache lifetime and request timeout,
-including per-upstream overrides. The smallest enabled interval R drives
-independent upstream groups, with sequential targets within a group. Starts are
-spread in upstream-name order: group i of N is first due at
-`start + (i + 1) * R / N`, then every R. Changes to the group set preserve
-existing groups' due times; new groups get `now + (j + 1) * R / N_new` using
-their index j in the updated set. When R changes, existing due times become
-`min(existing_due, now + new_R)`, with the new period thereafter. In-flight
-groups skip starts rather than overlap. Prewarm stays concurrent; initial
-refresh starts are due within R, and completing before the prewarmed entry
-expires still depends on the verifier and pass duration. Zero disables
-proactive verification refresh.
+Each enabled upstream runs one task that schedules targets by their cache expiry.
+The period p is a positive `verification_refresh_seconds`, or the default
+`max(cache_seconds - request_timeout_seconds, 1)`, using effective per-upstream
+settings. The lead is `cache_seconds.saturating_sub(p)`; refresh becomes due at
+`verification_start + TTL - lead`, or an earlier keyset expiry minus lead.
+Thus p below TTL requests refresh p seconds after verification starts; p at or
+above TTL gives zero lead and schedules at expiry. Zero disables the task.
+TTL at or below the timeout uses a default p of one second and can leave cold
+windows. Failed refresh preserves an unexpired cache, retries at its expiry,
+and otherwise waits p seconds before retrying.
 
-A cache stays warm while each target's replacement lands before the verifier's
-own expiry of its previous entry. External verifiers stamp expiry at cache
-insertion after verification; ACI-service stamps it at verification/appraisal
-start, before asynchronous appraisal completes, and also caps it at keyset
-expiry. Multi-target groups can drift, and skipped starts, failed refreshes,
-or invalidation can leave cold windows. Warmth is not guaranteed in all cases;
-an explicit R above `cache - request_timeout` reduces the refresh budget.
-Before refreshing a target that previously refreshed successfully in this
-process, the gateway calls the same `cached()` function used by the pin gate.
-If the cache is cold, it warns with upstream, model, and seconds since the last
-successful refresh completion. The warning observes the cache at refresh time
-rather than comparing completion gaps with a configured TTL.
+The supervisor wakes on configuration replacement, cancels old tasks, and starts
+new tasks with fresh verifiers. Initial verification uses the same scheduling
+and concurrency limit as later refreshes; there is no separate prewarm. Each
+upstream runs sequentially and selects the earliest expiry among due targets;
+cold targets retain their first-observed time so they do not starve. Background
+tasks share `upstream_verification_concurrency` permits (default 4).
+
+External and ACI-service cache TTLs both start at verification start. A cache
+stays warm only while each replacement completes before the previous entry
+expires. Sequential targets, queues, failures, or invalidation can leave cold
+windows. A per-target warning reports upstream and model when a previously
+successful target's cache is found cold at refresh start.
 
 An `aci-service` entry must provide at least one accepted subject or image
 digest and at least one accepted KMS root public key. The verifier rejects an
@@ -337,8 +339,8 @@ canonical JSON (JCS) digest.
 A `PUT` validates the complete array before it writes a temporary file and
 renames it over the active path. An invalid array returns `400` and leaves the
 active config unchanged. After the write succeeds, the gateway swaps the
-in-memory router and verifier state, then starts verification prewarm in the
-background. [Configure upstreams after startup](../deploy/README.md#configure-upstreams-after-startup)
+in-memory router and verifier state, then wakes the background verification
+supervisor. [Configure upstreams after startup](../deploy/README.md#configure-upstreams-after-startup)
 shows both calls with `curl`.
 
 ## Source provenance

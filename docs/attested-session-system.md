@@ -45,21 +45,27 @@ request -> receipt (X-Receipt-Id)
 ## Preflight survey
 
 `GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the same
-verifier `cached(request)` function used by the pin gate's verification fast
-path. The list equals the sessions the gate accepts right now for those targets;
-it never performs fresh verification. A user can inspect the verified identity,
-channel binding, and typed claims before releasing data. Per-model filters
-resolve only the selected model's channel; Chutes lists only instances in the
-current cached event.
+`cached(request)` function as the pin gate. For the queried channels, the list
+is exactly the sessions the gate accepts now without re-verifying. It never
+performs fresh verification. An empty list means no verified state is available
+now; absence does not imply refusal, because a stable-evidence verifier can
+re-derive the same id after fresh verification. Chutes lists only instances in
+the current cached event.
 
-The list is empty while the cache is cold or no successful verification is
-available. A failed background refresh keeps the old successful entry until its
-cache deadline, so that still-valid entry remains listed. The session sink seals
-results promptly, but stored history does not define currency: even an older
-in-flight result sealed after a refresh cannot replace the cached listing.
-Superseded sessions remain retrievable by id until retention ends. A cache
-rotation between listing and forwarding can still produce `412
-session_not_accepted`; re-list and retry once.
+Pins apply to the routed channel. Use `?model=<public-alias>` to survey that
+model's channels, using the same alias mapping as requests. Without middleware,
+only the default first route is listed; with middleware, all configured routes
+serving the model are listed and pin-mismatched candidates are skipped. A broad
+list can contain sessions that a particular request will not route to.
+
+Failed refresh keeps the old successful entry until cache expiry. The session
+sink seals results promptly, but stored history does not define currency: an
+older in-flight result cannot replace the cached listing. Get-or-create under
+the store lock makes concurrent sealing of identical material reuse one id.
+Superseded sessions stay retrievable by id until retention ends. `expires_at`
+is an upper bound; cache replacement can supersede a session earlier. If a
+rotation between listing and forwarding produces `412 session_not_accepted`,
+re-list and retry once.
 
 ## Storage: compacted JSONL
 
