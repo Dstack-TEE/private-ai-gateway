@@ -269,16 +269,24 @@ request time.
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
 
-Each enabled upstream runs one task that schedules targets by their cache expiry.
+Each upstream with a verifier route and enabled refresh runs one task that
+schedules targets by their cache expiry. Plain upstreams without a verifier route
+are not scheduled.
+
 The period p is a positive `verification_refresh_seconds`, or the default
 `max(cache_seconds - request_timeout_seconds, 1)`, using effective per-upstream
 settings. The lead is `cache_seconds.saturating_sub(p)`; refresh becomes due at
 `verification_start + TTL - lead`, or an earlier keyset expiry minus lead.
 Thus p below TTL requests refresh p seconds after verification starts; p at or
-above TTL gives zero lead and schedules at expiry. Zero disables the task.
+above TTL gives zero lead; the next start still waits until the previous start
+plus p when that is later than expiry. Zero disables the task.
 TTL at or below the timeout uses a default p of one second and can leave cold
-windows. Failed refresh preserves an unexpired cache, retries at its expiry,
-and otherwise waits p seconds before retrying.
+windows. After success, the next start is no earlier than the previous start
+plus p, even when the cache expires during verification or a keyset shortens its
+lifetime.
+Cacheless verifiers remain scheduled. Failed refresh preserves an unexpired cache
+and retries at its expiry; without one, it retries no earlier than the failed
+attempt's start plus p.
 
 The supervisor wakes on configuration replacement, cancels old tasks, and starts
 new tasks with fresh verifiers. Initial verification uses the same scheduling
@@ -287,9 +295,12 @@ upstream runs sequentially and selects the earliest expiry among due targets;
 cold targets retain their first-observed time so they do not starve. Background
 tasks share `upstream_verification_concurrency` permits (default 4).
 
-External and ACI-service cache TTLs both start at verification start. A cache
-stays warm only while each replacement completes before the previous entry
-expires. Sequential targets, queues, failures, or invalidation can leave cold
+External and ACI-service cache TTLs both start at verification start. ACI-service
+appraisal uses wall-clock time after the response and rechecks keyset expiry
+after asynchronous verification completes; cached validity never exceeds
+keyset expiry. Its request-path verification and background refresh share a
+single-flight lock. A cache stays warm only while each replacement completes
+before the previous entry expires. Sequential targets, queues, failures, or invalidation can leave cold
 windows. A per-target warning reports upstream and model when a previously
 successful target's cache is found cold at refresh start.
 

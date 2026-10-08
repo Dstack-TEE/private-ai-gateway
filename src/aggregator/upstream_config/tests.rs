@@ -588,7 +588,7 @@ async fn failed_refresh_retries_at_expiry_then_once_per_period() {
 
 #[tokio::test(start_paused = true)]
 async fn aci_service_models_share_one_verification_per_period() {
-    let mut cfg = test_upstream_config("provider", UpstreamProvider::OpenAiCompatible, "a", "x");
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "x");
     cfg.models.extend([
         ("b".to_string(), "y".to_string()),
         ("c".to_string(), "z".to_string()),
@@ -607,7 +607,7 @@ async fn aci_service_models_share_one_verification_per_period() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn preverified_targets_are_verified_once_then_unscheduled() {
+async fn preverified_targets_refresh_once_per_period() {
     let verifications = Arc::new(AtomicUsize::new(0));
     let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "x");
     cfg.models.extend([
@@ -627,7 +627,85 @@ async fn preverified_targets_are_verified_once_then_unscheduled() {
     tokio::task::yield_now().await;
     advance(1800).await;
     stop_refresh(task).await;
-    assert_eq!(verifications.load(Ordering::SeqCst), 2);
+    assert_eq!(verifications.load(Ordering::SeqCst), 16);
+}
+
+#[tokio::test(start_paused = true)]
+async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
+    for (cache, ttl, latency, period) in [(300, 300, 25, 10), (300, 30, 0, 240), (30, 30, 40, 30)] {
+        let mut cfg =
+            test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+        cfg.verifier_cache_seconds = Some(cache);
+        cfg.verification_refresh_seconds = Some(period);
+        let verifier = Arc::new(FakeVerifier::new(ttl, latency));
+        let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
+        tokio::task::yield_now().await;
+        advance(1800).await;
+        stop_refresh(task).await;
+        let observations = verifier.observations.lock().unwrap();
+        let starts = observations.starts.values().next().unwrap();
+        assert!(starts.len() >= 3, "expired successes must remain scheduled");
+        assert!(starts.len() <= 1800 / period as usize + 1);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(period)));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn permit_wait_reselects_the_most_urgent_sibling() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
+    cfg.models.insert("b".to_string(), "b".to_string());
+    let verifier = Arc::new(FakeVerifier::new(300, 25));
+    let now = Instant::now();
+    verifier.cache.lock().unwrap().extend([
+        ("a".to_string(), now + Duration::from_secs(300)),
+        ("b".to_string(), now + Duration::from_secs(320)),
+    ]);
+    let permits = Arc::new(Semaphore::new(1));
+    let held = permits.clone().acquire_owned().await.unwrap();
+    let manager = refresh_test_manager(vec![cfg], verifier.clone());
+    let task = tokio::spawn(manager.run_verification_refresh(permits, |_| {}));
+    tokio::task::yield_now().await;
+    advance(250).await; // A is due and waiting on the permit.
+    assert!(verifier.observations.lock().unwrap().starts.is_empty());
+    verifier
+        .cache
+        .lock()
+        .unwrap()
+        .insert("b".to_string(), Instant::now() + Duration::from_secs(10));
+    drop(held);
+    advance(1).await;
+    stop_refresh(task).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(observations.starts.len(), 1);
+    assert!(observations
+        .starts
+        .contains_key(&("provider".to_string(), "b".to_string())));
+}
+
+#[tokio::test(start_paused = true)]
+async fn mixed_config_does_not_schedule_plain_upstreams_without_verifier_routes() {
+    let config = vec![
+        test_upstream_config("tee", UpstreamProvider::PhalaDirect, "public", "model"),
+        test_upstream_config(
+            "plain",
+            UpstreamProvider::OpenAiCompatible,
+            "public",
+            "model",
+        ),
+    ];
+    let verifier = Arc::new(FakeVerifier::new(300, 1));
+    let task = start_refresh(refresh_test_manager(config, verifier.clone()), 4);
+    tokio::task::yield_now().await;
+    advance(900).await;
+    stop_refresh(task).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(observations.starts.len(), 1);
+    assert!(observations
+        .starts
+        .keys()
+        .all(|(upstream, _)| upstream == "tee"));
 }
 
 #[tokio::test(start_paused = true)]

@@ -83,6 +83,29 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
     }
 }
 
+pub(super) fn has_verifier_route(
+    cfg: &UpstreamConfig,
+    config: &[UpstreamConfig],
+    options: &UpstreamRuntimeOptions,
+) -> bool {
+    provider_is_tee(cfg.provider)
+        || match options.verifier_mode {
+            UpstreamVerifierMode::None => false,
+            UpstreamVerifierMode::Preverified => true,
+            UpstreamVerifierMode::AciService => {
+                !config.iter().any(|cfg| provider_is_tee(cfg.provider))
+                    || cfg
+                        .accepted_subjects
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+                    || cfg
+                        .accepted_image_digests
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+            }
+        }
+}
+
 fn build_provider_backend(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
@@ -205,6 +228,9 @@ fn build_provider_verifier(
     }
     let mut router = RoutingUpstreamVerifier::new();
     for cfg in config {
+        if !has_verifier_route(cfg, config, options) {
+            continue;
+        }
         let cache_seconds = cfg
             .verifier_cache_seconds
             .unwrap_or(options.verifier_cache_seconds);
@@ -297,21 +323,7 @@ fn build_global_verifier_for_config(
         UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
             "preverified/out-of-band/v1",
         )))),
-        UpstreamVerifierMode::AciService => {
-            let has_explicit_aci_policy = cfg
-                .accepted_subjects
-                .as_ref()
-                .is_some_and(|ids| !ids.is_empty())
-                || cfg
-                    .accepted_image_digests
-                    .as_ref()
-                    .is_some_and(|digests| !digests.is_empty());
-            if has_explicit_aci_policy {
-                build_aci_service_verifier(cfg, options).map(Some)
-            } else {
-                Ok(None)
-            }
-        }
+        UpstreamVerifierMode::AciService => build_aci_service_verifier(cfg, options).map(Some),
     }
 }
 

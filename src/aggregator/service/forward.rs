@@ -668,7 +668,7 @@ impl AciService {
     ) -> Result<Vec<SealedSession>, ServiceError> {
         // §4.1: a direct service has no upstream hop and publishes no
         // attested sessions — this also covers the middleware commit paths
-        // and the background prewarm sink.
+        // and the background refresh sink.
         if self.serves_directly() {
             return Ok(Vec::new());
         }

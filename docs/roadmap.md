@@ -8,7 +8,7 @@ Last reviewed: 2026-09-28.
 
 - OpenAI chat, completions, embeddings, and Responses endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
-- Runtime upstream replacement: validated, redacted, atomically persisted, prewarmed, and refreshed in the background.
+- Runtime upstream replacement: validated, redacted, atomically persisted, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
 - Fail-closed request constraints and session allowlists.
 - Signed receipts, attestation reports, and immutable attested sessions.

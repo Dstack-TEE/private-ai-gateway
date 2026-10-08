@@ -187,7 +187,7 @@ impl UpstreamProvider {
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
-            // prewarm probe granularity. Per-model is the safe default — it
+            // refresh probe granularity. Per-model is the safe default — it
             // never collapses channels. ACI's real scope is service-dependent
             // (router or model), resolved when ACI becomes a first-party router.
             UpstreamProvider::OpenAiCompatible
@@ -290,7 +290,7 @@ pub struct UpstreamConfigSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct UpstreamPrewarmResult {
+pub struct UpstreamVerificationResult {
     pub upstream_name: String,
     pub model_id: String,
     pub url_origin: Option<String>,
@@ -535,7 +535,7 @@ impl UpstreamConfigManager {
     pub async fn run_verification_refresh(
         self: Arc<Self>,
         permits: Arc<Semaphore>,
-        log: fn(Vec<UpstreamPrewarmResult>),
+        log: fn(Vec<UpstreamVerificationResult>),
     ) {
         let mut generation = self.generation.subscribe();
         let mut tasks = JoinSet::new();
@@ -549,6 +549,9 @@ impl UpstreamConfigManager {
                 .clone();
             if let Some(verifier) = &state.verifier {
                 for cfg in &state.config {
+                    if !builders::has_verifier_route(cfg, &state.config, &self.options) {
+                        continue;
+                    }
                     let Some(period) = verification_refresh_seconds(cfg, &self.options) else {
                         continue;
                     };
@@ -727,84 +730,91 @@ impl ProviderSessionRegistry {
 
 async fn refresh_upstream(
     verifier: Arc<dyn UpstreamVerifier>,
-    mut targets: Vec<UpstreamVerificationTarget>,
+    targets: Vec<UpstreamVerificationTarget>,
     lead: Duration,
     period: Duration,
     permits: Arc<Semaphore>,
     sink: Option<Arc<dyn UpstreamSessionSink>>,
-    log: fn(Vec<UpstreamPrewarmResult>),
+    log: fn(Vec<UpstreamVerificationResult>),
 ) {
     let started = Instant::now();
     let mut not_before = HashMap::new();
     let mut succeeded = HashSet::new();
     let mut cold_since = HashMap::new();
     while !targets.is_empty() {
-        let now = Instant::now();
-        let mut selected = None;
-        let mut earliest_start = None;
-        for target in &targets {
-            let expiry = match verifier.cache_remaining(&target.request()) {
-                Some(remaining) => now + remaining,
-                None => *cold_since.entry(target.clone()).or_insert_with(|| {
-                    if succeeded.contains(target) {
-                        now
-                    } else {
-                        started
+        let (target, permit) = {
+            let mut select = || {
+                let now = Instant::now();
+                let mut selected = None;
+                let mut earliest_start = None;
+                for target in &targets {
+                    let expiry = match verifier.cache_remaining(&target.request()) {
+                        Some(remaining) => now + remaining,
+                        None => *cold_since.entry(target.clone()).or_insert_with(|| {
+                            if succeeded.contains(target) {
+                                now
+                            } else {
+                                started
+                            }
+                        }),
+                    };
+                    let due = expiry.checked_sub(lead).unwrap_or(expiry);
+                    let due = not_before
+                        .get(target)
+                        .copied()
+                        .map_or(due, |retry| due.max(retry));
+                    earliest_start =
+                        Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
+                    if due <= now
+                        && selected
+                            .as_ref()
+                            .is_none_or(|(_, deadline)| expiry < *deadline)
+                    {
+                        selected = Some((target, expiry));
                     }
-                }),
+                }
+                (selected.map(|(target, _)| target.clone()), earliest_start)
             };
-            let due = expiry.checked_sub(lead).unwrap_or(expiry);
-            let due = not_before
-                .get(target)
-                .copied()
-                .map_or(due, |retry| due.max(retry));
-            earliest_start =
-                Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
-            if due <= now
-                && selected
-                    .as_ref()
-                    .is_none_or(|(_, deadline)| expiry < *deadline)
-            {
-                selected = Some((target.clone(), expiry));
+            let (selected, earliest_start) = select();
+            if selected.is_none() {
+                if let Some(due) = earliest_start {
+                    tokio::time::sleep_until(due).await;
+                }
+                continue;
             }
-        }
-        let Some((target, _)) = selected else {
-            if let Some(due) = earliest_start {
-                tokio::time::sleep_until(due).await;
-            }
-            continue;
+            let Ok(permit) = permits.acquire().await else {
+                return;
+            };
+            // Requests can replace caches and sibling deadlines can change while queued.
+            let Some(target) = select().0 else {
+                continue;
+            };
+            (target, permit)
         };
-        let Ok(permit) = permits.acquire().await else {
-            return;
-        };
-        // A request may have refreshed this entry while we waited for a permit.
-        if verifier
-            .cache_remaining(&target.request())
-            .is_some_and(|remaining| remaining > lead)
-        {
-            continue;
-        }
         let request = target.request();
         if succeeded.contains(&target) && verifier.cache_remaining(&request).is_none() {
             tracing::warn!(upstream = %target.upstream_name, model = %target.model_id, "upstream verification cache was cold before refresh");
         }
+        let refresh_started = Instant::now();
         let event = verifier.refresh(request.clone()).await;
         drop(permit);
         let remaining = verifier.cache_remaining(&request);
         if event.result == VerificationResult::Verified {
             succeeded.insert(target.clone());
-            not_before.remove(&target);
+            not_before.insert(target.clone(), refresh_started + period);
             cold_since.remove(&target);
-            if remaining.is_none() {
-                targets.retain(|scheduled| *scheduled != target);
-            }
         } else {
-            not_before.insert(target.clone(), Instant::now() + remaining.unwrap_or(period));
+            not_before.insert(
+                target.clone(),
+                remaining.map_or(refresh_started + period, |remaining| {
+                    Instant::now() + remaining
+                }),
+            );
         }
         if let Some(sink) = &sink {
             sink.record_session(&event);
         }
-        log(vec![UpstreamPrewarmResult {
+        log(vec![UpstreamVerificationResult {
             upstream_name: target.upstream_name,
             model_id: target.model_id,
             url_origin: target.url_origin,

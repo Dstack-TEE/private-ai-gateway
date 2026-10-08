@@ -25,8 +25,8 @@ Only successful verification events are cached. Failed verification is returned 
 
 ## Cache and background refresh
 
-The manager runs one background task per enabled upstream. There is no separate
-prewarm: an uncached target is immediately eligible on startup. Configuration
+The manager runs one background task per upstream with a verifier route and
+enabled refresh. There is no separate prewarm: an uncached target is immediately eligible on startup. Configuration
 replacement builds fresh verifiers, wakes the supervisor, and cancels old tasks
 before starting new ones. Background results are logged and sealed into sessions;
 startup and admin responses do not wait for verification.
@@ -42,17 +42,24 @@ The period p is `verification_refresh_seconds` when positive, otherwise
 `max(cache_seconds - request_timeout_seconds, 1)` (240 seconds with defaults).
 Zero disables the upstream's task. The lead is `cache_seconds.saturating_sub(p)`.
 Both external and ACI-service caches count expiry from verification start;
-ACI-service also caps it at the workload keyset's `not_after`. The task starts
-refresh at `expiry - lead`, subject to any failure retry deadline, and recomputes
-that time after waking because request-time verification can replace an entry.
+ACI-service also caps it at the workload keyset's `not_after`. Report appraisal
+uses wall-clock time after the response, and keyset expiry is checked again
+after asynchronous verification completes. Concurrent cold ACI-service requests
+share one verification; forced background refresh takes the same lock. The task
+starts refresh at `expiry - lead`, subject to the minimum start interval and any
+failure retry deadline. It recomputes after waking and after acquiring a permit
+because request-time verification can replace an entry or a sibling can become
+more urgent.
 
 All background verifier-cache tasks share `upstream_verification_concurrency`
 permits (default 4). Request-time verification is independent of this limit.
-Successful refresh replaces the cache. A successful verifier with no timed cache
-is verified once and then removed from scheduling. Failure keeps any previous
-unexpired entry and retries when that entry expires, then once per p while no
-valid cache remains. When TTL is at or below the timeout, p remains at least one
-second; refreshing at expiry can leave cold windows.
+Successful refresh replaces the cache and prevents the target from starting
+again before its previous refresh start plus p, even if verification consumed
+the TTL or keyset expiry shortened it. Cacheless verifiers stay scheduled once
+per p. Failure keeps any previous unexpired entry and retries at its expiry;
+without a valid entry, the next attempt is due no earlier than the failed
+attempt's start plus p. When TTL is at or below the timeout, p remains at least
+one second; slow verification or a short keyset lifetime can leave cold windows.
 
 A cache stays warm only while replacement completes before the previous entry
 expires. Sequential targets, permit queues, failures, and invalidation can leave

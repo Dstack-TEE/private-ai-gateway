@@ -745,7 +745,7 @@ async fn compact_session_log(store: Arc<JsonlSessionStore>) -> Result<usize, Str
 }
 
 fn log_verification_results(
-    results: Vec<private_ai_gateway::aggregator::upstream_config::UpstreamPrewarmResult>,
+    results: Vec<private_ai_gateway::aggregator::upstream_config::UpstreamVerificationResult>,
 ) {
     for result in results {
         match result.reason {
