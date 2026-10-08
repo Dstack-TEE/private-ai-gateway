@@ -837,8 +837,9 @@ impl AciService {
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
 
-        // Each citation obligates retention for another receipt TTL.
-        let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
+        // Each citation obligates retention for another full retention
+        // window (§8: a session outlives the receipts that cite it).
+        let retention_until = now.saturating_add(self.config.session_retention_seconds);
         if let Some(existing) =
             self.session_store
                 .current_session(&fingerprint, retention_until, now)

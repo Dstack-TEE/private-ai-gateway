@@ -37,6 +37,12 @@ pub(super) fn normalize_downstream_domain(raw: &str) -> Option<String> {
 }
 
 /// Configuration accepted by [`super::AciService::new`].
+/// Default attested-session retention: 30 days (§8 "SHOULD remain available
+/// longer than the receipts citing it"). Field-CAS storage makes the long
+/// horizon cheap — measured ~78MB/day vs ~1.46GB/day unpacked at the
+/// production churn rate (docs/aci-session-storage-study.md §9).
+pub const DEFAULT_SESSION_RETENTION_SECONDS: u64 = 30 * 24 * 3600;
+
 pub struct AciServiceConfig {
     pub tee_type: String,
     /// Runtime source provenance. The binary populates this from
@@ -50,8 +56,14 @@ pub struct AciServiceConfig {
     pub subject: Option<String>,
     pub service_capabilities: ServiceCapabilities,
     /// How long receipts stay queryable in the in-memory store. Also the
-    /// attested-session validity period and per-citation retention extension.
+    /// attested-session validity period.
     pub receipt_ttl_seconds: u64,
+    /// How long an attested-session record (and the chunks it references)
+    /// stays served by id after its last citation (§8 retention: as long as
+    /// any receipt citing it could still be re-checked, plus the archived-
+    /// receipt horizon). Independent of `receipt_ttl_seconds`: receipts are
+    /// hot and short-lived, sessions are the long-tail audit trail.
+    pub session_retention_seconds: u64,
     pub allow_test_keys: bool,
     /// Overrides the TLS-SPKI digests reported by the key provider.
     /// Production deployments should derive this from the mounted
@@ -74,6 +86,7 @@ impl AciServiceConfig {
             subject: None,
             service_capabilities: ServiceCapabilities::default(),
             receipt_ttl_seconds: 3600,
+            session_retention_seconds: DEFAULT_SESSION_RETENTION_SECONDS,
             allow_test_keys: true,
             tls_public_keys: None,
         }
