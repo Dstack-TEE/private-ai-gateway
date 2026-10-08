@@ -24,7 +24,6 @@ use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
     COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
 };
-use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
 use super::backend::{
@@ -907,29 +906,23 @@ pub(super) async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let sessions = match q.model.as_deref() {
-        // Resolve the model to the upstream(s) serving it, then list each
-        // channel's sessions (honoring an upstream_name filter if both are given).
-        Some(model) => {
-            let names = state
-                .upstream_config
-                .as_ref()
-                .map(|c| c.upstream_names_for_model(model))
-                .unwrap_or_default();
-            let mut merged = names
-                .iter()
-                .filter(|n| q.upstream_name.as_deref().is_none_or(|p| p == n.as_str()))
-                .flat_map(|n| state.service.list_attested_sessions(Some(n)))
-                .collect::<Vec<_>>();
-            // Each per-upstream list is already sorted, but the fan-out just
-            // concatenates them — re-sort the merge so it matches the ordering of
-            // the single-channel path.
-            sort_sessions_newest_first(&mut merged);
-            merged
+    let requests = state
+        .upstream_config
+        .as_ref()
+        .map(|config| {
+            config.current_verification_requests(q.model.as_deref(), q.upstream_name.as_deref())
+        })
+        .unwrap_or_default();
+    let sessions = match state.service.list_current_sessions(&requests) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to list attested sessions");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to list attested sessions",
+            );
         }
-        None => state
-            .service
-            .list_attested_sessions(q.upstream_name.as_deref()),
     };
     // List entries add a `session_id` member for lookup and keep the digest as
     // the integrity anchor while dropping the raw evidence `data` (§8.1). Only

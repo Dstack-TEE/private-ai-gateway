@@ -478,18 +478,23 @@ impl AciServiceUpstreamVerifier {
 #[async_trait]
 impl UpstreamVerifier for AciServiceUpstreamVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let now_secs = now_secs();
-        if let Some(cached) = self
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        self.refresh(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cached = self
             .cache
             .read()
             .expect("ACI service verifier cache poisoned")
-            .clone()
-        {
-            if now_secs < cached.expires_at {
-                return cached.event_for(request, &self.verifier_id);
-            }
-        }
+            .clone()?;
+        (now_secs() < cached.expires_at)
+            .then(|| cached.event_for(request.clone(), &self.verifier_id))
+    }
 
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         match tokio::time::timeout(
             Duration::from_secs(self.request_timeout_seconds),
             self.verify_uncached(),

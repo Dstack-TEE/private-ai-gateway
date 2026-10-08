@@ -424,6 +424,11 @@ pub struct UpstreamVerificationRequest {
 pub trait UpstreamVerifier: Send + Sync {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
 
+    /// The verification `verify(request)` would serve from cache right now, without verifying; None when `verify` would verify afresh.
+    fn cached(&self, _request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        None
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.invalidate(&request);
         self.verify(request).await

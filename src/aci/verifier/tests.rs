@@ -828,7 +828,7 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
 }
 
 #[tokio::test]
-async fn aci_service_refresh_bypasses_the_cached_verification() {
+async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     // Nothing listens on port 1, so any fresh verification fails fast.
     let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
         "http://127.0.0.1:1",
@@ -861,14 +861,25 @@ async fn aci_service_refresh_bypasses_the_cached_verification() {
     };
 
     let cached = verifier.verify(request.clone()).await;
-    let refreshed = verifier.refresh(request).await;
+    let refreshed = verifier.refresh(request.clone()).await;
 
     assert_eq!(cached.result, VerificationResult::Verified);
+    assert_eq!(refreshed.result, VerificationResult::Failed);
+    let retained = verifier
+        .cached(&request)
+        .expect("failed refresh keeps the old cache");
+    assert_eq!(retained.channel_bindings, cached.channel_bindings);
     assert_eq!(
-        refreshed.result,
-        VerificationResult::Failed,
-        "refresh must re-verify instead of returning the cached event"
+        verifier.verify(request.clone()).await.channel_bindings,
+        cached.channel_bindings
     );
+    // Production cache expiry uses wall time; seed the same entry at its boundary.
+    let expired = verifier.with_cached(CachedAciServiceVerification {
+        expires_at: current_unix_secs(),
+        evidence: cached.evidence,
+        channel_bindings: cached.channel_bindings,
+    });
+    assert!(expired.cached(&request).is_none());
 }
 
 #[test]

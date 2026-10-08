@@ -138,12 +138,22 @@ gateway relays `tee=true` in place of any client-supplied `tee` parameter.
 | `GET /v1/aci/attestation?nonce=<value>` | Public | Bare ACI attestation report. `nonce` must be exactly 64 lowercase hex characters; any other value returns `400`. The nonce is bound into `report_data`; omitting it binds JSON `null`. |
 | `GET /v1/aci/receipts/{id}` | Original bearer token for owned receipts | Bare signed receipt. `{id}` accepts `receipt_id` or an upstream chat ID. |
 | `GET /v1/aci/sessions/{session_id}` | Public | Full immutable attested-session record, including evidence data when recorded. |
-| `GET /v1/aci/sessions?upstream_name=<name>&model=<id>` | Public | Newest-first session list. The broad list omits evidence data and keeps its digest. |
+| `GET /v1/aci/sessions?upstream_name=<name>&model=<id>` | Public | Newest-first list of sessions accepted by the pin gate from the current verifier cache. The broad list omits evidence data and keeps its digest. |
 
 Use a fresh, unpredictable attestation nonce for each trust decision. When
 [downstream TLS bindings](configuration-reference.md#downstream-tls-binding)
 are configured, fetch the report through the same public hostname used for
 inference; the report handlers select the binding by `Host`.
+
+The session list is derived from the same cached verification that the pin gate
+uses. It is empty while the cache is cold, when no successful verification is
+available, or when no upstream configuration exists. A failed refresh preserves
+an existing successful cache entry until it expires. Filters resolve both public
+model aliases and upstream model IDs; per-model providers list only that model's
+channel. `expires_at` is an upper bound, not a promise that a pin remains accepted:
+cache replacement can supersede a session sooner. Superseded sessions remain
+retrievable by id until retention ends. On `412 session_not_accepted`, re-list
+and retry once with a current session id.
 
 A session's evidence object has two fields. `data` is a
 `data:<content-type>;base64,<bytes>` URI holding the exact bytes the verifier

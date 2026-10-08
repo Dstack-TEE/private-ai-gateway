@@ -27,8 +27,9 @@ covers the session created from a verified binding.
 
 Two deadlines govern a stored session:
 
-- The document's `expires_at` bounds its use for new forwarding decisions and
-  for the list endpoint. The validity period reuses `receipt_ttl_seconds`.
+- The document's `expires_at` is an upper bound for new forwarding decisions
+  and listing, not a freshness guarantee. Replacement or expiry of the verifier
+  cache can stop acceptance sooner. The validity period reuses `receipt_ttl_seconds`.
 - The store's `retention_until` bounds how long the session is served by id.
   Each citing receipt pushes it forward without touching the sealed bytes, so
   a session outlives every receipt that cites it (spec §8).
@@ -43,13 +44,22 @@ request -> receipt (X-Receipt-Id)
 
 ## Preflight survey
 
-`GET /v1/aci/sessions?upstream_name=&model=` reads the same store. A user can
-inspect the verified identity, channel binding, and typed claims for a model,
-and check its pinned SPKI, before releasing any data. The forwarding path
-never trusts a stored session for freshness. It forwards only on a fresh
-verification result.
-The list shows only the current session per channel; superseded sessions remain
-retrievable by id until retention ends.
+`GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the same
+verifier `cached(request)` function used by the pin gate's verification fast
+path. The list equals the sessions the gate accepts right now for those targets;
+it never performs fresh verification. A user can inspect the verified identity,
+channel binding, and typed claims before releasing data. Per-model filters
+resolve only the selected model's channel; Chutes lists only instances in the
+current cached event.
+
+The list is empty while the cache is cold or no successful verification is
+available. A failed background refresh keeps the old successful entry until its
+cache deadline, so that still-valid entry remains listed. The session sink seals
+results promptly, but stored history does not define currency: even an older
+in-flight result sealed after a refresh cannot replace the cached listing.
+Superseded sessions remain retrievable by id until retention ends. A cache
+rotation between listing and forwarding can still produce `412
+session_not_accepted`; re-list and retry once.
 
 ## Storage: compacted JSONL
 

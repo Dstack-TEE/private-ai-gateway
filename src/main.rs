@@ -687,17 +687,7 @@ fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
     });
 
     let verification_config = upstream_config.clone();
-    tokio::spawn(async move {
-        loop {
-            let Some(seconds) = verification_config.verification_refresh_interval_seconds() else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            };
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
-            let results = verification_config.refresh_upstream_verification().await;
-            log_prewarm_results(results);
-        }
-    });
+    tokio::spawn(verification_config.run_verification_refresh(log_prewarm_results));
 
     let session_config = upstream_config;
     tokio::spawn(async move {

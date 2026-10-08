@@ -131,6 +131,10 @@ impl UpstreamVerifier for ChutesProviderVerifier {
         self.verifier.verify(request).await
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.refresh(request).await
     }
@@ -181,6 +185,10 @@ impl TinfoilProviderVerifier {
 impl UpstreamVerifier for TinfoilProviderVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -238,6 +246,10 @@ impl NearAiProviderVerifier {
 impl UpstreamVerifier for NearAiProviderVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -308,6 +320,10 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
         self.verifier.verify(request).await
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.refresh(request).await
     }
@@ -376,6 +392,10 @@ impl PhalaDirectProviderVerifier {
 impl UpstreamVerifier for PhalaDirectProviderVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -471,6 +491,10 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
             Ok(verifier) => verifier.verify(request).await,
             Err(reason) => Self::failed_event(request, reason),
         }
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier_for(request).ok()?.cached(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {

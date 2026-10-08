@@ -25,7 +25,7 @@
 //! session for this channel" without re-sealing per request; it is never
 //! served and carries no protocol meaning.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -34,10 +34,7 @@ use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 
-use crate::aci::digest;
-
-use super::session::{AttestedSession, SessionClaims, WorkloadIdentityRef};
-use crate::aci::receipt::ChannelBinding;
+use super::session::AttestedSession;
 
 /// Record type tag for a session line.
 const RECORD_TYPE_SESSION: &str = "session";
@@ -83,93 +80,32 @@ pub trait SessionStore: Send + Sync {
         retention_until: u64,
         now: u64,
     ) -> Option<AttestedSession>;
-
-    /// List sessions whose validity period covers `now` and which have not
-    /// been superseded by a newer session of the same channel, optionally
-    /// filtered by `upstream_name` (the operator's upstream config name).
-    /// Sessions are per-TEE-channel; a model→channel lookup belongs to the
-    /// caller.
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession>;
 }
 
 struct SessionEntry {
     session: AttestedSession,
     fingerprint: String,
-    slot: String,
-    /// Insertion order within this index. Replay inserts in file order and
-    /// compaction writes in rank order, so ranks survive restarts.
-    rank: u64,
     retention_until: u64,
 }
 
-#[derive(Serialize)]
-struct ChannelSlotMaterial<'a> {
-    upstream_name: &'a str,
-    endpoint: &'a Option<String>,
-    verifier_id: &'a str,
-    identity: &'a Option<WorkloadIdentityRef>,
-    channel_binding: &'a [ChannelBinding],
-    claims: &'a SessionClaims,
-}
-
-/// Stable key for the channel material shared by successive verifications.
-/// Validity timestamps and evidence are deliberately excluded so a fresh
-/// verification supersedes the prior session in listings. Material that cannot
-/// be canonicalized falls back to the session's own id: it is listed on its own
-/// and never supersedes another session.
-fn channel_slot(session: &AttestedSession) -> String {
-    let doc = session.document();
-    serde_json::to_value(ChannelSlotMaterial {
-        upstream_name: &doc.upstream_name,
-        endpoint: &doc.endpoint,
-        verifier_id: &doc.verifier_id,
-        identity: &doc.identity,
-        channel_binding: &doc.channel_binding,
-        claims: &doc.claims,
-    })
-    .ok()
-    .and_then(|value| digest::jcs_bytes(&value).ok())
-    .map(|bytes| digest::sha256_hex(&bytes))
-    .unwrap_or_else(|| session.session_id().to_string())
-}
-
-/// A slot member's position: the newest `established_at` lists, and among
-/// equal timestamps the later insertion does.
-type SlotOrder = (u64, u64, String);
-
 /// In-memory session index shared by both stores: id→entry plus a
-/// fingerprint→current-id map, the retained sessions of each channel slot in
-/// listing order, and a retention-deadline index so eviction costs only what
-/// actually lapsed.
+/// fingerprint→current-id map and a retention-deadline index so eviction
+/// costs only what actually lapsed.
 #[derive(Default)]
 struct SessionIndex {
     by_id: HashMap<String, SessionEntry>,
     by_fingerprint: HashMap<String, String>,
-    by_slot: HashMap<String, BTreeSet<SlotOrder>>,
     by_retention: BTreeMap<u64, HashSet<String>>,
-    next_rank: u64,
 }
 
 impl SessionIndex {
     fn insert(&mut self, fingerprint: String, session: AttestedSession, retention_until: u64) {
         let id = session.session_id().to_string();
-        let slot = channel_slot(&session);
-        let established_at = session.document().established_at;
-        // A re-inserted id keeps its place; only a new session takes the next.
-        let rank = match self.by_id.get(&id) {
-            Some(prev) => prev.rank,
-            None => {
-                self.next_rank += 1;
-                self.next_rank
-            }
-        };
         if let Some(prev) = self.by_id.insert(
             id.clone(),
             SessionEntry {
                 session,
                 fingerprint: fingerprint.clone(),
-                slot: slot.clone(),
-                rank,
                 retention_until,
             },
         ) {
@@ -181,21 +117,7 @@ impl SessionIndex {
             .entry(retention_until)
             .or_default()
             .insert(id.clone());
-        self.by_fingerprint.insert(fingerprint, id.clone());
-        // Listing order only moves forward: resolving an older session (a
-        // stale in-flight verification) never re-lists it.
-        self.by_slot
-            .entry(slot)
-            .or_default()
-            .insert((established_at, rank, id));
-    }
-
-    /// A slot lists its newest retained session; older ones are superseded.
-    fn is_listed(&self, entry: &SessionEntry) -> bool {
-        self.by_slot
-            .get(&entry.slot)
-            .and_then(BTreeSet::last)
-            .is_some_and(|(_, _, id)| id == entry.session.session_id())
+        self.by_fingerprint.insert(fingerprint, id);
     }
 
     fn drop_retention_hint(&mut self, id: &str, retention_until: u64) {
@@ -221,14 +143,6 @@ impl SessionIndex {
                 if let Some(entry) = self.by_id.remove(&id) {
                     if self.by_fingerprint.get(&entry.fingerprint) == Some(&id) {
                         self.by_fingerprint.remove(&entry.fingerprint);
-                    }
-                    // The next-newest retained session takes over, as replay of
-                    // the surviving records would choose.
-                    if let Some(members) = self.by_slot.get_mut(&entry.slot) {
-                        members.remove(&(entry.session.document().established_at, entry.rank, id));
-                        if members.is_empty() {
-                            self.by_slot.remove(&entry.slot);
-                        }
                     }
                 }
             }
@@ -264,22 +178,6 @@ impl SessionIndex {
             return Some(session);
         }
         Some(entry.session.clone())
-    }
-
-    fn list(&mut self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        // Evict first, like `get`/`current`, so the listing reflects the same
-        // retained set a replay at `now` would rebuild.
-        self.evict_lapsed(now);
-        let mut out: Vec<AttestedSession> = self
-            .by_id
-            .values()
-            .filter(|e| now < e.session.document().expires_at)
-            .filter(|e| self.is_listed(e))
-            .filter(|e| upstream_name.is_none_or(|p| e.session.document().upstream_name == p))
-            .map(|e| e.session.clone())
-            .collect();
-        sort_sessions_newest_first(&mut out);
-        out
     }
 }
 
@@ -455,11 +353,9 @@ impl JsonlSessionStore {
         let live: Vec<(String, AttestedSession, u64)> = {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
             index.evict_lapsed(now);
-            // Written in insertion order, so replay assigns the same ranks and
-            // same-second sessions keep the same listing order.
-            let mut live: Vec<&SessionEntry> = index.by_id.values().collect();
-            live.sort_by_key(|e| e.rank);
-            live.into_iter()
+            index
+                .by_id
+                .values()
                 .map(|e| (e.fingerprint.clone(), e.session.clone(), e.retention_until))
                 .collect()
         };
@@ -557,13 +453,6 @@ impl SessionStore for JsonlSessionStore {
             .unwrap_or_else(|p| p.into_inner())
             .current(fingerprint, retention_until, now)
     }
-
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .list(upstream_name, now)
-    }
 }
 
 /// Non-persistent [`SessionStore`] — the default when no session-log path is
@@ -608,19 +497,11 @@ impl SessionStore for InMemorySessionStore {
             .unwrap_or_else(|p| p.into_inner())
             .current(fingerprint, retention_until, now)
     }
-
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .list(upstream_name, now)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aci::receipt::ChannelBinding;
     use crate::aggregator::session::{EvidenceRef, SessionClaims, SessionDocument};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -685,198 +566,6 @@ mod tests {
             evidence: EvidenceRef::default(),
         })
         .unwrap()
-    }
-
-    fn session_with_material(
-        endpoint: &str,
-        established_at: u64,
-        expires_at: u64,
-        spki: &str,
-        evidence_digest: &str,
-    ) -> AttestedSession {
-        AttestedSession::seal(SessionDocument {
-            api_version: "aci/1".to_string(),
-            upstream_name: "phala-direct".to_string(),
-            endpoint: Some(endpoint.to_string()),
-            verifier_id: "phala-direct/1".to_string(),
-            established_at,
-            expires_at,
-            identity: None,
-            channel_binding: vec![ChannelBinding::TlsSpkiSha256 {
-                origin: endpoint.to_string(),
-                spki_sha256: spki.repeat(32),
-            }],
-            claims: SessionClaims::default(),
-            evidence: EvidenceRef {
-                digest: Some(evidence_digest.to_string()),
-                data_uri: None,
-            },
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn listing_keeps_only_the_newest_session_for_a_channel_slot() {
-        let store = InMemorySessionStore::default();
-        let older = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let newer = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
-        let older_id = older.session_id().to_string();
-        store.put_session("fp-a", older, 9_000, 1_000).unwrap();
-        store
-            .put_session("fp-b", newer.clone(), 9_000, 2_000)
-            .unwrap();
-
-        assert_eq!(
-            store
-                .list_sessions(None, 2_500)
-                .into_iter()
-                .map(|s| s.session_id().to_string())
-                .collect::<Vec<_>>(),
-            vec![newer.session_id().to_string()]
-        );
-        assert!(store.get_session(&older_id, 2_500).is_some());
-    }
-
-    fn listed_ids(store: &dyn SessionStore, now: u64) -> Vec<String> {
-        store
-            .list_sessions(None, now)
-            .into_iter()
-            .map(|s| s.session_id().to_string())
-            .collect()
-    }
-
-    #[test]
-    fn a_stale_resolution_does_not_roll_the_listing_back() {
-        let store = InMemorySessionStore::default();
-        let old = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let new = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
-        let new_id = new.session_id().to_string();
-        store.put_session("fp-old", old, 9_000, 1_000).unwrap();
-        store.put_session("fp-new", new, 9_000, 2_000).unwrap();
-
-        // An in-flight request still holding the old verification resolves the
-        // old session; the channel keeps listing the newer one.
-        assert!(store.current_session("fp-old", 9_500, 2_100).is_some());
-        assert_eq!(listed_ids(&store, 2_200), vec![new_id]);
-    }
-
-    #[test]
-    fn listing_survives_restart_and_compaction_without_request_writes() {
-        let path = temp_path();
-        let old = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let new = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
-        let new_id = new.session_id().to_string();
-        {
-            let store = open_store(&path);
-            store.put_session("fp-old", old, 9_000, 1_000).unwrap();
-            store.put_session("fp-new", new, 9_000, 2_000).unwrap();
-            assert!(store.current_session("fp-old", 9_500, 2_100).is_some());
-            assert_eq!(count_lines(&path), 2, "resolving a session never appends");
-        }
-        // Restart without compaction (e.g. a crash before the hourly rewrite).
-        {
-            let store = open_store(&path);
-            assert_eq!(listed_ids(&store, 2_200), vec![new_id.clone()]);
-            store.compact(2_200).unwrap();
-        }
-        let reopened = open_store(&path);
-        assert_eq!(listed_ids(&reopened, 2_200), vec![new_id]);
-        drop(reopened);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn evicting_the_listed_session_lists_the_next_retained_one_as_replay_does() {
-        let path = temp_path();
-        let old = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let new = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
-        let old_id = old.session_id().to_string();
-        {
-            let store = open_store(&path);
-            // The listed session's retention lapses first.
-            store.put_session("fp-old", old, 8_000, 1_000).unwrap();
-            store.put_session("fp-new", new, 3_000, 2_000).unwrap();
-            assert_eq!(listed_ids(&store, 3_500), vec![old_id.clone()]);
-        }
-        let reopened = open_store_at(&path, 3_500);
-        assert_eq!(listed_ids(&reopened, 3_500), vec![old_id]);
-        drop(reopened);
-        cleanup(&path);
-    }
-
-    #[test]
-    fn same_second_sessions_list_the_last_inserted_across_compactions() {
-        let path = temp_path();
-        // Several sessions sealed in one second: only insertion order separates
-        // them, so a rewrite that loses it would list an arbitrary one.
-        let sessions: Vec<AttestedSession> = (0..5)
-            .map(|n| session_with_material("https://x", 1_000, 9_000, "aa", &format!("ev-{n}")))
-            .collect();
-        let last_id = sessions[4].session_id().to_string();
-        {
-            let store = open_store(&path);
-            for (n, session) in sessions.into_iter().enumerate() {
-                store
-                    .put_session(&format!("fp-{n}"), session, 9_000, 1_000)
-                    .unwrap();
-            }
-            assert_eq!(listed_ids(&store, 1_500), vec![last_id.clone()]);
-        }
-        for _ in 0..3 {
-            let store = open_store(&path);
-            assert_eq!(listed_ids(&store, 1_500), vec![last_id.clone()]);
-            store.compact(1_500).unwrap();
-        }
-        cleanup(&path);
-    }
-
-    #[test]
-    fn listing_keeps_sessions_for_distinct_channel_bindings() {
-        let store = InMemorySessionStore::default();
-        let first = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let second = session_with_material("https://x", 1_001, 9_000, "bb", "evidence-a");
-        store
-            .put_session("fp-a", first.clone(), 9_000, 1_000)
-            .unwrap();
-        store
-            .put_session("fp-b", second.clone(), 9_000, 1_001)
-            .unwrap();
-
-        let listed: HashSet<String> = store
-            .list_sessions(None, 2_500)
-            .into_iter()
-            .map(|s| s.session_id().to_string())
-            .collect();
-        assert_eq!(
-            listed,
-            HashSet::from([
-                first.session_id().to_string(),
-                second.session_id().to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn jsonl_replay_preserves_supersession_and_old_lookup() {
-        let path = temp_path();
-        let older = session_with_material("https://x", 1_000, 9_000, "aa", "evidence-a");
-        let newer = session_with_material("https://x", 2_000, 9_000, "aa", "evidence-b");
-        let older_id = older.session_id().to_string();
-        let newer_id = newer.session_id().to_string();
-        {
-            let store = open_store(&path);
-            store.put_session("fp-a", older, 9_000, 1_000).unwrap();
-            store.put_session("fp-b", newer, 9_000, 2_000).unwrap();
-            assert_eq!(store.compact(2_500).unwrap(), 2);
-        }
-
-        let reopened = open_store(&path);
-        let listed = reopened.list_sessions(None, 2_500);
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].session_id(), newer_id);
-        assert!(reopened.get_session(&older_id, 2_500).is_some());
-        drop(reopened);
-        cleanup(&path);
     }
 
     /// Replay must be proportional to the live set, not to everything appended
@@ -955,16 +644,16 @@ mod tests {
     }
 
     #[test]
-    fn expired_validity_drops_out_of_listings_but_not_lookup() {
+    fn expired_validity_drops_out_of_current_but_not_lookup() {
         let store = InMemorySessionStore::default();
         let s = session("https://x", 1_000, 2_000);
         let id = s.session_id().to_string();
         store.put_session("fp-x", s, 9_000, 1_000).unwrap();
 
-        assert_eq!(store.list_sessions(None, 1_500).len(), 1);
-        // Validity lapsed: gone from the preflight listing, still resolvable
+        assert!(store.current_session("fp-x", 9_000, 1_500).is_some());
+        // Validity lapsed: no longer current, still resolvable
         // by id for receipts that cite it.
-        assert!(store.list_sessions(None, 2_000).is_empty());
+        assert!(store.current_session("fp-x", 9_000, 2_000).is_none());
         assert!(store.get_session(&id, 2_000).is_some());
     }
 
@@ -1083,7 +772,7 @@ mod tests {
 
         let store = open_store(&path);
         assert_eq!(store.get_session(good.session_id(), 2_000), Some(good));
-        assert_eq!(store.list_sessions(None, 2_000).len(), 1);
+        assert_eq!(store.index.lock().unwrap().by_id.len(), 1);
 
         drop(store);
         cleanup(&path);

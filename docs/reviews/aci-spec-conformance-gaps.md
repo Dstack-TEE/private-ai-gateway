@@ -97,15 +97,16 @@ item.
    same captured request once unless the deployment provides affinity or a
    shared replay store.
 
-8. **Fixed: session listings no longer advertise superseded sessions.** A
-   channel slot is derived from the stable channel material (excluding
-   validity timestamps and evidence), and the in-memory session index lists
-   only the newest session in each slot while retaining older sessions for
-   lookup by id until retention ends. The residual is that when the binding or
-   claims themselves change (for example, certificate rotation or a TCB
-   change), the old session remains listed until its `expires_at`. The session
-   store and verifier cache are per-process, so multi-replica deployments need
-   session affinity for pins.
+8. **Fixed: session listings match the pin gate's current verifier cache.**
+   Both listing and the verification fast path use `cached(request)`; listing
+   seals only those successful events, so superseded bindings, claims,
+   nonce-bound evidence, and removed Chutes instances disappear immediately.
+   Cold caches list nothing; older sessions remain retrievable by id until
+   retention ends. Warm-cache availability requires the refresh cadence to fit
+   within the cache lifetime: ticks run isolated upstream groups concurrently,
+   and each group's pass must fit within `cache_seconds - request_timeout_seconds`
+   at the default interval. The session store and verifier cache are
+   per-process, so multi-replica deployments need session affinity for pins.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry

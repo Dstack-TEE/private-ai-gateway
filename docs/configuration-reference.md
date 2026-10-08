@@ -258,12 +258,19 @@ request time.
 | `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
 | `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
 | `verifier_request_timeout_seconds` | positive integer | `60` | Provider verification timeout. Zero is rejected. |
-| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - 60, 1)` | Background verification refresh cadence. Zero disables proactive refresh for this entry. |
+| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` | Background verification refresh cadence (240 seconds with defaults). Zero disables proactive refresh for this entry. |
 | `session_refresh_seconds` | integer | `45` for Chutes; disabled otherwise | Chutes nonce-session refresh cadence. Zero disables it. |
 | `chutes_e2ee_api_base` | string | `https://api.chutes.ai` | Chutes discovery, evidence, and E2EE API base. Chutes only. |
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
+
+Verification refresh uses the effective cache lifetime and request timeout, including
+per-upstream overrides. Ticks start independent upstream passes, with sequential
+targets within each pass. An explicit `verification_refresh_seconds` above
+`verifier_cache_seconds - verifier_request_timeout_seconds` can leave cold windows;
+the same applies when a group's pass exceeds that margin. Zero disables proactive
+verification refresh.
 
 An `aci-service` entry must provide at least one accepted subject or image
 digest and at least one accepted KMS root public key. The verifier rejects an

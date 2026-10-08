@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
@@ -287,4 +289,41 @@ impl Quoter for StubQuoter {
     async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
         Ok(self.quote_for(report_data.to_vec()))
     }
+}
+
+/// Load a task-local upstream configuration for session HTTP tests, then remove
+/// its file: these tests only read the manager's in-memory snapshot.
+pub fn session_config(
+    config: serde_json::Value,
+) -> Arc<private_ai_gateway::aggregator::upstream_config::UpstreamConfigManager> {
+    use private_ai_gateway::aggregator::upstream_config::{
+        UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let directory = std::env::temp_dir().join(format!(
+        "pag-session-config-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("upstreams.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let manager = UpstreamConfigManager::load(
+        &path,
+        UpstreamRuntimeOptions {
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_subjects: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+        },
+    );
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    Arc::new(manager.unwrap())
 }

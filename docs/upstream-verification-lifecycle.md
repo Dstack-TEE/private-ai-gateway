@@ -27,7 +27,7 @@ Only successful verification events are cached. Failed verification is returned 
 
 After startup, the manager prewarms verification for configured targets. Replacing upstream configuration through the admin API constructs and validates a new runtime snapshot, publishes it, and starts another prewarm.
 
-For a router-scoped upstream, prewarm chooses one deterministic representative model. For per-model providers, it verifies each distinct upstream model.
+For a router-scoped upstream, prewarm chooses one deterministic representative model. For per-model providers, it verifies each distinct upstream model. Prewarm runs upstream groups concurrently and targets within each group sequentially.
 
 A successful prewarm also records the corresponding attested session. This makes the audit surface useful before the first user request. Request-time verification records the same content-addressed session idempotently.
 
@@ -43,7 +43,11 @@ results, and `verification_refresh_seconds` sets the proactive refresh cadence.
 [Upstream fields](configuration-reference.md#upstream-fields) lists their
 defaults and zero values.
 
-The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
+The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Ticks are anchored to that interval, with the first tick one interval after the refresh loop starts. The interval is rebuilt when configuration changes its value; disabled refresh keeps the five-second configuration poll. A delayed tick uses Tokio's `MissedTickBehavior::Delay`.
+
+Each tick starts one pass per upstream with no pass already in flight. Upstream groups run concurrently and independently; targets within a group run sequentially. A slow upstream skips ticks until its pass finishes and cannot delay another upstream. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
+
+The default interval is `max(cache_seconds - request_timeout_seconds, 1)`, using the effective per-upstream settings (240 seconds with the defaults). After prewarm, successful refreshes keep caches warm when each upstream's pass takes at most `cache_seconds - request_timeout_seconds` and the tick interval stays within that margin. Longer passes can leave cold windows; the gateway warns when a group's pass exceeds its margin. An explicit interval above the margin also leaves room for cache expiry before refresh completes.
 
 The ACI-service verifier also limits its cached result to the workload keyset's
 `not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and

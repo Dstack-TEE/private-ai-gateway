@@ -348,3 +348,300 @@ async fn prewarm_verification_deduplicates_upstream_models() {
         Some("https://provider-a.example")
     );
 }
+
+#[derive(Default)]
+struct RefreshObservations {
+    completions: HashMap<(String, String), Vec<Instant>>,
+    active: HashMap<String, usize>,
+    peak: HashMap<String, usize>,
+}
+
+struct SleepingVerifier {
+    latencies: HashMap<String, u64>,
+    sleep_on_verify: bool,
+    observations: Mutex<RefreshObservations>,
+}
+
+#[async_trait]
+impl UpstreamVerifier for SleepingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if self.sleep_on_verify {
+            return self.refresh(request).await;
+        }
+        self.observations
+            .lock()
+            .unwrap()
+            .completions
+            .entry((request.upstream_name.clone(), request.model_id.clone()))
+            .or_default()
+            .push(Instant::now());
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name,
+            model_id: request.model_id,
+            url_origin: request.url_origin,
+            verifier_id: "sleeping-verifier/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: request.required,
+            ..Default::default()
+        }
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        {
+            let mut observations = self.observations.lock().unwrap();
+            let active = observations
+                .active
+                .entry(request.upstream_name.clone())
+                .or_default();
+            *active += 1;
+            let active = *active;
+            let peak = observations
+                .peak
+                .entry(request.upstream_name.clone())
+                .or_default();
+            *peak = (*peak).max(active);
+        }
+        tokio::time::sleep(Duration::from_secs(self.latencies[&request.upstream_name])).await;
+        {
+            let mut observations = self.observations.lock().unwrap();
+            *observations.active.get_mut(&request.upstream_name).unwrap() -= 1;
+            observations
+                .completions
+                .entry((request.upstream_name.clone(), request.model_id.clone()))
+                .or_default()
+                .push(Instant::now());
+        }
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name,
+            model_id: request.model_id,
+            url_origin: request.url_origin,
+            verifier_id: "sleeping-verifier/v1".to_string(),
+            result: VerificationResult::Verified,
+            required: request.required,
+            ..Default::default()
+        }
+    }
+}
+
+fn refresh_test_manager(
+    config: Vec<UpstreamConfig>,
+    verifier: Arc<dyn UpstreamVerifier>,
+) -> Arc<UpstreamConfigManager> {
+    Arc::new(UpstreamConfigManager {
+        path: PathBuf::from("/unused/upstreams.json"),
+        options: UpstreamRuntimeOptions {
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_subjects: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+        },
+        state: Arc::new(RwLock::new(Arc::new(ConfiguredUpstreams {
+            config,
+            config_digest: "fixture".to_string(),
+            backend: Arc::new(EmptyUpstreamBackend),
+            verifier: Some(verifier),
+            sessions: Arc::new(ProviderSessionRegistry::default()),
+        }))),
+        update_lock: Arc::new(Mutex::new(())),
+        session_sink: Arc::new(RwLock::new(None)),
+    })
+}
+
+async fn drive_refresh_test(
+    manager: Arc<UpstreamConfigManager>,
+    verifier: &SleepingVerifier,
+    duration: u64,
+) {
+    let started = Instant::now();
+    manager.prewarm_upstream_verification().await;
+    let refresh = tokio::spawn(manager.run_verification_refresh(|_| {}));
+    tokio::task::yield_now().await;
+    while started.elapsed() < Duration::from_secs(duration) {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+    refresh.abort();
+    assert!(refresh.await.unwrap_err().is_cancelled());
+    // Drain only the passes already started, leaving no detached test tasks.
+    while verifier
+        .observations
+        .lock()
+        .unwrap()
+        .active
+        .values()
+        .any(|count| *count > 0)
+    {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn tick_refresh_keeps_six_slow_upstreams_warm_without_extra_load() {
+    let config: Vec<_> = (0..6)
+        .map(|i| {
+            test_upstream_config(
+                &format!("provider-{i}"),
+                UpstreamProvider::PhalaDirect,
+                "public",
+                "model",
+            )
+        })
+        .collect();
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: config.iter().map(|cfg| (cfg.name.clone(), 50)).collect(),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(config, verifier.clone());
+    drive_refresh_test(manager, &verifier, 1800).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(observations.completions.len(), 6);
+    for times in observations.completions.values() {
+        assert!(times.len() >= 7);
+        assert!(times
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] < Duration::from_secs(300)));
+        assert!(
+            times.len() <= 1800 / 240 + 1,
+            "no refresh load beyond tick cadence"
+        );
+    }
+    assert!(observations.peak.values().all(|peak| *peak == 1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_upstream_pass_is_isolated_and_never_overlaps_itself() {
+    let mut slow =
+        test_upstream_config("slow", UpstreamProvider::PhalaDirect, "public-a", "model-a");
+    // Two sequential targets make the group's pass outlast a tick.
+    slow.models
+        .insert("public-b".to_string(), "model-b".to_string());
+    let healthy = test_upstream_config("healthy", UpstreamProvider::PhalaDirect, "public", "model");
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: HashMap::from([("slow".to_string(), 200), ("healthy".to_string(), 1)]),
+        sleep_on_verify: false,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(vec![slow, healthy], verifier.clone());
+    drive_refresh_test(manager, &verifier, 1800).await;
+    let observations = verifier.observations.lock().unwrap();
+    let healthy_times = &observations.completions[&("healthy".to_string(), "model".to_string())];
+    assert!(healthy_times
+        .windows(2)
+        .all(|pair| pair[1] - pair[0] < Duration::from_secs(300)));
+    assert!(healthy_times.len() >= 5);
+    assert_eq!(observations.peak["slow"], 1);
+    for times in observations.completions.values() {
+        assert!(times.len() <= 1800 / 240 + 1);
+    }
+}
+
+#[test]
+fn default_verification_interval_uses_effective_request_timeout() {
+    let mut config =
+        test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+    let manager = refresh_test_manager(
+        vec![config.clone()],
+        Arc::new(CountingVerifier {
+            verifications: Arc::new(AtomicUsize::new(0)),
+            invalidations: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    assert_eq!(manager.verification_refresh_interval_seconds(), Some(240));
+    config.verifier_request_timeout_seconds = Some(90);
+    assert_eq!(
+        verification_refresh_seconds(&config, &manager.options),
+        Some(210)
+    );
+    config.verifier_cache_seconds = Some(80);
+    assert_eq!(
+        verification_refresh_seconds(&config, &manager.options),
+        Some(1)
+    );
+    config.verification_refresh_seconds = Some(0);
+    assert_eq!(
+        verification_refresh_seconds(&config, &manager.options),
+        None
+    );
+}
+
+#[test]
+fn current_requests_filter_per_model_and_router_channels() {
+    let mut per_model = test_upstream_config(
+        "per-model",
+        UpstreamProvider::PhalaDirect,
+        "public-a",
+        "up-a",
+    );
+    per_model
+        .models
+        .insert("public-b".to_string(), "up-b".to_string());
+    let mut router = test_upstream_config("router", UpstreamProvider::NearAi, "public-a", "up-a");
+    router
+        .models
+        .insert("public-b".to_string(), "up-b".to_string());
+    let manager = refresh_test_manager(
+        vec![per_model, router],
+        Arc::new(CountingVerifier {
+            verifications: Arc::new(AtomicUsize::new(0)),
+            invalidations: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    assert_eq!(manager.current_verification_requests(None, None).len(), 3);
+    for model in ["public-b", "up-b"] {
+        let requests = manager.current_verification_requests(Some(model), None);
+        assert_eq!(requests.len(), 2);
+        let per_model = requests
+            .iter()
+            .find(|request| request.upstream_name == "per-model")
+            .unwrap();
+        assert_eq!(per_model.model_id, "up-b");
+        assert_eq!(per_model.forwarded_body_hash, digest::sha256_hex(b""));
+        assert!(per_model.required);
+        assert_eq!(
+            manager
+                .current_verification_requests(Some(model), Some("per-model"))
+                .len(),
+            1
+        );
+    }
+    assert!(manager
+        .current_verification_requests(Some("unknown"), None)
+        .is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn prewarm_groups_run_concurrently_with_sequential_targets() {
+    let mut first = test_upstream_config(
+        "first",
+        UpstreamProvider::PhalaDirect,
+        "public-a",
+        "model-a",
+    );
+    first
+        .models
+        .insert("public-b".to_string(), "model-b".to_string());
+    let second = test_upstream_config("second", UpstreamProvider::PhalaDirect, "public", "model");
+    let verifier = Arc::new(SleepingVerifier {
+        latencies: HashMap::from([("first".to_string(), 50), ("second".to_string(), 50)]),
+        sleep_on_verify: true,
+        observations: Mutex::new(RefreshObservations::default()),
+    });
+    let manager = refresh_test_manager(vec![first, second], verifier.clone());
+    let started = Instant::now();
+    assert_eq!(manager.prewarm_upstream_verification().await.len(), 3);
+    assert_eq!(started.elapsed(), Duration::from_secs(100));
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(observations.peak["first"], 1);
+    assert_eq!(observations.peak["second"], 1);
+    assert_eq!(
+        observations.completions[&("second".to_string(), "model".to_string())][0] - started,
+        Duration::from_secs(50)
+    );
+}

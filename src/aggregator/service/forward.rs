@@ -49,7 +49,7 @@ pub(super) struct SealedSession {
     /// The per-instance key (Chutes instance id) for a multi-instance backend;
     /// `None` for a single-channel backend.
     instance_key: Option<String>,
-    session_id: String,
+    pub(super) session_id: String,
 }
 
 /// Pick which sealed session the receipt cites. For a backend that fronts

@@ -169,6 +169,15 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
         }
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .as_ref()?
+            .cached(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verifier = self
             .state

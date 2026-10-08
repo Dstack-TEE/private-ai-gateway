@@ -149,14 +149,21 @@ impl ExternalProviderVerifier {
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
         let cache_key = self.cache_key(&request);
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached(&request) {
             return event;
         }
         let _verify_guard = self.verify_lock.lock().await;
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached(&request) {
             return event;
         }
         self.verify_uncached(request, cache_key).await
+    }
+
+    pub(super) fn cached(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<UpstreamVerifiedEvent> {
+        self.cached_event(&self.cache_key(request), request)
     }
 
     pub(super) async fn refresh(

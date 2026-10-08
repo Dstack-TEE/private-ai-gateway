@@ -20,6 +20,18 @@ pub(super) struct UpstreamVerificationTarget {
     pub(super) url_origin: Option<String>,
 }
 
+impl UpstreamVerificationTarget {
+    pub(super) fn request(&self) -> crate::aggregator::service::UpstreamVerificationRequest {
+        crate::aggregator::service::UpstreamVerificationRequest {
+            upstream_name: self.upstream_name.clone(),
+            url_origin: self.url_origin.clone(),
+            model_id: self.model_id.clone(),
+            forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+            required: true,
+        }
+    }
+}
+
 pub(super) fn verification_targets(config: &[UpstreamConfig]) -> Vec<UpstreamVerificationTarget> {
     verification_targets_for_configs(config.iter())
 }
@@ -74,13 +86,21 @@ pub(super) fn verification_refresh_seconds(
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
-        None => {
-            let cache_seconds = cfg
-                .verifier_cache_seconds
-                .unwrap_or(options.verifier_cache_seconds);
-            Some(cache_seconds.saturating_sub(60).max(1))
-        }
+        None => Some(verification_refresh_margin_seconds(cfg, options)),
     }
+}
+
+pub(super) fn verification_refresh_margin_seconds(
+    cfg: &UpstreamConfig,
+    options: &UpstreamRuntimeOptions,
+) -> u64 {
+    let cache_seconds = cfg
+        .verifier_cache_seconds
+        .unwrap_or(options.verifier_cache_seconds);
+    let timeout = cfg
+        .verifier_request_timeout_seconds
+        .unwrap_or(options.verifier_request_timeout_seconds);
+    cache_seconds.saturating_sub(timeout).max(1)
 }
 
 pub(super) fn session_refresh_seconds(cfg: &UpstreamConfig) -> Option<u64> {
