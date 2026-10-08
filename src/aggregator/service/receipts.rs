@@ -62,27 +62,23 @@ impl AciService {
         &self,
         requests: &[UpstreamVerificationRequest],
     ) -> Result<Vec<AttestedSession>, ServiceError> {
-        if self.serves_directly() {
-            return Ok(Vec::new());
-        }
         let Some(verifier) = self.upstream_verifier.as_ref() else {
             return Ok(Vec::new());
         };
         let now = self.clock.now_secs();
         let mut ids = HashSet::new();
         let mut sessions = Vec::new();
-        for request in requests {
-            if let Some(event) = verifier.cached(request) {
-                for sealed in self.record_attested_upstream_session(&event)? {
-                    if ids.insert(sealed.session_id.clone()) {
-                        if let Some(session) =
-                            self.session_store.get_session(&sealed.session_id, now)
-                        {
-                            if now < session.document().expires_at {
-                                sessions.push(session);
-                            }
-                        }
-                    }
+        for event in requests.iter().filter_map(|r| verifier.cached(r)) {
+            for sealed in self.record_attested_upstream_session(&event)? {
+                if !ids.insert(sealed.session_id.clone()) {
+                    continue;
+                }
+                if let Some(session) = self
+                    .session_store
+                    .get_session(&sealed.session_id, now)
+                    .filter(|s| now < s.document().expires_at)
+                {
+                    sessions.push(session);
                 }
             }
         }

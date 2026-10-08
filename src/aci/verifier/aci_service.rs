@@ -569,14 +569,13 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
     }
 
     fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
-        let cached = self
+        let cache = self
             .cache
             .read()
-            .expect("ACI service verifier cache poisoned")
-            .clone()?;
-        cached
-            .remaining()
-            .map(|_| cached.event_for(request.clone(), &self.verifier_id))
+            .expect("ACI service verifier cache poisoned");
+        let cached = cache.as_ref()?;
+        cached.remaining()?;
+        Some(cached.event_for(request.clone(), &self.verifier_id))
     }
 
     fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {

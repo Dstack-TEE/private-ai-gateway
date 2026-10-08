@@ -138,31 +138,18 @@ gateway relays `tee=true` in place of any client-supplied `tee` parameter.
 | `GET /v1/aci/attestation?nonce=<value>` | Public | Bare ACI attestation report. `nonce` must be exactly 64 lowercase hex characters; any other value returns `400`. The nonce is bound into `report_data`; omitting it binds JSON `null`. |
 | `GET /v1/aci/receipts/{id}` | Original bearer token for owned receipts | Bare signed receipt. `{id}` accepts `receipt_id` or an upstream chat ID. |
 | `GET /v1/aci/sessions/{session_id}` | Public | Full immutable attested-session record, including evidence data when recorded. |
-| `GET /v1/aci/sessions?upstream_name=<name>&model=<id>` | Public | Newest-first list of sessions accepted by the pin gate from the current verifier cache. The broad list omits evidence data and keeps its digest. |
+| `GET /v1/aci/sessions?upstream_name=<name>&model=<id>` | Public | Newest-first list of sessions accepted by the pin gate right now. The broad list omits evidence data and keeps its digest. |
 
 Use a fresh, unpredictable attestation nonce for each trust decision. When
 [downstream TLS bindings](configuration-reference.md#downstream-tls-binding)
 are configured, fetch the report through the same public hostname used for
 inference; the report handlers select the binding by `Host`.
 
-For the queried channels, the list is exactly the sessions the gate accepts now
-without re-verifying: listing uses the same `cached(request)` function as the
-verification fast path. An empty list means no verified state is available now
-for those channels (including no upstream configuration). Absence does not imply
-refusal: a verifier with stable evidence can re-derive the same session id after
-fresh verification. Failed refresh preserves an unexpired successful entry.
-
-Pins are checked against the routed channel. Use `?model=<public-alias>` to
-survey the model you will request. The alias mapping is the same as request
-routing: without middleware the list includes only the default first route for
-that model; with middleware it includes all configured routes serving the model,
-and candidates whose sessions do not match the pin are skipped. The unfiltered
-list can include channels that a particular request will not route to.
-
-`expires_at` is an upper bound, not a promise that a pin remains accepted: cache
-replacement can supersede a session sooner. Superseded sessions remain
-retrievable by id until retention ends. On `412 session_not_accepted`, re-list
-and retry once with a current session id.
+The list is exactly the sessions the pin gate accepts now for the queried
+channels; it never verifies afresh, so an empty list means no current verified
+state. Query `?model=<public alias>`; see [Preflight survey](attested-session-system.md#preflight-survey)
+for direct versus middleware routing. `expires_at` is an upper bound; superseded
+sessions stay retrievable by id. On `412`, re-list and retry once.
 
 A session's evidence object has two fields. `data` is a
 `data:<content-type>;base64,<bytes>` URI holding the exact bytes the verifier

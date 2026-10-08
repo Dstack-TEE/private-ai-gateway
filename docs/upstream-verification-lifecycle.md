@@ -25,58 +25,35 @@ Only successful verification events are cached. Failed verification is returned 
 
 ## Cache and background refresh
 
-The manager runs one background task per upstream with a verifier route and
-enabled refresh. Every target gets an initial attempt on startup through the
-same task. Configuration replacement builds fresh verifiers, wakes the
-supervisor, and cancels old tasks before starting new ones. Background results
-are logged; startup and admin responses do not wait for verification.
+The manager runs one sequential task per upstream with a verifier route and
+refresh enabled. Startup verification uses this task; hot reload cancels old
+tasks and starts fresh verifiers. Startup and admin responses do not wait for it.
+Router-scoped and ACI-service upstreams refresh one representative model;
+other providers refresh each distinct upstream model.
 
-Router-scoped and ACI-service upstreams schedule one representative model,
-matching their shared verifier cache; other providers schedule each distinct
-upstream model. Within an upstream, the task refreshes one target at a time.
-Never-attempted targets take priority in stable target order. Once all targets
-have had an attempt, due warm entries are refreshed earliest-deadline-first
-ahead of due cold retries. Cold retries use the oldest previous attempt first.
+Never-attempted targets run first in stable order, then due warm entries by
+earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
+after waiting for a background permit, since caches and deadlines can change.
+The period p is a positive `verification_refresh_seconds`, or
+`max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` by default
+(240 seconds); zero disables refresh. The lead is `max(TTL - p, 0)`,
+and warm entries become due at expiry minus lead. External and ACI-service cache
+TTLs begin at verification start. ACI-service caps expiry at keyset `not_after`,
+rechecked when verification completes; appraisal uses the wall clock after the
+response. Cold requests and background refresh share its single-flight lock.
 
-The period p is `verification_refresh_seconds` when positive, otherwise
-`max(cache_seconds - request_timeout_seconds, 1)` (240 seconds with defaults).
-Zero disables the upstream's task. The lead is `cache_seconds.saturating_sub(p)`.
-Both external and ACI-service caches count expiry from verification start;
-ACI-service also caps it at the workload keyset's `not_after`. Report appraisal
-uses wall-clock time after the response, and keyset expiry is checked again
-after asynchronous verification completes. Concurrent cold ACI-service requests
-share one verification; forced background refresh takes the same lock. The task
-starts refresh at `expiry - lead`, subject to the minimum start interval and any
-failure retry deadline. It recomputes after waking and after acquiring a permit
-because request-time verification can replace an entry or a sibling can become
-more urgent.
+All tasks share `upstream_verification_concurrency` permits (default 4);
+request-time verification is independent. After success, a target cannot start
+again before its previous start plus p, including cacheless verifiers. Failure
+keeps a valid entry and retries at expiry, otherwise no earlier than start plus p.
+On Unix, cancellation or timeout kills an external verifier's process group,
+including bridge subprocesses, and reaps the child.
 
-All background verifier-cache tasks share `upstream_verification_concurrency`
-permits (default 4). Request-time verification is independent of this limit.
-Successful refresh replaces the cache and prevents the target from starting
-again before its previous refresh start plus p, even if verification consumed
-the TTL or keyset expiry shortened it. Cacheless verifiers stay scheduled once
-per p. Failure keeps any previous unexpired entry and retries at its expiry;
-without a valid entry, the next attempt is due no earlier than the failed
-attempt's start plus p. When TTL is at or below the timeout, p remains at least
-one second; slow verification or a short keyset lifetime can leave cold windows.
-
-A cache stays warm only while replacement completes before the previous entry
-expires. Sequential targets, permit queues, failures, and invalidation can leave
-cold windows; refresh does not guarantee continuous warmth. If a serialized
-upstream's verification time per cycle exceeds the TTL, cold targets may receive
-no background retry under sustained overload; the request path still verifies
-on demand. At refresh start, a target that succeeded earlier in its task but has
-no remaining cache lifetime emits a warning with upstream and model. This
-observes the verifier's cache rather than inferring warmth from completion gaps.
-
-On Unix, external verifiers run in their own process group. Cancellation or
-timeout kills the group, including bridge subprocesses, and reaps the child.
-Listing and the pin gate seal sessions atomically on demand from current
-verified events.
-
-Cache lifetime is not a promise that a connection remains safe for that duration.
-Every forward enforces the cached channel binding against the connection it uses.
+Warmth is best-effort within capacity: replacements must complete before expiry;
+under sustained upstream overload cold targets may get no background retry,
+while requests still verify on demand. A previously successful target found cold
+at refresh start logs a warning with upstream and model. Every forward enforces
+the current channel binding against its connection.
 
 ## Request-time flow
 

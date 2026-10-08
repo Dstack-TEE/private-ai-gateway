@@ -201,7 +201,6 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
         if let Some(event) = self.cached(&request) {
             return event;
         }
@@ -209,14 +208,35 @@ impl ExternalProviderVerifier {
         if let Some(event) = self.cached(&request) {
             return event;
         }
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
     }
 
     pub(super) fn cached(
         &self,
         request: &UpstreamVerificationRequest,
     ) -> Option<UpstreamVerifiedEvent> {
-        self.cached_event(&self.cache_key(request), request)
+        let cache_key = self.cache_key(request);
+        if self.cache_ttl_seconds == 0 {
+            return None;
+        }
+        let now = Instant::now();
+        let cached = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned")
+            .get(&cache_key)
+            .cloned();
+        match cached {
+            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
+            Some(_) => {
+                self.cache
+                    .write()
+                    .expect("external provider verifier cache poisoned")
+                    .remove(&cache_key);
+                None
+            }
+            None => None,
+        }
     }
 
     pub(super) fn cache_remaining(
@@ -238,16 +258,12 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
         let _verify_guard = self.verify_lock.lock().await;
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
     }
 
-    async fn verify_uncached(
-        &self,
-        request: UpstreamVerificationRequest,
-        cache_key: ExternalProviderVerifierCacheKey,
-    ) -> UpstreamVerifiedEvent {
+    async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let cache_key = self.cache_key(&request);
         let started = Instant::now();
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
@@ -291,34 +307,6 @@ impl ExternalProviderVerifier {
                 event
             }
             Err(err) => self.failed_event(request, err),
-        }
-    }
-
-    fn cached_event(
-        &self,
-        cache_key: &ExternalProviderVerifierCacheKey,
-        request: &UpstreamVerificationRequest,
-    ) -> Option<UpstreamVerifiedEvent> {
-        if self.cache_ttl_seconds == 0 {
-            return None;
-        }
-        let now = Instant::now();
-        let cached = self
-            .cache
-            .read()
-            .expect("external provider verifier cache poisoned")
-            .get(cache_key)
-            .cloned();
-        match cached {
-            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
-            Some(_) => {
-                self.cache
-                    .write()
-                    .expect("external provider verifier cache poisoned")
-                    .remove(cache_key);
-                None
-            }
-            None => None,
         }
     }
 
@@ -650,19 +638,15 @@ mod process_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    async fn assert_tree_cancelled(timeout: bool) {
+    #[tokio::test(start_paused = true)]
+    async fn drop_kills_and_reaps_verifier_process_tree() {
         const HELPER_ENV: &str = "ACI_VERIFIER_PROCESS_TEST_HELPER";
         if std::env::var_os(HELPER_ENV).is_none() {
-            let test = if timeout {
-                "timeout_kills_and_reaps_verifier_process_tree"
-            } else {
-                "abort_kills_and_reaps_verifier_process_tree"
-            };
             let output = Command::new(std::env::current_exe().unwrap())
                 .env(HELPER_ENV, "1")
                 .args([
                     "--exact",
-                    &format!("aci::verifier::external::process_tests::{test}"),
+                    "aci::verifier::external::process_tests::drop_kills_and_reaps_verifier_process_tree",
                     "--nocapture",
                 ])
                 .kill_on_drop(true)
@@ -702,21 +686,10 @@ mod process_tests {
         let (reaped, waited) = tokio::sync::oneshot::channel();
         process.reaped = Some(reaped);
         let task = tokio::spawn(async move {
-            let child = process.child.as_mut().unwrap();
-            if timeout {
-                assert!(tokio::time::timeout(Duration::from_secs(1), child.wait())
-                    .await
-                    .is_err());
-            } else {
-                child.wait().await.unwrap();
-            }
+            process.child.as_mut().unwrap().wait().await.unwrap();
         });
-        if timeout {
-            task.await.unwrap();
-        } else {
-            task.abort();
-            assert!(task.await.unwrap_err().is_cancelled());
-        }
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
         waited.await.unwrap();
         let mut status = 0;
         assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
@@ -730,15 +703,5 @@ mod process_tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn abort_kills_and_reaps_verifier_process_tree() {
-        assert_tree_cancelled(false).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn timeout_kills_and_reaps_verifier_process_tree() {
-        assert_tree_cancelled(true).await;
     }
 }

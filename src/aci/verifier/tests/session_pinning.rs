@@ -104,13 +104,6 @@ impl UpstreamVerifier for ProcessVerifier {
     fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
         self.0.cached(request)
     }
-
-    fn cache_remaining(
-        &self,
-        request: &UpstreamVerificationRequest,
-    ) -> Option<std::time::Duration> {
-        self.0.cache_remaining(request)
-    }
 }
 
 struct FixtureBackend(&'static str, Mutex<Vec<String>>);
@@ -155,198 +148,33 @@ impl UpstreamBackend for FixtureBackend {
     }
 }
 
-#[tokio::test]
-async fn external_router_listed_session_accepts_a_pin_for_another_public_model() {
-    let path = std::env::temp_dir().join(format!("pag-router-session-test-{}", std::process::id()));
-    std::fs::create_dir(&path).unwrap();
-    let directory = TestDirectory(path);
-    let counter = directory.0.join("counter");
-    let config_path = directory.0.join("upstreams.json");
-    std::fs::write(&config_path, serde_json::to_vec(&json!([{
-        "name": "provider-upstream", "provider": "tinfoil", "base_url": "https://provider.example",
-        "models": {"public-a": "provider-model", "public-b": "other-provider-model"},
-    }])).unwrap()).unwrap();
-    let manager = Arc::new(
-        UpstreamConfigManager::load(
-            &config_path,
-            UpstreamRuntimeOptions {
-                verifier_mode: UpstreamVerifierMode::None,
-                accepted_subjects: Vec::new(),
-                accepted_image_digests: Vec::new(),
-                accepted_dstack_kms_root_public_keys: Vec::new(),
-                pccs_url: None,
-                verifier_cache_seconds: 300,
-                connect_timeout_seconds: 10,
-                read_timeout_seconds: 600,
-                verifier_request_timeout_seconds: 60,
-            },
-        )
-        .unwrap(),
-    );
-    let verifier = Arc::new(ProcessVerifier(ExternalProviderVerifier::with_command_and_cache(
-        "tinfoil", AttestationScope::PerRouter,
-        counting_provider_script(&counter, "tinfoil", "tinfoil/session-test/v1", json!({
-            "type": "tls_spki_sha256", "origin": "https://provider.example", "spki_sha256": "AA".repeat(32),
-        })), 5, 300,
-    ).unwrap()));
-    let representative = manager
-        .current_verification_requests(None, None, true)
-        .remove(0);
-    assert_eq!(representative.model_id, "provider-model");
-    assert_eq!(
-        verifier.verify(representative).await.result,
-        VerificationResult::Verified
-    );
-    let verifier = Arc::new(RoutingUpstreamVerifier::new().add_route(
-        "provider-upstream",
-        "https://provider.example",
-        verifier,
-    ));
-    let backend = Arc::new(FixtureBackend("provider-upstream", Mutex::new(Vec::new())));
-    let mut router = ModelRouterBackend::new("fixture-router");
-    for (public, upstream) in [
-        ("public-a", "provider-model"),
-        ("public-b", "other-provider-model"),
-    ] {
-        router
-            .add_route(
-                ModelRoute::new(
-                    public,
-                    upstream,
-                    backend.clone(),
-                    format!("provider-upstream:{public}"),
-                )
-                .unwrap()
-                .with_is_tee(Some(true)),
-            )
-            .unwrap();
-    }
-    let service = Arc::new(
-        AciService::new_with_upstream_verifier(
-            Arc::new(SessionKeys(SigningKey::from_bytes(&[7; 32]))),
-            Arc::new(UnusedQuoter),
-            Arc::new(router),
-            verifier,
-            Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test(),
-            Arc::new(FixedClock(1_700_000_000)),
-        )
-        .unwrap(),
-    );
-    let app = build_router_with_admin(service.clone(), manager, None);
-    let listed = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/v1/aci/sessions?model=public-a")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(listed.status(), StatusCode::OK);
-    let listed: Value =
-        serde_json::from_slice(&to_bytes(listed.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(listed["sessions"].as_array().unwrap().len(), 1);
-    let id = listed["sessions"][0]["session_id"].as_str().unwrap();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({
-                        "model": "public-b", "messages": [], "provider": {"aci_session_ids": [id]},
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let receipt_id = response.headers()["x-receipt-id"].to_str().unwrap();
-    let receipt = service
-        .get_receipt_by_receipt_id(receipt_id)
-        .unwrap()
-        .document_json()
-        .unwrap();
-    let verified = receipt["event_log"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| event["type"] == "upstream.verified")
-        .unwrap();
-    assert_eq!(verified["session_id"], id);
-    assert_eq!(verified["model_id"], "other-provider-model");
-    assert_eq!(*backend.1.lock().unwrap(), ["other-provider-model"]);
-    assert_eq!(
-        std::fs::read_to_string(counter).unwrap(),
-        "1",
-        "the other model must reuse the real verifier cache"
-    );
-}
-
-#[tokio::test]
-async fn session_listing_and_pins_follow_default_or_middleware_routes() {
+fn manager(config: Value) -> (TestDirectory, Arc<UpstreamConfigManager>) {
     let directory = TestDirectory(
         std::env::temp_dir().join(format!("pag-route-list-test-{}", std::process::id())),
     );
     std::fs::create_dir(&directory.0).unwrap();
-    let config_path = directory.0.join("upstreams.json");
-    std::fs::write(&config_path, serde_json::to_vec(&json!([
-        {"name":"a", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"a":"M", "shared":"x"}},
-        {"name":"b", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"M":"y", "shared":"z"}},
-    ])).unwrap()).unwrap();
-    let manager = Arc::new(
-        UpstreamConfigManager::load(
-            &config_path,
-            UpstreamRuntimeOptions {
-                verifier_mode: UpstreamVerifierMode::None,
-                accepted_subjects: Vec::new(),
-                accepted_image_digests: Vec::new(),
-                accepted_dstack_kms_root_public_keys: Vec::new(),
-                pccs_url: None,
-                verifier_cache_seconds: 300,
-                connect_timeout_seconds: 10,
-                read_timeout_seconds: 600,
-                verifier_request_timeout_seconds: 60,
-            },
-        )
-        .unwrap(),
-    );
-    let mut backend = ModelRouterBackend::new("fixture");
-    let mut verifier = RoutingUpstreamVerifier::new();
-    let a = Arc::new(FixtureBackend("a", Mutex::new(Vec::new())));
-    let b = Arc::new(FixtureBackend("b", Mutex::new(Vec::new())));
-    for (name, routes, upstream) in [
-        ("a", [("a", "M"), ("shared", "x")], a.clone()),
-        ("b", [("M", "y"), ("shared", "z")], b.clone()),
-    ] {
-        verifier = verifier.add_route(
-            name,
-            "https://provider.example",
-            Arc::new(StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
-                result: VerificationResult::Verified,
-                channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
-                    origin: "https://provider.example".to_string(),
-                    spki_sha256: "aa".repeat(32),
-                }],
-                ..Default::default()
-            })),
-        );
-        for (public, model) in routes {
-            backend
-                .add_route(
-                    ModelRoute::new(public, model, upstream.clone(), format!("{name}:{public}"))
-                        .unwrap()
-                        .with_is_tee(Some(true)),
-                )
-                .unwrap();
-        }
-    }
-    let service = Arc::new(
+    let path = directory.0.join("upstreams.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let manager = UpstreamConfigManager::load(
+        &path,
+        UpstreamRuntimeOptions {
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_subjects: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+        },
+    )
+    .unwrap();
+    (directory, Arc::new(manager))
+}
+
+fn service(backend: ModelRouterBackend, verifier: RoutingUpstreamVerifier) -> Arc<AciService> {
+    Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(SessionKeys(SigningKey::from_bytes(&[7; 32]))),
             Arc::new(UnusedQuoter),
@@ -357,66 +185,141 @@ async fn session_listing_and_pins_follow_default_or_middleware_routes() {
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
-    );
-    let plain = build_router_with_admin(service.clone(), manager.clone(), None);
-    async fn list(app: axum::Router, model: &str) -> Vec<Value> {
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/v1/aci/sessions?model={model}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
-        body["sessions"].as_array().unwrap().clone()
-    }
-    async fn pin(app: axum::Router, model: &str, id: &str) -> axum::response::Response {
-        app.oneshot(
+    )
+}
+
+async fn list(app: axum::Router, query: &str) -> Vec<Value> {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/aci/sessions?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    body["sessions"].as_array().unwrap().clone()
+}
+
+async fn pin(app: axum::Router, service: &AciService, model: &str, id: &str) -> Value {
+    let response = app
+        .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::to_vec(
-                        &json!({"model":model,"messages":[],"provider":{"aci_session_ids":[id]}}),
-                    )
+                    serde_json::to_vec(&json!({
+                        "model": model, "messages": [], "provider": {"aci_session_ids": [id]},
+                    }))
                     .unwrap(),
                 ))
                 .unwrap(),
         )
         .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt = service
+        .get_receipt_by_receipt_id(response.headers()["x-receipt-id"].to_str().unwrap())
         .unwrap()
+        .document_json()
+        .unwrap();
+    let verified = receipt["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "upstream.verified")
+        .unwrap()
+        .clone();
+    assert_eq!(verified["session_id"], id);
+    to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    verified
+}
+
+#[tokio::test]
+async fn session_listing_matches_pin_gate_across_routes() {
+    let (directory, manager) = manager(json!([
+        {"name":"a", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"a":"provider-model", "shared":"x"}},
+        {"name":"b", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"provider-model":"y", "shared":"z"}},
+    ]));
+    let counter = directory.0.join("counter");
+    let process = Arc::new(ProcessVerifier(ExternalProviderVerifier::with_command_and_cache(
+        "tinfoil", AttestationScope::PerRouter,
+        counting_provider_script(&counter, "tinfoil", "tinfoil/session-test/v1", json!({
+            "type": "tls_spki_sha256", "origin": "https://provider.example", "spki_sha256": "AA".repeat(32),
+        })), 5, 300,
+    ).unwrap()));
+    let representative = manager
+        .current_verification_requests(Some("a"), None, false)
+        .remove(0);
+    assert_eq!(representative.model_id, "provider-model");
+    assert_eq!(
+        process.verify(representative).await.result,
+        VerificationResult::Verified
+    );
+    let verifier = RoutingUpstreamVerifier::new()
+        .add_route("a", "https://provider.example", process)
+        .add_route(
+            "b",
+            "https://provider.example",
+            Arc::new(StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+                result: VerificationResult::Verified,
+                channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                    origin: "https://provider.example".to_string(),
+                    spki_sha256: "aa".repeat(32),
+                }],
+                ..Default::default()
+            })),
+        );
+    let a = Arc::new(FixtureBackend("a", Mutex::new(Vec::new())));
+    let b = Arc::new(FixtureBackend("b", Mutex::new(Vec::new())));
+    let mut backend = ModelRouterBackend::new("fixture");
+    for (name, routes, upstream) in [
+        ("a", [("a", "provider-model"), ("shared", "x")], a.clone()),
+        ("b", [("provider-model", "y"), ("shared", "z")], b.clone()),
+    ] {
+        for (public, model) in routes {
+            backend
+                .add_route(
+                    ModelRoute::new(public, model, upstream.clone(), format!("{name}:{public}"))
+                        .unwrap()
+                        .with_is_tee(Some(true)),
+                )
+                .unwrap();
+        }
     }
-    let listed = list(plain.clone(), "shared").await;
+    let service = service(backend, verifier);
+    let plain = build_router_with_admin(service.clone(), manager.clone(), None);
+    let listed = list(plain.clone(), "model=a").await;
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["upstream_name"], "a");
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let verified = pin(plain.clone(), &service, "shared", id).await;
+    assert_eq!(verified["model_id"], "x");
+    assert_eq!(*a.1.lock().unwrap(), ["x"]);
     assert_eq!(
-        pin(
-            plain.clone(),
-            "shared",
-            listed[0]["session_id"].as_str().unwrap()
-        )
-        .await
-        .status(),
-        StatusCode::OK
+        std::fs::read_to_string(&counter).unwrap(),
+        "1",
+        "cross-model pin must reuse the real verifier cache"
     );
-    let alias = list(plain.clone(), "M").await;
+    let alias = list(plain.clone(), "model=provider-model").await;
     assert_eq!(alias.len(), 1);
     assert_eq!(
         alias[0]["upstream_name"], "b",
         "upstream IDs cannot shadow public aliases"
     );
-    assert_eq!(
-        pin(plain, "M", alias[0]["session_id"].as_str().unwrap())
-            .await
-            .status(),
-        StatusCode::OK
-    );
+    pin(
+        plain.clone(),
+        &service,
+        "provider-model",
+        alias[0]["session_id"].as_str().unwrap(),
+    )
+    .await;
+    assert!(list(plain.clone(), "model=unknown").await.is_empty());
+    assert!(list(plain, "model=shared&upstream_name=b").await.is_empty());
     a.1.lock().unwrap().clear();
     b.1.lock().unwrap().clear();
     let control = axum::Router::new().route("/consult/pre", axum::routing::post(|| async { axum::Json(json!({
@@ -443,7 +346,7 @@ async fn session_listing_and_pins_follow_default_or_middleware_routes() {
         .unwrap(),
     );
     let app = build_router_with_admin_and_middleware(service.clone(), manager, None, middleware);
-    let listed = list(app.clone(), "shared").await;
+    let listed = list(app.clone(), "model=shared").await;
     assert_eq!(listed.len(), 2);
     let id = listed
         .iter()
@@ -451,24 +354,12 @@ async fn session_listing_and_pins_follow_default_or_middleware_routes() {
         .unwrap()["session_id"]
         .as_str()
         .unwrap();
-    let response = pin(app, "shared", id).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let receipt = service
-        .get_receipt_by_receipt_id(response.headers()["x-receipt-id"].to_str().unwrap())
-        .unwrap()
-        .document_json()
-        .unwrap();
-    assert!(receipt["event_log"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|event| event["type"] == "upstream.verified" && event["session_id"] == id));
+    pin(app, &service, "shared", id).await;
     assert!(
         a.1.lock().unwrap().is_empty(),
         "pin-mismatched A must be skipped"
     );
     assert_eq!(*b.1.lock().unwrap(), ["z"]);
-    to_bytes(response.into_body(), usize::MAX).await.unwrap();
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }

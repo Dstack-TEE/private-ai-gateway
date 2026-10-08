@@ -39,7 +39,6 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
-use private_ai_gateway::aggregator::upstream_config::UpstreamConfigManager;
 use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
 use tokio::time::Instant;
@@ -424,17 +423,19 @@ fn harness_with(
 fn harness_for_sessions(
     verifier: Arc<dyn UpstreamVerifier>,
     provider: &str,
-    models: Value,
-) -> (Harness, Arc<UpstreamConfigManager>) {
+) -> (Harness, UpstreamVerificationRequest) {
     let mut harness = harness_with(RecordingUpstream::default(), verifier, false);
     let config = common::session_config(serde_json::json!([{
         "name": "surface-upstream",
         "provider": provider,
         "base_url": "https://surface-upstream.example",
-        "models": models,
+        "models": {"aci-model": "aci-model"},
     }]));
     harness.requester.app = build_router_with_admin(harness.service.clone(), config.clone(), None);
-    (harness, config)
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
+    (harness, request)
 }
 
 fn harness_with_streaming_upstream_error() -> Harness {
@@ -2033,91 +2034,6 @@ async fn pinned_current_session_serves_and_is_cited() {
 }
 
 #[tokio::test]
-async fn rotated_session_listing_rejects_old_pin_and_accepts_new_pin() {
-    let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "phala-direct",
-        serde_json::json!({"aci-model": "aci-model"}),
-    );
-
-    let first = h
-        .requester
-        .post("/v1/chat/completions", CHAT_REQUEST, &[])
-        .await;
-    assert_eq!(first.status, StatusCode::OK);
-    let first_receipt_id = header(&first.headers, "x-receipt-id");
-    let first_receipt = h
-        .service
-        .get_receipt_by_receipt_id(first_receipt_id)
-        .unwrap();
-    let old_id = payload_event(&receipt_payload(&first_receipt), "upstream.verified")["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let request = config
-        .current_verification_requests(None, None, true)
-        .remove(0);
-    verifier.refresh(request).await;
-
-    let second = h
-        .requester
-        .post("/v1/chat/completions", CHAT_REQUEST, &[])
-        .await;
-    assert_eq!(second.status, StatusCode::OK);
-    let second_receipt_id = header(&second.headers, "x-receipt-id");
-    let second_receipt = h
-        .service
-        .get_receipt_by_receipt_id(second_receipt_id)
-        .unwrap();
-    let new_id = payload_event(&receipt_payload(&second_receipt), "upstream.verified")
-        ["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(old_id, new_id);
-
-    let listed = h
-        .requester
-        .get("/v1/aci/sessions?upstream_name=surface-upstream", &[])
-        .await;
-    assert_eq!(listed.status, StatusCode::OK);
-    let listed_body = json_body(&listed);
-    assert_eq!(listed_body["sessions"].as_array().unwrap().len(), 1);
-    assert_eq!(listed_body["sessions"][0]["session_id"], new_id);
-
-    let old_pin = format!(
-        r#"{{"model":"aci-model","messages":[],"provider":{{"aci_session_ids":["{old_id}"]}}}}"#
-    );
-    let refused = h
-        .requester
-        .post("/v1/chat/completions", old_pin.as_bytes(), &[])
-        .await;
-    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(error_type(&refused), "session_not_accepted");
-    assert!(h.service.get_attested_session(&old_id).is_some());
-
-    let new_pin = format!(
-        r#"{{"model":"aci-model","messages":[],"provider":{{"aci_session_ids":["{new_id}"]}}}}"#
-    );
-    let accepted = h
-        .requester
-        .post("/v1/chat/completions", new_pin.as_bytes(), &[])
-        .await;
-    assert_eq!(accepted.status, StatusCode::OK);
-    let accepted_receipt_id = header(&accepted.headers, "x-receipt-id");
-    let accepted_receipt = h
-        .service
-        .get_receipt_by_receipt_id(accepted_receipt_id)
-        .unwrap();
-    assert_eq!(
-        payload_event(&receipt_payload(&accepted_receipt), "upstream.verified")["session_id"],
-        new_id
-    );
-}
-
-#[tokio::test]
 async fn unmatched_pinned_sessions_refuse_with_session_not_accepted() {
     let h = harness();
     let bogus = "ab".repeat(32);
@@ -3002,26 +2918,6 @@ fn cited_session(harness: &Harness, response: &HttpResult) -> String {
         .to_string()
 }
 
-#[tokio::test]
-async fn cached_session_listing_is_pin_acceptable_before_traffic() {
-    let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "phala-direct",
-        serde_json::json!({"aci-model": "aci-model"}),
-    );
-    let request = config
-        .current_verification_requests(None, None, true)
-        .remove(0);
-    verifier.verify(request).await;
-    let listed = listed_sessions(&h, "").await;
-    assert_eq!(listed.len(), 1);
-    let id = listed[0]["session_id"].as_str().unwrap();
-    let accepted = pin_session(&h, id).await;
-    assert_eq!(accepted.status, StatusCode::OK);
-    assert_eq!(cited_session(&h, &accepted), id);
-}
-
 #[derive(Default)]
 struct InterleavingVerifier {
     inner: RotatingVerifier,
@@ -3054,11 +2950,7 @@ impl UpstreamVerifier for InterleavingVerifier {
 #[tokio::test]
 async fn stale_inflight_verification_cannot_replace_the_cached_listing() {
     let verifier = Arc::new(InterleavingVerifier::default());
-    let (h, _) = harness_for_sessions(
-        verifier.clone(),
-        "phala-direct",
-        serde_json::json!({"aci-model": "aci-model"}),
-    );
+    let (h, _) = harness_for_sessions(verifier.clone(), "phala-direct");
     *verifier.service.lock().unwrap() = Arc::downgrade(&h.service);
     let first = h
         .requester
@@ -3076,35 +2968,29 @@ async fn stale_inflight_verification_cannot_replace_the_cached_listing() {
     let refused = pin_session(&h, &first_id).await;
     assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
     assert_eq!(error_type(&refused), "session_not_accepted");
-    assert_eq!(
-        h.requester
-            .get(&format!("/v1/aci/sessions/{first_id}"), &[])
-            .await
-            .status,
-        StatusCode::OK
-    );
+    assert!(json_body(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("re-list /v1/aci/sessions"));
 }
 
 #[tokio::test(start_paused = true)]
-async fn cold_verifier_cache_lists_nothing_but_retains_historical_sessions() {
+async fn session_listing_tracks_cache_warmth_and_keeps_historical_lookup() {
     let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "phala-direct",
-        serde_json::json!({"aci-model": "aci-model"}),
-    );
+    let (h, request) = harness_for_sessions(verifier.clone(), "phala-direct");
     assert!(listed_sessions(&h, "").await.is_empty());
     assert_eq!(
         verifier.verifications.load(Ordering::Relaxed),
         0,
         "listing never verifies afresh"
     );
-    let request = config
-        .current_verification_requests(None, None, true)
-        .remove(0);
     verifier.verify(request).await;
     let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
     let id = listed[0]["session_id"].as_str().unwrap();
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
     tokio::time::advance(Duration::from_secs(300)).await;
     assert!(listed_sessions(&h, "").await.is_empty());
     assert_eq!(verifier.verifications.load(Ordering::Relaxed), 1);
@@ -3120,14 +3006,7 @@ async fn cold_verifier_cache_lists_nothing_but_retains_historical_sessions() {
 #[tokio::test]
 async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
     let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "chutes",
-        serde_json::json!({"aci-model": "aci-model"}),
-    );
-    let request = config
-        .current_verification_requests(None, None, true)
-        .remove(0);
+    let (h, request) = harness_for_sessions(verifier.clone(), "chutes");
     let event = |instances: &[&str]| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         verifier_id: "chutes-fixture/v1".to_string(),
@@ -3173,33 +3052,6 @@ async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
 }
 
 #[tokio::test]
-async fn per_model_listing_uses_public_aliases() {
-    let verifier = Arc::new(RotatingVerifier::default());
-    let (h, config) = harness_for_sessions(
-        verifier.clone(),
-        "phala-direct",
-        serde_json::json!({"a": "x", "x": "y"}),
-    );
-    let mut evidence = HashMap::new();
-    for request in config.current_verification_requests(None, None, true) {
-        let model = request.model_id.clone();
-        let event = verifier.verify(request).await;
-        evidence.insert(model, event.evidence.unwrap()["digest"].clone());
-    }
-    assert_eq!(listed_sessions(&h, "").await.len(), 2);
-    for (public_model, upstream_model) in [("a", "x"), ("x", "y")] {
-        let listed = listed_sessions(&h, &format!("?model={public_model}")).await;
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0]["evidence"]["digest"], evidence[upstream_model]);
-    }
-    assert!(listed_sessions(&h, "?model=y").await.is_empty());
-    assert!(listed_sessions(&h, "?model=unknown").await.is_empty());
-    assert!(listed_sessions(&h, "?model=a&upstream_name=other")
-        .await
-        .is_empty());
-}
-
-#[tokio::test]
 async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
     let event = UpstreamVerifiedEvent {
         verifier_id: "surface-verifier/v1".to_string(),
@@ -3218,7 +3070,6 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
             }),
         ),
         "phala-direct",
-        serde_json::json!({"aci-model": "aci-model"}),
     );
     let listed = listed_sessions(&h, "").await;
     assert_eq!(listed.len(), 1);

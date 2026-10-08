@@ -329,7 +329,7 @@ pub struct UpstreamConfigManager {
     options: UpstreamRuntimeOptions,
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
     update_lock: Arc<Mutex<()>>,
-    generation: watch::Sender<u64>,
+    reload: watch::Sender<()>,
 }
 
 impl UpstreamConfigManager {
@@ -345,7 +345,7 @@ impl UpstreamConfigManager {
             options,
             state: Arc::new(RwLock::new(state)),
             update_lock: Arc::new(Mutex::new(())),
-            generation: watch::channel(0).0,
+            reload: watch::channel(()).0,
         })
     }
 
@@ -449,8 +449,7 @@ impl UpstreamConfigManager {
 
     fn install_state(&self, state: Arc<ConfiguredUpstreams>) {
         *self.state.write().unwrap_or_else(|p| p.into_inner()) = state;
-        self.generation
-            .send_modify(|generation| *generation = generation.wrapping_add(1));
+        self.reload.send_replace(());
     }
 
     pub fn current_verification_requests(
@@ -480,36 +479,38 @@ impl UpstreamConfigManager {
         } else {
             None
         };
-        verification_targets(&state.config)
-            .into_iter()
-            .filter(|target| {
+        state
+            .config
+            .iter()
+            .filter(|cfg| builders::provider_is_tee(cfg.provider))
+            .filter(|cfg| upstream_name.is_none_or(|name| cfg.name == name))
+            .filter(|cfg| {
                 routed_upstream
                     .as_ref()
-                    .is_none_or(|name| target.upstream_name == *name)
+                    .is_none_or(|name| cfg.name == *name)
             })
-            .filter(|target| upstream_name.is_none_or(|name| target.upstream_name == name))
-            .filter(|target| {
-                state.config.iter().any(|cfg| {
-                    cfg.name == target.upstream_name
-                        && builders::provider_is_tee(cfg.provider)
-                        && model.is_none_or(|model| {
+            .flat_map(|cfg| {
+                verification_targets(std::slice::from_ref(cfg))
+                    .into_iter()
+                    .filter(move |target| {
+                        model.is_none_or(|model| {
                             if cfg.provider.attestation_scope().is_per_router() {
                                 cfg.models.contains_key(model)
                             } else {
                                 cfg.models.get(model) == Some(&target.model_id)
                             }
                         })
-                })
+                    })
             })
             .map(|target| target.request())
             .collect()
     }
 
     pub async fn run_verification_refresh(self: Arc<Self>, permits: Arc<Semaphore>) {
-        let mut generation = self.generation.subscribe();
+        let mut reload = self.reload.subscribe();
         let mut tasks = JoinSet::new();
         loop {
-            generation.borrow_and_update();
+            reload.borrow_and_update();
             let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(verifier) = &state.verifier {
                 for cfg in &state.config {
@@ -532,6 +533,7 @@ impl UpstreamConfigManager {
                             UpstreamVerifierMode::AciService
                         ))
                     {
+                        // ACI-service verifiers keep one cache per service; refresh one representative.
                         targets.truncate(1);
                     }
                     tasks.spawn(refresh_upstream(
@@ -545,7 +547,7 @@ impl UpstreamConfigManager {
             }
             loop {
                 tokio::select! {
-                    changed = generation.changed() => {
+                    changed = reload.changed() => {
                         if changed.is_err() { return; }
                         break;
                     }
@@ -726,50 +728,49 @@ async fn refresh_upstream(
             succeeded: false,
         })
         .collect();
-    while !targets.is_empty() {
-        let (index, permit) = {
-            let select = || {
-                let now = Instant::now();
-                let mut selected = None;
-                let mut earliest_start = None;
-                for (index, state) in targets.iter().enumerate() {
-                    let expiry = verifier
-                        .cache_remaining(&state.target.request())
-                        .map(|remaining| now + remaining);
-                    let (priority, due) = match (state.last_start, expiry) {
-                        (None, _) => ((0, None), state.not_before),
-                        (Some(_), Some(expiry)) => (
-                            (1, Some(expiry)),
-                            expiry
-                                .checked_sub(lead)
-                                .unwrap_or(expiry)
-                                .max(state.not_before),
-                        ),
-                        (Some(last_start), None) => ((2, Some(last_start)), state.not_before),
-                    };
-                    earliest_start =
-                        Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
-                    if due <= now && selected.as_ref().is_none_or(|(_, key)| priority < *key) {
-                        selected = Some((index, priority));
-                    }
-                }
-                (selected.map(|(index, _)| index), earliest_start)
+    let select = |targets: &[VerificationTargetState]| {
+        let now = Instant::now();
+        let mut selected = None;
+        let mut earliest_start = None;
+        for (index, state) in targets.iter().enumerate() {
+            let expiry = verifier
+                .cache_remaining(&state.target.request())
+                .map(|remaining| now + remaining);
+            // 0: never attempted; 1: warm, earliest expiry first; 2: cold, oldest attempt first.
+            let (priority, due) = match (state.last_start, expiry) {
+                (None, _) => ((0, None), state.not_before),
+                (Some(_), Some(expiry)) => (
+                    (1, Some(expiry)),
+                    expiry
+                        .checked_sub(lead)
+                        .unwrap_or(expiry)
+                        .max(state.not_before),
+                ),
+                (Some(last_start), None) => ((2, Some(last_start)), state.not_before),
             };
-            let (selected, earliest_start) = select();
-            if selected.is_none() {
-                if let Some(due) = earliest_start {
-                    tokio::time::sleep_until(due).await;
-                }
-                continue;
+            earliest_start =
+                Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
+            if due <= now && selected.as_ref().is_none_or(|(_, key)| priority < *key) {
+                selected = Some((index, priority));
             }
-            let Ok(permit) = permits.acquire().await else {
+        }
+        (selected.map(|(index, _)| index), earliest_start)
+    };
+    loop {
+        let (selected, earliest_start) = select(&targets);
+        if selected.is_none() {
+            let Some(due) = earliest_start else {
                 return;
             };
-            // Requests can replace caches and sibling deadlines can change while queued.
-            let Some(index) = select().0 else {
-                continue;
-            };
-            (index, permit)
+            tokio::time::sleep_until(due).await;
+            continue;
+        }
+        let Ok(permit) = permits.acquire().await else {
+            return;
+        };
+        // Requests can replace caches and sibling deadlines can change while queued.
+        let Some(index) = select(&targets).0 else {
+            continue;
         };
         let state = &mut targets[index];
         let request = state.target.request();

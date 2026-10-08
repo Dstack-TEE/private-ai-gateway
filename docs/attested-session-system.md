@@ -44,9 +44,9 @@ request -> receipt (X-Receipt-Id)
 
 ## Preflight survey
 
-`GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the same
-`cached(request)` function as the pin gate. For the queried channels, the list
-is exactly the sessions the gate accepts now without re-verifying. It never
+`GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the verifier's
+current cache, the same state the pin gate consults. For the queried channels,
+the list is exactly the sessions the gate accepts now without re-verifying. It never
 performs fresh verification. An empty list means no verified state is available
 now; absence does not imply refusal, because a stable-evidence verifier can
 re-derive the same id after fresh verification. Chutes lists only instances in
@@ -58,14 +58,9 @@ only the default first route is listed; with middleware, all configured routes
 serving the model are listed and pin-mismatched candidates are skipped. A broad
 list can contain sessions that a particular request will not route to.
 
-Failed refresh keeps the old successful entry until cache expiry. Stored
-history does not define currency: an older in-flight result cannot replace the
-cached listing. Get-or-create under
-the store lock makes concurrent sealing of identical material reuse one id.
-Superseded sessions stay retrievable by id until retention ends. `expires_at`
-is an upper bound; cache replacement can supersede a session earlier. If a
-rotation between listing and forwarding produces `412 session_not_accepted`,
-re-list and retry once.
+Failed refresh keeps the previous entry until it expires; an older in-flight
+result cannot replace the listing. Concurrent sealing of identical material
+yields one id.
 
 ## Storage: compacted JSONL
 

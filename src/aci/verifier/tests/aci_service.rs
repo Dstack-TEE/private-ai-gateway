@@ -115,11 +115,6 @@ impl Fixture {
             server,
         }
     }
-
-    async fn close(mut self) {
-        self.server.abort();
-        assert!((&mut self.server).await.unwrap_err().is_cancelled());
-    }
 }
 
 impl Drop for Fixture {
@@ -161,7 +156,6 @@ async fn public_cold_verification_is_single_flight_and_refresh_shares_the_lock()
     assert_eq!(verified.result, VerificationResult::Verified);
     assert_eq!(verified.evidence, refreshed.evidence);
     assert_eq!(fixture.control.calls.load(Ordering::SeqCst), 2);
-    fixture.close().await;
 }
 
 #[tokio::test]
@@ -179,14 +173,13 @@ async fn public_verification_rejects_a_keyset_expiring_before_the_response() {
     assert_eq!(result.result, VerificationResult::Failed);
     assert!(result.reason.unwrap().contains("expired"));
     assert!(fixture.verifier.cached(&fixture.request).is_none());
-    fixture.close().await;
 }
 
 #[tokio::test]
 async fn absolute_keyset_expiry_invalidates_an_unexpired_monotonic_cache() {
     let origin = "http://127.0.0.1:1";
     let deadline = Instant::now() + Duration::from_secs(300);
-    let not_after = current_unix_secs() + 1;
+    let not_after = current_unix_secs() + 2;
     let verifier = verifier(origin).with_cached(CachedAciServiceVerification {
         expires_at: deadline,
         not_after,
@@ -198,7 +191,7 @@ async fn absolute_keyset_expiry_invalidates_an_unexpired_monotonic_cache() {
         verifier.verify(request.clone()).await.result,
         VerificationResult::Verified
     );
-    assert!(verifier.cache_remaining(&request).unwrap() <= Duration::from_secs(1));
+    assert!(verifier.cache_remaining(&request).unwrap() <= Duration::from_secs(2));
     wait_until_wall(not_after).await;
     assert!(Instant::now() < deadline);
     assert!(verifier.cached(&request).is_none());

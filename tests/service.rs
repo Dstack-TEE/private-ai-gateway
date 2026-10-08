@@ -834,14 +834,6 @@ async fn session_listing_propagates_persistence_failure() {
         )),
     );
     let service = service.with_session_store(Arc::new(FailingSessionStore));
-    let request = UpstreamVerificationRequest {
-        upstream_name: "stub-upstream".to_string(),
-        url_origin: Some("http://stub-upstream".to_string()),
-        model_id: "model".to_string(),
-        forwarded_body_hash: private_ai_gateway::aci::digest::sha256_hex(b""),
-        required: true,
-    };
-    assert!(service.list_current_sessions(&[request]).is_err());
     let config = common::session_config(serde_json::json!([{
         "name": "stub-upstream", "base_url": "http://stub-upstream",
         "provider": "phala-direct",

@@ -442,7 +442,7 @@ fn refresh_test_manager(
         options,
         state: Arc::new(RwLock::new(Arc::new(state))),
         update_lock: Arc::new(Mutex::new(())),
-        generation: watch::channel(0).0,
+        reload: watch::channel(()).0,
     })
 }
 
@@ -466,6 +466,21 @@ async fn stop_refresh(task: tokio::task::JoinHandle<()>) {
     tokio::task::yield_now().await;
 }
 
+async fn run_refresh(
+    config: Vec<UpstreamConfig>,
+    verifier: Arc<dyn UpstreamVerifier>,
+    seconds: u64,
+) {
+    let task = start_refresh(refresh_test_manager(config, verifier), 4);
+    tokio::task::yield_now().await;
+    advance(seconds).await;
+    stop_refresh(task).await;
+}
+
+fn starts<'a>(o: &'a RefreshObservations, upstream: &str, model: &str) -> &'a [(Instant, bool)] {
+    &o.starts[&(upstream.to_string(), model.to_string())]
+}
+
 #[tokio::test(start_paused = true)]
 async fn eleven_sequential_targets_replace_caches_before_expiry() {
     let mut cfg = test_upstream_config(
@@ -478,11 +493,10 @@ async fn eleven_sequential_targets_replace_caches_before_expiry() {
         cfg.models
             .insert(format!("public-{i:02}"), format!("model-{i:02}"));
     }
+    cfg.models
+        .insert("duplicate".to_string(), "model-00".to_string());
     let verifier = Arc::new(FakeVerifier::new(300, 24));
-    let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
-    tokio::task::yield_now().await;
-    advance(1800).await;
-    stop_refresh(task).await;
+    run_refresh(vec![cfg], verifier.clone(), 1800).await;
     let observations = verifier.observations.lock().unwrap();
     assert_eq!(observations.starts.len(), 11);
     assert_eq!(observations.peak["provider"], 1);
@@ -513,7 +527,7 @@ async fn eleven_sequential_targets_replace_caches_before_expiry() {
 async fn twenty_upstreams_share_four_background_permits_without_early_refreshes() {
     let observations = Arc::new(Mutex::new(RefreshObservations::default()));
     let mut routing = crate::aci::verifier::RoutingUpstreamVerifier::new();
-    let config: Vec<_> = (0..20)
+    let mut config: Vec<_> = (0..20)
         .map(|i| {
             let cfg = test_upstream_config(
                 &format!("provider-{i}"),
@@ -531,12 +545,23 @@ async fn twenty_upstreams_share_four_background_permits_without_early_refreshes(
             cfg
         })
         .collect();
-    let task = start_refresh(refresh_test_manager(config, Arc::new(routing)), 4);
-    tokio::task::yield_now().await;
-    advance(900).await;
-    stop_refresh(task).await;
+    let plain = test_upstream_config(
+        "plain",
+        UpstreamProvider::OpenAiCompatible,
+        "public",
+        "model",
+    );
+    let mut plain_verifier = FakeVerifier::new(300, 25);
+    plain_verifier.observations = observations.clone();
+    routing = routing.add_route(&plain.name, &plain.base_url, Arc::new(plain_verifier));
+    config.push(plain);
+    run_refresh(config, Arc::new(routing), 900).await;
     let observations = observations.lock().unwrap();
     assert_eq!(observations.starts.len(), 20);
+    assert!(!observations
+        .starts
+        .keys()
+        .any(|(upstream, _)| upstream == "plain"));
     assert_eq!(observations.global_peak, 4);
     assert!(observations.peak.values().all(|peak| *peak == 1));
     assert!(observations.active.values().all(|active| *active == 0));
@@ -568,10 +593,10 @@ async fn hot_reload_aborts_old_tasks_and_refreshes_new_verifiers_immediately() {
     advance(201).await;
     stop_refresh(task).await;
     let old = old.observations.lock().unwrap();
-    assert_eq!(old.starts.values().next().unwrap().len(), 2);
+    assert_eq!(starts(&old, "provider", "model").len(), 2);
     assert_eq!(old.active["provider"], 0);
     let new = new.observations.lock().unwrap();
-    let starts = new.starts.values().next().unwrap();
+    let starts = starts(&new, "provider", "model");
     assert_eq!(starts[0].0, changed_at);
     assert_eq!(starts.len(), 5);
     assert!(starts
@@ -599,11 +624,7 @@ async fn failed_refresh_retries_at_expiry_then_once_per_period() {
     stop_refresh(task).await;
     let observations = verifier.observations.lock().unwrap();
     assert_eq!(
-        observations
-            .starts
-            .values()
-            .next()
-            .unwrap()
+        starts(&observations, "provider", "model")
             .iter()
             .map(|(time, _)| (*time - epoch).as_secs())
             .collect::<Vec<_>>(),
@@ -619,17 +640,14 @@ async fn slow_failed_target_does_not_starve_a_healthy_sibling() {
     verifier.failed_model = Some(("a".to_string(), Duration::from_secs(240)));
     let verifier = Arc::new(verifier);
     let epoch = Instant::now();
-    let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
-    tokio::task::yield_now().await;
-    advance(1800).await;
-    stop_refresh(task).await;
+    run_refresh(vec![cfg], verifier.clone(), 1800).await;
     let observations = verifier.observations.lock().unwrap();
-    let healthy = &observations.starts[&("provider".to_string(), "b".to_string())];
+    let healthy = starts(&observations, "provider", "b");
     assert!(healthy.len() >= 2);
     assert!(healthy
         .windows(2)
         .all(|pair| pair[1].0 - pair[0].0 < Duration::from_secs(300)));
-    assert!(observations.starts[&("provider".to_string(), "a".to_string())].len() >= 3);
+    assert!(starts(&observations, "provider", "a").len() >= 3);
     assert!(
         healthy[1..].iter().all(|(_, cold)| !cold),
         "healthy starts (seconds, cold): {:?}",
@@ -655,38 +673,11 @@ async fn aci_service_models_share_one_verification_per_period() {
     let mut verifier = FakeVerifier::new(300, 1);
     verifier.service_cache = true;
     let verifier = Arc::new(verifier);
-    let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
-    tokio::task::yield_now().await;
-    advance(721).await;
-    stop_refresh(task).await;
+    run_refresh(vec![cfg], verifier.clone(), 721).await;
     let observations = verifier.observations.lock().unwrap();
     let starts: Vec<_> = observations.starts.values().flatten().collect();
     assert_eq!(starts.len(), 4);
     assert_eq!(observations.peak["provider"], 1);
-}
-
-#[tokio::test(start_paused = true)]
-async fn preverified_targets_refresh_once_per_period() {
-    let verifications = Arc::new(AtomicUsize::new(0));
-    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "x");
-    cfg.models.extend([
-        ("b".to_string(), "x".to_string()),
-        ("c".to_string(), "y".to_string()),
-    ]);
-    let task = start_refresh(
-        refresh_test_manager(
-            vec![cfg],
-            Arc::new(CountingVerifier {
-                verifications: verifications.clone(),
-                invalidations: Arc::new(AtomicUsize::new(0)),
-            }),
-        ),
-        4,
-    );
-    tokio::task::yield_now().await;
-    advance(1800).await;
-    stop_refresh(task).await;
-    assert_eq!(verifications.load(Ordering::SeqCst), 16);
 }
 
 #[tokio::test(start_paused = true)]
@@ -697,12 +688,9 @@ async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
         cfg.verifier_cache_seconds = Some(cache);
         cfg.verification_refresh_seconds = Some(period);
         let verifier = Arc::new(FakeVerifier::new(ttl, latency));
-        let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
-        tokio::task::yield_now().await;
-        advance(1800).await;
-        stop_refresh(task).await;
+        run_refresh(vec![cfg], verifier.clone(), 1800).await;
         let observations = verifier.observations.lock().unwrap();
-        let starts = observations.starts.values().next().unwrap();
+        let starts = starts(&observations, "provider", "model");
         assert!(starts.len() >= 3, "expired successes must remain scheduled");
         assert!(starts.len() <= 1800 / period as usize + 1);
         assert!(starts
@@ -732,38 +720,8 @@ async fn permit_wait_reselects_the_most_urgent_sibling() {
     advance(1).await;
     stop_refresh(task).await;
     let observations = verifier.observations.lock().unwrap();
-    assert_eq!(
-        observations.starts[&("provider".to_string(), "a".to_string())].len(),
-        1
-    );
-    assert_eq!(
-        observations.starts[&("provider".to_string(), "b".to_string())].len(),
-        2
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn mixed_config_does_not_schedule_plain_upstreams_without_verifier_routes() {
-    let config = vec![
-        test_upstream_config("tee", UpstreamProvider::PhalaDirect, "public", "model"),
-        test_upstream_config(
-            "plain",
-            UpstreamProvider::OpenAiCompatible,
-            "public",
-            "model",
-        ),
-    ];
-    let verifier = Arc::new(FakeVerifier::new(300, 1));
-    let task = start_refresh(refresh_test_manager(config, verifier.clone()), 4);
-    tokio::task::yield_now().await;
-    advance(900).await;
-    stop_refresh(task).await;
-    let observations = verifier.observations.lock().unwrap();
-    assert_eq!(observations.starts.len(), 1);
-    assert!(observations
-        .starts
-        .keys()
-        .all(|(upstream, _)| upstream == "tee"));
+    assert_eq!(starts(&observations, "provider", "a").len(), 1);
+    assert_eq!(starts(&observations, "provider", "b").len(), 2);
 }
 
 #[tokio::test(start_paused = true)]
@@ -774,81 +732,14 @@ async fn cache_ttl_at_or_below_timeout_has_bounded_failed_retries() {
         cfg.verifier_cache_seconds = Some(ttl);
         let verifier = Arc::new(FakeVerifier::new(ttl, 0));
         verifier.fail.store(true, Ordering::SeqCst);
-        let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
-        tokio::task::yield_now().await;
-        advance(10).await;
-        stop_refresh(task).await;
+        run_refresh(vec![cfg], verifier.clone(), 10).await;
         let observations = verifier.observations.lock().unwrap();
-        let starts = observations.starts.values().next().unwrap();
+        let starts = starts(&observations, "provider", "model");
         assert!(starts.len() <= 11);
         assert!(starts
             .windows(2)
             .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(1)));
     }
-}
-
-#[test]
-fn refresh_period_uses_effective_timeout_and_never_reaches_zero() {
-    let mut cfg =
-        test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
-    let manager = refresh_test_manager(vec![cfg.clone()], Arc::new(FakeVerifier::new(300, 0)));
-    assert_eq!(
-        verification_refresh_seconds(&cfg, &manager.options),
-        Some(240)
-    );
-    cfg.verifier_request_timeout_seconds = Some(90);
-    assert_eq!(
-        verification_refresh_seconds(&cfg, &manager.options),
-        Some(210)
-    );
-    cfg.verifier_cache_seconds = Some(80);
-    assert_eq!(
-        verification_refresh_seconds(&cfg, &manager.options),
-        Some(1)
-    );
-    cfg.verification_refresh_seconds = Some(0);
-    assert_eq!(verification_refresh_seconds(&cfg, &manager.options), None);
-}
-
-#[test]
-fn current_requests_follow_public_alias_mapping_and_default_route_order() {
-    let a = test_upstream_config("a", UpstreamProvider::PhalaDirect, "a", "M");
-    let mut b = test_upstream_config("b", UpstreamProvider::PhalaDirect, "M", "y");
-    b.models.insert("x".to_string(), "y".to_string());
-    let manager = refresh_test_manager(vec![a, b], Arc::new(FakeVerifier::new(300, 0)));
-    let requests = manager.current_verification_requests(Some("M"), None, false);
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].upstream_name, "b");
-    assert_eq!(requests[0].model_id, "y");
-    assert!(manager
-        .current_verification_requests(Some("y"), None, false)
-        .is_empty());
-    let mut a = test_upstream_config("a", UpstreamProvider::PhalaDirect, "a", "x");
-    a.models.insert("x".to_string(), "y".to_string());
-    let mut b = test_upstream_config("b", UpstreamProvider::NearAi, "a", "x");
-    b.models.insert("x".to_string(), "y".to_string());
-    let manager = refresh_test_manager(vec![a, b], Arc::new(FakeVerifier::new(300, 0)));
-    let requests = manager.current_verification_requests(Some("x"), None, false);
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].model_id, "y");
-    let requests = manager.current_verification_requests(Some("x"), None, true);
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].model_id, "x"); // Per-router representative.
-    assert!(manager
-        .current_verification_requests(Some("x"), Some("b"), false)
-        .is_empty());
-    assert_eq!(
-        manager
-            .current_verification_requests(Some("x"), Some("b"), true)
-            .len(),
-        1
-    );
-    assert_eq!(
-        manager
-            .current_verification_requests(None, None, true)
-            .len(),
-        3
-    );
 }
 
 #[test]

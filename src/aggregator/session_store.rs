@@ -455,6 +455,8 @@ impl SessionStore for JsonlSessionStore {
         }
         let session = seal()?;
         writer.append(fingerprint, &session, retention_until, now)?;
+        // Update the index under the writer lock: compact rewrites the log from the index,
+        // so an index lagging a completed append could drop an on-disk record.
         index.insert(fingerprint.to_string(), session.clone(), retention_until);
         index.evict_lapsed(now);
         Ok(session)
@@ -623,6 +625,17 @@ mod tests {
         assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
     }
 
+    fn reuse_only(
+        store: &dyn SessionStore,
+        fp: &str,
+        retention: u64,
+        now: u64,
+    ) -> io::Result<AttestedSession> {
+        store.current_or_seal(fp, retention, now, &mut || {
+            Err(io::Error::other("cache miss"))
+        })
+    }
+
     #[test]
     fn current_or_seal_extends_retention_without_a_log_append() {
         let path = temp_path();
@@ -634,19 +647,11 @@ mod tests {
         // A repeat request finds the current session and extends retention
         // without appending.
         let before = std::fs::metadata(&path).unwrap().len();
-        assert!(store
-            .current_or_seal("fp-x", 9_000, 1_500, &mut || Err(io::Error::other(
-                "cache miss"
-            )))
-            .is_ok());
+        assert!(reuse_only(&store, "fp-x", 9_000, 1_500).is_ok());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
 
         // Past the validity period, the channel needs a fresh session...
-        assert!(store
-            .current_or_seal("fp-x", 12_000, 3_000, &mut || Err(io::Error::other(
-                "cache miss"
-            )))
-            .is_err());
+        assert!(reuse_only(&store, "fp-x", 12_000, 3_000).is_err());
         // ...but the record keeps serving by id until its retention deadline.
         assert!(store.get_session(&id, 5_000).is_some());
         assert!(store.get_session(&id, 9_000).is_none());
@@ -663,18 +668,10 @@ mod tests {
             .current_or_seal("fp-x", 9_000, 1_000, &mut || Ok(s.clone()))
             .unwrap();
 
-        assert!(store
-            .current_or_seal("fp-x", 9_000, 1_500, &mut || Err(io::Error::other(
-                "cache miss"
-            )))
-            .is_ok());
+        assert!(reuse_only(&store, "fp-x", 9_000, 1_500).is_ok());
         // Validity lapsed: no longer current, still resolvable
         // by id for receipts that cite it.
-        assert!(store
-            .current_or_seal("fp-x", 9_000, 2_000, &mut || Err(io::Error::other(
-                "cache miss"
-            )))
-            .is_err());
+        assert!(reuse_only(&store, "fp-x", 9_000, 2_000).is_err());
         assert!(store.get_session(&id, 2_000).is_some());
     }
 
