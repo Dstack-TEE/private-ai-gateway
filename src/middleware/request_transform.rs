@@ -2634,6 +2634,7 @@ mod tests {
             engine: None,
             reasoning_format: None,
             reasoning_policy: None,
+            hoist_system_messages: false,
         };
         let bodies = build_candidates(
             &params,
