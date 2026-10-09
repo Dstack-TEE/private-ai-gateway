@@ -2633,6 +2633,21 @@ mod tests {
     }
 
     #[test]
+    fn an_undeclared_route_serves_only_the_compatible_surfaces() {
+        let route = declared_route("undeclared", vec![]);
+        for path in [
+            CHAT_COMPLETIONS_PATH,
+            COMPLETIONS_PATH,
+            EMBEDDINGS_PATH,
+            MESSAGES_PATH,
+        ] {
+            assert!(route.serves(path), "{path}");
+        }
+        assert!(!route.serves(RESPONSES_PATH));
+        assert!(!route.serves(SYSTEMONE_PATH));
+    }
+
+    #[test]
     fn build_candidates_calls_a_declared_route_only_on_listed_paths() {
         let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
         let bodies = build_candidates(

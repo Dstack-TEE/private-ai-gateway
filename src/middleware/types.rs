@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{ServiceError, UpstreamVerificationError, SYSTEMONE_PATH};
+use crate::aggregator::service::{
+    ServiceError, UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    EMBEDDINGS_PATH, MESSAGES_PATH,
+};
 
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
@@ -119,6 +122,16 @@ pub struct ReasoningPolicy {
     pub omit_max_tokens: Option<bool>,
 }
 
+/// Paths a route with no `supportedEndpoints` serves: the OpenAI-compatible
+/// surfaces the gateway calls on any upstream. Native Responses and System One
+/// are served only where declared.
+pub const DEFAULT_ENDPOINTS: &[&str] = &[
+    CHAT_COMPLETIONS_PATH,
+    COMPLETIONS_PATH,
+    EMBEDDINGS_PATH,
+    MESSAGES_PATH,
+];
+
 /// One ordered failover candidate: a backend route id plus the upstream format.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -141,8 +154,7 @@ pub struct RouteCandidate {
     pub reasoning_policy: Option<ReasoningPolicy>,
     /// API paths the upstream serves. When non-empty this is the complete set:
     /// the gateway calls the route on no other path. Empty declares nothing,
-    /// and the route serves every OpenAI-compatible path except native-only
-    /// System One.
+    /// and the route serves [`DEFAULT_ENDPOINTS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_endpoints: Vec<String>,
     /// Merge every `system`/`developer` chat message into one leading `system`
@@ -161,7 +173,7 @@ impl RouteCandidate {
     /// Whether the gateway may call this route on `path`.
     pub fn serves(&self, path: &str) -> bool {
         if self.supported_endpoints.is_empty() {
-            path != SYSTEMONE_PATH
+            DEFAULT_ENDPOINTS.contains(&path)
         } else {
             self.supports_endpoint(path)
         }

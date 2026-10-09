@@ -55,8 +55,8 @@ chat streaming, reasoning, or engine parameters. Do not derive chat features
 or token estimates from `state` and `questions`.
 
 A candidate's `supportedEndpoints`, when non-empty, is the complete set of
-paths it serves; an omitted or empty list serves every OpenAI-compatible path
-except `/v1/systemone`. [`build_candidates`](../src/middleware/request_transform.rs)
+paths it serves; an omitted or empty list serves the default chat, completions,
+embeddings, and messages paths. [`build_candidates`](../src/middleware/request_transform.rs)
 skips a candidate that does not serve the path it would be called on, so a
 System One request reaches only candidates that list `/v1/systemone`, and a
 chat request never reaches a native-only System One upstream. If none qualify,
