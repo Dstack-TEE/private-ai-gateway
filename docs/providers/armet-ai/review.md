@@ -152,8 +152,11 @@ provider-specific session material is used.
 ### 9. Request fidelity
 
 Chat and streaming pass end to end through the gateway (see
-[Live probe](#live-probe-2026-10-02)). **Provider evidence through live review session:** tools,
-structured outputs and error paths, as advertised.
+[Live probe](#live-probe-2026-10-02)). Tool calling passes with
+`tool_choice: auto`, non-streaming and streaming, including a follow-up turn
+with the tool result (see [Tool calling](#tool-calling-2026-10-09)).
+**Provider evidence through live review session:** structured outputs, error
+paths, and other `tool_choice` modes, as advertised.
 
 ### 10. Load balancing and cache
 
@@ -294,7 +297,8 @@ parameters now add `--enable-auto-tool-choice`, `--tool-call-parser glm47` and
 `initdata.toml`, this serving-configuration change is measured through
 `MRCONFIGID` and required a new pin. The verifier checks and the gateway
 end-to-end tests were rerun against `https://poc1.armet.ai` for
-`GLM-5.3-Flash`. Tool calling itself was not exercised (criterion 9).
+`GLM-5.3-Flash`. Tool calling was then tested separately (see
+[Tool calling](#tool-calling-2026-10-09)).
 
 | Check | Result |
 | --- | --- |
@@ -321,6 +325,22 @@ the session claims are unchanged.
 
 The new subject was pinned for this test only, as above.
 
+## Tool calling (2026-10-09)
+
+Tested through a locally run gateway against the 2026-10-09 deployment (same
+pinned subject), with `provider.aci_verified: true`, a single `get_weather`
+function tool and `tool_choice: auto`. Every request returned `200` with a
+signed receipt citing the verified ArmetAI session.
+
+| Case | Result |
+| --- | --- |
+| Non-streaming | `finish_reason: tool_calls`; one `get_weather` call with valid JSON arguments (`{"city":"Paris","unit":"celsius"}`) and a tool-call id; reasoning returned separately from content |
+| Streaming | Terminated by `[DONE]`; tool-call deltas reassemble into a valid `get_weather` call; `finish_reason: tool_calls` |
+| Follow-up turn with the tool result | `finish_reason: stop`; the answer uses the returned data, with no further tool calls |
+
+`tool_choice: required`, a named function, parallel tool calls and structured
+outputs were not tested.
+
 ## Hard reject conditions
 
 | Condition | Status |
@@ -334,7 +354,7 @@ The new subject was pinned for this test only, as above.
 | Unpublished measurement swaps | Adapter fails closed; publication process is TODO (criterion 7). |
 | Verifier fails open | Clear: every step gates, including GPU. |
 | No model-scoped evidence | Clear. |
-| Semantic post-processing | Chat and streaming pass unmodified; tools and structured outputs pending (criterion 9). |
+| Semantic post-processing | Chat, streaming and tool calling pass unmodified; structured outputs pending (criterion 9). |
 
 ## Open questions for maintainers
 
