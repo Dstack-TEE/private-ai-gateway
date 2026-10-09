@@ -97,13 +97,12 @@ item.
    same captured request once unless the deployment provides affinity or a
    shared replay store.
 
-8. **Fixed:** listings derive from the same cached verification the pin gate
-   uses, so superseded sessions (rotated evidence, removed Chutes instances) drop
-   out immediately and remain retrievable by id until retention ends. Background
-   refresh keeps caches warm on a best-effort basis
-   ([lifecycle](../upstream-verification-lifecycle.md#cache-and-background-refresh)).
-   The session store and verifier cache are per-process; multi-replica
-   deployments need affinity for pins.
+8. **Session pins need replica affinity.** The session store and verifier
+   cache are per process, so a replica lists and accepts only the sessions
+   its own verifications produced. Behind a load balancer, a client that
+   lists sessions on one replica and sends a pinned request to another is
+   refused `session_not_accepted` unless the deployment provides affinity
+   or a shared session store.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry
