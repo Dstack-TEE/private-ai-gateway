@@ -262,9 +262,11 @@
       "response.created",
       "response.in_progress",
       "response.output_item.added",
+      "response.content_part.added",
       "response.reasoning_text.delta",
       "response.reasoning_text.delta",
       "response.reasoning_text.done",
+      "response.content_part.done",
       "response.output_item.done",
       "response.output_item.added",
       "response.content_part.added",
@@ -275,11 +277,10 @@
       "response.output_item.done",
       "response.output_item.added",
       "response.function_call_arguments.delta",
-      "response.output_item.added",
-      "response.function_call_arguments.delta",
-      "response.function_call_arguments.delta",
       "response.function_call_arguments.done",
       "response.output_item.done",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
       "response.function_call_arguments.done",
       "response.output_item.done",
       "response.completed"
@@ -314,11 +315,15 @@
       "response.in_progress",
       "response.output_item.added",
       "response.function_call_arguments.delta",
-      "response.failed"
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed"
     ],
     "terminal": {
-      "status": "failed",
-      "output": [],
+      "status": "completed",
+      "output": [
+        { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "{\"x\":", "status": "completed" }
+      ],
       "usage": {
         "input_tokens": 0,
         "input_tokens_details": { "cached_tokens": 0 },
@@ -370,10 +375,10 @@
       "response.output_text.done",
       "response.content_part.done",
       "response.output_item.done",
-      "response.failed"
+      "response.completed"
     ],
     "terminal": {
-      "status": "failed",
+      "status": "completed",
       "output": [{
         "id": "msg_resp_fixture_0",
         "type": "message",
