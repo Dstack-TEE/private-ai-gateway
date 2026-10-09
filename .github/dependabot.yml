@@ -35,9 +35,11 @@ updates:
     ignore:
       - dependency-name: tauri
       - dependency-name: tauri-*
-      # src-tauri passes webview2-com interfaces to wry, so it must stay on
-      # wry's version; bump it by hand together with Tauri.
+      # src-tauri passes webview2-com and windows interfaces to wry, so both
+      # stay on wry's versions; bump them by hand together with Tauri.
       - dependency-name: webview2-com
+      - dependency-name: windows
+        update-types: ["version-update:semver-major"]
       # The desktop CLI uses k256 and sha3 only in tests, to sign evidence
       # that crates/aci-verify checks. They follow aci-verify's versions,
       # which are outside this config's scope.
@@ -45,13 +47,13 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: sha3
         update-types: ["version-update:semver-major"]
-      # windows-registry returns windows-result errors, so the two crates
-      # must be bumped together by hand.
-      - dependency-name: windows-registry
-        update-types: ["version-update:semver-major"]
-      - dependency-name: windows-result
-        update-types: ["version-update:semver-major"]
     groups:
+      # windows-registry returns windows-result errors, so the two crates
+      # must move together, major versions included.
+      windows-registry:
+        patterns:
+          - windows-registry
+          - windows-result
       desktop-cargo:
         patterns:
           - "*"
