@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -423,6 +424,16 @@ pub struct UpstreamVerificationRequest {
 #[async_trait]
 pub trait UpstreamVerifier: Send + Sync {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
+
+    /// The verification `verify(request)` would serve from cache right now, without verifying; None when `verify` would verify afresh.
+    fn cached(&self, _request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        None
+    }
+
+    /// Remaining lifetime of a timed successful cache entry; None when absent, expired, or untimed.
+    fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {
+        None
+    }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.invalidate(&request);

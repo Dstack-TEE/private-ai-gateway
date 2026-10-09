@@ -23,33 +23,37 @@ Caching follows the provider's attestation scope:
 
 Only successful verification events are cached. Failed verification is returned to the caller and is not stored as a reusable success.
 
-## Startup and configuration replacement
-
-After startup, the manager prewarms verification for configured targets. Replacing upstream configuration through the admin API constructs and validates a new runtime snapshot, publishes it, and starts another prewarm.
-
-For a router-scoped upstream, prewarm chooses one deterministic representative model. For per-model providers, it verifies each distinct upstream model.
-
-A successful prewarm also records the corresponding attested session. This makes the audit surface useful before the first user request. Request-time verification records the same content-addressed session idempotently.
-
-Prewarm results are logged after the background task finishes. They are not
-included in the startup or admin response. A failed prewarm does not prevent
-the process from serving unrelated routes. A later constrained request still
-applies the fail-closed gate.
-
 ## Cache and background refresh
 
-`verifier_cache_seconds` sets the maximum reuse period for provider-verifier
-results, and `verification_refresh_seconds` sets the proactive refresh cadence.
-[Upstream fields](configuration-reference.md#upstream-fields) lists their
-defaults and zero values.
+The manager runs one sequential task per upstream with a verifier route and
+refresh enabled. Startup verification uses this task; hot reload cancels old
+tasks and starts fresh verifiers. Startup and admin responses do not wait for it.
+Router-scoped and ACI-service upstreams refresh one representative model;
+other providers refresh each distinct upstream model.
 
-The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
+Never-attempted targets run first in stable order, then due warm entries by
+earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
+after waiting for a background permit, since caches and deadlines can change.
+The period p is a positive `verification_refresh_seconds`, or
+`max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` by default
+(240 seconds); zero disables refresh. The lead is `max(TTL - p, 0)`,
+and warm entries become due at expiry minus lead. External and ACI-service cache
+TTLs begin at verification start. ACI-service caps expiry at keyset `not_after`,
+rechecked when verification completes; appraisal uses the wall clock after the
+response. Cold requests and background refresh share its single-flight lock.
 
-The ACI-service verifier also limits its cached result to the workload keyset's
-`not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and
-the configured cache deadline.
+All tasks share `upstream_verification_concurrency` permits (default 4);
+request-time verification is independent. After success, a target cannot start
+again before its previous start plus p, including cacheless verifiers. Failure
+keeps a valid entry and retries at expiry, otherwise no earlier than start plus p.
+On Unix, cancellation or timeout kills an external verifier's process group,
+including bridge subprocesses, and reaps the child.
 
-Cache lifetime is not a promise that a connection remains safe for that duration. Every forward still enforces the cached channel binding against the connection it uses.
+Warmth is best-effort within capacity: replacements must complete before expiry;
+under sustained upstream overload cold targets may get no background retry,
+while requests still verify on demand. A previously successful target found cold
+at refresh start logs a warning with upstream and model. Every forward enforces
+the current channel binding against its connection.
 
 ## Request-time flow
 
@@ -109,14 +113,14 @@ For each request, the Chutes backend:
 The pool uses the provider's `nonce_expires_in` value when present and a
 55-second fallback otherwise. Expired entries are discarded, and selecting a
 nonce removes it from the pool. The model cache and nonce pools are in memory;
-a process restart rebuilds them through prewarm, refresh, or the next request.
+a process restart rebuilds them through background refresh or the next request.
 
 A dated live probe on 2026-05-18 observed roughly 138 to 145 seconds for cold
 Chutes evidence verification and roughly one second for warmed small prompts.
 A short 120 requests-per-minute stage and a 25-request burst completed without
 provider `429` responses. These measurements are a lower bound from one model
 and account, not a current latency or throughput guarantee. They explain why
-prewarm and background session refresh keep evidence discovery off the normal
+background verification and session refresh keep evidence discovery off the normal
 request path.
 
 To measure warmed Chutes throughput across several nonce lifetimes, run the
@@ -152,7 +156,7 @@ Each candidate goes through its own verification and binding checks. A verified 
 
 Use these surfaces when diagnosing lifecycle behavior:
 
-- gateway logs for prewarm, refresh, invalidation, and binding-mismatch messages;
+- gateway logs for refresh, invalidation, and binding-mismatch messages;
 - `GET /v1/aci/sessions` for current materialized sessions;
 - `GET /v1/admin/upstreams` for redacted active configuration and its digest;
 - `GET /v1/metrics` for gateway-owned request metrics;

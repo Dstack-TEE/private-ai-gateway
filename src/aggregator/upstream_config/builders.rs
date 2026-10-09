@@ -71,7 +71,7 @@ fn build_model_router(
 /// Whether a provider route may serve `provider.aci_verified` requests. Plain
 /// OpenAI-compatible cloud APIs have no provider attestation and are therefore
 /// ineligible for that constraint.
-fn provider_is_tee(provider: UpstreamProvider) -> bool {
+pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => false,
         UpstreamProvider::AciService
@@ -81,6 +81,29 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::SecretAi
         | UpstreamProvider::PhalaDirect => true,
     }
+}
+
+pub(super) fn has_verifier_route(
+    cfg: &UpstreamConfig,
+    config: &[UpstreamConfig],
+    options: &UpstreamRuntimeOptions,
+) -> bool {
+    provider_is_tee(cfg.provider)
+        || match options.verifier_mode {
+            UpstreamVerifierMode::None => false,
+            UpstreamVerifierMode::Preverified => true,
+            UpstreamVerifierMode::AciService => {
+                !config.iter().any(|cfg| provider_is_tee(cfg.provider))
+                    || cfg
+                        .accepted_subjects
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+                    || cfg
+                        .accepted_image_digests
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+            }
+        }
 }
 
 fn build_provider_backend(
@@ -172,50 +195,29 @@ pub(super) fn build_verifier(
     options: &UpstreamRuntimeOptions,
     sessions: &ProviderSessionRegistry,
 ) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    if let Some(provider_verifier) = build_provider_verifier(config, options, sessions)? {
-        return Ok(Some(provider_verifier));
-    }
-    match options.verifier_mode {
-        UpstreamVerifierMode::None => Ok(None),
-        UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
-            "preverified/out-of-band/v1",
-        )))),
-        UpstreamVerifierMode::AciService => {
-            let mut router = RoutingUpstreamVerifier::new();
-            for cfg in config {
-                let verifier = build_aci_service_verifier(cfg, options)?;
-                router = router.add_route(
-                    cfg.name.clone(),
-                    cfg.base_url.trim_end_matches('/').to_string(),
-                    verifier,
-                );
-            }
-            Ok(Some(Arc::new(router)))
-        }
-    }
-}
-
-fn build_provider_verifier(
-    config: &[UpstreamConfig],
-    options: &UpstreamRuntimeOptions,
-    sessions: &ProviderSessionRegistry,
-) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    if !config.iter().any(|cfg| provider_is_tee(cfg.provider)) {
-        return Ok(None);
-    }
     let mut router = RoutingUpstreamVerifier::new();
+    let mut has_routes = false;
     for cfg in config {
+        if !has_verifier_route(cfg, config, options) {
+            continue;
+        }
         let cache_seconds = cfg
             .verifier_cache_seconds
             .unwrap_or(options.verifier_cache_seconds);
         let request_timeout_seconds = cfg
             .verifier_request_timeout_seconds
             .unwrap_or(options.verifier_request_timeout_seconds);
-        let verifier: Option<Arc<dyn UpstreamVerifier>> = match cfg.provider {
+        let verifier: Arc<dyn UpstreamVerifier> = match cfg.provider {
             UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => {
-                build_global_verifier_for_config(cfg, options)?
+                match options.verifier_mode {
+                    UpstreamVerifierMode::None => continue,
+                    UpstreamVerifierMode::Preverified => Arc::new(
+                        PreverifiedUpstreamVerifier::new("preverified/out-of-band/v1"),
+                    ),
+                    UpstreamVerifierMode::AciService => build_aci_service_verifier(cfg, options)?,
+                }
             }
-            UpstreamProvider::AciService => Some(build_aci_service_verifier(cfg, options)?),
+            UpstreamProvider::AciService => build_aci_service_verifier(cfg, options)?,
             UpstreamProvider::Chutes => {
                 let session_store = sessions.chutes(&cfg.name).ok_or_else(|| {
                     UpstreamConfigError::InvalidConfig(format!(
@@ -244,19 +246,19 @@ fn build_provider_verifier(
                 if let Some(interval) = cfg.chutes_e2ee_discovery_interval_seconds {
                     verifier = verifier.with_discovery_interval_seconds(interval);
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
-            UpstreamProvider::Tinfoil => Some(Arc::new(TinfoilProviderVerifier::new_with_cache(
+            UpstreamProvider::Tinfoil => Arc::new(TinfoilProviderVerifier::new_with_cache(
                 request_timeout_seconds,
                 cache_seconds,
-            ))),
+            )),
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_api_key(token.clone());
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
             UpstreamProvider::SecretAi => {
                 let verifier = SecretAiProviderVerifier::new_with_cache(
@@ -264,7 +266,7 @@ fn build_provider_verifier(
                     cache_seconds,
                 )
                 .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
             UpstreamProvider::PhalaDirect => {
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
@@ -274,45 +276,17 @@ fn build_provider_verifier(
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
         };
-        if let Some(verifier) = verifier {
-            router = router.add_route(
-                cfg.name.clone(),
-                cfg.base_url.trim_end_matches('/').to_string(),
-                verifier,
-            );
-        }
+        router = router.add_route(
+            cfg.name.clone(),
+            cfg.base_url.trim_end_matches('/').to_string(),
+            verifier,
+        );
+        has_routes = true;
     }
-    Ok(Some(Arc::new(router)))
-}
-
-fn build_global_verifier_for_config(
-    cfg: &UpstreamConfig,
-    options: &UpstreamRuntimeOptions,
-) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    match options.verifier_mode {
-        UpstreamVerifierMode::None => Ok(None),
-        UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
-            "preverified/out-of-band/v1",
-        )))),
-        UpstreamVerifierMode::AciService => {
-            let has_explicit_aci_policy = cfg
-                .accepted_subjects
-                .as_ref()
-                .is_some_and(|ids| !ids.is_empty())
-                || cfg
-                    .accepted_image_digests
-                    .as_ref()
-                    .is_some_and(|digests| !digests.is_empty());
-            if has_explicit_aci_policy {
-                build_aci_service_verifier(cfg, options).map(Some)
-            } else {
-                Ok(None)
-            }
-        }
-    }
+    Ok(has_routes.then(|| Arc::new(router) as Arc<dyn UpstreamVerifier>))
 }
 
 fn build_aci_service_verifier(

@@ -14,10 +14,10 @@ use std::time::Duration;
 use aci_verify::decode_hex_32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
+use tokio::time::Instant;
 
-use super::current_unix_secs;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
@@ -27,6 +27,59 @@ use crate::aggregator::upstream_config::AttestationScope;
 pub enum ProviderVerifierConfigError {
     #[error("provider verifier command must not be empty")]
     EmptyCommand,
+}
+
+struct VerifierProcess {
+    child: Option<Child>,
+    #[cfg(unix)]
+    group: libc::pid_t,
+    #[cfg(test)]
+    reaped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl VerifierProcess {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.kill_on_drop(true).spawn()?;
+        Ok(Self {
+            #[cfg(unix)]
+            group: child.id().expect("spawned verifier has a pid") as libc::pid_t,
+            child: Some(child),
+            #[cfg(test)]
+            reaped: None,
+        })
+    }
+}
+
+impl Drop for VerifierProcess {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // The group belongs to this spawn; SIGKILL also stops bridge subprocesses.
+        if unsafe { libc::killpg(self.group, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "failed to kill provider verifier process group");
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            #[cfg(not(unix))]
+            if let Err(error) = child.start_kill() {
+                tracing::warn!(%error, "failed to kill provider verifier");
+            }
+            #[cfg(test)]
+            let reaped = self.reaped.take();
+            tokio::spawn(async move {
+                if let Err(error) = child.wait().await {
+                    tracing::warn!(%error, "failed to reap provider verifier");
+                }
+                #[cfg(test)]
+                if let Some(reaped) = reaped {
+                    let _ = reaped.send(());
+                }
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +96,8 @@ pub(super) struct ExternalProviderVerifier {
     cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedExternalProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
+    #[cfg(test)]
+    reaped: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ExternalProviderVerifier {
@@ -80,6 +135,8 @@ impl ExternalProviderVerifier {
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         }
     }
 
@@ -105,6 +162,8 @@ impl ExternalProviderVerifier {
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         })
     }
 
@@ -148,31 +207,70 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached(&request) {
             return event;
         }
         let _verify_guard = self.verify_lock.lock().await;
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached(&request) {
             return event;
         }
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
+    }
+
+    pub(super) fn cached(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<UpstreamVerifiedEvent> {
+        let cache_key = self.cache_key(request);
+        if self.cache_ttl_seconds == 0 {
+            return None;
+        }
+        let now = Instant::now();
+        let cached = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned")
+            .get(&cache_key)
+            .cloned();
+        match cached {
+            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
+            Some(_) => {
+                self.cache
+                    .write()
+                    .expect("external provider verifier cache poisoned")
+                    .remove(&cache_key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub(super) fn cache_remaining(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<Duration> {
+        let cache = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned");
+        cache
+            .get(&self.cache_key(request))?
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
     }
 
     pub(super) async fn refresh(
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
         let _verify_guard = self.verify_lock.lock().await;
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
     }
 
-    async fn verify_uncached(
-        &self,
-        request: UpstreamVerificationRequest,
-        cache_key: ExternalProviderVerifierCacheKey,
-    ) -> UpstreamVerifiedEvent {
+    async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let cache_key = self.cache_key(&request);
+        let started = Instant::now();
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -211,38 +309,10 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
-                self.maybe_cache_event(cache_key, &event);
+                self.maybe_cache_event(cache_key, &event, started);
                 event
             }
             Err(err) => self.failed_event(request, err),
-        }
-    }
-
-    fn cached_event(
-        &self,
-        cache_key: &ExternalProviderVerifierCacheKey,
-        request: &UpstreamVerificationRequest,
-    ) -> Option<UpstreamVerifiedEvent> {
-        if self.cache_ttl_seconds == 0 {
-            return None;
-        }
-        let now = current_unix_secs();
-        let cached = self
-            .cache
-            .read()
-            .expect("external provider verifier cache poisoned")
-            .get(cache_key)
-            .cloned();
-        match cached {
-            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
-            Some(_) => {
-                self.cache
-                    .write()
-                    .expect("external provider verifier cache poisoned")
-                    .remove(cache_key);
-                None
-            }
-            None => None,
         }
     }
 
@@ -250,12 +320,13 @@ impl ExternalProviderVerifier {
         &self,
         cache_key: ExternalProviderVerifierCacheKey,
         event: &UpstreamVerifiedEvent,
+        started: Instant,
     ) {
         if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
             return;
         }
         let cached = CachedExternalProviderEvent {
-            expires_at: current_unix_secs().saturating_add(self.cache_ttl_seconds),
+            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
             event: event.clone(),
         };
         self.cache
@@ -283,31 +354,48 @@ impl ExternalProviderVerifier {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(current_dir) = &self.current_dir {
             command.current_dir(current_dir);
         }
         for (key, value) in &self.env {
             command.env(key, value);
         }
-        let mut child = command
-            .spawn()
+        let mut process = VerifierProcess::spawn(&mut command)
             .map_err(|e| format!("failed to spawn provider verifier {program:?}: {e}"))?;
+        #[cfg(test)]
+        {
+            process.reaped = self.reaped.lock().unwrap().take();
+        }
+        let child = process.child.as_mut().expect("spawned verifier child");
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "failed to open provider verifier stdin".to_string())?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|e| format!("failed to write provider verifier stdin: {e}"))?;
-        drop(stdin);
-
-        let output = tokio::time::timeout(
-            Duration::from_secs(self.timeout_seconds),
-            child.wait_with_output(),
-        )
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stdout".to_string())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stderr".to_string())?;
+        let output = tokio::time::timeout(Duration::from_secs(self.timeout_seconds), async {
+            stdin.write_all(&input).await?;
+            drop(stdin);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (status, _, _) = tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+            )?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout: out,
+                stderr: err,
+            })
+        })
         .await
         .map_err(|_| {
             format!(
@@ -464,7 +552,7 @@ impl ExternalProviderVerifierCacheKey {
 
 #[derive(Clone, Debug)]
 struct CachedExternalProviderEvent {
-    expires_at: u64,
+    expires_at: Instant,
     event: UpstreamVerifiedEvent,
 }
 
@@ -553,4 +641,109 @@ fn parse_external_channel_bindings(
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     decode_hex_32(value).map(hex::encode)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_and_timeout_kill_and_reap_verifier_process_tree() {
+        const HELPER_ENV: &str = "ACI_VERIFIER_PROCESS_TEST_HELPER";
+        if std::env::var_os(HELPER_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .env(HELPER_ENV, "1")
+                .args([
+                    "--exact",
+                    "aci::verifier::external::process_tests::abort_and_timeout_kill_and_reap_verifier_process_tree",
+                    "--nocapture",
+                ])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        // Only this isolated test process adopts killed grandchildren, so it can
+        // reap them without relying on init's timing or changing other tests.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+            0
+        );
+        for timeout in [false, true] {
+            // The inherited pipe confirms both processes exist before advancing time.
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+            let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+            let script = format!(
+                r#"sleep 60 & printf '%s %s\n' "$$" "$!" > /proc/self/fd/{}; wait"#,
+                writer.as_raw_fd()
+            );
+            let read_pids = || {
+                drop(writer);
+                let mut ready = String::new();
+                BufReader::new(reader).read_line(&mut ready).unwrap();
+                let pids: Vec<libc::pid_t> = ready
+                    .split_whitespace()
+                    .map(|pid| pid.parse().unwrap())
+                    .collect();
+                assert_eq!(pids.len(), 2);
+                assert!(pids
+                    .iter()
+                    .all(|pid| unsafe { libc::getpgid(*pid) } == pids[0]));
+                pids
+            };
+            let (reaped, waited) = tokio::sync::oneshot::channel();
+            let pids = if timeout {
+                let verifier = ExternalProviderVerifier::with_command(
+                    "tinfoil",
+                    AttestationScope::PerRouter,
+                    vec!["sh".to_string(), "-c".to_string(), script],
+                    1,
+                )
+                .unwrap();
+                *verifier.reaped.lock().unwrap() = Some(reaped);
+                let mut run = Box::pin(verifier.run(Vec::new()));
+                assert!(futures_util::poll!(&mut run).is_pending());
+                let pids = read_pids();
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert_eq!(
+                    run.await.unwrap_err(),
+                    "provider verifier timed out after 1s"
+                );
+                pids
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", &script]);
+                let mut process = VerifierProcess::spawn(&mut command).unwrap();
+                process.reaped = Some(reaped);
+                let pids = read_pids();
+                let task = tokio::spawn(async move {
+                    process.child.as_mut().unwrap().wait().await.unwrap();
+                });
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                pids
+            };
+            waited.await.unwrap();
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
+            assert!(libc::WIFSIGNALED(status));
+            assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+            // Both the leader and its grandchild are gone, not just the direct child.
+            assert_eq!(unsafe { libc::killpg(pids[0], 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
 }

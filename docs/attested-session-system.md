@@ -19,16 +19,17 @@ session document once. Those bytes are stored and always served
 byte-identically, and the session id is their SHA-256 (spec §8). Sealing never
 calls the model and never sees user data.
 
-Background upstream verification establishes and refreshes sessions before
-traffic. Request completion records the session actually served on the
-receipt's `upstream.verified` event. Both paths write through the same
-process-owned store. `tests/service.rs::verified_upstream_binding_creates_attested_session`
+Background upstream verification refreshes the verifier cache. Listing and the
+pin gate seal sessions on demand through the same process-owned store. Request
+completion records the session actually served on the receipt's
+`upstream.verified` event. `tests/service.rs::verified_upstream_binding_creates_attested_session`
 covers the session created from a verified binding.
 
 Two deadlines govern a stored session:
 
-- The document's `expires_at` bounds its use for new forwarding decisions and
-  for the list endpoint. The validity period reuses `receipt_ttl_seconds`.
+- The document's `expires_at` is an upper bound for new forwarding decisions
+  and listing, not a freshness guarantee. Replacement or expiry of the verifier
+  cache can stop acceptance sooner. The validity period reuses `receipt_ttl_seconds`.
 - The store's `retention_until` bounds how long the session is served by id.
   Each citing receipt pushes it forward without touching the sealed bytes, so
   a session outlives every receipt that cites it (spec §8).
@@ -43,11 +44,23 @@ request -> receipt (X-Receipt-Id)
 
 ## Preflight survey
 
-`GET /v1/aci/sessions?upstream_name=&model=` reads the same store. A user can
-inspect the verified identity, channel binding, and typed claims for a model,
-and check its pinned SPKI, before releasing any data. The forwarding path
-never trusts a stored session for freshness. It forwards only on a fresh
-verification result.
+`GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the verifier's
+current cache, the same state the pin gate consults. For the queried channels,
+the list is exactly the sessions the gate accepts now without re-verifying. It never
+performs fresh verification. An empty list means no verified state is available
+now; absence does not imply refusal, because a stable-evidence verifier can
+re-derive the same id after fresh verification. Chutes lists only instances in
+the current cached event.
+
+Pins apply to the routed channel. Use `?model=<public-alias>` to survey that
+model's channels, using the same alias mapping as requests. Without middleware,
+only the default first route is listed; with middleware, all configured routes
+serving the model are listed and pin-mismatched candidates are skipped. A broad
+list can contain sessions that a particular request will not route to.
+
+Failed refresh keeps the previous entry until it expires; an older in-flight
+result cannot replace the listing. Concurrent sealing of identical material
+yields one id.
 
 ## Storage: compacted JSONL
 

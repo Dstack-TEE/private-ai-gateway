@@ -12,7 +12,7 @@ const DEFAULT_UPSTREAM_SESSION_REFRESH_SECONDS: u64 = 45;
 
 /// One configured model-endpoint to verify: the upstream's config `name`, the
 /// configured upstream `model_id`, and the endpoint origin. Drives both the
-/// verifier-cache prewarm and the attested-session writes.
+/// verifier-cache refresh and the attested-session writes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct UpstreamVerificationTarget {
     pub(super) upstream_name: String,
@@ -20,27 +20,22 @@ pub(super) struct UpstreamVerificationTarget {
     pub(super) url_origin: Option<String>,
 }
 
+impl UpstreamVerificationTarget {
+    pub(super) fn request(&self) -> crate::aggregator::service::UpstreamVerificationRequest {
+        crate::aggregator::service::UpstreamVerificationRequest {
+            upstream_name: self.upstream_name.clone(),
+            url_origin: self.url_origin.clone(),
+            model_id: self.model_id.clone(),
+            forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+            required: true,
+        }
+    }
+}
+
 pub(super) fn verification_targets(config: &[UpstreamConfig]) -> Vec<UpstreamVerificationTarget> {
-    verification_targets_for_configs(config.iter())
-}
-
-pub(super) fn verification_targets_for_refresh(
-    config: &[UpstreamConfig],
-    options: &UpstreamRuntimeOptions,
-) -> Vec<UpstreamVerificationTarget> {
-    verification_targets_for_configs(
-        config
-            .iter()
-            .filter(|cfg| verification_refresh_seconds(cfg, options).is_some()),
-    )
-}
-
-fn verification_targets_for_configs<'a>(
-    configs: impl Iterator<Item = &'a UpstreamConfig>,
-) -> Vec<UpstreamVerificationTarget> {
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
-    for cfg in configs {
+    for cfg in config {
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
         // A router's attestation is of the gateway/enclave channel itself, which
         // is identical for every model it fronts — every model resolves to the
@@ -74,12 +69,15 @@ pub(super) fn verification_refresh_seconds(
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
-        None => {
-            let cache_seconds = cfg
-                .verifier_cache_seconds
-                .unwrap_or(options.verifier_cache_seconds);
-            Some(cache_seconds.saturating_sub(60).max(1))
-        }
+        None => Some(
+            cfg.verifier_cache_seconds
+                .unwrap_or(options.verifier_cache_seconds)
+                .saturating_sub(
+                    cfg.verifier_request_timeout_seconds
+                        .unwrap_or(options.verifier_request_timeout_seconds),
+                )
+                .max(1),
+        ),
     }
 }
 

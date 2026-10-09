@@ -49,7 +49,7 @@ pub(super) struct SealedSession {
     /// The per-instance key (Chutes instance id) for a multi-instance backend;
     /// `None` for a single-channel backend.
     instance_key: Option<String>,
-    session_id: String,
+    pub(super) session_id: String,
 }
 
 /// Pick which sealed session the receipt cites. For a backend that fronts
@@ -668,7 +668,7 @@ impl AciService {
     ) -> Result<Vec<SealedSession>, ServiceError> {
         // §4.1: a direct service has no upstream hop and publishes no
         // attested sessions — this also covers the middleware commit paths
-        // and the background prewarm sink.
+        // and on-demand session listing.
         if self.serves_directly() {
             return Ok(Vec::new());
         }
@@ -839,14 +839,7 @@ impl AciService {
 
         // Each citation obligates retention for another receipt TTL.
         let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
-        if let Some(existing) =
-            self.session_store
-                .current_session(&fingerprint, retention_until, now)
-        {
-            return Ok(existing.session_id().to_string());
-        }
-
-        let session = AttestedSession::seal(SessionDocument {
+        let document = SessionDocument {
             api_version: SESSION_API_VERSION.to_string(),
             upstream_name: event.upstream_name.clone(),
             endpoint: event.url_origin.clone(),
@@ -857,17 +850,18 @@ impl AciService {
             channel_binding: channel_bindings,
             claims,
             evidence,
-        })
-        .map_err(|err| ServiceError::SessionStore(format!("seal attested session: {err}")))?;
-        let session_id = session.session_id().to_string();
-        self.session_store
-            .put_session(&fingerprint, session, retention_until, now)
+        };
+        let session = self
+            .session_store
+            .current_or_seal(&fingerprint, retention_until, now, &mut || {
+                AttestedSession::seal(document.clone()).map_err(std::io::Error::other)
+            })
             .map_err(|err| {
                 ServiceError::SessionStore(format!(
-                    "failed to persist attested session {session_id}: {err}"
+                    "failed to seal or persist attested session: {err}"
                 ))
             })?;
-        Ok(session_id)
+        Ok(session.session_id().to_string())
     }
 
     /// Lift the response-signing address out of provider claims into a verified

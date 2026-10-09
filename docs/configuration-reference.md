@@ -42,6 +42,10 @@ Minimal container configuration:
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
+| `upstream_verification_concurrency` | positive integer | `4` | Maximum concurrent background verifier-cache refreshes, including initial verification. Limits pressure on the shared verifier sidecar; request-time verification is independent. |
+
+Do not set `upstream_verification_concurrency` in production until the rollback
+window has passed: the older binary rejects unknown static configuration fields.
 
 ### Runtime state files
 
@@ -258,12 +262,15 @@ request time.
 | `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
 | `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
 | `verifier_request_timeout_seconds` | positive integer | `60` | Provider verification timeout. Zero is rejected. |
-| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - 60, 1)` | Background verification refresh cadence. Zero disables proactive refresh for this entry. |
+| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` | Background refresh period p, measured from verification start. Default max(verifier_cache_seconds - verifier_request_timeout_seconds, 1) (240 with defaults). Zero disables background verification for this entry. |
 | `session_refresh_seconds` | integer | `45` for Chutes; disabled otherwise | Chutes nonce-session refresh cadence. Zero disables it. |
 | `chutes_e2ee_api_base` | string | `https://api.chutes.ai` | Chutes discovery, evidence, and E2EE API base. Chutes only. |
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
+
+See [Cache and background refresh](upstream-verification-lifecycle.md#cache-and-background-refresh)
+for scheduling, failure retries, concurrency, and cache-warmth limits.
 
 An `aci-service` entry must provide at least one accepted subject or image
 digest and at least one accepted KMS root public key. The verifier rejects an
@@ -311,8 +318,8 @@ canonical JSON (JCS) digest.
 A `PUT` validates the complete array before it writes a temporary file and
 renames it over the active path. An invalid array returns `400` and leaves the
 active config unchanged. After the write succeeds, the gateway swaps the
-in-memory router and verifier state, then starts verification prewarm in the
-background. [Configure upstreams after startup](../deploy/README.md#configure-upstreams-after-startup)
+in-memory router and verifier state, then wakes the background verification
+supervisor. [Configure upstreams after startup](../deploy/README.md#configure-upstreams-after-startup)
 shows both calls with `curl`.
 
 ## Source provenance

@@ -79,7 +79,7 @@ const CHUTES_NONCE_C: &str = "nonce-c";
 const CHUTES_INSTANCE_B_NONCE: &str = "nonce-d";
 const CHUTES_INSTANCE_B_NONCE_B: &str = "nonce-e";
 const CHUTES_INSTANCE_B_NONCE_C: &str = "nonce-f";
-const CHUTES_PREWARMED_NONCE: &str = "nonce-prewarmed";
+const CHUTES_REFRESHED_NONCE: &str = "nonce-refreshed";
 const CHUTES_MLKEM_CT_SIZE: usize = 1088;
 const CHUTES_INFO_REQ: &[u8] = b"e2e-req-v1";
 const CHUTES_INFO_RESP: &[u8] = b"e2e-resp-v1";
@@ -1189,7 +1189,7 @@ async fn chutes_provider_pools_verified_single_use_nonces() {
 }
 
 #[tokio::test]
-async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
+async fn chutes_provider_consumes_verifier_refreshed_nonce_pool() {
     let (base_url, provider_calls, e2e_pubkey, instance_requests) =
         serve_chutes_provider_fixture().await;
     let store = Arc::new(ChutesSessionStore::new());
@@ -1202,7 +1202,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
                 instance_id: CHUTES_INSTANCE_ID.to_string(),
                 e2e_pubkey: e2e_pubkey.clone(),
                 public_key_sha256: hex::encode(sha2::Sha256::digest(&pubkey)),
-                nonces: vec![CHUTES_PREWARMED_NONCE.to_string()],
+                nonces: vec![CHUTES_REFRESHED_NONCE.to_string()],
             }],
         })
         .unwrap();
@@ -1239,7 +1239,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
     let requests = instance_requests.lock().unwrap();
     assert!(
         requests.is_empty(),
-        "prewarmed verified nonce pool should avoid /e2e/instances on the request path"
+        "refreshed verified nonce pool should avoid /e2e/instances on the request path"
     );
     drop(requests);
 
@@ -1247,7 +1247,7 @@ async fn chutes_provider_consumes_verifier_prewarmed_nonce_pool() {
     assert_eq!(calls.len(), 1);
     assert_eq!(
         calls[0].x_e2e_nonce.as_deref(),
-        Some(CHUTES_PREWARMED_NONCE)
+        Some(CHUTES_REFRESHED_NONCE)
     );
 }
 

@@ -1,17 +1,7 @@
 use serde_json::Value;
 
-use super::AciService;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
-use crate::aggregator::upstream_config::UpstreamSessionSink;
-
-impl UpstreamSessionSink for AciService {
-    fn record_session(&self, event: &UpstreamVerifiedEvent) {
-        if let Err(err) = self.record_attested_upstream_session(event) {
-            tracing::warn!(error = %err, "failed to record attested session from verification");
-        }
-    }
-}
 
 /// Maps a verified `UpstreamVerifiedEvent` onto the typed claim vocabulary for
 /// one provider. Each provider implements it, so the honesty rules for a

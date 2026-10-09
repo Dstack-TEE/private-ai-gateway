@@ -8,12 +8,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use crate::aci::digest;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
-use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError};
+use crate::aci::receipt::VerificationResult;
+use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError, UpstreamRequest};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
@@ -30,8 +35,8 @@ use builders::{build_chutes_provider_backend, build_state, config_digest};
 use dynamic::{DynamicUpstreamBackend, DynamicUpstreamVerifier};
 use validation::{
     read_config_file, session_refresh_seconds, snapshot_for, unique_upstream_models,
-    validate_config, verification_refresh_seconds, verification_targets,
-    verification_targets_for_refresh, write_config_file,
+    validate_config, verification_refresh_seconds, verification_targets, write_config_file,
+    UpstreamVerificationTarget,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,7 +187,7 @@ impl UpstreamProvider {
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
-            // prewarm probe granularity. Per-model is the safe default — it
+            // refresh probe granularity. Per-model is the safe default — it
             // never collapses channels. ACI's real scope is service-dependent
             // (router or model), resolved when ACI becomes a first-party router.
             UpstreamProvider::OpenAiCompatible
@@ -285,17 +290,6 @@ pub struct UpstreamConfigSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct UpstreamPrewarmResult {
-    pub upstream_name: String,
-    pub model_id: String,
-    pub url_origin: Option<String>,
-    pub verifier_id: String,
-    pub result: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct UpstreamSessionRefreshResult {
     pub upstream_name: String,
     pub model_id: String,
@@ -329,21 +323,13 @@ struct ConfiguredUpstreams {
     sessions: Arc<ProviderSessionRegistry>,
 }
 
-/// Sink that materializes verified upstream events into stored attested
-/// sessions. Implemented by the service; the background verification loop calls
-/// it after each verify/refresh so the session store is populated by the same
-/// verification used for serving, without a separate refresh path.
-pub trait UpstreamSessionSink: Send + Sync {
-    fn record_session(&self, event: &UpstreamVerifiedEvent);
-}
-
 #[derive(Clone)]
 pub struct UpstreamConfigManager {
     path: PathBuf,
     options: UpstreamRuntimeOptions,
     state: Arc<RwLock<Arc<ConfiguredUpstreams>>>,
     update_lock: Arc<Mutex<()>>,
-    session_sink: Arc<RwLock<Option<Arc<dyn UpstreamSessionSink>>>>,
+    reload: watch::Sender<()>,
 }
 
 impl UpstreamConfigManager {
@@ -359,15 +345,8 @@ impl UpstreamConfigManager {
             options,
             state: Arc::new(RwLock::new(state)),
             update_lock: Arc::new(Mutex::new(())),
-            session_sink: Arc::new(RwLock::new(None)),
+            reload: watch::channel(()).0,
         })
-    }
-
-    /// Attach the sink that the background verification writes attested sessions
-    /// into. Set once after the service is built, before the lifecycle is
-    /// spawned.
-    pub fn set_session_sink(&self, sink: Arc<dyn UpstreamSessionSink>) {
-        *self.session_sink.write().unwrap_or_else(|p| p.into_inner()) = Some(sink);
     }
 
     pub fn backend(&self) -> Arc<dyn UpstreamBackend> {
@@ -380,20 +359,6 @@ impl UpstreamConfigManager {
         Arc::new(DynamicUpstreamVerifier {
             state: self.state.clone(),
         })
-    }
-
-    /// The upstream config `name`s that serve `model` (matched against both the
-    /// public alias and the upstream model id). Lets a model-based preflight
-    /// query resolve to the per-channel attested sessions, which are keyed on the
-    /// upstream name rather than the model.
-    pub fn upstream_names_for_model(&self, model: &str) -> Vec<String> {
-        let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
-        state
-            .config
-            .iter()
-            .filter(|cfg| cfg.models.contains_key(model) || cfg.models.values().any(|v| v == model))
-            .map(|cfg| cfg.name.clone())
-            .collect()
     }
 
     /// Resolve `model` to the first configured upstream that serves it, with the
@@ -478,33 +443,124 @@ impl UpstreamConfigManager {
         }
         let next = Arc::new(build_state(&config, &self.options)?);
         write_config_file(&self.path, &config)?;
-        *self
-            .state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+        self.install_state(next.clone());
         Ok(Some(snapshot_for(&self.path, &next)))
     }
 
-    pub async fn prewarm_upstream_verification(&self) -> Vec<UpstreamPrewarmResult> {
-        self.run_upstream_verification(false).await
+    fn install_state(&self, state: Arc<ConfiguredUpstreams>) {
+        *self.state.write().unwrap_or_else(|p| p.into_inner()) = state;
+        self.reload.send_replace(());
     }
 
-    pub async fn refresh_upstream_verification(&self) -> Vec<UpstreamPrewarmResult> {
-        self.run_upstream_verification(true).await
-    }
-
-    pub fn verification_refresh_interval_seconds(&self) -> Option<u64> {
-        let state = self
-            .state
-            .read()
-            .expect("upstream config manager state poisoned")
-            .clone();
-        state.verifier.as_ref()?;
+    pub fn current_verification_requests(
+        &self,
+        model: Option<&str>,
+        upstream_name: Option<&str>,
+        all_routes: bool,
+    ) -> Vec<UpstreamVerificationRequest> {
+        let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let routed_upstream = if !all_routes {
+            if let Some(model) = model {
+                let Ok(body) = serde_json::to_vec(&serde_json::json!({"model": model})) else {
+                    return Vec::new();
+                };
+                let Ok(prepared) = state.backend.prepare(UpstreamRequest {
+                    body,
+                    path: None,
+                    target_route_id: None,
+                    headers: HashMap::new(),
+                }) else {
+                    return Vec::new();
+                };
+                Some(prepared.upstream_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         state
             .config
             .iter()
-            .filter_map(|cfg| verification_refresh_seconds(cfg, &self.options))
-            .min()
+            .filter(|cfg| builders::provider_is_tee(cfg.provider))
+            .filter(|cfg| upstream_name.is_none_or(|name| cfg.name == name))
+            .filter(|cfg| {
+                routed_upstream
+                    .as_ref()
+                    .is_none_or(|name| cfg.name == *name)
+            })
+            .flat_map(|cfg| {
+                verification_targets(std::slice::from_ref(cfg))
+                    .into_iter()
+                    .filter(move |target| {
+                        model.is_none_or(|model| {
+                            if cfg.provider.attestation_scope().is_per_router() {
+                                cfg.models.contains_key(model)
+                            } else {
+                                cfg.models.get(model) == Some(&target.model_id)
+                            }
+                        })
+                    })
+            })
+            .map(|target| target.request())
+            .collect()
+    }
+
+    pub async fn run_verification_refresh(self: Arc<Self>, permits: Arc<Semaphore>) {
+        let mut reload = self.reload.subscribe();
+        let mut tasks = JoinSet::new();
+        loop {
+            reload.borrow_and_update();
+            let state = self.state.read().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(verifier) = &state.verifier {
+                for cfg in &state.config {
+                    if !builders::has_verifier_route(cfg, &state.config, &self.options) {
+                        continue;
+                    }
+                    let Some(period) = verification_refresh_seconds(cfg, &self.options) else {
+                        continue;
+                    };
+                    let cache_seconds = cfg
+                        .verifier_cache_seconds
+                        .unwrap_or(self.options.verifier_cache_seconds);
+                    let mut targets = verification_targets(std::slice::from_ref(cfg));
+                    if cfg.provider == UpstreamProvider::AciService
+                        || (matches!(
+                            cfg.provider,
+                            UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic
+                        ) && matches!(
+                            self.options.verifier_mode,
+                            UpstreamVerifierMode::AciService
+                        ))
+                    {
+                        // ACI-service verifiers keep one cache per service; refresh one representative.
+                        targets.truncate(1);
+                    }
+                    tasks.spawn(refresh_upstream(
+                        verifier.clone(),
+                        targets,
+                        Duration::from_secs(cache_seconds.saturating_sub(period)),
+                        Duration::from_secs(period),
+                        permits.clone(),
+                    ));
+                }
+            }
+            loop {
+                tokio::select! {
+                    changed = reload.changed() => {
+                        if changed.is_err() { return; }
+                        break;
+                    }
+                    result = tasks.join_next(), if !tasks.is_empty() => {
+                        if let Some(Err(err)) = result {
+                            tracing::error!(error = %err, "upstream verification refresh task failed");
+                        }
+                    }
+                }
+            }
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
     }
 
     pub fn session_refresh_interval_seconds(&self) -> Option<u64> {
@@ -520,62 +576,6 @@ impl UpstreamConfigManager {
             .filter(|cfg| cfg.provider == UpstreamProvider::Chutes)
             .filter_map(session_refresh_seconds)
             .min()
-    }
-
-    async fn run_upstream_verification(&self, refresh: bool) -> Vec<UpstreamPrewarmResult> {
-        let (verifier, targets, sink) = {
-            let state = self
-                .state
-                .read()
-                .expect("upstream config manager state poisoned")
-                .clone();
-            let Some(verifier) = state.verifier.clone() else {
-                return Vec::new();
-            };
-            let targets = if refresh {
-                verification_targets_for_refresh(&state.config, &self.options)
-            } else {
-                verification_targets(&state.config)
-            };
-            let sink = self
-                .session_sink
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            (verifier, targets, sink)
-        };
-
-        let mut results = Vec::with_capacity(targets.len());
-        for target in targets {
-            let request = UpstreamVerificationRequest {
-                upstream_name: target.upstream_name.clone(),
-                url_origin: target.url_origin.clone(),
-                model_id: target.model_id.clone(),
-                forwarded_body_hash: digest::sha256_hex(b""),
-                required: true,
-            };
-            let event = if refresh {
-                verifier.refresh(request).await
-            } else {
-                verifier.verify(request).await
-            };
-            // Materialize the verified state into the session store, keeping the
-            // preflight view fresh independent of traffic. (The completion path
-            // also writes the session it served; writes are idempotent +
-            // content-addressed, so they converge on one record.)
-            if let Some(sink) = sink.as_ref() {
-                sink.record_session(&event);
-            }
-            results.push(UpstreamPrewarmResult {
-                upstream_name: target.upstream_name,
-                model_id: target.model_id,
-                url_origin: target.url_origin,
-                verifier_id: event.verifier_id,
-                result: event.result.as_str().to_string(),
-                reason: event.reason,
-            });
-        }
-        results
     }
 
     pub async fn refresh_provider_sessions(&self) -> Vec<UpstreamSessionRefreshResult> {
@@ -701,5 +701,99 @@ impl ProviderSessionRegistry {
 
     fn chutes(&self, upstream_name: &str) -> Option<Arc<ChutesSessionStore>> {
         self.chutes.get(upstream_name).cloned()
+    }
+}
+
+struct VerificationTargetState {
+    target: UpstreamVerificationTarget,
+    not_before: Instant,
+    last_start: Option<Instant>,
+    succeeded: bool,
+}
+
+async fn refresh_upstream(
+    verifier: Arc<dyn UpstreamVerifier>,
+    targets: Vec<UpstreamVerificationTarget>,
+    lead: Duration,
+    period: Duration,
+    permits: Arc<Semaphore>,
+) {
+    let started = Instant::now();
+    let mut targets: Vec<_> = targets
+        .into_iter()
+        .map(|target| VerificationTargetState {
+            target,
+            not_before: started,
+            last_start: None,
+            succeeded: false,
+        })
+        .collect();
+    let select = |targets: &[VerificationTargetState]| {
+        let now = Instant::now();
+        let mut selected = None;
+        let mut earliest_start = None;
+        for (index, state) in targets.iter().enumerate() {
+            let expiry = verifier
+                .cache_remaining(&state.target.request())
+                .map(|remaining| now + remaining);
+            // 0: never attempted; 1: warm, earliest expiry first; 2: cold, oldest attempt first.
+            let (priority, due) = match (state.last_start, expiry) {
+                (None, _) => ((0, None), state.not_before),
+                (Some(_), Some(expiry)) => (
+                    (1, Some(expiry)),
+                    expiry
+                        .checked_sub(lead)
+                        .unwrap_or(expiry)
+                        .max(state.not_before),
+                ),
+                (Some(last_start), None) => ((2, Some(last_start)), state.not_before),
+            };
+            earliest_start =
+                Some(earliest_start.map_or(due, |earliest: Instant| earliest.min(due)));
+            if due <= now && selected.as_ref().is_none_or(|(_, key)| priority < *key) {
+                selected = Some((index, priority));
+            }
+        }
+        (selected.map(|(index, _)| index), earliest_start)
+    };
+    loop {
+        let (selected, earliest_start) = select(&targets);
+        if selected.is_none() {
+            let Some(due) = earliest_start else {
+                return;
+            };
+            tokio::time::sleep_until(due).await;
+            continue;
+        }
+        let Ok(permit) = permits.acquire().await else {
+            return;
+        };
+        // Requests can replace caches and sibling deadlines can change while queued.
+        let Some(index) = select(&targets).0 else {
+            continue;
+        };
+        let state = &mut targets[index];
+        let request = state.target.request();
+        if state.succeeded && verifier.cache_remaining(&request).is_none() {
+            tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, "upstream verification cache was cold before refresh");
+        }
+        let refresh_started = Instant::now();
+        state.last_start = Some(refresh_started);
+        let event = verifier.refresh(request.clone()).await;
+        drop(permit);
+        let completed = Instant::now();
+        let remaining = verifier.cache_remaining(&request);
+        if event.result == VerificationResult::Verified {
+            state.succeeded = true;
+            state.not_before = refresh_started + period;
+        } else {
+            state.not_before =
+                remaining.map_or(refresh_started + period, |remaining| completed + remaining);
+        }
+        if let Some(reason) = &event.reason {
+            tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), reason = %reason, "upstream verification refresh finished");
+        } else {
+            tracing::info!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), "upstream verification refresh finished");
+        }
     }
 }

@@ -21,6 +21,9 @@ use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
 
+mod aci_service;
+mod session_pinning;
+
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
 }
@@ -802,7 +805,8 @@ fi"#
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
-        expires_at: 10,
+        expires_at: tokio::time::Instant::now(),
+        not_after: u64::MAX,
         evidence: Some(json!({
             "digest": format!("sha256:{}", "11".repeat(32)),
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
@@ -827,8 +831,8 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
     assert_eq!(event.channel_bindings, cached.channel_bindings);
 }
 
-#[tokio::test]
-async fn aci_service_refresh_bypasses_the_cached_verification() {
+#[tokio::test(start_paused = true)]
+async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     // Nothing listens on port 1, so any fresh verification fails fast.
     let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
         "http://127.0.0.1:1",
@@ -845,7 +849,8 @@ async fn aci_service_refresh_bypasses_the_cached_verification() {
     )
     .unwrap()
     .with_cached(CachedAciServiceVerification {
-        expires_at: u64::MAX,
+        expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        not_after: u64::MAX,
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "http://127.0.0.1:1".to_string(),
@@ -861,14 +866,25 @@ async fn aci_service_refresh_bypasses_the_cached_verification() {
     };
 
     let cached = verifier.verify(request.clone()).await;
-    let refreshed = verifier.refresh(request).await;
+    tokio::time::advance(std::time::Duration::from_secs(240)).await;
+    let refreshed = verifier.refresh(request.clone()).await;
 
     assert_eq!(cached.result, VerificationResult::Verified);
+    assert_eq!(refreshed.result, VerificationResult::Failed);
+    let retained = verifier
+        .cached(&request)
+        .expect("failed refresh keeps the old cache");
+    assert_eq!(retained.channel_bindings, cached.channel_bindings);
     assert_eq!(
-        refreshed.result,
-        VerificationResult::Failed,
-        "refresh must re-verify instead of returning the cached event"
+        verifier.verify(request.clone()).await.channel_bindings,
+        cached.channel_bindings
     );
+    let remaining = verifier.cache_remaining(&request).unwrap();
+    tokio::time::advance(remaining - std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_some());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_none());
+    assert!(verifier.cache_remaining(&request).is_none());
 }
 
 #[test]

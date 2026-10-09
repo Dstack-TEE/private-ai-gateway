@@ -13,11 +13,10 @@ use private_ai_gateway::aci::upstream::{
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, ServiceError,
-    UpstreamVerificationError,
+    UpstreamVerificationError, UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
 use private_ai_gateway::aggregator::session_store::SessionStore;
-use private_ai_gateway::aggregator::upstream_config::UpstreamSessionSink;
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
@@ -45,32 +44,18 @@ struct StubUpstream {
 struct FailingSessionStore;
 
 impl SessionStore for FailingSessionStore {
-    fn put_session(
+    fn current_or_seal(
         &self,
         _fingerprint: &str,
-        _session: AttestedSession,
         _retention_until: u64,
         _now: u64,
-    ) -> std::io::Result<u64> {
+        _seal: &mut dyn FnMut() -> std::io::Result<AttestedSession>,
+    ) -> std::io::Result<AttestedSession> {
         Err(std::io::Error::other("session store unavailable"))
     }
 
     fn get_session(&self, _session_id: &str, _now: u64) -> Option<AttestedSession> {
         None
-    }
-
-    fn current_session(
-        &self,
-        _fingerprint: &str,
-        _retention_until: u64,
-        _now: u64,
-    ) -> Option<AttestedSession> {
-        // Always a miss, so the caller falls through to the failing `put_session`.
-        None
-    }
-
-    fn list_sessions(&self, _upstream_name: Option<&str>, _now: u64) -> Vec<AttestedSession> {
-        Vec::new()
     }
 }
 
@@ -135,6 +120,13 @@ impl UpstreamBackend for StubUpstream {
 }
 
 fn make_service_raw(body: &[u8]) -> (AciService, ReceivedBody) {
+    make_service_raw_with_verifier(body, None)
+}
+
+fn make_service_raw_with_verifier(
+    body: &[u8],
+    verifier: Option<Arc<dyn UpstreamVerifier>>,
+) -> (AciService, ReceivedBody) {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let (upstream, received) = StubUpstream::new(body);
@@ -146,14 +138,25 @@ fn make_service_raw(body: &[u8]) -> (AciService, ReceivedBody) {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
     };
-    let svc = AciService::new(
-        keys,
-        quoter,
-        upstream,
-        store,
-        cfg,
-        Arc::new(FixedClock(1_700_000_000)),
-    )
+    let svc = match verifier {
+        Some(verifier) => AciService::new_with_upstream_verifier(
+            keys,
+            quoter,
+            upstream,
+            verifier,
+            store,
+            cfg,
+            Arc::new(FixedClock(1_700_000_000)),
+        ),
+        None => AciService::new(
+            keys,
+            quoter,
+            upstream,
+            store,
+            cfg,
+            Arc::new(FixedClock(1_700_000_000)),
+        ),
+    }
     .unwrap();
     (svc, received)
 }
@@ -442,8 +445,9 @@ async fn session_is_per_tee_channel_not_per_model() {
         session_id_of(&r2),
         "same TEE channel, different models -> one session"
     );
-    // And only one session is stored for the channel.
-    assert_eq!(svc.list_attested_sessions(Some("stub-upstream")).len(), 1);
+    assert!(svc
+        .get_attested_session(&session_id_of(&r1).unwrap())
+        .is_some());
 }
 
 #[tokio::test]
@@ -710,8 +714,7 @@ fn service_refuses_test_keys_in_production_mode() {
 }
 
 #[tokio::test]
-async fn background_verification_writes_inspectable_session_into_the_store() {
-    let (service, _) = make_service(b"{}");
+async fn listing_seals_an_inspectable_cached_session_on_demand() {
     let event = UpstreamVerifiedEvent {
         provider_type: Some("tinfoil".to_string()),
         url_origin: Some("https://preflight-upstream".to_string()),
@@ -724,15 +727,20 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
         ..verified_event("preflight-upstream", "preflight-model")
     };
 
-    // Nothing verified yet — nothing to inspect.
-    assert!(service.list_attested_sessions(None).is_empty());
-
-    // The background verification writes the session through the sink — pure
-    // attestation, no client request and no body. The preflight API then reads
-    // this same store.
-    service.record_session(&event);
-
-    let listed = service.list_attested_sessions(Some("preflight-upstream"));
+    let (service, _) = make_service_raw_with_verifier(
+        b"{}",
+        Some(Arc::new(
+            private_ai_gateway::aci::verifier::StaticUpstreamVerifier::new(event.clone()),
+        )),
+    );
+    let requests = [UpstreamVerificationRequest {
+        upstream_name: event.upstream_name.clone(),
+        url_origin: event.url_origin.clone(),
+        model_id: event.model_id.clone(),
+        forwarded_body_hash: private_ai_gateway::aci::digest::sha256_hex(b""),
+        required: true,
+    }];
+    let listed = service.list_current_sessions(&requests).unwrap();
     assert_eq!(listed.len(), 1);
     let session = &listed[0];
     let document = session.document();
@@ -747,12 +755,10 @@ async fn background_verification_writes_inspectable_session_into_the_store() {
     // Resolvable by its content-addressed id too.
     assert!(service.get_attested_session(session.session_id()).is_some());
 
-    // Re-verifying the unchanged channel is idempotent: the store's channel
-    // dedup returns the live session instead of sealing a new document (and a
-    // later completion path references this same session rather than copying).
+    // Listing unchanged material reuses the sealed document; forwarding can
+    // reference the same session afterward.
     let id = session.session_id().to_string();
-    service.record_session(&event);
-    let after = service.list_attested_sessions(Some("preflight-upstream"));
+    let after = service.list_current_sessions(&requests).unwrap();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].session_id(), id);
 }
@@ -816,4 +822,42 @@ async fn unconstrained_request_forwards_and_records_failed_event() {
         reason.contains("no upstream verifier"),
         "reason should explain why result is failed, got {reason:?}"
     );
+}
+
+#[tokio::test]
+async fn session_listing_propagates_persistence_failure() {
+    let event = verified_event("stub-upstream", "model");
+    let (service, _) = make_service_raw_with_verifier(
+        b"{}",
+        Some(Arc::new(
+            private_ai_gateway::aci::verifier::StaticUpstreamVerifier::new(event),
+        )),
+    );
+    let service = service.with_session_store(Arc::new(FailingSessionStore));
+    let config = common::session_config(serde_json::json!([{
+        "name": "stub-upstream", "base_url": "http://stub-upstream",
+        "provider": "phala-direct",
+        "models": {"model": "model"},
+    }]));
+    let router = private_ai_gateway::http::build_router_with_admin(Arc::new(service), config, None);
+    use tower::ServiceExt;
+    let response = router
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/aci/sessions")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8(body.to_vec())
+        .unwrap()
+        .contains("session store unavailable"));
 }

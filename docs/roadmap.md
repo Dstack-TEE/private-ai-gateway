@@ -8,7 +8,7 @@ Last reviewed: 2026-09-28.
 
 - OpenAI chat, completions, embeddings, and Responses endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
-- Runtime upstream replacement: validated, redacted, atomically persisted, prewarmed, and refreshed in the background.
+- Runtime upstream replacement: validated, redacted, atomically persisted, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
 - Fail-closed request constraints and session allowlists.
 - Signed receipts, attestation reports, and immutable attested sessions.
@@ -62,7 +62,7 @@ These are gaps in the implementation. What ACI does not cover by design is in
 - A durable receipt store that survives restarts and serves multiple replicas.
 - Production guidance for state backup, recovery, permissions, growth, replica ownership, health checks, and alerting.
 - Metrics for verification cache health, refresh results, binding mismatches, and the Chutes nonce pool.
-- Per-upstream refresh scheduling, a real nonce count on the Chutes `refreshed_via_verifier` path, and a low-watermark nonce refill.
+- A real nonce count on the Chutes `refreshed_via_verifier` path and a low-watermark nonce refill.
 - A pinned runner image or reviewed prebuilt binary instead of the runtime apt and rustup bootstrap.
 - Multi-region identity and state: KMS application identity, receipt locality, failover, and session availability.
 

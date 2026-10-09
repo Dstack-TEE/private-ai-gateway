@@ -759,11 +759,10 @@ async fn attested_session_lookup_returns_audit_record() {
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["sessions"][0]["session_id"], session_id);
-    // The broad list keeps the integrity digest but strips the evidence bytes;
-    // fetch a single session by id for the full bundle (see above).
-    assert!(body["sessions"][0]["evidence"]["digest"].is_string());
-    assert!(body["sessions"][0]["evidence"].get("data").is_none());
+    assert!(
+        body["sessions"].as_array().unwrap().is_empty(),
+        "a router without upstream config lists no sessions"
+    );
 
     // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
     let app = build_router(h.service.clone());

@@ -4,7 +4,7 @@
 Boots the gateway with one router upstream (NEAR AI or Tinfoil) and a short
 `verification_refresh_seconds`, then — making NO inference request — confirms:
 
-  1. the boot prewarm writes the channel session (it appears in /v1/aci/sessions), and
+  1. initial background verification makes the channel session listable, and
   2. the background refresh re-verifies it: a session with a newer `established_at`
      appears, with no inference traffic.
 
@@ -13,8 +13,6 @@ content-addressed record of one verification; a refresh is a new (fresh,
 nonce-bound) verification, so a provider whose attestation carries a freshness
 nonce (NEAR AI) correctly mints a new immutable session each cycle, while one
 whose attestation is static (Tinfoil) re-seals the same id. Both are "refreshed".
-Superseded sessions are retained until their TTL so receipts can still resolve
-them.
 
 Usage (from scripts/, with the provider key in the environment):
     uv run python live_e2e/router_refresh_smoke.py tinfoil
@@ -135,7 +133,7 @@ def main() -> int:
                     pass
                 time.sleep(0.5)
 
-            # 1. Prewarm writes the session (no inference request made).
+            # 1. Initial verification makes the session listable (no inference request made).
             first = None
             deadline = time.time() + 90
             while time.time() < deadline:
@@ -145,11 +143,11 @@ def main() -> int:
                     break
                 time.sleep(1)
             if not first:
-                print("FAIL: prewarm did not write a session; log tail:\n", log_path.read_text()[-1000:])
+                print("FAIL: initial verification did not make a session listable; log tail:\n", log_path.read_text()[-1000:])
                 return 1
             est0 = max(s.get("established_at", 0) for s in first)
             ids0 = sorted(s.get("session_id") for s in first)
-            print(f"  prewarm: {len(first)} session(s), established_at={est0}, ids={ids0}")
+            print(f"  initial: {len(first)} session(s), established_at={est0}, ids={ids0}")
 
             # 2. The refresh loop re-verifies the channel: a session with a newer
             #    established_at appears (id rotates for nonce-bound attestation,
@@ -160,7 +158,7 @@ def main() -> int:
                 if sessions and max(s.get("established_at", 0) for s in sessions) > est0:
                     est1 = max(s.get("established_at", 0) for s in sessions)
                     ids1 = sorted(s.get("session_id") for s in sessions)
-                    # Is the freshest session the prewarm one re-sealed, or a new
+                    # Is the freshest session the initial one re-sealed, or a new
                     # immutable session (nonce-bound attestation)?
                     fresh_ids = {s.get("session_id") for s in sessions if s.get("established_at", 0) == est1}
                     re_sealed = fresh_ids <= set(ids0)
@@ -168,7 +166,7 @@ def main() -> int:
                     print(
                         f"\nPASS: router channel re-verified by the background refresh "
                         f"(established_at {est0} -> {est1}; "
-                        f"{'same id, re-sealed' if re_sealed else 'fresh immutable session, prior retained'})."
+                        f"{'same id, re-sealed' if re_sealed else 'fresh immutable session, prior retrievable by id'})."
                     )
                     return 0
                 time.sleep(1)

@@ -88,6 +88,7 @@ struct GatewayConfigFile {
     enable_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
+    upstream_verification_concurrency: usize,
 }
 
 impl Default for GatewayConfigFile {
@@ -105,6 +106,7 @@ impl Default for GatewayConfigFile {
             enable_e2ee: true,
             dstack_endpoint: None,
             middleware: None,
+            upstream_verification_concurrency: 4,
         }
     }
 }
@@ -128,6 +130,11 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
     let config: GatewayConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
+    if config.upstream_verification_concurrency == 0 {
+        return Err(
+            "gateway upstream_verification_concurrency must be greater than zero".to_string(),
+        );
+    }
     Ok(config)
 }
 
@@ -562,16 +569,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // The background upstream verification keeps the attested-session store fresh
-    // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
-    // (preflight) is populated before any traffic. (The completion path also
-    // writes the session it served; writes are idempotent + content-addressed.)
-    // Attach the sink before spawning the lifecycle so the boot prewarm populates
-    // the store.
-    upstream_config.set_session_sink(service.clone());
-    spawn_upstream_lifecycle(upstream_config.clone());
+    spawn_upstream_lifecycle(
+        upstream_config.clone(),
+        gateway_config.upstream_verification_concurrency,
+    );
     if let Some((puller, initial_pull_succeeded)) = upstream_puller {
-        spawn_upstream_pull(puller, upstream_config.clone(), initial_pull_succeeded);
+        spawn_upstream_pull(puller, initial_pull_succeeded);
     }
 
     let app = if let Some(middleware_config) = middleware_config {
@@ -622,11 +625,7 @@ fn log_pull_outcome(outcome: &PullRefreshOutcome) {
     }
 }
 
-fn spawn_upstream_pull(
-    puller: UpstreamConfigPuller,
-    upstream_config: Arc<UpstreamConfigManager>,
-    initial_pull_succeeded: bool,
-) {
+fn spawn_upstream_pull(puller: UpstreamConfigPuller, initial_pull_succeeded: bool) {
     tokio::spawn(async move {
         let refresh_seconds = puller.refresh_seconds();
         let initial_failure_delay = 5_u64.min(refresh_seconds);
@@ -640,16 +639,9 @@ fn spawn_upstream_pull(
             tokio::time::sleep(Duration::from_secs(next_delay_seconds)).await;
             match puller.refresh().await {
                 Ok(outcome) => {
-                    let updated = matches!(outcome, PullRefreshOutcome::Updated { .. });
                     log_pull_outcome(&outcome);
                     failure_delay_seconds = initial_failure_delay;
                     next_delay_seconds = jittered_refresh_seconds(refresh_seconds);
-                    if updated {
-                        let manager = upstream_config.clone();
-                        tokio::spawn(async move {
-                            log_prewarm_results(manager.prewarm_upstream_verification().await);
-                        });
-                    }
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -679,25 +671,9 @@ fn jittered_refresh_seconds(refresh_seconds: u64) -> u64 {
         .max(1)
 }
 
-fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
-    let prewarm_config = upstream_config.clone();
-    tokio::spawn(async move {
-        let results = prewarm_config.prewarm_upstream_verification().await;
-        log_prewarm_results(results);
-    });
-
-    let verification_config = upstream_config.clone();
-    tokio::spawn(async move {
-        loop {
-            let Some(seconds) = verification_config.verification_refresh_interval_seconds() else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            };
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
-            let results = verification_config.refresh_upstream_verification().await;
-            log_prewarm_results(results);
-        }
-    });
+fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>, concurrency: usize) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    tokio::spawn(upstream_config.clone().run_verification_refresh(permits));
 
     let session_config = upstream_config;
     tokio::spawn(async move {
@@ -761,32 +737,6 @@ async fn compact_session_log(store: Arc<JsonlSessionStore>) -> Result<usize, Str
         .await
         .map_err(|err| format!("compaction task failed: {err}"))?
         .map_err(|err| err.to_string())
-}
-
-fn log_prewarm_results(
-    results: Vec<private_ai_gateway::aggregator::upstream_config::UpstreamPrewarmResult>,
-) {
-    for result in results {
-        match result.reason {
-            Some(reason) => tracing::warn!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                reason = %reason,
-                "upstream verification prewarm finished"
-            ),
-            None => tracing::info!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                "upstream verification prewarm finished"
-            ),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -948,6 +898,15 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
+    fn gateway_config_rejects_zero_verification_concurrency() {
+        let path = temp_path("verification-concurrency");
+        std::fs::write(&path, r#"{"upstream_verification_concurrency":0}"#).unwrap();
+        let err = load_gateway_config(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("upstream_verification_concurrency must be greater than zero"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn gateway_config_rejects_removed_fields() {
         for (name, body) in [
             ("receipt-ttl", r#"{"receipt_ttl_seconds": 3600}"#),
@@ -1100,6 +1059,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert!(config.enable_e2ee);
+        assert_eq!(config.upstream_verification_concurrency, 4);
         let _ = std::fs::remove_file(config_path);
     }
 

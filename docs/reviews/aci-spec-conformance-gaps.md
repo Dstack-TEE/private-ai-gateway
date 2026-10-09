@@ -97,16 +97,12 @@ item.
    same captured request once unless the deployment provides affinity or a
    shared replay store.
 
-8. **Session validity is advertised far longer than a session can actually
-    serve.** `expires_at` is set to `now + receipt_ttl_seconds` (default
-    3600), but each verification round mints a fresh nonce, so the evidence
-    digest — part of the channel fingerprint — changes every
-    `verifier_cache_seconds` (default 300) and a new session supersedes the
-    old one. The list endpoint keeps advertising the superseded session as
-    current until its `expires_at`, so a client that verified and pinned it
-    (§5.3) is refused `session_not_accepted` while the service still lists
-    it. Fix direction: end a session's validity period when a re-verification
-    supersedes it, so "current" means current.
+8. **Session pins need replica affinity.** The session store and verifier
+   cache are per process, so a replica lists and accepts only the sessions
+   its own verifications produced. Behind a load balancer, a client that
+   lists sessions on one replica and sends a pinned request to another is
+   refused `session_not_accepted` unless the deployment provides affinity
+   or a shared session store.
 
 9. **A channel with several bindings is split into one session per
     binding.** `record_attested_upstream_session` seals a session per entry

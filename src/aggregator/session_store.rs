@@ -53,38 +53,19 @@ struct SessionLogRecord {
 
 /// The session registry behind the audit endpoints.
 pub trait SessionStore: Send + Sync {
-    /// Persist a newly sealed session under its channel `fingerprint`. `ts` is
-    /// the wall-clock second the record is written; `retention_until` is the
-    /// initial retention deadline. The store assigns and returns the log
-    /// sequence number.
-    fn put_session(
-        &self,
-        fingerprint: &str,
-        session: AttestedSession,
-        retention_until: u64,
-        now: u64,
-    ) -> io::Result<u64>;
-
     /// Fetch a session by its full `bare 64-hex` id. Served until its
     /// retention deadline — past `expires_at` too, because receipts citing it
     /// may still be live (§8 retention).
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession>;
 
-    /// The channel's current session — the one whose validity period covers
-    /// `now` — extending its retention to at least `retention_until` (each
-    /// citation obligates retention for another receipt TTL). `None` tells the
-    /// caller to seal and [`put_session`](Self::put_session) a fresh document.
-    fn current_session(
+    /// Reuse the current session and extend retention, or atomically seal and persist it.
+    fn current_or_seal(
         &self,
         fingerprint: &str,
         retention_until: u64,
         now: u64,
-    ) -> Option<AttestedSession>;
-
-    /// List sessions whose validity period covers `now`, optionally filtered
-    /// by `upstream_name` (the operator's upstream config name). Sessions are
-    /// per-TEE-channel; a model→channel lookup belongs to the caller.
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession>;
+        seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
+    ) -> io::Result<AttestedSession>;
 }
 
 struct SessionEntry {
@@ -184,18 +165,6 @@ impl SessionIndex {
         }
         Some(entry.session.clone())
     }
-
-    fn list(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        let mut out: Vec<AttestedSession> = self
-            .by_id
-            .values()
-            .filter(|e| now < e.session.document().expires_at)
-            .filter(|e| upstream_name.is_none_or(|p| e.session.document().upstream_name == p))
-            .map(|e| e.session.clone())
-            .collect();
-        sort_sessions_newest_first(&mut out);
-        out
-    }
 }
 
 /// Stable presentation order for a session listing: newest first, then by id.
@@ -209,11 +178,11 @@ pub(crate) fn sort_sessions_newest_first(sessions: &mut [AttestedSession]) {
 }
 
 /// Append-only JSONL-backed [`SessionStore`]. The append log and the in-memory
-/// index sit behind separate locks, so a read never waits on a write.
+/// index sit behind separate locks; creation holds both while sealing and writing.
 ///
 /// The hot path appends a line only when a *new* session is sealed; a repeat
 /// request extends the current session's retention in the index without
-/// writing (see [`SessionStore::current_session`]).
+/// writing (see [`SessionStore::current_or_seal`]).
 /// [`JsonlSessionStore::compact`] then rewrites the file from the live index,
 /// dropping lapsed records and persisting the extended retention deadlines.
 ///
@@ -363,7 +332,7 @@ impl JsonlSessionStore {
     /// file.
     pub fn compact(&self, now: u64) -> io::Result<usize> {
         // Hold the writer across the whole rewrite so no append races the swap.
-        // Lock order is writer → index, matching `put_session`, so the two paths
+        // Lock order is writer → index, matching `current_or_seal`, so the two paths
         // can never deadlock against each other.
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
 
@@ -408,16 +377,15 @@ impl JsonlSessionStore {
     }
 }
 
-impl SessionStore for JsonlSessionStore {
-    fn put_session(
-        &self,
+impl LogWriter {
+    fn append(
+        &mut self,
         fingerprint: &str,
-        session: AttestedSession,
+        session: &AttestedSession,
         retention_until: u64,
         now: u64,
     ) -> io::Result<u64> {
-        let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
-        let seq = w.next_seq;
+        let seq = self.next_seq;
         // Refuse to write a record we cannot assign a successor to, rather than
         // overflow. Only reachable from a corrupt replayed `seq` near u64::MAX;
         // the gateway's startup compaction renumbers from zero before serving.
@@ -440,16 +408,58 @@ impl SessionStore for JsonlSessionStore {
         // No flush: `File::flush` is a no-op and the log isn't fsync'd. If
         // `file` ever becomes a `BufWriter`, restore a flush or records can sit
         // unwritten on a crash.
-        w.file.write_all(line.as_bytes())?;
-        w.next_seq = next_seq;
-        // Update the index under the writer lock so the log and index advance
-        // together: `compact` rewrites the log *from* the index, so an index that
-        // lagged a completed append could drop an on-disk record. Reads still
-        // don't wait on the file write — only on this brief index update.
+        self.file.write_all(line.as_bytes())?;
+        self.next_seq = next_seq;
+        Ok(seq)
+    }
+}
+
+#[cfg(test)]
+impl JsonlSessionStore {
+    fn put_session(
+        &self,
+        fingerprint: &str,
+        session: AttestedSession,
+        retention_until: u64,
+        now: u64,
+    ) -> io::Result<u64> {
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        let seq = writer.append(fingerprint, &session, retention_until, now)?;
         index.insert(fingerprint.to_string(), session, retention_until);
         index.evict_lapsed(now);
         Ok(seq)
+    }
+}
+
+impl SessionStore for JsonlSessionStore {
+    fn current_or_seal(
+        &self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+        seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
+    ) -> io::Result<AttestedSession> {
+        if let Some(session) = self
+            .index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .current(fingerprint, retention_until, now)
+        {
+            return Ok(session);
+        }
+        let mut writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(session) = index.current(fingerprint, retention_until, now) {
+            return Ok(session);
+        }
+        let session = seal()?;
+        writer.append(fingerprint, &session, retention_until, now)?;
+        // Update the index under the writer lock: compact rewrites the log from the index,
+        // so an index lagging a completed append could drop an on-disk record.
+        index.insert(fingerprint.to_string(), session.clone(), retention_until);
+        index.evict_lapsed(now);
+        Ok(session)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
@@ -457,25 +467,6 @@ impl SessionStore for JsonlSessionStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(session_id, now)
-    }
-
-    fn current_session(
-        &self,
-        fingerprint: &str,
-        retention_until: u64,
-        now: u64,
-    ) -> Option<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
-    }
-
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .list(upstream_name, now)
     }
 }
 
@@ -488,19 +479,21 @@ pub struct InMemorySessionStore {
 }
 
 impl SessionStore for InMemorySessionStore {
-    fn put_session(
+    fn current_or_seal(
         &self,
         fingerprint: &str,
-        session: AttestedSession,
         retention_until: u64,
         now: u64,
-    ) -> io::Result<u64> {
+        seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
+    ) -> io::Result<AttestedSession> {
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-        // Bound the store: drop entries past their retention deadline so a
-        // long-running gateway does not accumulate a session per re-verification.
-        index.insert(fingerprint.to_string(), session, retention_until);
+        if let Some(session) = index.current(fingerprint, retention_until, now) {
+            return Ok(session);
+        }
+        let session = seal()?;
+        index.insert(fingerprint.to_string(), session.clone(), retention_until);
         index.evict_lapsed(now);
-        Ok(0)
+        Ok(session)
     }
 
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession> {
@@ -508,25 +501,6 @@ impl SessionStore for InMemorySessionStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(session_id, now)
-    }
-
-    fn current_session(
-        &self,
-        fingerprint: &str,
-        retention_until: u64,
-        now: u64,
-    ) -> Option<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .current(fingerprint, retention_until, now)
-    }
-
-    fn list_sessions(&self, upstream_name: Option<&str>, now: u64) -> Vec<AttestedSession> {
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .list(upstream_name, now)
     }
 }
 
@@ -651,8 +625,19 @@ mod tests {
         assert_eq!(reopened.index.lock().unwrap().by_id.len(), 2);
     }
 
+    fn reuse_only(
+        store: &dyn SessionStore,
+        fp: &str,
+        retention: u64,
+        now: u64,
+    ) -> io::Result<AttestedSession> {
+        store.current_or_seal(fp, retention, now, &mut || {
+            Err(io::Error::other("cache miss"))
+        })
+    }
+
     #[test]
-    fn current_session_extends_retention_without_a_log_append() {
+    fn current_or_seal_extends_retention_without_a_log_append() {
         let path = temp_path();
         let store = open_store(&path);
         let s = session("https://x", 1_000, 2_000);
@@ -662,11 +647,11 @@ mod tests {
         // A repeat request finds the current session and extends retention
         // without appending.
         let before = std::fs::metadata(&path).unwrap().len();
-        assert!(store.current_session("fp-x", 9_000, 1_500).is_some());
+        assert!(reuse_only(&store, "fp-x", 9_000, 1_500).is_ok());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
 
         // Past the validity period, the channel needs a fresh session...
-        assert!(store.current_session("fp-x", 12_000, 3_000).is_none());
+        assert!(reuse_only(&store, "fp-x", 12_000, 3_000).is_err());
         // ...but the record keeps serving by id until its retention deadline.
         assert!(store.get_session(&id, 5_000).is_some());
         assert!(store.get_session(&id, 9_000).is_none());
@@ -675,16 +660,18 @@ mod tests {
     }
 
     #[test]
-    fn expired_validity_drops_out_of_listings_but_not_lookup() {
+    fn expired_validity_drops_out_of_current_but_not_lookup() {
         let store = InMemorySessionStore::default();
         let s = session("https://x", 1_000, 2_000);
         let id = s.session_id().to_string();
-        store.put_session("fp-x", s, 9_000, 1_000).unwrap();
+        store
+            .current_or_seal("fp-x", 9_000, 1_000, &mut || Ok(s.clone()))
+            .unwrap();
 
-        assert_eq!(store.list_sessions(None, 1_500).len(), 1);
-        // Validity lapsed: gone from the preflight listing, still resolvable
+        assert!(reuse_only(&store, "fp-x", 9_000, 1_500).is_ok());
+        // Validity lapsed: no longer current, still resolvable
         // by id for receipts that cite it.
-        assert!(store.list_sessions(None, 2_000).is_empty());
+        assert!(reuse_only(&store, "fp-x", 9_000, 2_000).is_err());
         assert!(store.get_session(&id, 2_000).is_some());
     }
 
@@ -693,10 +680,14 @@ mod tests {
         let store = InMemorySessionStore::default();
         let a = session("https://a", 1_000, 2_000);
         let a_id = a.session_id().to_string();
-        store.put_session("fp-a", a, 2_000, 1_000).unwrap();
+        store
+            .current_or_seal("fp-a", 2_000, 1_000, &mut || Ok(a.clone()))
+            .unwrap();
         // A later write past A's retention deadline evicts it.
         let b = session("https://b", 5_000, 10_000);
-        store.put_session("fp-b", b.clone(), 10_000, 5_000).unwrap();
+        store
+            .current_or_seal("fp-b", 10_000, 5_000, &mut || Ok(b.clone()))
+            .unwrap();
 
         assert!(store.get_session(&a_id, 5_000).is_none());
         assert!(store.get_session(b.session_id(), 5_000).is_some());
@@ -742,9 +733,12 @@ mod tests {
         // The fingerprint index survives replay too.
         assert_eq!(
             store
-                .current_session("fp-a", 5_000, 2_000)
-                .map(|s| s.session_id().to_string()),
-            Some(a.session_id().to_string())
+                .current_or_seal("fp-a", 5_000, 2_000, &mut || Err(io::Error::other(
+                    "cache miss"
+                )))
+                .unwrap()
+                .session_id(),
+            a.session_id()
         );
         let next = session("https://node-7.example.net", 1_002, 5_000);
         assert_eq!(store.put_session("fp-c", next, 5_000, 1_002).unwrap(), 2);
@@ -803,7 +797,7 @@ mod tests {
 
         let store = open_store(&path);
         assert_eq!(store.get_session(good.session_id(), 2_000), Some(good));
-        assert_eq!(store.list_sessions(None, 2_000).len(), 1);
+        assert_eq!(store.index.lock().unwrap().by_id.len(), 1);
 
         drop(store);
         cleanup(&path);
@@ -861,6 +855,62 @@ mod tests {
         assert!(reopened.get_session(swapped.session_id(), 2_000).is_none());
 
         drop(reopened);
+        cleanup(&path);
+    }
+
+    fn concurrently_seal(store: &dyn SessionStore) -> AttestedSession {
+        let barrier = std::sync::Barrier::new(2);
+        let seals = AtomicU64::new(0);
+        let sessions = std::thread::scope(|scope| {
+            let tasks: Vec<_> = [1_000, 1_001]
+                .into_iter()
+                .map(|now| {
+                    let barrier = &barrier;
+                    let seals = &seals;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store
+                            .current_or_seal("shared", 9_000, now, &mut || {
+                                seals.fetch_add(1, Ordering::SeqCst);
+                                Ok(session("https://shared", now, 5_000))
+                            })
+                            .unwrap()
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .map(|task| task.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(seals.load(Ordering::SeqCst), 1);
+        assert_eq!(sessions[0].bytes(), sessions[1].bytes());
+        sessions[0].clone()
+    }
+
+    #[test]
+    fn concurrent_current_or_seal_is_atomic_in_memory() {
+        let store = InMemorySessionStore::default();
+        let sealed = concurrently_seal(&store);
+        assert_eq!(store.get_session(sealed.session_id(), 1_002), Some(sealed));
+    }
+
+    #[test]
+    fn concurrent_current_or_seal_writes_one_replayable_jsonl_record() {
+        let path = temp_path();
+        let store = open_store(&path);
+        let sealed = concurrently_seal(&store);
+        assert_eq!(count_lines(&path), 1);
+        drop(store);
+        let replayed = open_store(&path);
+        let current = replayed
+            .current_or_seal("shared", 9_000, 1_002, &mut || {
+                panic!("replayed session must be reused")
+            })
+            .unwrap();
+        assert_eq!(current.bytes(), sealed.bytes());
+        assert_eq!(count_lines(&path), 1);
+        drop(replayed);
         cleanup(&path);
     }
 
