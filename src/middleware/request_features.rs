@@ -280,7 +280,7 @@ pub fn extract(
             }
             _ => {}
         },
-        Endpoint::Embed | Endpoint::CreateModelResponse => return None,
+        Endpoint::Embed | Endpoint::CreateModelResponse | Endpoint::SystemOne => return None,
     }
 
     // Legacy `functions` is still forwarded by the request transform, so it is
