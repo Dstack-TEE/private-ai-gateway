@@ -84,7 +84,7 @@ evidence) exactly as observed.
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
   stops there; neither in-tree verifier appraises the evidence itself
-  (conformance gaps item 5).
+  (conformance gaps item 17).
 - **Ed25519 receipts only.** A receipt keyed to any other algorithm is
   reported as a failed signature check, not verified.
 

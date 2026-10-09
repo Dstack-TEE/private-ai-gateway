@@ -1,223 +1,194 @@
-# Reference Implementation vs. ACI Spec: Known Gaps
+# Known Gaps Between This Implementation and the ACI Spec
 
-Where this implementation falls short of, or diverges from,
-[the ACI Spec](../../spec/aci.md). The spec is authoritative; these are
-implementation compromises, not spec changes. Each item is a candidate work
-item.
+This page lists the places where the gateway and its clients fall short of
+[the ACI spec](../../spec/aci.md) or behave differently from it. The spec is
+the reference. Each item is a known compromise in this implementation, not a
+change to the spec, and a candidate for future work.
 
 ## Verifier coverage
 
-1. **Client custody checks are partial and opt-in.** §9.1(5) requires the
-   verifier policy to check private-key custody (for this deployment, the
-   dstack KMS signature chain in `attestation.evidence.key_custody`). `pap`
-   checks the receipt key when run with `--accept-subject app-id:0x<hex>` and
-   `--accept-dstack-kms-root-public-key`: the chain must run from the measured
-   app ID to an accepted KMS root, and the custody entry must name a receipt
-   key in the attested keyset. Without that policy, and always in
-   verifier-ts, id-5 is a `skip`. Neither client covers E2EE or TLS keys (see
-   items 13 and 14).
-   The top-line verdict and exit code do not distinguish a skip from a pass:
-   a run can end `VERIFIED` (exit 0) with custody unevaluated. The skip and
-   its reason are always printed in the transcript and counted in the
-   verdict line; a relying party that requires §9.1(5) must gate on the
-   id-5 status, not on the exit code alone.
+1. **Key custody is checked only for the receipt key, and only on request.**
+   The spec asks verifiers to check where the workload's private keys live
+   (§9.1 check 5). `pap` checks this for the receipt key when you pass
+   `--accept-subject` and `--accept-dstack-kms-root-public-key`: the dstack
+   KMS signature chain must lead from the measured app ID to a KMS root you
+   accept, and must name a receipt key from the attested keyset. Without those
+   flags `pap` skips the check, and the TypeScript verifier always skips it.
+   Neither client checks custody of the E2EE or TLS keys (see items 13 and 14).
 
-2. **Provenance is measured, not rebuilt.** When the service publishes
-   `app_compose`, id-4 verifies `sha256(app_compose)` equals the `compose-hash`
-   measured into the quote's RTMR3, and `--accept-compose` pins that value to
-   an operator allowlist (§1.3). Nothing rebuilds `repo_url`/`repo_commit`
-   from source or ties them to the measurement, so those fields stay a label
-   to read rather than evidence; appraising them is the operator's job.
-   Against a live service both verifiers fail id-4 when no `app_compose`
-   backs the claim (§9.1(4)); only an offline audit of a stored report
-   records the honest skip.
+   A skipped check does not change the exit code, so a run can end with
+   `VERIFIED` and exit 0 without checking custody. The transcript always shows
+   the skip and the reason. If your policy requires custody, look at the
+   status of check id-5, not only the exit code.
 
-## Service conformance
+2. **The compose file is measured, but the source is not rebuilt.** When the
+   service publishes its compose file, check id-4 confirms it is the file
+   measured into the hardware quote, and `--accept-compose` limits which
+   compose files you accept. Nothing rebuilds the code from the repository and
+   commit the report names, so those two fields are only labels, and deciding
+   whether to trust them is up to you. Against a live service, both verifiers
+   fail check id-4 when the service publishes no compose file. Only an offline
+   audit of a saved report skips the check instead.
 
-3. **Receipts are in-memory only.** Receipt retention is bounded by
-   `receipt_ttl_seconds` and lost on restart. The spec permits a bounded,
-   implementation-defined retention period (§7.1), but a restart shortens it
-   silently. Sessions do better: the JSONL store survives restarts and
-   extends retention per citing receipt (§8 retention rule).
+## Gateway behavior
 
-4. **Chutes per-instance sessions keep §8.2 evidence out of the dedup
-   fingerprint, not out of the document.** The Chutes verifier's raw
-   evidence is fleet-wide and nonce-bound, so sealing it into the channel
-   fingerprint would mint a new session id for every verification round.
-   Instead, `record_attested_upstream_session` seals per-instance documents
-   with the establishing round's evidence (`data` + `digest`, §8.2), and
-   `seal_attested_session` excludes the rotating evidence digest from
-   `ChannelMaterial` for instance-scoped bindings only. Within a validity
-   window the id stays stable across rounds — re-verifying the same
-   instance resolves to the existing session, and the document it points at
-   carries auditable evidence throughout. Material changes (per-instance
-   TCB, GPU outcome, binding) still flow through the claims and binding, so
-   they mint a new session as before.
+3. **Receipts are kept only in memory.** A receipt is kept for
+   `receipt_ttl_seconds` and is lost if the gateway restarts. The spec lets an
+   implementation choose its retention period (§7.1), but a restart shortens
+   it without warning. Attested sessions are stored on disk, survive restarts,
+   and are kept as long as any receipt cites them.
 
-   Sealing the evidence into the fingerprint was tried (#142) and reverted
-   (#145): a fresh id per round appended a fresh record per instance, each
-   carrying the fleet-wide bundle, and startup replayed the whole log into
-   the index, so the process could exhaust memory before serving a request.
-   The properties this fix relies on are now the design contract, stated
-   explicitly because nothing enforces them mechanically: a session's
-   *fingerprint* must not commit to anything that changes per verification
-   round (the id still commits to the sealed document — which never changes
-   within a window, because the fingerprint gates resealing), and replay
-   must stay proportional to the live set rather than to everything
-   appended since the last compaction (#145 skips lapsed records ahead of
-   the decode). Append rate is one record per instance per validity window
-   (plus rare first-round races), not one per request.
+4. **A Chutes session keeps the evidence from the round that created it.**
+   Chutes returns one evidence bundle for all of a chute's instances, and the
+   bundle changes on every verification round because each round uses a new
+   nonce. If the bundle were part of what makes a session unique, every round
+   would create a new session for every instance. An earlier change did
+   exactly that (#142) and was reverted (#145): the session log grew without
+   bound, and replaying it at startup could run out of memory before the
+   gateway served a single request.
 
-   Residual consequences: the evidence is a point-in-time proof from the
-   window's establishing round, not from the request's own round; the
-   enforceable channel binding, not the evidence, is what each request is
-   served over. A §9.2(4) deep audit remains impossible for Chutes until a
-   chutes-specific evidence re-verifier exists (see the §9.2 audits item
-   below) — §9.2(2) (`aci` CLI upstream-2; verifier-ts
-   `checkSessionEvidence`) now passes. The session store still accepts
-   records with empty evidence (it rejects only evidence whose `data` does
-   not hash to `digest`), so a Chutes verifier that stops emitting the
-   bundle degrades to the pre-fix state with a warning in the logs rather
-   than a hard failure.
-5. **Streaming upstream errors carry no receipt.** A streaming request whose
-   upstream answers non-200 is returned as a buffered error without a
-   receipt (inherited dstack-vllm-proxy behavior,
-   `forward_chat_completion_stream_request`), while the buffered path issues
-   a receipt for the same upstream error status. Arguably outside §1.4(5) —
-   no inference completed — but the coverage is asymmetric.
+   Instead, a Chutes instance session stores the bundle from the round that
+   created it, and the bundle is left out of the fingerprint the gateway uses
+   to find a channel's current session. Re-verifying the same instance while
+   the session is valid reuses that session. A real change, such as a
+   different TCB status, GPU result, or key, still creates a new session.
+   Nothing enforces this automatically, so it stays a design rule: the
+   fingerprint must not include anything that changes on every round.
 
-6. **§5.3 membership is best-effort for multi-instance backends.** The
-   pinned-session gate runs before forwarding against the channel's current
-   session ids. A Chutes-style backend fronts many instances behind one
-   route, and the serving instance is known only after the response, so a
-   non-listed instance can serve when a sibling instance was listed. The
-   receipt's cited id exposes this to the client's §9.3(6) check.
+   The log stores each bundle once, and every instance session that uses it
+   refers to it by digest. Every stored session has its evidence: the gateway
+   rejects a verified result without evidence, and the store refuses a
+   session without it.
 
-7. **The E2EE v2 replay cache is per process.** The
-   [v2 protocol](../../spec/e2ee-v2.md#7-key-selection-validation-and-replay-protection)
-   requires rejection of a repeated
-   `(client_public_key, service_public_key, nonce)` tuple inside the acceptance
-   window. `claim_e2ee_replay` keeps that state in one
-   process. Replicas that share the same workload keyset can each accept the
-   same captured request once unless the deployment provides affinity or a
-   shared replay store.
+   Two limits remain. The stored evidence proves the instance's state when the
+   session was created, not at the time of a later request; each request is
+   still sent only over the instance's attested key. And no client can yet
+   check what the Chutes evidence itself proves (§9.2 check 4, see item 17).
+   Clients can check that the evidence matches its digest (§9.2 check 2).
 
-8. **Session pins need replica affinity.** The session store and verifier
-   cache are per process, so a replica lists and accepts only the sessions
-   its own verifications produced. Behind a load balancer, a client that
-   lists sessions on one replica and sends a pinned request to another is
-   refused `session_not_accepted` unless the deployment provides affinity
-   or a shared session store.
+5. **Failed streaming requests get no receipt.** When the upstream rejects a
+   streaming request, the gateway returns the error without a receipt, as
+   dstack-vllm-proxy did. The same error on a non-streaming request does get a
+   receipt. No inference happened, so the spec may not require a receipt, but
+   the two paths behave differently.
 
-9. **A channel with several bindings is split into one session per
-    binding.** `record_attested_upstream_session` seals a session per entry
-    in `channel_bindings`. For a Chutes-style backend that is correct (one
-    session per instance), but an `aci-service` upstream publishing several
-    service-wide TLS pins for one origin yields several sessions whose
-    records each state a tighter binding than the aggregator enforced (the
-    TLS client accepts any of the pins). The receipt cites the first, so a
-    client that pinned a sibling session passes the membership gate and then
-    fails its own §9.3(6) check. Fix direction: group bindings of one channel
-    into one session, keyed on what makes a channel distinct.
+6. **Session pinning is not exact for Chutes.** When a request lists the
+   sessions it accepts (§5.3), the gateway checks the list before forwarding,
+   against the channel's current sessions. A Chutes route serves many
+   instances, and the gateway learns which instance answered only after the
+   response. So an unlisted instance can serve a request that listed one of
+   its siblings. The receipt names the session that actually served it, so the
+   client's receipt check (§9.3 check 6) catches this.
 
-10. **Session retention can lapse before the receipts citing it.** Session
-    `retention_until` is fixed at seal time — stream start — while the
-    receipt's expiry is computed at stream end, so for a long stream the
-    session can be evicted while its citing receipt is still served. §8
-    requires the session to outlast every receipt citing it. Sub-second
-    window on the buffered paths, stream-duration window on the streaming
-    ones.
+7. **E2EE replay protection works within one process.** The
+   [E2EE v2 protocol](../../spec/e2ee-v2.md#7-key-selection-validation-and-replay-protection)
+   requires the gateway to reject a request that reuses a client key, service
+   key and nonce it has already accepted. The gateway remembers accepted
+   requests only in its own process. Replicas that share one keyset could each
+   accept the same captured request once, unless the deployment sends a client
+   to one replica or shares the replay state.
 
-11. **A verified, served request can be recorded as `result: "failed"`.**
-    `cite_served_session` matches a reported served instance only against
-    sealed sessions carrying an `instance_key`. An external verifier that
-    returns an `e2ee_public_key_sha256` binding without `key_id` (optional in
-    the contract) while the backend reports a served instance matches
-    nothing, and the receipt records the failed form on a request that was
-    verified and served. Unreachable with the bundled bridges, which always
-    set `key_id`.
+8. **Session pins work only on the replica that listed them.** Each gateway
+   process keeps its own session store and verifier cache, so a replica lists
+   and accepts only the sessions its own verifications produced. Behind a load
+   balancer, a client that lists sessions on one replica and sends a pinned
+   request to another is refused with `session_not_accepted`, unless the
+   deployment sends a client to the same replica or shares the session store.
 
-12. **The Chutes backend adds a member to the forwarded body after
-    hashing.** `request.forwarded` hashes `prepared.request.body`, and
-    `build_chutes_e2ee_request` then inserts `e2e_response_pk` into that JSON
-    before encrypting and sending. The JSON the upstream parses therefore
-    carries one member the signed hash does not commit to. ACI treats upstream
-    encryption as a channel-binding detail outside client-facing E2EE
-    extensions, but this is a body member, not encryption framing.
+9. **A channel with several keys becomes several sessions.** The gateway
+   creates one session per channel binding. For Chutes that is right, because
+   each binding is a separate instance. But an `aci-service` upstream that
+   publishes several TLS keys for one origin gets one session per key. Each
+   session claims a narrower binding than the gateway enforces, since the
+   connection accepts any of the keys. The receipt cites the first session, so
+   a client that pinned a sibling session passes the gateway's check and then
+   fails its own receipt check. The fix is to group the bindings of one
+   channel into one session.
 
-13. **TLS keys are attested without custody evidence.** The keyset publishes
-    the SPKI of a mounted certificate whose private key lives in the external
-    TLS terminator, not the workload, and no `key_custody` entry covers the
-    TLS role — so no verifier policy can check §3.3 custody for it, and a
-    client pinning that SPKI cannot tell whether TLS terminates inside the
-    TEE. The [E2EE v2 extension](../../spec/e2ee-v2.md) is the currently
-    supported mechanism that does not depend on this. Fix direction: terminate
-    TLS in the workload, or publish custody evidence for the terminator.
+10. **A session can expire before the receipts that cite it.** A session's
+    retention is set when the session is created at the start of a request,
+    while the receipt's retention is set when the response ends. For a long
+    stream, the session can be dropped while its receipt is still served. The
+    spec requires a session to outlive every receipt that cites it (§8). The
+    gap is under a second for normal requests and as long as the stream for
+    streaming ones.
 
-14. **The dstack custody policy checks only the receipt key.**
-    `verify_dstack_kms_receipt_custody` matches the `receipt` role against
-    `receipt_signing_keys`; the `e2ee-secp256k1` and `e2ee-x25519` custody
-    entries are never matched against `e2ee_public_keys`, and TLS is not
-    covered. §3.3 requires a policy to specify custody for the receipt, E2EE
-    and TLS keys.
+11. **A verified request can be recorded as failed.** The gateway matches the
+    instance that served a request against its instance sessions. If an
+    external verifier reports an E2EE binding without a `key_id` (the field is
+    optional) and the backend then reports which instance served, nothing
+    matches, and the receipt records the request as failed even though it was
+    verified and served. The bundled verifiers always set `key_id`, so this
+    cannot happen today.
 
-15. **No plausibility bound on `not_after`.** §3.1 says a verifier SHOULD
-    reject an implausibly distant expiry; no verifier here does, and the
-    service accepts any configured lifetime. §3.4's automatic expiry is the
-    only revocation that needs no coordination, so an absurd `not_after`
-    nullifies it.
+12. **The Chutes backend adds a field after the request is hashed.** The
+    receipt's `request.forwarded` hash covers the body the gateway prepared.
+    The Chutes backend then adds `e2e_response_pk` to that body before
+    encrypting and sending it, so the body Chutes reads has one field the
+    receipt does not cover. ACI treats encryption to the upstream as part of
+    the channel, but this is a field in the body, not part of the encryption.
 
-16. **The `aci-service` upstream verifier trusts `image_digest`
-    uncorroborated.** Its policy accepts an upstream when the attested
-    app id is allowlisted **or** the report's `source_provenance.image_digest`
-    is (`AciServiceVerifierPolicy::accepts_measured`). The first path is
-    measured: acceptance keys on `app-id:0x<hex>` of the app id the verified
-    RTMR3 event log yields, and the compose preimage is checked against the
-    measured `compose-hash` (an upstream publishing no `app_compose` fails
-    closed). A keyset `subject` is the workload's own claim, so it may only
-    restate that measured value. But `image_digest` is a self-asserted report
-    field that nothing ties to that measurement, so the second path admits an
-    upstream on a claim alone — §4.1 says a verifier trusts provenance "only
-    when corroborated by measured evidence, like the §4.2 compose-hash path".
-    `repo_url` / `repo_commit` are corroborated by neither path. Related: the
-    KMS receipt-custody chain is pinned to the `aci.receipt.ed25519.v1`
-    purpose, but the link from the KMS-derived k256 scalar to the published
-    Ed25519 receipt key rests on the measured workload code — another reason
-    the anchor must stay measured. Fix direction: anchor `image_digest` to the
-    verified compose, or drop it as a policy anchor.
+13. **Nothing proves where the TLS private key lives.** The keyset publishes
+    the public key of a certificate mounted into the gateway, and no custody
+    evidence covers it. A client that pins that key cannot tell from the
+    report whether TLS ends inside the TEE; that depends on how the deployment
+    terminates TLS. The [E2EE v2 extension](../../spec/e2ee-v2.md) protects
+    request content without relying on this. The fix is to publish custody
+    evidence for the TLS key.
 
-17. **The §9.2 session audits stop short of evidence appraisal.** Both
-    verifiers prove the cited session hashes to its id, the validity window
-    holds, and the evidence data hashes to its digest — §9.2(1)-(2). The
-    `aci` CLI also appraises the typed claims against a caller policy
-    (§9.2(3), `--require-claim` on audit/sessions/send/serve); verifier-ts
-    still only formats claims into the upstream detail. Neither implements
-    §9.2(4), appraising the evidence itself. Candidate work items: a
-    `requiredClaims` input for verifier-ts, and an evidence-appraisal hook
-    reusing the provider-verifier logic.
+14. **The custody policy covers only the receipt key.** The dstack custody
+    check matches the receipt key against the attested keyset, but never
+    checks the E2EE custody entries against the published E2EE keys, and
+    nothing covers the TLS key. The spec asks a custody policy to cover the
+    receipt, E2EE and TLS keys (§3.3).
 
-## Stale surroundings
+15. **Nothing limits how far ahead a keyset can expire.** The spec says a
+    verifier should reject an expiry that is implausibly far away (§3.1). No
+    verifier here does, and the gateway accepts any configured lifetime.
+    Expiry is the only way to revoke keys without coordination (§3.4), so a
+    keyset valid for decades cannot be revoked that way.
 
-18. **The live E2E scripts predate the simplified protocol.** Parts of
-   `scripts/live_e2e/` (e.g. `cases/embeddings.py`, `cases/lifecycle.py`)
-   still assert removed transparency events, so the full live matrix fails.
-   The multi-upstream smoke scripts, the attested-session case, and the
-   in-process integration suites (`tests/`) use the simplified protocol.
+16. **The `aci-service` upstream verifier trusts `image_digest` without
+    proof.** It accepts an upstream if either its app ID or the image digest
+    in its report is on the allowlist. The app ID is measured: it comes from
+    the verified event log, and the compose file is checked against the
+    measured compose hash. The image digest is only the upstream's own claim,
+    and nothing ties it to a measurement, so it admits an upstream on its word
+    alone. The spec says to trust provenance only when measured evidence
+    backs it (§4.1). The repository and commit fields are not checked either
+    way.
 
-19. **Client CI triggers are path-scoped.** `verifier-ts` tests pin the spec
-   test vectors byte-for-byte, and the unified TypeScript workflow runs for
-   changes anywhere under `clients/**`. It does not trigger for an edit
-   to `spec/test-vectors.md` alone; Rust CI catches that drift through
-   `tests/spec_vectors.rs`.
+    The KMS custody chain has a related limit. It proves which KMS key belongs
+    to the app, but the step from that key to the published receipt key
+    happens in the workload's code, so it is only as trustworthy as the
+    measured code. That is another reason the policy must rely on measured
+    values. The fix is to tie the image digest to the verified compose file,
+    or stop accepting it on its own.
 
-## Beyond-spec surfaces (intentional, keep honest)
+17. **Session audits check the evidence's integrity, not what it proves.**
+    Both verifiers check that a cited session hashes to its ID, that it was
+    valid when the receipt was issued, and that its evidence matches its
+    digest (§9.2 checks 1 and 2). `pap` can also require specific claims with
+    `--require-claim` (§9.2 check 3); the TypeScript verifier only displays
+    them. Neither verifier re-checks what the evidence proves (§9.2 check 4).
+    Possible next steps are a required-claims option for the TypeScript
+    verifier and a way to reuse the provider verifiers to re-check evidence
+    on the client.
 
-20. **Legacy dstack-vllm-proxy compatibility** (the Appendix B non-ACI-surfaces rule).
-    `/v1/attestation/report` (separate report-data layout, injected
-    `signing_address` / `intel_quote` / `nvidia_payload`), `/v1/signature/{id}`,
-    and the `X-Signing-Algo` E2EE mode serve pre-ACI clients. The shared k256
-    key also serves the E2EE v2 secp256k1 suite, so its KMS custody evidence is
-    a keyset role in `/v1/aci/attestation`; the legacy Ed25519 key stays
-    outside ACI artifacts. The spec's rule that compatibility
-    surfaces must not alter ACI artifacts holds: report, receipt, and session
-    bytes are identical with or without compatibility parameters.
+## Tooling
+
+18. **TypeScript CI does not run on spec-only changes.** The TypeScript
+    verifier's tests compare against the spec's test vectors byte for byte,
+    and its CI runs for changes under `clients/`. An edit to
+    `spec/test-vectors.md` alone does not trigger it. The Rust test
+    `tests/spec_vectors.rs` still catches the mismatch.
+
+## Intentional differences
+
+19. **Compatibility with dstack-vllm-proxy.** `/v1/attestation/report`,
+    `/v1/signature/{id}`, and the `X-Signing-Algo` E2EE mode serve clients
+    written before ACI and use their own report format. The k256 key they
+    share with the E2EE v2 secp256k1 suite appears in the ACI keyset with its
+    custody evidence; the legacy Ed25519 key stays outside ACI. As the spec
+    requires (Appendix B), these routes never change ACI reports, receipts, or
+    sessions.
