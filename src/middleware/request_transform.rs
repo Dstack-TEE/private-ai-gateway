@@ -211,7 +211,9 @@ pub fn transform_to_provider_request(
     transform_using_provider_config(&config, &params)
 }
 
-/// Shape one body per candidate, preserving failover order. Each entry is the
+/// Shape one body per candidate, preserving failover order, after dropping the
+/// candidates that cannot serve `endpoint` (a dedicated System One route serves
+/// only System One, which goes nowhere else). Each entry is the
 /// candidate's `route_id`, its transformed body, and the endpoint the body is
 /// shaped for — the upstream path it must be forwarded to.
 ///
