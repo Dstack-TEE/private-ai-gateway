@@ -453,11 +453,17 @@ pub(super) async fn messages(
     // compatibility protocol does not define Anthropic response content blocks,
     // so fail closed rather than mark an unencrypted response as E2EE-applied.
     if has_e2ee_headers(&headers) {
-        return error_response(
+        let mut response = error_response(
             StatusCode::BAD_REQUEST,
             "e2ee_unsupported_endpoint",
             "E2EE v2 is not supported on /v1/messages",
         );
+        insert_str_header(
+            response.headers_mut(),
+            "x-request-id",
+            &generate_request_id(),
+        );
+        return response;
     }
     openai_completion_endpoint(state, headers, body, MESSAGES_PATH, false).await
 }
@@ -473,11 +479,17 @@ pub(super) async fn responses(
     // supported on this endpoint yet — its body uses `input`, not `messages` —
     // so reject E2EE requests cleanly instead of failing later in field decryption.
     if has_e2ee_headers(&headers) {
-        return error_response(
+        let mut response = error_response(
             StatusCode::BAD_REQUEST,
             "e2ee_unsupported_endpoint",
             "E2EE v2 is not supported on /v1/responses",
         );
+        insert_str_header(
+            response.headers_mut(),
+            "x-request-id",
+            &generate_request_id(),
+        );
+        return response;
     }
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
 }
@@ -610,10 +622,37 @@ pub(super) async fn openai_completion_endpoint(
     endpoint_path: &'static str,
     force_buffered: bool,
 ) -> Response {
+    let request_id = generate_request_id();
+    let attach_request_id = matches!(
+        endpoint_path,
+        CHAT_COMPLETIONS_PATH | COMPLETIONS_PATH | MESSAGES_PATH | RESPONSES_PATH
+    );
+    let mut response = openai_completion_endpoint_inner(
+        state,
+        headers,
+        body,
+        endpoint_path,
+        force_buffered,
+        request_id.clone(),
+    )
+    .await;
+    if attach_request_id {
+        insert_str_header(response.headers_mut(), "x-request-id", &request_id);
+    }
+    response
+}
+
+async fn openai_completion_endpoint_inner(
+    state: AppState,
+    headers: HeaderMap,
+    body: Body,
+    endpoint_path: &'static str,
+    force_buffered: bool,
+    request_id: String,
+) -> Response {
     // The request id and surface exist before the body is read so an oversize
     // body is refused with a proper envelope rather than the extractor-level
     // 413 (an unread upload hyper turns into a connection reset).
-    let request_id = generate_request_id();
     let surface = if endpoint_path == MESSAGES_PATH {
         Surface::Anthropic
     } else {

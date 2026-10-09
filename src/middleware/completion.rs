@@ -76,6 +76,12 @@ pub struct CompletionInput {
 /// refuses: the surface to shape the error for, and the inputs of the refusal
 /// receipt.
 #[derive(Clone, Copy)]
+struct UpstreamRequestIds<'a> {
+    upstream_request_id: &'a str,
+    provider_request_id: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
 struct OutcomeCtx<'a> {
     surface: Surface,
     service: &'a AciService,
@@ -563,6 +569,10 @@ pub async fn run(
                     Some(&forward.selected_route),
                     raw_usage,
                     failed_response.then_some(ErrorClass::UpstreamResponseFailed),
+                    UpstreamRequestIds {
+                        upstream_request_id: &forward.upstream_request_id,
+                        provider_request_id: forward.provider_request_id.as_deref(),
+                    },
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (
@@ -588,6 +598,10 @@ pub async fn run(
                     Some(&forward.selected_route),
                     None,
                     Some(class),
+                    UpstreamRequestIds {
+                        upstream_request_id: &forward.upstream_request_id,
+                        provider_request_id: forward.provider_request_id.as_deref(),
+                    },
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -654,6 +668,8 @@ pub async fn run(
                 status: 502,
                 is_streaming: Some(true),
                 attempt_index: Some(attempt_index),
+                upstream_request_id: Some(forward.upstream_request_id.clone()),
+                provider_request_id: forward.provider_request_id.clone(),
                 selected_route_id: Some(forward.selected_route.clone()),
                 error_source: Some(ErrorSource::Gateway),
                 error_message: Some(ErrorClass::DownstreamFinalizerFailed),
@@ -664,6 +680,10 @@ pub async fn run(
                 forward.selected_route.clone(),
                 attempt_index,
                 upstream_status,
+                UpstreamRequestIds {
+                    upstream_request_id: &forward.upstream_request_id,
+                    provider_request_id: forward.provider_request_id.as_deref(),
+                },
                 downstream_abort.clone(),
                 meter_settled.clone(),
             );
@@ -802,6 +822,10 @@ pub async fn run(
                 attempt_index,
                 &forward.selected_route,
                 Some(class),
+                UpstreamRequestIds {
+                    upstream_request_id: &forward.error.upstream_request_id,
+                    provider_request_id: forward.error.provider_request_id.as_deref(),
+                },
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -943,6 +967,10 @@ impl Meter {
                     attempt_index,
                     &forward.selected_route,
                     Some(class),
+                    UpstreamRequestIds {
+                        upstream_request_id: &forward.error.upstream_request_id,
+                        provider_request_id: forward.error.provider_request_id.as_deref(),
+                    },
                 );
                 status
             }
@@ -1049,6 +1077,10 @@ fn build_early_streaming_response(
                     selected_route.clone(),
                     attempt_index,
                     upstream_status,
+                    UpstreamRequestIds {
+                        upstream_request_id: &f.upstream_request_id,
+                        provider_request_id: f.provider_request_id.as_deref(),
+                    },
                     stream_abort.clone(),
                     stream_settled.clone(),
                 );
@@ -1259,6 +1291,7 @@ impl Meter {
         selected_route_id: String,
         attempt_index: u32,
         upstream_status: u16,
+        upstream_request_ids: UpstreamRequestIds<'_>,
         downstream_abort: Arc<AtomicBool>,
         settled: Arc<AtomicBool>,
     ) -> StreamReport {
@@ -1275,6 +1308,8 @@ impl Meter {
             selected_route_id: Some(selected_route_id),
             attempt_index,
             upstream_status,
+            upstream_request_id: upstream_request_ids.upstream_request_id.to_string(),
+            provider_request_id: upstream_request_ids.provider_request_id.map(str::to_string),
             prefix_hash: self.prefix_hash.clone(),
             started: self.started,
             downstream_abort,
@@ -1291,6 +1326,8 @@ impl Meter {
             ttft_ms: None,
             is_streaming: Some(false),
             attempt_index: Some(0),
+            upstream_request_id: None,
+            provider_request_id: None,
             selected_route_id: None,
             request_model: self.request_model.clone(),
             usage: None,
@@ -1316,11 +1353,14 @@ impl Meter {
         selected_route_id: Option<&str>,
         usage: Option<Value>,
         error_class: Option<ErrorClass>,
+        upstream_request_ids: UpstreamRequestIds<'_>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
             status,
             attempt_index: Some(attempt_index),
+            upstream_request_id: Some(upstream_request_ids.upstream_request_id.to_string()),
+            provider_request_id: upstream_request_ids.provider_request_id.map(str::to_string),
             selected_route_id: selected_route_id.map(str::to_string),
             usage,
             error_message: error_class,
@@ -1334,12 +1374,15 @@ impl Meter {
         attempt_index: u32,
         selected_route_id: &str,
         error_class: Option<ErrorClass>,
+        upstream_request_ids: UpstreamRequestIds<'_>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
             status,
             is_streaming: Some(true),
             attempt_index: Some(attempt_index),
+            upstream_request_id: Some(upstream_request_ids.upstream_request_id.to_string()),
+            provider_request_id: upstream_request_ids.provider_request_id.map(str::to_string),
             selected_route_id: Some(selected_route_id.to_string()),
             error_message: error_class,
             ..self.base()
@@ -1356,6 +1399,8 @@ impl Meter {
                 duration_ms: attempt.duration_ms,
                 is_streaming: Some(is_streaming),
                 attempt_index: Some(index as u32),
+                upstream_request_id: Some(attempt.upstream_request_id.clone()),
+                provider_request_id: attempt.provider_request_id.clone(),
                 selected_route_id: Some(attempt.route_id.clone()),
                 ..self.base()
             });

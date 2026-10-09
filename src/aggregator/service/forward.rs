@@ -20,6 +20,7 @@ use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
+    generate_upstream_request_id, provider_request_id, trace_upstream_attempt,
 };
 use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
 use super::{
@@ -42,6 +43,20 @@ pub(super) enum ReverifyOutcome<R> {
     /// error. Both map to the caller's failure path; the helper has already
     /// applied any mismatch invalidation.
     Failed(UpstreamError),
+}
+
+fn direct_attempt_error_status(err: &ServiceError) -> u16 {
+    match err {
+        ServiceError::Upstream(UpstreamError::Timeout(_)) => 504,
+        _ => 502,
+    }
+}
+
+fn direct_upstream_error_status(err: &UpstreamError) -> u16 {
+    match err {
+        UpstreamError::Timeout(_) => 504,
+        _ => 502,
+    }
 }
 
 /// A session sealed for one verified channel binding (one per Chutes instance).
@@ -141,6 +156,9 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let request_id = req.context.request_id.clone();
+        let upstream_request_id = generate_upstream_request_id();
+        let mut route_id = req.context.target_route_id.clone().unwrap_or_default();
         self.metrics.record_request(
             endpoint_path,
             RequestMode::Buffered,
@@ -152,10 +170,17 @@ impl AciService {
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
             body: backend_input_body,
+            headers: std::collections::HashMap::from([
+                (
+                    "X-Client-Request-Id".to_string(),
+                    upstream_request_id.clone(),
+                ),
+                ("X-Request-Id".to_string(), upstream_request_id.clone()),
+            ]),
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
-            ..Default::default()
         })?;
+        route_id = prepared.route_id.clone().unwrap_or(route_id);
         if aci_required && !attested_route_eligible(prepared.is_tee) {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(
@@ -197,9 +222,38 @@ impl AciService {
             .await
         {
             ReverifyOutcome::Forwarded(response) => response,
-            ReverifyOutcome::RefreshFailed(err) => return Err(err),
-            ReverifyOutcome::Failed(err) => return Err(err.into()),
+            ReverifyOutcome::RefreshFailed(err) => {
+                trace_upstream_attempt(
+                    &request_id,
+                    0,
+                    &route_id,
+                    direct_attempt_error_status(&err),
+                    &upstream_request_id,
+                    None,
+                );
+                return Err(err);
+            }
+            ReverifyOutcome::Failed(err) => {
+                trace_upstream_attempt(
+                    &request_id,
+                    0,
+                    &route_id,
+                    direct_upstream_error_status(&err),
+                    &upstream_request_id,
+                    None,
+                );
+                return Err(err.into());
+            }
         };
+        let provider_id = provider_request_id(&upstream_response.headers);
+        trace_upstream_attempt(
+            &request_id,
+            0,
+            &route_id,
+            upstream_response.status_code,
+            &upstream_request_id,
+            provider_id.as_deref(),
+        );
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body);
         self.metrics.record_upstream_response(
@@ -318,22 +372,31 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let request_id = req.context.request_id.clone();
+        let upstream_request_id = generate_upstream_request_id();
+        let mut route_id = req.context.target_route_id.clone().unwrap_or_default();
         self.metrics.record_request(
             endpoint_path,
             RequestMode::Streaming,
             req.e2ee.as_ref().is_some(),
         );
         let target_route_id = req.context.target_route_id.clone();
-        let request_id = req.context.request_id.clone();
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
             body: backend_input_body,
+            headers: std::collections::HashMap::from([
+                (
+                    "X-Client-Request-Id".to_string(),
+                    upstream_request_id.clone(),
+                ),
+                ("X-Request-Id".to_string(), upstream_request_id.clone()),
+            ]),
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
-            ..Default::default()
         })?;
+        route_id = prepared.route_id.clone().unwrap_or(route_id);
         if aci_required && !attested_route_eligible(prepared.is_tee) {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(
@@ -375,9 +438,38 @@ impl AciService {
             .await
         {
             ReverifyOutcome::Forwarded(response) => response,
-            ReverifyOutcome::RefreshFailed(err) => return Err(err),
-            ReverifyOutcome::Failed(err) => return Err(err.into()),
+            ReverifyOutcome::RefreshFailed(err) => {
+                trace_upstream_attempt(
+                    &request_id,
+                    0,
+                    &route_id,
+                    direct_attempt_error_status(&err),
+                    &upstream_request_id,
+                    None,
+                );
+                return Err(err);
+            }
+            ReverifyOutcome::Failed(err) => {
+                trace_upstream_attempt(
+                    &request_id,
+                    0,
+                    &route_id,
+                    direct_upstream_error_status(&err),
+                    &upstream_request_id,
+                    None,
+                );
+                return Err(err.into());
+            }
         };
+        let provider_id = provider_request_id(&upstream_response.headers);
+        trace_upstream_attempt(
+            &request_id,
+            0,
+            &route_id,
+            upstream_response.status_code,
+            &upstream_request_id,
+            provider_id.as_deref(),
+        );
         // Match dstack-vllm-proxy compatibility behavior: streaming
         // requests whose upstream response is not exactly HTTP 200
         // are returned as ordinary buffered error responses. No
@@ -400,6 +492,8 @@ impl AciService {
                     upstream_status,
                     upstream_headers,
                     upstream_body,
+                    upstream_request_id,
+                    provider_request_id: provider_id,
                 },
             ));
         }

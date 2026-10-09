@@ -22,6 +22,45 @@ pub(super) fn generate_receipt_id() -> String {
     format!("rcpt-{}", hex::encode(bytes))
 }
 
+pub(super) fn generate_upstream_request_id() -> String {
+    let mut rng = rand::rngs::OsRng;
+    let mut bytes = [0u8; 16];
+    rng.fill_bytes(&mut bytes);
+    format!("ureq_{}", hex::encode(bytes))
+}
+
+pub(super) fn provider_request_id(
+    headers: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    ["x-request-id", "request-id", "x-amzn-requestid", "cf-ray"]
+        .iter()
+        .find_map(|name| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        })
+}
+
+pub(super) fn trace_upstream_attempt(
+    request_id: &str,
+    attempt_index: u32,
+    route_id: &str,
+    status: u16,
+    upstream_request_id: &str,
+    provider_request_id: Option<&str>,
+) {
+    tracing::info!(
+        request_id,
+        attempt_index,
+        route_id,
+        status,
+        upstream_request_id,
+        provider_request_id = provider_request_id.unwrap_or(""),
+        "upstream attempt completed"
+    );
+}
+
 pub(super) fn extract_chat_id(body: &[u8]) -> Option<String> {
     if body.is_empty() {
         return None;

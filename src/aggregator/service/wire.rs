@@ -101,6 +101,8 @@ pub struct FailedAttempt {
     pub route_id: String,
     pub status: u16,
     pub duration_ms: u64,
+    pub upstream_request_id: String,
+    pub provider_request_id: Option<String>,
 }
 
 pub struct MiddlewareAllFailed {
@@ -124,6 +126,8 @@ pub struct MiddlewareForwarded {
     pub upstream_status: u16,
     pub upstream_body: Vec<u8>,
     pub upstream_headers: std::collections::HashMap<String, String>,
+    pub upstream_request_id: String,
+    pub provider_request_id: Option<String>,
     /// Which route served the request and the attested session id (if any).
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
@@ -141,6 +145,8 @@ pub struct MiddlewareStreamingForwarded {
     pub receipt_id: String,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
+    pub upstream_request_id: String,
+    pub provider_request_id: Option<String>,
     pub body: ServiceResponseStream,
     /// Which route served the request and the attested session id (if any).
     /// These are internal routing outcomes, not emitted as response headers;
@@ -316,6 +322,8 @@ pub struct StreamingUpstreamError {
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub upstream_body: Vec<u8>,
+    pub upstream_request_id: String,
+    pub provider_request_id: Option<String>,
 }
 
 /// A streaming non-2xx on the middleware path, carrying the same route

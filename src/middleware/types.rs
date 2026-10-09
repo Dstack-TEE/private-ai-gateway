@@ -421,6 +421,10 @@ pub struct PostReport {
     pub is_streaming: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
     /// `<provider>:<model>` from the backend's selected route, or `null`.
     ///
     /// Wire contract for consumers: a request may emit multiple per-attempt
