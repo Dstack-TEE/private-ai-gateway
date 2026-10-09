@@ -40,13 +40,6 @@ updates:
       - dependency-name: webview2-com
       - dependency-name: windows
         update-types: ["version-update:semver-major"]
-      # The desktop CLI uses k256 and sha3 only in tests, to sign evidence
-      # that crates/aci-verify checks. They follow aci-verify's versions,
-      # which are outside this config's scope.
-      - dependency-name: k256
-        update-types: ["version-update:semver-major"]
-      - dependency-name: sha3
-        update-types: ["version-update:semver-major"]
     groups:
       # windows-registry returns windows-result errors, so the two crates
       # must move together, major versions included.

@@ -63,9 +63,7 @@ pub(super) mod tests {
     }
 
     fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
-        let (signature, recid) = key
-            .sign_digest_recoverable(Keccak256::new_with_prefix(message))
-            .unwrap();
+        let (signature, recid) = key.sign_digest_recoverable(Keccak256::new_with_prefix(message));
         let mut out = signature.to_vec();
         out.push(recid.to_byte());
         hex::encode(out)
@@ -130,8 +128,7 @@ pub(super) mod tests {
     }
 
     pub(in crate::aci::verifier) fn policy_with_root(root: &SigningKey) -> CustodyPolicy {
-        let root_uncompressed =
-            hex::encode(root.verifying_key().to_encoded_point(false).as_bytes());
+        let root_uncompressed = hex::encode(root.verifying_key().to_sec1_point(false).as_bytes());
         CustodyPolicy::new(
             [format!("app-id:0x{}", hex::encode(APP_ID))],
             [root_uncompressed],
