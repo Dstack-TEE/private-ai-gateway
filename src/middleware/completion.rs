@@ -276,18 +276,6 @@ pub async fn run(
     }
 
     let candidates = drop_conflicting_route_twins(consult.candidates.clone().unwrap_or_default());
-    if candidates.is_empty() {
-        // Not found, not malformed — 404 is what the `model_not_found` body has
-        // always said, and what an OpenAI-compatible client expects for a model
-        // it cannot reach.
-        let message = format!("no route available for model {}", model.unwrap_or("(none)"));
-        // The control plane answered with nothing to route to; report it as
-        // its failure so the request is accounted for, like a denial.
-        meter.gateway_failure(404, ErrorSource::Control, ErrorClass::ModelNotFound, stream);
-        let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
-        return finalize_generated(404, body, &[], e2ee, outcome_ctx);
-    }
-
     // Shape one body per candidate (typed per-route contract).
     let shaped = match build_candidates(
         &params,
@@ -322,6 +310,18 @@ pub async fn run(
             return finalize_generated(status, body, &[], e2ee, outcome_ctx);
         }
     };
+    if shaped.is_empty() {
+        // Not found, not malformed — 404 is what the `model_not_found` body has
+        // always said, and what an OpenAI-compatible client expects for a model
+        // it cannot reach. Empty when the control plane answered with nothing
+        // to route to, or with no route that serves this endpoint.
+        let message = format!("no route available for model {}", model.unwrap_or("(none)"));
+        // Reported as the control plane's failure so the request is accounted
+        // for, like a denial.
+        meter.gateway_failure(404, ErrorSource::Control, ErrorClass::ModelNotFound, stream);
+        let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
+        return finalize_generated(404, body, &[], e2ee, outcome_ctx);
+    }
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
         .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {

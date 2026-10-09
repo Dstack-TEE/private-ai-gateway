@@ -859,6 +859,30 @@ async fn systemone_unsupported_candidates_never_forward() {
 }
 
 #[tokio::test]
+async fn chat_never_forwards_to_a_native_only_route() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "acme:kev", "format": "openai",
+                             "supportedEndpoints": ["/v1/systemone"] }]
+        }),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["type"], json!("model_not_found"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn systemone_non_2xx_uses_public_error_contract() {
     for upstream_status in [400, 422] {
         let control_url = spawn_control(

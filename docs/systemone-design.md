@@ -54,13 +54,14 @@ unchanged. Use `format: "openai"` with a native parameter table; do not inject
 chat streaming, reasoning, or engine parameters. Do not derive chat features
 or token estimates from `state` and `questions`.
 
-The existing `supportedEndpoints` metadata is not automatically enforced for
-every endpoint. In [`build_candidates`](../src/middleware/request_transform.rs),
-add a System One-only predicate using `supports_endpoint("/v1/systemone")`.
-Skip unsupported candidates, then use existing shaping and skip-on-error
-behavior while preserving order. If none qualify, use the existing failure
-path without forwarding or falling back to chat. Do not rely on an incompatible
-upstream returning a retryable error.
+A candidate's `supportedEndpoints`, when non-empty, is the complete set of
+paths it serves; an omitted or empty list serves every OpenAI-compatible path
+except `/v1/systemone`. [`build_candidates`](../src/middleware/request_transform.rs)
+skips a candidate that does not serve the path it would be called on, so a
+System One request reaches only candidates that list `/v1/systemone`, and a
+chat request never reaches a native-only System One upstream. If none qualify,
+the request returns `404 model_not_found` without forwarding or falling back
+to chat. Do not rely on an incompatible upstream returning a retryable error.
 
 ### Responses and shared policies
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{ServiceError, UpstreamVerificationError};
+use crate::aggregator::service::{ServiceError, UpstreamVerificationError, SYSTEMONE_PATH};
 
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
@@ -139,8 +139,10 @@ pub struct RouteCandidate {
     /// Raw reasoning policy from deployment config; the gateway decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_policy: Option<ReasoningPolicy>,
-    /// API paths implemented directly by the upstream. Endpoints omitted here
-    /// may still be served through a gateway conversion when one exists.
+    /// API paths the upstream serves. When non-empty this is the complete set:
+    /// the gateway calls the route on no other path. Empty declares nothing,
+    /// and the route serves every OpenAI-compatible path except native-only
+    /// System One.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_endpoints: Vec<String>,
     /// Merge every `system`/`developer` chat message into one leading `system`
@@ -154,6 +156,15 @@ impl RouteCandidate {
         self.supported_endpoints
             .iter()
             .any(|supported| supported == path)
+    }
+
+    /// Whether the gateway may call this route on `path`.
+    pub fn serves(&self, path: &str) -> bool {
+        if self.supported_endpoints.is_empty() {
+            path != SYSTEMONE_PATH
+        } else {
+            self.supports_endpoint(path)
+        }
     }
 }
 

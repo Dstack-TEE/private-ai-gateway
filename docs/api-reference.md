@@ -29,7 +29,7 @@ envelope does not.
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
-| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. See the [candidate fields](control-plane-contract.md#post-consultpre). |
+| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate that serves chat receives a converted chat completion. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
 | `POST /v1/systemone` | System One structured decisions | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Accepts native `model`, `state`, and `questions` fields and returns native `model`, `answers`, and `usage` fields. Middleware forwards only to candidates that list `/v1/systemone` in `supportedEndpoints`; it never converts the request to chat. |
 

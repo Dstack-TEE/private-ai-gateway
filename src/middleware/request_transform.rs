@@ -244,14 +244,6 @@ pub fn build_candidates(
     let mut shaped: Vec<(String, Value, Endpoint)> = Vec::new();
     let mut first_error: Option<TransformError> = None;
     for candidate in candidates {
-        if endpoint == Endpoint::SystemOne && !candidate.supports_endpoint(SYSTEMONE_PATH) {
-            tracing::debug!(
-                route_id = %candidate.route_id,
-                endpoint = SYSTEMONE_PATH,
-                "candidate does not declare native endpoint support; skipping"
-            );
-            continue;
-        }
         let (upstream_endpoint, body) = match responses {
             Some(responses) if candidate.supports_endpoint(RESPONSES_PATH) => (
                 Endpoint::CreateModelResponse,
@@ -290,6 +282,14 @@ pub fn build_candidates(
                 (upstream_endpoint, body)
             }
         };
+        if !candidate.serves(upstream_endpoint.path()) {
+            tracing::debug!(
+                route_id = %candidate.route_id,
+                endpoint = upstream_endpoint.path(),
+                "candidate does not serve this endpoint; skipping"
+            );
+            continue;
+        }
         match body {
             Ok(body) => shaped.push((candidate.route_id.clone(), body, upstream_endpoint)),
             Err(err) => {
@@ -2620,14 +2620,8 @@ mod tests {
         assert!(err.is_err());
     }
 
-    #[test]
-    fn build_candidates_filters_systemone_capability_without_reordering() {
-        let params = json!({
-            "model": "kev-4b",
-            "state": "hello",
-            "questions": { "ok": { "type": "noul" } }
-        });
-        let candidate = |id: &str, supported: Vec<&str>| RouteCandidate {
+    fn declared_route(id: &str, supported: Vec<&str>) -> RouteCandidate {
+        RouteCandidate {
             route_id: id.into(),
             supported_endpoints: supported.into_iter().map(str::to_string).collect(),
             format: ProviderFormat::Openai,
@@ -2635,7 +2629,46 @@ mod tests {
             reasoning_format: None,
             reasoning_policy: None,
             hoist_system_messages: false,
-        };
+        }
+    }
+
+    #[test]
+    fn build_candidates_calls_a_declared_route_only_on_listed_paths() {
+        let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
+        let bodies = build_candidates(
+            &params,
+            Endpoint::ChatComplete,
+            &[
+                declared_route("undeclared", vec![]),
+                declared_route("native-only", vec![SYSTEMONE_PATH]),
+                declared_route("responses-only", vec![RESPONSES_PATH]),
+                declared_route(
+                    "chat-and-responses",
+                    vec![CHAT_COMPLETIONS_PATH, RESPONSES_PATH],
+                ),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            bodies
+                .iter()
+                .map(|(id, _, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["undeclared", "chat-and-responses"]
+        );
+    }
+
+    #[test]
+    fn build_candidates_filters_systemone_capability_without_reordering() {
+        let params = json!({
+            "model": "kev-4b",
+            "state": "hello",
+            "questions": { "ok": { "type": "noul" } }
+        });
+        let candidate = declared_route;
         let bodies = build_candidates(
             &params,
             Endpoint::SystemOne,
