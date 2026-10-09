@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{
-    ServiceError, UpstreamVerificationError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
-    EMBEDDINGS_PATH, MESSAGES_PATH,
-};
+use crate::aggregator::service::{ServiceError, UpstreamVerificationError};
 
 /// Opaque pricing block. Carried verbatim until cost computation lands.
 pub type PricingConfig = Value;
@@ -122,16 +119,6 @@ pub struct ReasoningPolicy {
     pub omit_max_tokens: Option<bool>,
 }
 
-/// Paths a route with no `supportedEndpoints` serves: the OpenAI-compatible
-/// surfaces the gateway calls on any upstream. Native Responses and System One
-/// are served only where declared.
-pub const DEFAULT_ENDPOINTS: &[&str] = &[
-    CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH,
-    EMBEDDINGS_PATH,
-    MESSAGES_PATH,
-];
-
 /// One ordered failover candidate: a backend route id plus the upstream format.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -152,9 +139,8 @@ pub struct RouteCandidate {
     /// Raw reasoning policy from deployment config; the gateway decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_policy: Option<ReasoningPolicy>,
-    /// API paths the upstream serves. When non-empty this is the complete set:
-    /// the gateway calls the route on no other path. Empty declares nothing,
-    /// and the route serves [`DEFAULT_ENDPOINTS`].
+    /// API paths implemented directly by the upstream. Endpoints omitted here
+    /// may still be served through a gateway conversion when one exists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_endpoints: Vec<String>,
     /// Merge every `system`/`developer` chat message into one leading `system`
@@ -168,15 +154,6 @@ impl RouteCandidate {
         self.supported_endpoints
             .iter()
             .any(|supported| supported == path)
-    }
-
-    /// Whether the gateway may call this route on `path`.
-    pub fn serves(&self, path: &str) -> bool {
-        if self.supported_endpoints.is_empty() {
-            DEFAULT_ENDPOINTS.contains(&path)
-        } else {
-            self.supports_endpoint(path)
-        }
     }
 }
 

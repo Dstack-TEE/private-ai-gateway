@@ -54,14 +54,13 @@ unchanged. Use `format: "openai"` with a native parameter table; do not inject
 chat streaming, reasoning, or engine parameters. Do not derive chat features
 or token estimates from `state` and `questions`.
 
-A candidate's `supportedEndpoints`, when non-empty, is the complete set of
-paths it serves; an omitted or empty list serves the default chat, completions,
-embeddings, and messages paths. [`build_candidates`](../src/middleware/request_transform.rs)
-skips a candidate that does not serve the path it would be called on, so a
-System One request reaches only candidates that list `/v1/systemone`, and a
-chat request never reaches a native-only System One upstream. If none qualify,
-the request returns `404 model_not_found` without forwarding or falling back
-to chat. Do not rely on an incompatible upstream returning a retryable error.
+A candidate that lists `/v1/systemone` in `supportedEndpoints` is a dedicated
+System One upstream. In [`build_candidates`](../src/middleware/request_transform.rs),
+a System One request skips every other candidate and any other request skips
+these, so neither reaches an upstream that cannot read it. Then use existing
+shaping and skip-on-error behavior while preserving order. If none qualify, the
+request returns `404 model_not_found` without forwarding or falling back to
+chat. Do not rely on an incompatible upstream returning a retryable error.
 
 ### Responses and shared policies
 

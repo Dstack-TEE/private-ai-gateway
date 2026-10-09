@@ -244,6 +244,16 @@ pub fn build_candidates(
     let mut shaped: Vec<(String, Value, Endpoint)> = Vec::new();
     let mut first_error: Option<TransformError> = None;
     for candidate in candidates {
+        // A System One upstream is dedicated: it receives System One requests
+        // and nothing else, and System One requests go nowhere else.
+        if (endpoint == Endpoint::SystemOne) != candidate.supports_endpoint(SYSTEMONE_PATH) {
+            tracing::debug!(
+                route_id = %candidate.route_id,
+                endpoint = endpoint.path(),
+                "candidate does not serve this endpoint; skipping"
+            );
+            continue;
+        }
         let (upstream_endpoint, body) = match responses {
             Some(responses) if candidate.supports_endpoint(RESPONSES_PATH) => (
                 Endpoint::CreateModelResponse,
@@ -282,14 +292,6 @@ pub fn build_candidates(
                 (upstream_endpoint, body)
             }
         };
-        if !candidate.serves(upstream_endpoint.path()) {
-            tracing::debug!(
-                route_id = %candidate.route_id,
-                endpoint = upstream_endpoint.path(),
-                "candidate does not serve this endpoint; skipping"
-            );
-            continue;
-        }
         match body {
             Ok(body) => shaped.push((candidate.route_id.clone(), body, upstream_endpoint)),
             Err(err) => {
@@ -2633,34 +2635,15 @@ mod tests {
     }
 
     #[test]
-    fn an_undeclared_route_serves_only_the_compatible_surfaces() {
-        let route = declared_route("undeclared", vec![]);
-        for path in [
-            CHAT_COMPLETIONS_PATH,
-            COMPLETIONS_PATH,
-            EMBEDDINGS_PATH,
-            MESSAGES_PATH,
-        ] {
-            assert!(route.serves(path), "{path}");
-        }
-        assert!(!route.serves(RESPONSES_PATH));
-        assert!(!route.serves(SYSTEMONE_PATH));
-    }
-
-    #[test]
-    fn build_candidates_calls_a_declared_route_only_on_listed_paths() {
+    fn build_candidates_never_sends_other_endpoints_to_a_system_one_route() {
         let params = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
         let bodies = build_candidates(
             &params,
             Endpoint::ChatComplete,
             &[
                 declared_route("undeclared", vec![]),
-                declared_route("native-only", vec![SYSTEMONE_PATH]),
-                declared_route("responses-only", vec![RESPONSES_PATH]),
-                declared_route(
-                    "chat-and-responses",
-                    vec![CHAT_COMPLETIONS_PATH, RESPONSES_PATH],
-                ),
+                declared_route("system-one", vec![SYSTEMONE_PATH]),
+                declared_route("responses", vec![RESPONSES_PATH]),
             ],
             None,
             None,
@@ -2672,7 +2655,7 @@ mod tests {
                 .iter()
                 .map(|(id, _, _)| id.as_str())
                 .collect::<Vec<_>>(),
-            ["undeclared", "chat-and-responses"]
+            ["undeclared", "responses"]
         );
     }
 
