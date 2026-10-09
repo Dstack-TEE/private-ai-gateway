@@ -99,6 +99,7 @@ fn receipt_custody_fixture(
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
         "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "armet-ai" => Some("model"),
         _ => None,
     }
 }
@@ -481,6 +482,118 @@ async fn phala_direct_provider_verifier_runs_provider_owned_external_verifier() 
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn armet_ai_provider_verifier_runs_provider_owned_external_verifier() {
+    let verifier = ArmetAiProviderVerifier::with_command(
+        provider_script(
+            "armet-ai",
+            "armet-ai/external-test/v1",
+            json!({
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }),
+        ),
+        5,
+    )
+    .unwrap();
+    assert_provider_script_verifier(
+        &verifier,
+        "armet-ai",
+        "armet-ai/external-test/v1",
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://provider.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+    )
+    .await;
+}
+
+fn armet_ai_request() -> UpstreamVerificationRequest {
+    UpstreamVerificationRequest {
+        upstream_name: "tdx-a".to_string(),
+        url_origin: Some("https://provider.example".to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    }
+}
+
+#[tokio::test]
+async fn armet_ai_passes_pins_and_bearer_token_to_the_bridge() {
+    // The pin must reach the bridge lowercased, and the bearer token under the
+    // armet-ai option name; anything else is treated as an unpinned request.
+    let subject = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "armet-ai/options-test/v1",
+        "attested_scope": "model",
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://provider.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+    });
+    let script = format!(
+        r#"payload="$(cat)"
+case "$payload" in
+  *'"armet_ai_accepted_subject:{subject}":"true"'*) ;;
+  *) printf '%s' '{{"result":"failed","reason":"pin missing"}}'; exit 0 ;;
+esac
+case "$payload" in
+  *'"armet_ai_bearer_token":"tok"'*) printf '%s' '{output}' ;;
+  *) printf '%s' '{{"result":"failed","reason":"bearer missing"}}' ;;
+esac"#
+    );
+    let verifier = ArmetAiProviderVerifier::with_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        5,
+    )
+    .unwrap()
+    .with_accepted_subjects([format!("tdx-measurement:sha256:{}", "AB".repeat(32))])
+    .with_bearer_token("tok");
+    let event = verifier.verify(armet_ai_request()).await;
+    assert_eq!(
+        event.result,
+        VerificationResult::Verified,
+        "{:?}",
+        event.reason
+    );
+    assert_eq!(event.provider_type.as_deref(), Some("armet-ai"));
+}
+
+#[tokio::test]
+async fn armet_ai_rejects_a_bridge_claiming_router_scope() {
+    // A per-model TD must not be sealed as a shared router channel: that would
+    // let one model's verification cover every model behind the origin.
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "armet-ai/scope-test/v1",
+        "attested_scope": "router",
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://provider.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+    });
+    let script = format!("cat >/dev/null; printf '%s' '{output}'");
+    let verifier = ArmetAiProviderVerifier::with_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        5,
+    )
+    .unwrap();
+    let event = verifier.verify(armet_ai_request()).await;
+    assert_eq!(event.result, VerificationResult::Failed);
+    assert!(
+        event
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("per-model")),
+        "{:?}",
+        event.reason
+    );
 }
 
 #[tokio::test]

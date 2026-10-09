@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
+import re
 import sys
 from typing import Any
 
@@ -28,6 +30,7 @@ __all__ = [
     "provider_options",
     "request_timeout_seconds",
     "tdx_debug_enabled",
+    "verified_nras_gpu_claims",
 ]
 
 
@@ -183,3 +186,41 @@ def tdx_debug_enabled(quote_bytes: bytes) -> bool:
     if len(td_attributes) != 8:
         raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
     return td_attributes[0] != 0
+
+
+_NONCE_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def verified_nras_gpu_claims(
+    gpu_result: Any, gpu_nonce: str, label: str
+) -> tuple[list[str], int]:
+    """Signed GPU models and count from a ``secretvm.verify`` NRAS result.
+
+    Gates on the NRAS-signed report, never on the unsigned request payload: the
+    overall result must be true, the signed nonce must equal ``gpu_nonce``, and
+    every per-GPU report must verify that nonce. ``label`` prefixes errors.
+    """
+    report = getattr(gpu_result, "report", None)
+    if not isinstance(report, dict):
+        raise ValueError(f"{label} NRAS result is missing its signed report")
+    if report.get("overall_result") is not True:
+        raise ValueError(f"{label} NRAS signed overall attestation result is not true")
+    verified_nonce = str(report.get("nonce") or "").lower()
+    if not _NONCE_HEX_RE.fullmatch(verified_nonce) or not hmac.compare_digest(
+        verified_nonce, gpu_nonce
+    ):
+        raise ValueError(f"{label} NRAS nonce does not match the CPU-bound GPU nonce")
+
+    gpu_reports = report.get("gpus")
+    if not isinstance(gpu_reports, dict) or not gpu_reports:
+        raise ValueError(f"{label} NRAS result contains no signed per-GPU reports")
+    models: set[str] = set()
+    for gpu_id, gpu_report in gpu_reports.items():
+        if not isinstance(gpu_report, dict):
+            raise ValueError(f"{label} NRAS report for GPU {gpu_id!r} is malformed")
+        if gpu_report.get("attestation_report_nonce_match") is not True:
+            raise ValueError(f"{label} NRAS report for GPU {gpu_id!r} does not verify the nonce")
+        model = gpu_report.get("model")
+        if isinstance(model, str) and model:
+            models.add(model)
+    return sorted(models), len(gpu_reports)

@@ -40,6 +40,7 @@ class Provider:
     chutes_chute_ids: dict[str, str]
     chutes_e2ee_discovery_rounds: int | None
     chutes_e2ee_discovery_interval_seconds: int | None
+    accepted_subjects: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -66,6 +67,7 @@ class Provider:
             chutes_e2ee_discovery_interval_seconds=optional_int(
                 value, "chutes_e2ee_discovery_interval_seconds"
             ),
+            accepted_subjects=tuple(value.get("accepted_subjects") or ()),
         )
 
     def has_capability(self, capability: str) -> bool:

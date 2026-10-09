@@ -20,6 +20,7 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
+        Some("armet-ai") => &ArmetAiClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
         _ => &GenericClaims,
     }
@@ -204,6 +205,47 @@ impl ProviderClaimMapper for SecretAiClaims {
     }
 }
 
+/// armet-ai: a dcap-verified TDX quote whose report_data commits to the
+/// channel key, the exact GPU evidence and the model, with the measured TD
+/// (MRTD, RTMR0-3 and launch configuration) matching an operator pin, and a
+/// mandatory NRAS-signed GPU check. The pin covers firmware, kernel, command
+/// line and runtime, but it is an operator's acceptance of a measurement, not a
+/// reproducible build, so it asserts serving software only and leaves
+/// `os_known_good` Unknown.
+pub(super) struct ArmetAiClaims;
+impl ProviderClaimMapper for ArmetAiClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
+            serving_software_known_good: armet_ai_software_claim(event),
+            gpu_attested: nras_gpu_claim(
+                event,
+                "the TD commits to the exact GPU evidence in its report_data",
+            ),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+pub(super) fn armet_ai_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let subject = event
+        .provider_claims
+        .as_ref()
+        .and_then(|claims| claims.get("accepted_subject"))
+        .and_then(Value::as_str);
+    match subject {
+        Some(subject) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            format!(
+                "measured TD (MRTD, RTMR0-3, launch configuration) matches operator-configured \
+                 pin {subject}"
+            ),
+        ),
+        None => Claim::unknown(),
+    }
+}
+
 /// Generic verifier path: we only know it returned Verified with an enforceable
 /// channel binding.
 pub(super) struct GenericClaims;
@@ -364,6 +406,12 @@ pub(super) fn secret_ai_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
 }
 
 pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    nras_gpu_claim(event, "its nonce matches the CPU report_data")
+}
+
+/// A mandatory, NRAS-signed GPU gate. `binding` says how the verifier tied the
+/// GPU evidence to the CPU quote.
+fn nras_gpu_claim(event: &UpstreamVerifiedEvent, binding: &str) -> Claim {
     let claims = event.provider_claims.as_ref();
     let verified = claims
         .and_then(|claims| claims.get("gpu_verified"))
@@ -383,12 +431,12 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
                 .filter(|models| !models.is_empty());
             let reason = match models {
                 Some(models) => format!(
-                    "NVIDIA confidential-computing GPU attestation verified by NRAS and its nonce \
-                     matches the CPU report_data (signed models {models})"
+                    "NVIDIA confidential-computing GPU attestation verified by NRAS and \
+                     {binding} (signed models {models})"
                 ),
-                None => "NVIDIA confidential-computing GPU attestation verified by NRAS and its \
-                         nonce matches the CPU report_data"
-                    .to_string(),
+                None => format!(
+                    "NVIDIA confidential-computing GPU attestation verified by NRAS and {binding}"
+                ),
             };
             Claim::asserted(ClaimSource::VerifierDerived, reason)
         }
@@ -548,6 +596,58 @@ mod claim_mapping_tests {
             claims.serving_software_known_good.status,
             ClaimStatus::Unknown
         );
+    }
+
+    #[test]
+    fn armet_ai_asserts_pinned_software_but_never_os_provenance() {
+        let subject = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+        let claims = session_claims_for_event(&event(
+            Some("armet-ai"),
+            VerificationResult::Verified,
+            Some(json!({
+                "accepted_subject": subject,
+                "tcb_status": "OutOfDate",
+                "gpu_verified": true,
+                "gpu_models": ["GH100"],
+                "gpu_count": 1,
+                // Even a verifier-supplied OS verdict must not be upgraded:
+                // a measurement pin is not a reviewed OS build.
+                "production_os_image": true,
+            })),
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Asserted
+        );
+        assert_eq!(
+            claims.serving_software_known_good.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
+        let gpu_reason = claims.gpu_attested.reason.as_deref().unwrap_or_default();
+        assert!(
+            gpu_reason.contains("exact GPU evidence") && gpu_reason.contains("GH100"),
+            "{gpu_reason}"
+        );
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
+
+        let unpinned = session_claims_for_event(&event(
+            Some("armet-ai"),
+            VerificationResult::Verified,
+            Some(json!({"tcb_status": "UpToDate"})),
+        ));
+        assert_eq!(
+            unpinned.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        assert_eq!(unpinned.gpu_attested.status, ClaimStatus::Unknown);
     }
 
     #[test]

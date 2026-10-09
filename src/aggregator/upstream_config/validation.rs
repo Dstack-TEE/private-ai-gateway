@@ -105,7 +105,7 @@ fn looks_like_uuid(value: &str) -> bool {
         && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
-fn valid_secret_ai_origin(value: &str) -> bool {
+fn valid_root_https_origin(value: &str) -> bool {
     let Ok(origin) = reqwest::Url::parse(value) else {
         return false;
     };
@@ -116,6 +116,16 @@ fn valid_secret_ai_origin(value: &str) -> bool {
         && origin.path() == "/"
         && origin.query().is_none()
         && origin.fragment().is_none()
+}
+
+/// `tdx-measurement:sha256:<64 lowercase hex>`, the pin format the armet-ai
+/// bridge derives from the verified MRTD, RTMR0-3 and TD launch configuration.
+pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
+    value
+        .strip_prefix("tdx-measurement:sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {
@@ -179,12 +189,33 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             )));
         }
         if upstream.provider == UpstreamProvider::SecretAi
-            && !valid_secret_ai_origin(&upstream.base_url)
+            && !valid_root_https_origin(&upstream.base_url)
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
+        }
+        if upstream.provider == UpstreamProvider::ArmetAi {
+            if !valid_root_https_origin(&upstream.base_url) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai requires a root HTTPS base_url without userinfo, query, or fragment",
+                    upstream.name
+                )));
+            }
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if subjects.is_empty() {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai requires at least one accepted_subjects measurement pin",
+                    upstream.name
+                )));
+            }
+            if let Some(bad) = subjects.iter().find(|s| !valid_tdx_measurement_subject(s)) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai accepted_subjects entry {bad:?} must be tdx-measurement:sha256:<64 lowercase hex>",
+                    upstream.name
+                )));
+            }
         }
         if upstream.basic_auth {
             if upstream.bearer_token.is_none() {
