@@ -1,6 +1,6 @@
 # ArmetAI Per-Model TDX Review
 
-Date: 2026-09-29 UTC. Updated: 2026-10-07 UTC.
+Date: 2026-09-29 UTC. Updated: 2026-10-09 UTC.
 
 > [!NOTE]
 > This is the provider's **self-assessment** against the
@@ -17,7 +17,8 @@ in-TD TLS proxy repositories with commits, to be listed before review).
 
 **Decision pending.** The adapter verifies the live `poc1.armet.ai` endpoint
 (see [Live probe](#live-probe-2026-10-02) and
-[Re-probe](#re-probe-after-redeploy-2026-10-07)), but source provenance, the
+re-probes on [2026-10-07](#re-probe-after-redeploy-2026-10-07) and
+[2026-10-09](#re-probe-after-redeploy-2026-10-09)), but source provenance, the
 Fortanix DSM key-release policy and the privacy boundary have not been
 reviewed.
 
@@ -174,8 +175,8 @@ Live:
 
 - A request for a model the TD does not serve (`GLM-5.3-Other`) was refused by
   the endpoint with `409`, and the verifier failed closed.
-- After the 2026-10-07 relaunch changed `MRCONFIGID`, the previous pin was
-  rejected at the measurement step.
+- After the 2026-10-07 and 2026-10-09 relaunches changed `MRCONFIGID`, the
+  previous pin was rejected at the measurement step each time.
 
 The certificate-rotation and VM-shape checks are **TODO**.
 
@@ -282,6 +283,41 @@ End to end through a locally run gateway, pinned to the new subject:
 The live E2E suite ran with the separate live-test session-label fix applied
 (see the PR notes); without it, the suite's attested-session check fails for
 any verified provider.
+
+The new subject was pinned for this test only, as above.
+
+## Re-probe after redeploy (2026-10-09)
+
+ArmetAI relaunched the TD with a changed `initdata.toml`: the vLLM start
+parameters now add `--enable-auto-tool-choice`, `--tool-call-parser glm47` and
+`--reasoning-parser glm47`. Because the vLLM command line lives in
+`initdata.toml`, this serving-configuration change is measured through
+`MRCONFIGID` and required a new pin. The verifier checks and the gateway
+end-to-end tests were rerun against `https://poc1.armet.ai` for
+`GLM-5.3-Flash`. Tool calling itself was not exercised (criterion 9).
+
+| Check | Result |
+| --- | --- |
+| Wire contract and `report_data` commitment | Pass |
+| Reported SPKI equals live certificate SPKI | Pass (`e3e15952…1cd5`, unchanged; released by Fortanix DSM) |
+| Previous pin (`b2032b5a…47b8`) | Rejected at the measurement step |
+| New subject, pinned for the test | `verified`; TCB `UpToDate`, no advisories; NRAS 8 × GH100, every GPU nonce-matched |
+| Wrong model | `409` from the endpoint; verifier failed closed |
+
+Changed values; every other pinned field and the TDX module are unchanged:
+
+| Field | Value |
+| --- | --- |
+| MRCONFIGID | `ea7bfcb3…7fede6` (was `55a078a9…30a3bf`) |
+| Subject | `tdx-measurement:sha256:f7bc92c48878e1318aea9cf33e23413aa0a9efc5dfc879b6e46b8c3d05db6f4b` |
+
+End to end through a locally run gateway, pinned to the new subject, with the
+same results as on 2026-10-07: the live E2E quick profile passes (with the
+separate session-label fix applied); chat and streaming with
+`provider.aci_verified: true` return `200` with `X-Receipt-Id`, the stream
+terminated by `[DONE]`; a non-current `aci_session_ids` pin returns `412`; the
+offline `pap audit` fails only `id-4`, the gateway's own source provenance; and
+the session claims are unchanged.
 
 The new subject was pinned for this test only, as above.
 
