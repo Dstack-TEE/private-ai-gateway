@@ -1,4 +1,4 @@
-use super::builders::build_verifier;
+use super::builders::{build_state, build_verifier};
 use super::dynamic::{DynamicUpstreamVerifier, EmptyUpstreamBackend};
 use super::*;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
@@ -78,6 +78,7 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::Privatemode.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
     assert_eq!(
@@ -129,6 +130,103 @@ fn parse_secret_ai_rejects_invalid_origins() {
             err.to_string().contains("requires a root HTTPS base_url"),
             "{base_url:?}: {err}"
         );
+    }
+}
+
+#[test]
+fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_static() {
+    let valid_text = r#"[{
+          "name": "privatemode",
+          "provider": "privatemode",
+          "base_url": "http://privatemode-proxy:8080",
+          "models": {"public-model": "provider-model"}
+        }]"#;
+    let valid = parse_config_text(valid_text).expect("Privatemode route should parse");
+    assert_eq!(valid[0].provider, UpstreamProvider::Privatemode);
+
+    for (field, expected) in [
+        (
+            r#""bearer_token": "must-not-cross-the-internal-hop""#,
+            "forbids bearer_token",
+        ),
+        (r#""path": "/v1/models""#, "forbids path"),
+        (
+            r#""privatemode_manifest_path": "/run/privatemode/manifest.json""#,
+            "unknown field",
+        ),
+    ] {
+        let candidate = valid_text.replace(
+            r#""models": {"public-model": "provider-model"}"#,
+            &format!(r#""models": {{"public-model": "provider-model"}}, {field}"#),
+        );
+        let err = parse_config_text(&candidate).expect_err("field must be rejected");
+        assert!(err.to_string().contains(expected), "{field}: {err}");
+    }
+}
+
+#[test]
+fn privatemode_route_must_match_the_static_proxy_deployment() {
+    let manifest_log_path = std::env::temp_dir().join(format!(
+        "private-ai-gateway-privatemode-manifest-log-{}-{}.txt",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let credential_path = manifest_log_path.with_extension("credential");
+    std::fs::write(&credential_path, b"secret").unwrap();
+    let deployment = Arc::new(
+        crate::aci::upstream::PrivatemodeProxyDeployment::new(
+            "http://privatemode-proxy:8080",
+            &manifest_log_path,
+            &credential_path,
+            crate::aci::digest::sha256_hex(b"secret"),
+            format!("sha256:{}", "22".repeat(32)),
+        )
+        .unwrap(),
+    );
+    let _ = std::fs::remove_file(credential_path);
+
+    let mut route = test_upstream_config(
+        "privatemode",
+        UpstreamProvider::Privatemode,
+        "public-model",
+        "provider-model",
+    );
+    route.base_url = deployment.base_url().to_string();
+    let mut options = runtime_options(UpstreamVerifierMode::None);
+
+    let err = match build_state(&[route.clone()], &options) {
+        Ok(_) => panic!("Privatemode route without static deployment must fail"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("requires static privatemode_proxy"));
+
+    options.privatemode_proxy = Some(deployment);
+    build_state(&[route.clone()], &options)
+        .expect("matching static Privatemode deployment should build");
+    route.base_url = "http://different-proxy:8080".to_string();
+    let err = match build_state(&[route], &options) {
+        Ok(_) => panic!("mutable route must not redirect the static proxy"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("does not match static proxy endpoint"));
+}
+
+fn runtime_options(verifier_mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
+    UpstreamRuntimeOptions {
+        verifier_mode,
+        accepted_subjects: Vec::new(),
+        accepted_image_digests: Vec::new(),
+        accepted_dstack_kms_root_public_keys: Vec::new(),
+        pccs_url: None,
+        verifier_cache_seconds: 300,
+        connect_timeout_seconds: 10,
+        read_timeout_seconds: 600,
+        verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     }
 }
 
@@ -231,17 +329,7 @@ fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstre
             "secret-model",
         ),
     ];
-    let options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::AciService,
-        accepted_subjects: Vec::new(),
-        accepted_image_digests: Vec::new(),
-        accepted_dstack_kms_root_public_keys: Vec::new(),
-        pccs_url: None,
-        verifier_cache_seconds: 300,
-        connect_timeout_seconds: 10,
-        read_timeout_seconds: 600,
-        verifier_request_timeout_seconds: 60,
-    };
+    let options = runtime_options(UpstreamVerifierMode::AciService);
 
     let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
         .expect("plain OpenAI-compatible upstreams should not require ACI service policy");
@@ -424,17 +512,7 @@ fn refresh_test_manager(
     config: Vec<UpstreamConfig>,
     verifier: Arc<dyn UpstreamVerifier>,
 ) -> Arc<UpstreamConfigManager> {
-    let options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::None,
-        accepted_subjects: Vec::new(),
-        accepted_image_digests: Vec::new(),
-        accepted_dstack_kms_root_public_keys: Vec::new(),
-        pccs_url: None,
-        verifier_cache_seconds: 300,
-        connect_timeout_seconds: 10,
-        read_timeout_seconds: 600,
-        verifier_request_timeout_seconds: 60,
-    };
+    let options = runtime_options(UpstreamVerifierMode::None);
     let mut state = build_state(&config, &options).unwrap();
     state.verifier = Some(verifier);
     Arc::new(UpstreamConfigManager {

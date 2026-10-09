@@ -181,6 +181,22 @@ fn session_document_seals_to_the_published_bytes_and_id() {
     assert_eq!(adopted.session_id(), SESSION_ID);
 }
 
+/// spec/proxy-image-binding.md §6: the §3 session with that binding.
+#[test]
+fn proxy_image_binding_session_matches_the_published_id() {
+    let mut document = vector_session_document();
+    document.channel_binding = vec![ChannelBinding::ProxyImageSha256 {
+        provider: "privatemode".to_string(),
+        proxy_image_digest: format!("sha256:{}", "e1".repeat(32)),
+        credential_sha256: "f2".repeat(32),
+    }];
+    let session = AttestedSession::seal(document).unwrap();
+    assert_eq!(
+        session.session_id(),
+        "c9e76e6247b2bf28ce034b7c3b4866b9fe9ce9177e9858ad999503e63ed4f0df"
+    );
+}
+
 /// Minimal provider over the pinned receipt key; production custody rules
 /// (§3.3) do not apply to published test vectors.
 struct VectorKeys;

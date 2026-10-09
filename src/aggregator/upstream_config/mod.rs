@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::aci::digest;
 use crate::aci::receipt::VerificationResult;
-use crate::aci::upstream::{ChutesSessionStore, UpstreamBackend, UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{
+    ChutesSessionStore, PrivatemodeProxyDeployment, UpstreamBackend, UpstreamError, UpstreamRequest,
+};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
@@ -172,6 +174,7 @@ pub enum UpstreamProvider {
     Tinfoil,
     NearAi,
     SecretAi,
+    Privatemode,
     PhalaDirect,
 }
 
@@ -180,9 +183,10 @@ impl UpstreamProvider {
     /// must choose its scope rather than inherit a default.
     pub(crate) fn attestation_scope(self) -> AttestationScope {
         match self {
-            UpstreamProvider::NearAi | UpstreamProvider::Tinfoil | UpstreamProvider::SecretAi => {
-                AttestationScope::PerRouter
-            }
+            UpstreamProvider::NearAi
+            | UpstreamProvider::Tinfoil
+            | UpstreamProvider::SecretAi
+            | UpstreamProvider::Privatemode => AttestationScope::PerRouter,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
             UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
@@ -265,6 +269,9 @@ pub struct UpstreamRuntimeOptions {
     pub connect_timeout_seconds: u64,
     pub read_timeout_seconds: u64,
     pub verifier_request_timeout_seconds: u64,
+    /// Statically measured Privatemode sidecar policy. Dynamic upstream config
+    /// may select this deployment but cannot replace its endpoint or pins.
+    pub privatemode_proxy: Option<Arc<PrivatemodeProxyDeployment>>,
 }
 
 /// Connection details for fetching a model's attestation report from its
