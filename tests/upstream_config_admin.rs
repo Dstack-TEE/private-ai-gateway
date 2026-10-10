@@ -98,7 +98,8 @@ async fn admin_can_replace_single_upstream_config_file_at_runtime() {
         "name": "gpu-a",
         "base_url": "https://gpu-a.example",
         "models": {"public-a": "upstream-a"},
-        "bearer_token": "secret-token"
+        "bearer_token": "secret-token",
+        "streaming_usage": "continuous"
       }
     ]"#;
 
@@ -145,6 +146,34 @@ async fn admin_can_replace_single_upstream_config_file_at_runtime() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["upstreams"][0]["models"]["public-a"], "upstream-a");
     assert!(body["upstreams"][0].get("bearer_token").is_none());
+
+    assert_eq!(body["upstreams"][0]["streaming_usage"], "continuous");
+    let before = std::fs::read(&path).unwrap();
+    let digest = body["config_digest"].clone();
+    let invalid = String::from_utf8(config.to_vec())
+        .unwrap()
+        .replace("continuous", "automatic");
+    let (status, _) = call(
+        app.clone(),
+        "PUT",
+        "/v1/admin/upstreams",
+        invalid.into_bytes(),
+        Some("admin-secret"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let reloaded = UpstreamConfigManager::load(&path, runtime_options())
+        .unwrap()
+        .snapshot();
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap()["config_digest"],
+        digest
+    );
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap()["upstreams"][0]["streaming_usage"],
+        "continuous"
+    );
 
     let (status, models) = call(app, "GET", "/v1/models", Vec::new(), None).await;
     assert_eq!(status, StatusCode::OK);

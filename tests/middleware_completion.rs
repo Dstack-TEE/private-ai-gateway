@@ -4132,3 +4132,103 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     assert_eq!(report["errorMessage"], json!("stream_inband_error"));
     assert_canary_absent(&posts, "probe-canary-inband");
 }
+
+struct PartialUsageUpstream {
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl UpstreamBackend for PartialUsageUpstream {
+    fn name(&self) -> &str {
+        "partial-usage-fixture"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        None
+    }
+    async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!()
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&req.request.body).unwrap());
+        let events = [3,7].map(|n| Ok(Bytes::from(format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":{n},\"total_tokens\":{}}}}}\n\n",11+n))));
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers: HashMap::from([("content-type".into(), "text/event-stream".into())]),
+            body: Box::pin(
+                futures_util::stream::iter(events).chain(futures_util::stream::pending()),
+            ),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend, StreamingUsage};
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,
+        "candidates":[{"routeId":"endpoint:gpt-test","format":"openai"}]}),
+    )
+    .await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "gpt-test",
+                "actual-model",
+                Arc::new(PartialUsageUpstream {
+                    requests: requests.clone(),
+                }),
+                "endpoint:gpt-test",
+            )
+            .unwrap()
+            .with_streaming_usage(Some(StreamingUsage::Continuous)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let mut input = chat_input();
+    input.stream = true;
+    input.params["stream"] = json!(true);
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body().into_data_stream();
+    let mut received = String::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !received.contains("\"completion_tokens\":7") {
+            received.push_str(std::str::from_utf8(&body.next().await.unwrap().unwrap()).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["status"] == json!(499)).await;
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(report["usage"]["prompt_tokens"], 11);
+    assert_eq!(report["usage"]["total_tokens"], 18);
+    assert_eq!(
+        requests.lock().unwrap()[0]["stream_options"],
+        json!({"include_usage":true,"continuous_usage_stats":true})
+    );
+    assert_eq!(
+        posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["status"] == json!(499))
+            .count(),
+        1
+    );
+}

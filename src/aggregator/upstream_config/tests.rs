@@ -21,6 +21,7 @@ fn test_upstream_config(
         provider,
         base_url: format!("https://{name}.example"),
         path: None,
+        streaming_usage: None,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -880,4 +881,24 @@ fn current_requests_exclude_plain_routes_even_with_a_global_verifier() {
             .len(),
         1
     );
+}
+
+#[test]
+fn streaming_usage_config_is_validated_and_visible_without_secrets() {
+    let mut config = test_upstream_config("endpoint", UpstreamProvider::OpenAiCompatible, "a", "b");
+    assert!(serde_json::to_value(config.redacted())
+        .unwrap()
+        .get("streaming_usage")
+        .is_none());
+    config.streaming_usage = Some(StreamingUsage::Continuous);
+    let serialized = serde_json::to_string(&vec![config.clone()]).unwrap();
+    let parsed = parse_config_text(&serialized).unwrap();
+    assert_eq!(parsed[0].streaming_usage, Some(StreamingUsage::Continuous));
+    assert_eq!(
+        serde_json::to_value(config.redacted()).unwrap()["streaming_usage"],
+        "continuous"
+    );
+    assert!(parse_config_text(&serialized.replace("continuous", "automatic")).is_err());
+    config.path = Some("/v1/messages".into());
+    assert!(super::validation::validate_config(&[config]).is_err());
 }
