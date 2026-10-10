@@ -35,7 +35,18 @@ updates:
     ignore:
       - dependency-name: tauri
       - dependency-name: tauri-*
+      # src-tauri passes webview2-com and windows interfaces to wry, so both
+      # stay on wry's versions; bump them by hand together with Tauri.
+      - dependency-name: webview2-com
+      - dependency-name: windows
+        update-types: ["version-update:semver-major"]
     groups:
+      # windows-registry returns windows-result errors, so the two crates
+      # must move together, major versions included.
+      windows-registry:
+        patterns:
+          - windows-registry
+          - windows-result
       desktop-cargo:
         patterns:
           - "*"

@@ -571,7 +571,7 @@ mod platform {
     use std::ptr;
 
     use windows_registry::{Type, CURRENT_USER};
-    use windows_result::HRESULT;
+    use windows_result::WIN32_ERROR;
     use windows_sys::Win32::{
         Foundation::ERROR_FILE_NOT_FOUND,
         System::Environment::ExpandEnvironmentStringsW,
@@ -779,7 +779,7 @@ mod platform {
     }
 
     fn not_found(error: &windows_result::Error) -> bool {
-        error.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND)
+        WIN32_ERROR::from_error(error) == Some(WIN32_ERROR(ERROR_FILE_NOT_FOUND))
     }
 
     fn read_registry_string(
