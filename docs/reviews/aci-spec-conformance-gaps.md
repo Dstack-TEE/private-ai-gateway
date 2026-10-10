@@ -21,14 +21,20 @@ change to the spec, and a candidate for future work.
    the skip and the reason. If your policy requires custody, look at the
    status of check id-5, not only the exit code.
 
-2. **The compose file is measured, but the source is not rebuilt.** When the
-   service publishes its compose file, check id-4 confirms it is the file
+2. **Verifiers do not read the source commit from the compose file.** When
+   the service publishes its compose file, check id-4 confirms it is the file
    measured into the hardware quote, and `--accept-compose` limits which
-   compose files you accept. Nothing rebuilds the code from the repository and
-   commit the report names, so those two fields are only labels, and deciding
-   whether to trust them is up to you. Against a live service, both verifiers
-   fail check id-4 when the service publishes no compose file. Only an offline
-   audit of a saved report skips the check instead.
+   compose files you accept. With the [git-launcher deployment](../../deploy/README.md),
+   the compose file names the gateway repository and an exact commit, and the
+   confidential VM checks out and builds that commit itself, so the measured
+   compose file identifies the source. The verifiers do not take the commit
+   from the compose file, though. The report's `repo_url` and `repo_commit`
+   are the gateway's own statement, and no verifier checks them against the
+   compose file. To confirm the source, read the commit from the compose file
+   as [Verify the deployment](../../deploy/README.md#verify-the-deployment)
+   describes. Against a live service, both verifiers fail check id-4 when the
+   service publishes no compose file. Only an offline audit of a saved report
+   skips the check instead.
 
 ## Gateway behavior
 
