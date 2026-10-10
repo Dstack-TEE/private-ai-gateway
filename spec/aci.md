@@ -76,7 +76,8 @@ surface**, not its routing policy:
 
 - Every upstream that offers TEE attestation is verified before it serves,
   and the aggregator reaches it only over the channel that verification
-  bound — a TLS key pin or an upstream E2EE key. Each receipt records the
+  bound — a TLS key pin, an upstream E2EE key, or a binding a published
+  extension defines (Appendix B). Each receipt records the
   outcome (§7.5). Nothing a client sends skips this.
 - Verified serving is required when the operator configures the serving
   endpoint TEE-only, or when the request carries `aci_verified` (§5.3).
@@ -726,6 +727,8 @@ the upstream. Defined shapes:
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
 
+A published extension may define another binding type; see Appendix B.
+
 ### 8.3 Typed claims
 
 Claims state what was proven about an upstream in a fixed vocabulary that
@@ -1011,6 +1014,9 @@ Extension points:
   types they don't recognize unless local policy cares. The signature
   covers the whole document, so unknown events don't break verification.
 - **Session records** — the `claims.extra` map (§8.3).
+- **Channel bindings** — a published extension defines each further binding
+  type (§8.2), such as [`proxy_image_sha256`](proxy-image-binding.md) for a
+  provider proxy co-deployed in the aggregator's attested workload.
 - **Non-ACI surfaces** — implementations MAY keep pre-ACI compatibility
   endpoints, headers, and report fields. These MUST NOT alter ACI
   artifacts: report, receipt, and session content, digests, and

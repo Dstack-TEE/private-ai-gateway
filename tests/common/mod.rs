@@ -333,6 +333,7 @@ pub fn session_config(
             connect_timeout_seconds: 10,
             read_timeout_seconds: 600,
             verifier_request_timeout_seconds: 60,
+            privatemode_proxy: None,
         },
     );
     std::fs::remove_file(&path).unwrap();
