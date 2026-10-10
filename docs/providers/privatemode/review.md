@@ -19,9 +19,13 @@ traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
 > hop, like every other provider. The `require_client_e2ee` and
 > `inference_token_sha256` settings were removed, so the deployment condition
 > above about setting `require_client_e2ee` no longer applies.
-> The manifest observation is now supplemental: an unreadable manifest log
-> omits it instead of failing verification, and sessions use the generic
-> verifier-derived `tee_attested` claim.
+> Sessions use the generic verifier-derived `tee_attested` claim.
+>
+> **Status (2026-10-10):** `main` now requires every sealed session to carry a
+> complete evidence bundle. The manifest observation is that bundle for
+> Privatemode, so it is required again: verification fails closed when no
+> complete manifest can be read, and the previous complete entry is used while
+> the proxy writes a new one.
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).

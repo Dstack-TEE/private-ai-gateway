@@ -39,9 +39,9 @@ Privatemode v1.48 writes every fetched manifest to
 describes for audit. The documentation does not specify the line format; the
 gateway parses the v1.48 format (`<RFC 3339 time> <path>/<N>.json`, from
 `internal/manifestlog` in the tagged source) and resolves `<N>.json` next to
-the log. Recheck that format whenever the pinned proxy image changes. When the
-latest entry is readable, the gateway reports it from the shared read-only
-manifest-history volume:
+the log. Recheck that format whenever the pinned proxy image changes. The
+gateway reads the latest version from the shared read-only manifest-history
+volume and reports:
 
 - `observed_manifest_sha256`
 - `manifest_observed_at`
@@ -69,10 +69,12 @@ For route verification, the gateway:
 1. Sends `GET /readyz`, the proxy's readiness endpoint, to the pinned internal
    proxy origin, and rejects redirects, ambient HTTP proxies, and non-success
    status.
-2. Emits the measured proxy binding.
-3. Adds the explicitly unbound manifest observation when the latest
-   manifest-history entry is readable. The observation is supplemental: a
-   missing, partial, or malformed entry omits it and never blocks serving.
+2. Reads and validates the latest manifest-history entry, falling back to the
+   previous one while the proxy is still writing the newest file. The
+   observation is the session's evidence bundle, which every sealed session
+   must carry.
+3. Emits the measured proxy binding and the explicitly unbound manifest
+   observation.
 
 With `--apiKey` set, the proxy starts listening only after its initial Contrast
 verification and secret exchange succeed, so a readiness answer corroborates
@@ -123,7 +125,7 @@ remain `Unknown` until the proxy exposes a request-bound active manifest:
 - `serving_software_known_good`
 - `model_weights_provenance`
 
-When present, the full observed manifest is retained as session evidence with
+The full observed manifest is retained as session evidence with
 `bound_to_active_secret: false`. The observation metadata is also in
 `claims.extra`; the receipt contains only the session id and verification
 outcome.
@@ -137,6 +139,7 @@ The route fails closed when:
 - the proxy image digest is malformed;
 - mutable configuration supplies a Bearer token or path;
 - the readiness probe fails;
+- the manifest log is malformed or its latest file is missing or unreadable;
 - forwarding targets a handler outside the encrypted allowlist; or
 - the verified proxy-image binding differs from the active deployment.
 

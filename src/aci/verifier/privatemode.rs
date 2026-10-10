@@ -56,35 +56,38 @@ impl PrivatemodeProviderVerifier {
             required: request.required,
             ..Default::default()
         };
-        if let Err(err) = self.probe().await {
-            event.reason = Some(err.to_string());
-            return event;
-        }
+        // The observed manifest is the session's evidence bundle, which every
+        // sealed session must carry (§8.2). It is not bound to the active
+        // secret, so it supports no manifest-specific claims.
+        let observed = match self.probe().await {
+            Ok(()) => self
+                .deployment
+                .latest_observed_manifest()
+                .map_err(|err| err.to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+        let manifest = match observed {
+            Ok(manifest) => manifest,
+            Err(reason) => {
+                event.reason = Some(reason);
+                return event;
+            }
+        };
         event.result = VerificationResult::Verified;
+        event.evidence = Some(manifest.evidence());
         event.channel_bindings = vec![self.deployment.channel_binding()];
-        let mut claims = serde_json::json!({
+        event.provider_claims = Some(serde_json::json!({
             "trust_boundary": "attested-compose-privatemode-proxy",
             "attestation_scope": "contrast-attested-e2ee-secret",
             "request_encryption": "privatemode-oae",
             "success_response_authentication": "privatemode-oae",
             "inference_secret_policy": "latest-per-attempt-fail-closed",
             "manifest_mode": "dynamic",
-        });
-        // The manifest observation is supplemental: it is not bound to the
-        // active secret, so a missing or unreadable one never blocks serving.
-        match self.deployment.latest_observed_manifest() {
-            Ok(manifest) => {
-                event.evidence = Some(manifest.evidence());
-                claims["observed_manifest_sha256"] = manifest.sha256.into();
-                claims["manifest_observed_at"] = manifest.observed_at.into();
-                claims["manifest_observation"] = "latest-proxy-fetch-log".into();
-                claims["manifest_bound_to_active_secret"] = false.into();
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "Privatemode manifest observation unavailable")
-            }
-        }
-        event.provider_claims = Some(claims);
+            "observed_manifest_sha256": manifest.sha256,
+            "manifest_observed_at": manifest.observed_at,
+            "manifest_observation": "latest-proxy-fetch-log",
+            "manifest_bound_to_active_secret": false,
+        }));
         event
     }
 

@@ -216,10 +216,9 @@ jq -e \
         .credential_sha256 == $credential and
         .proxy_image_digest == $image_digest) and
     .claims.extra.manifest_mode == "dynamic" and
-    (.claims.extra.observed_manifest_sha256 == null or
-      (.claims.extra.manifest_observation == "latest-proxy-fetch-log" and
-       .claims.extra.manifest_bound_to_active_secret == false and
-       (.claims.extra.observed_manifest_sha256 | test("^[0-9a-f]{64}$"))))
+    .claims.extra.manifest_observation == "latest-proxy-fetch-log" and
+    .claims.extra.manifest_bound_to_active_secret == false and
+    (.claims.extra.observed_manifest_sha256 | test("^[0-9a-f]{64}$"))
   ' "$artifact_dir/session.json"
 ```
 
@@ -230,8 +229,8 @@ that, the deployment check requires the complete attested Compose to equal the
 locally reviewed render, and `--accept-compose` makes `pap verify` accept only
 that app-compose; workload-owned labels are not treated as proof. The final
 `jq` assertion independently applies local policy to the signed session binding
-and confirms that any manifest digest the session reports is labelled as an
-unbound observation. Do not treat that digest
+and confirms that the session labels its manifest digest as an unbound
+observation. Do not treat that digest
 as the manifest used by this request's inference secret. See
 [Audit the receipt](../docs/attested-confidential-inference.md#audit-the-receipt) for the verification model.
 
