@@ -419,9 +419,17 @@ The policy preserves unrelated client stream options and forces the requested
 booleans true. `final` does not remove a continuous flag supplied by the client.
 Neither mode adds flags to nonstream requests, Responses, embeddings, or native
 Anthropic messages. When `path` is configured alongside the policy, it must end
-in `/chat/completions` or `/completions`.
+in `/chat/completions` or `/completions`. The usage the upstream sends reaches
+the client whether or not the client asked for it. With direct forwarding,
+`final` adds a closing chunk with an empty `choices` array, and `continuous`
+adds `usage` to every chunk.
 
 Existing configurations without this field keep their behavior: middleware
 continues requesting `include_usage`, while direct forwarding adds no new flags.
-Deploy gateway support before sending this field: older gateways reject unknown
-configuration fields. Removing the field restores the previous injection policy.
+Removing the field restores that behavior.
+
+Upgrade every gateway before sending this field. An older gateway rejects a
+configuration that contains it and keeps its previous configuration. The gateway
+also saves the configuration it receives, and an older gateway cannot start from
+a saved configuration that contains the field. Before rolling a gateway back,
+remove the field and wait until every gateway has picked up the change.
