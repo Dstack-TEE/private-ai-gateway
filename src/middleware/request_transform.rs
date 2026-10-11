@@ -2506,11 +2506,9 @@ fn chat_tool_choice(
     tool_map: &ResponsesToolMap,
 ) -> Result<Option<Value>, TransformError> {
     match choice {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none" | "required") => {
             Ok((!function_names.is_empty()).then(|| json!(choice)))
         }
-        Value::String(choice) if choice == "required" && function_names.is_empty() => Ok(None),
-        Value::String(choice) if choice == "required" => Ok(Some(json!(choice))),
         Value::Object(object)
             if matches!(
                 object.get("type").and_then(Value::as_str),

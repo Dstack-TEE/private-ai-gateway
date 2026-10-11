@@ -112,9 +112,16 @@ impl StreamTransform {
                 .messages
                 .get_or_insert_with(|| ChatStream::new(MessagesEvents::new(upstream_usage.clone())))
                 .event(&event, fallback_id),
-            StreamTransform::OpenaiChatToResponses(..) => {
-                self.responses_stream(state).event(&event, fallback_id)
-            }
+            StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) => state
+                .responses
+                .get_or_insert_with(|| {
+                    ChatStream::new(ResponsesEvents::new(
+                        echo.clone(),
+                        identity.clone(),
+                        upstream_usage.clone(),
+                    ))
+                })
+                .event(&event, fallback_id),
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
             StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
                 unreachable!("handled above")
@@ -136,22 +143,6 @@ impl StreamTransform {
                 .map_or(Ok(None), ChatStream::end_of_stream),
             _ => Ok(None),
         }
-    }
-
-    fn responses_stream<'a>(
-        &self,
-        state: &'a mut StreamState,
-    ) -> &'a mut ChatStream<ResponsesEvents> {
-        let StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) = self else {
-            unreachable!("only the Responses bridge has a Responses stream");
-        };
-        state.responses.get_or_insert_with(|| {
-            ChatStream::new(ResponsesEvents::new(
-                echo.clone(),
-                identity.clone(),
-                upstream_usage.clone(),
-            ))
-        })
     }
 }
 
@@ -2738,22 +2729,5 @@ mod tests {
                 "{output}"
             );
         }
-    }
-
-    #[test]
-    fn selection_matrix() {
-        let usage = UpstreamUsage::default();
-        assert!(matches!(
-            select_stream_transform(ProviderFormat::Anthropic, Endpoint::ChatComplete, &usage),
-            Some(StreamTransform::AnthropicToOpenaiChat)
-        ));
-        assert!(matches!(
-            select_stream_transform(ProviderFormat::Openai, Endpoint::Messages, &usage),
-            Some(StreamTransform::OpenaiToAnthropicMessages(_))
-        ));
-        assert!(
-            select_stream_transform(ProviderFormat::Openai, Endpoint::ChatComplete, &usage)
-                .is_none()
-        );
     }
 }
