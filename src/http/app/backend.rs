@@ -40,6 +40,17 @@ pub(super) async fn forward_to_backend(
     service: Arc<AciService>,
     input: BackendForwardInput,
 ) -> Response {
+    let request_id = input.context.request_id.clone();
+    let endpoint_path = input.endpoint_path;
+    let mut response = forward_to_backend_inner(service, input).await;
+    crate::middleware::apply_request_id_header(&mut response, endpoint_path, &request_id);
+    response
+}
+
+async fn forward_to_backend_inner(
+    service: Arc<AciService>,
+    input: BackendForwardInput,
+) -> Response {
     // Kept for the refusal-receipt path (§7.5): the forward moves the
     // requester/model into the request, but a fail-closed verification error
     // still needs them to finalize the receipt the error response cites.

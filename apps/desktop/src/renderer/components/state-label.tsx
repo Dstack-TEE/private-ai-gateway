@@ -1,4 +1,5 @@
-import { toneDotClass, type Tone } from "../lib/tone";
+import { toneDotClass } from "../lib/tone";
+import type { Tone } from "../../shared/contracts";
 import { cn } from "../lib/utils";
 import { Badge } from "./ui/badge";
 

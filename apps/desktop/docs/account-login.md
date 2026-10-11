@@ -10,22 +10,29 @@ selects its workspace. RedPill displays a standard workspace selector and Save,
 including when only one workspace is available. Failed persistence
 keeps the authorization available through Retry, without signing in again.
 Manual keys and ordinary profile edits use Save. Persistence does not start gateway verification. Preset service endpoints are hidden. The runtime owns the
-browser authorization, verification and OS credential store; the renderer only
+browser authorization, verification and `credentials.toml`; the renderer only
 receives presentation and non-secret account metadata.
 
 ## Authorization
 
 Phala uses device authorization at `cloud-api.phala.com`, with
 `client_id=private-ai-proxy` and `scope=redpill:api-key`.
-Polling honors pending, slowdown and expiry. Its returned token is an inference
+Polling honors pending, slowdown (five more seconds for every later request,
+RFC 8628 §3.5) and expiry. The endpoints take JSON bodies and nest errors under
+`detail`, as Phala's own CLI expects, so this polling is not the `oauth2`
+crate's form-encoded RFC 8628 client. Its returned token is an inference
 key. Account metadata must load successfully before the authorization is ready.
 
 RedPill uses public OAuth client `cGrHCOWG3S91oa0A` on `clerk.redpill.ai` with
-exact callback `http://127.0.0.1:4181/oauth/callback`. Discovery must support code
-flow, S256 PKCE and public token exchange. The callback checks Host, state, unique
-code and issuer when present. Requests do not follow redirects. The requested
-scopes are `openid profile user:org:read`; no client secret or refresh token is
-used. Clerk tokens stay in runtime memory. Once the workspace is resolved,
+the device authorization grant (RFC 8628); there is no local callback listener.
+Discovery must advertise the device code grant and public token exchange, and
+the device authorization and token endpoints must be on the issuer's origin.
+The `oauth2` crate requests the device code and polls the token endpoint,
+honoring pending, slowdown and expiry. The verification link must be on
+`https://accounts.redpill.ai`; the app shows it with the user code.
+Requests do not follow redirects. The requested scopes are
+`openid profile user:org:read`; no client secret or refresh token is used.
+Clerk tokens stay in runtime memory. Once the workspace is resolved,
 the runtime exchanges the grant for an inference key at
 `POST https://service.redpill.ai/api/oauth/key`.
 
@@ -44,23 +51,24 @@ profile only discards local credentials; unused keys must be managed in the Phal
 dashboard. New keys do not inherit the previous key's budget.
 
 RedPill device profiles derive an installation UUID from the local installation
-and profile IDs. RedPill owns its managed credential lifecycle, including activation,
+(the owner-only `installation-id` file, written once and atomically) and
+profile IDs. RedPill owns its managed credential lifecycle, including activation,
 revocation and expiry of abandoned pending credentials. The retry queue below
 applies to RedPill only.
 
-Save validates the configuration and credential format. A replacement is written to a
-new OS credential-store entry, then the profile JSON atomically switches its
-non-secret credential reference. Failure before that switch keeps the previous
-credential selected. Account saves run independently of an individual IPC
+Save validates the configuration and credential format. It writes the new key
+to `credentials.toml`, then the profile to `config.toml`
+([Settings files](configuration.md)); if the profile write fails, the previous
+key is put back. Account saves run independently of an individual IPC
 request; the client polls an operation ID for a definite outcome. A concurrent
 save receives an explicit busy failure. Saving reconnects protection only if it
 was previously running.
 
-RedPill activation and retirement use a persistent retry queue. Each record has
-its own OS credential-store item; an atomic, non-secret manifest holds only item
-names. This avoids Windows credential blob size limits. Cleanup compares secrets
-against every currently saved profile before revocation, so reselecting a stable
-key cannot cause a stale queue entry to disable it. Activation precedes retirement.
+RedPill activation and retirement use a persistent retry queue in the owner-only
+`local-state.json` in the app data directory, which stays on this device.
+Cleanup compares secrets against every currently saved profile before
+revocation, so reselecting a stable key cannot cause a stale queue entry to
+disable it. Activation precedes retirement.
 Ordinary network failures retain records silently for bounded background retries;
 unavailable activation is reported once and requires sign-in again.
 
@@ -84,14 +92,14 @@ RedPill requires its managed-credential backend; Phala uses its existing device 
   client-based key naming only; no new migration, lifecycle endpoint or worker.
 
 The Clerk public app is registered, but registration does not deploy the API
-endpoints. No provider credentials belong in renderer state, profile JSON,
+endpoints. No provider credentials belong in renderer state, `config.toml`,
 command arguments, agent configuration or logs.
 
 Focused checks cover real PostgreSQL concurrency and migrations, provisioning,
 permission failures, budget preservation, pending expiry, local HTTP authorization
 contracts, offline deletion, stable-key reselection, save concurrency and the
-renderer flow. Packaged OS credential-store checks and real consent through
-inference and billed usage remain release acceptance checks.
+renderer flow. Real consent through inference and billed usage remains a release acceptance
+check.
 
 ## Organization, workspace and billing
 
@@ -109,7 +117,8 @@ has no separate organization tier: its workspace (team) is selected in the brows
 
 Balances load in the profile editor after authorization or when opening a saved
 account. Overview does not query balances or read credentials for this purpose.
-The editor refreshes every minute and revalidates on focus after 30 seconds.
+The editor refreshes every minute and whenever the window becomes active, as on
+returning from the billing page.
 The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
 A replaced credential cannot reuse an old cache entry. Balance reads do not update
@@ -142,35 +151,25 @@ tenant query parameters, credentials in URLs, automatic checkout, or payment
 mutation is used.
 
 
-## Callback fallback and CLI
+## Device code and CLI
 
-The browser callback uses the app's generated brand mark, system typography and
-light/dark appearance. It says Authorization received, not Connected: token
-exchange and local saving may still be pending. The page never echoes the code,
-state or error details; it has no scripts or external assets and sends no-store,
-no-referrer and restrictive CSP headers.
-
-If the automatic loopback redirect cannot reach this machine, expand Paste
-callback link in the RedPill account panel. Paste the complete URL from the
-browser. The runtime accepts only the registered callback origin/path, current
-state and optional issuer, using the same one-shot receiver and PKCE exchange as
-the HTTP callback. Wrong, expired and reused callbacks are rejected. The temporary
-password input is cleared immediately on submission and is not persisted. Copy
-sign-in link is available if the system browser launcher fails.
+Both providers show the verification link and user code in the account panel.
+The sign-in can be approved from any browser, including on another device, so a
+remote service machine needs no callback forwarding. Copy sign-in link is
+available if the system browser launcher fails.
 
 CLI account login shares the runtime authorization and save state:
 
 ```sh
 pap profiles login work --provider redpill
 pap profiles login personal --provider phala
-pap profiles login work --provider redpill --workspace 123 --no-browser --callback-stdin
+pap profiles login work --provider redpill --workspace 123 --no-browser
 pap start --profile work
 ```
 
-Login prints/opens the authorization URL. Multiple workspaces prompt in an
-interactive terminal; automation supplies --workspace. RedPill callback fallback
-reads a hidden terminal prompt or a bounded stdin stream, never a command-line
-credential argument. No-browser supports remote terminals. CLI JSON mode returns
+Login prints/opens the verification URL and prints the device code. Multiple
+workspaces prompt in an interactive terminal; automation supplies --workspace.
+No-browser supports remote terminals. CLI JSON mode returns
 non-secret profile state; login links/prompts go to stderr. A lost save response
 is reconciled by operation ID. Explicit `pap profiles verify` remains available;
 normal UI Save does not verify. Starting protection always performs attestation
@@ -212,14 +211,10 @@ Profile readiness means a saved credential is available, not that a previous
 verification timestamp exists. The main view, profile list, tray and CLI use that
 rule. Saving a profile does not perform attestation; starting protection does.
 
-RedPill authorization codes still return to the loopback callback and undergo
-state/issuer/PKCE checks. After receipt, the page offers an Open App button using
-`{bundle identifier}://oauth/return`. The Tauri deep-link plugin registers the
-scheme for the packaged app and integrates with single-instance handling. This
-link only focuses the app and open account editor; it carries no code or token
-and cannot finish authorization. CLI users can return to their terminal instead.
-Native scheme registration and browser-to-app focus require packaged platform
-acceptance; a browser may ask permission to open the application.
+Device authorization completes by polling, so the browser never returns to the
+app. The Tauri deep-link plugin still registers
+`{bundle identifier}://oauth/return`; that link only focuses the app and open
+account editor, carries no code or token and cannot finish authorization.
 
 Phala billing links use the workspace slug returned by `/private_ai/self`;
 `/cost` is Usage History and must not be used for topping up.

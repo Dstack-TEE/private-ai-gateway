@@ -13,8 +13,9 @@ Pins:
     binding (origin = url_origin, spki = tls_cert_fingerprint) plus the granular
     tcb_status claim;
   - a missing tls_cert_fingerprint, a broken report_data binding (swapped
-    fingerprint), a mismatched GPU nonce, a dstack failure, and a GPU failure are
-    each rejected.
+    fingerprint), an app_compose that is not the RTMR3-measured compose (even with
+    a self-consistent info.compose_hash), a missing measured compose hash, and a
+    dstack failure are each rejected; GPU failures are recorded, not rejected.
 
 No network, no localhost:8080, no NRAS. Run: uv run python scripts/soundness_phala_direct.py
 """
@@ -46,6 +47,9 @@ URL_ORIGIN = "https://model-a.phala.example"
 # A real seeded dstack OS image hash (dev image 0.5.9) so the genuine path resolves
 # production_os_image offline from dstack_os_image.KNOWN_OS_IMAGES.
 SEED_DEV_HASH = "0e09f2bcb510c682b461d16b97192c710886db582852991e05146291063f890b"
+APP_COMPOSE = "services: []"
+# The compose-hash event the stub dstack verifier reports as replayed into RTMR3.
+MEASURED_COMPOSE_HASH = hashlib.sha256(APP_COMPOSE.encode()).hexdigest()
 
 
 def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
@@ -57,16 +61,16 @@ def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
     return (b"\x00" * 48 + bytes(body) + rd + b"\x99" * 16).hex()
 
 
-def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False) -> dict:
+def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False, app_compose: str = APP_COMPOSE) -> dict:
     """Build a version-2 report for a given nonce.
 
-    bind_fp  : fingerprint mixed into report_data[0:32] (genuine = FP).
-    report_fp: fingerprint advertised in the report body (None ⇒ omit the field).
-    debug    : set the TD_ATTRIBUTES TUD byte so the quote reads as debug mode.
+    bind_fp    : fingerprint mixed into report_data[0:32] (genuine = FP).
+    report_fp  : fingerprint advertised in the report body (None ⇒ omit the field).
+    debug      : set the TD_ATTRIBUTES TUD byte so the quote reads as debug mode.
+    app_compose: compose served in tcb_info; info.compose_hash always matches it.
     """
     first = hashlib.sha256(bytes.fromhex(ADDR) + bytes.fromhex(bind_fp)).digest()
     report_data_hex = (first + bytes.fromhex(nonce_hex)).hex()
-    app_compose = "services: []"
     attestation = {
         "signing_address": "0x" + ADDR,
         "signing_algo": "ecdsa",
@@ -111,20 +115,24 @@ def _make_requests_get(report_builder):
 
 
 class _StubDstack:
-    def __init__(self, url=None, *, is_valid=True, os_image_hash=SEED_DEV_HASH):
+    def __init__(self, url=None, *, is_valid=True, os_image_hash=SEED_DEV_HASH, compose_hash=MEASURED_COMPOSE_HASH):
         self._is_valid = is_valid
         self._os_image_hash = os_image_hash
+        self._compose_hash = compose_hash
 
     def verify(self, quote, event_log, vm_config):
         if not self._is_valid:
             return {"is_valid": False, "reason": "stub dstack failure"}
         # Intentionally omit report_data so the bridge falls back to parsing it
         # from the quote via the real _tdx_report_data_hex. Surface os_image_hash
-        # under app_info, matching the live dstack-verifier >= 0.5.6 response shape.
-        details = {"tcb_status": "UpToDate"}
+        # and the event-log compose_hash under app_info, matching the live
+        # dstack-verifier >= 0.5.6 response shape.
+        app_info = {}
         if self._os_image_hash is not None:
-            details["app_info"] = {"os_image_hash": self._os_image_hash}
-        return {"is_valid": True, "details": details}
+            app_info["os_image_hash"] = self._os_image_hash
+        if self._compose_hash is not None:
+            app_info["compose_hash"] = self._compose_hash
+        return {"is_valid": True, "details": {"tcb_status": "UpToDate", "app_info": app_info}}
 
 
 def _stub_gpu(ok=True):
@@ -143,6 +151,7 @@ def _run(
     dstack_valid=True,
     gpu_ok=True,
     os_image_hash=SEED_DEV_HASH,
+    compose_hash=MEASURED_COMPOSE_HASH,
     resolve_override=None,
 ) -> dict:
     """Run verify_phala_direct with stubs and return the emitted JSON result.
@@ -159,7 +168,7 @@ def _run(
     orig_offline = os.environ.get("DSTACK_OS_IMAGE_OFFLINE")
     requests_mod.get = _make_requests_get(report_builder)
     dstack_mod.DstackVerifier = lambda url=None: _StubDstack(
-        url, is_valid=dstack_valid, os_image_hash=os_image_hash
+        url, is_valid=dstack_valid, os_image_hash=os_image_hash, compose_hash=compose_hash
     )
     nvidia_mod.NvidiaGpuVerifier = _stub_gpu(gpu_ok)
     if resolve_override is not None:
@@ -222,6 +231,18 @@ def check() -> list[str]:
             f.append("genuine: os_image_version not surfaced from resolved metadata")
         if out.get("verifier_id") != "private-ai-verifier/phala-direct/v1":
             f.append(f"genuine: unexpected verifier_id {out.get('verifier_id')!r}")
+        if claims.get("compose_hash_verified") is not True:
+            f.append("genuine: expected compose_hash_verified true")
+
+    # --- swapped compose: info.compose_hash matches app_compose, but not the RTMR3 event ---
+    out = _run(report_builder=lambda n: _report(n, app_compose="services: [evil]"))
+    if out.get("result") != "failed" or "RTMR3 compose hash" not in (out.get("reason") or ""):
+        f.append(f"swapped-compose: expected RTMR3 compose mismatch, got {out!r}")
+
+    # --- no measured compose hash from the dstack verifier → fail closed ---
+    out = _run(report_builder=lambda n: _report(n), compose_hash=None)
+    if out.get("result") != "failed" or "compose hash" not in (out.get("reason") or ""):
+        f.append(f"no-measured-compose: expected failure, got {out!r}")
 
     # --- a production OS image resolves to production_os_image=true ---
     out = _run(

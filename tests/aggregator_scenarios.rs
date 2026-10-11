@@ -189,7 +189,7 @@ impl ScriptedVerifier {
                 result,
                 reason,
                 evidence: Some(serde_json::json!({
-                    "digest": format!("sha256:{}", "ab".repeat(32)),
+                    "digest": "sha256:afe38bd8c24e1191e4829d61e25d23e0f3c6df3afdd83974008cb0e1ecfffb8a",
                     "data": "data:application/json;base64,eyJmaXh0dXJlIjoidXBzdHJlYW0tMSJ9",
                 })),
                 calls: calls.clone(),
@@ -738,7 +738,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         url_origin: Some("https://mock-upstream.example".to_string()),
         verifier_id: "mock-verifier/v1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "cd".repeat(32)),
+            "digest": "sha256:85687d7058f885f5918a9a38343545062f9fbc7f8075b6275ab7c8d142b10622",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJpdmF0ZS11cHN0cmVhbS1uYW1lIn0=",
         })),
         ..verified_event("mock-upstream", "private-upstream-name")

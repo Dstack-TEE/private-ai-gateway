@@ -67,7 +67,7 @@ try {
 
   const tokens = path.join(home, ".private-ai-proxy", "agent-tokens");
   await mkdir(tokens, { recursive: true, mode: 0o700 });
-  for (const agent of ["codex", "claude-code", "opencode", "pi", "hermes", "openclaw", "oh-my-pi"]) {
+  for (const agent of ["codex", "claude-code", "dsh", "opencode", "pi", "hermes", "openclaw", "oh-my-pi"]) {
     await run("private-ai-proxy-helper", ["--agent-token", agent], 1);
     // Synthetic local token fixture, not a provider credential or a claim that
     // a verified agent connection has been established.

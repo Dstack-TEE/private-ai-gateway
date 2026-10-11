@@ -1,0 +1,23 @@
+name: Desktop release
+
+# release-please pushes desktop-v<version> when its release PR merges. This
+# workflow runs only for those tags, so its run number increases only on
+# release tags. Stable tags number their App Store build 100 + that run number
+# (desktop-native.yml); beta tags use a run number but upload nothing.
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+
+permissions: {}
+
+jobs:
+  release:
+    permissions:
+      actions: write
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/desktop-native.yml
+    secrets: inherit

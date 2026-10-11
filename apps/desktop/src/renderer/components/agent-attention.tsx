@@ -1,5 +1,4 @@
 import { StatusDot } from "./state-label";
-import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "./ui/dialog";
 
@@ -12,7 +11,7 @@ export function AgentAttention({ name, message, authorized, action, onRepair }: 
 }) {
   const label = authorized ? "Check model" : action === "reconnect" ? "Reconnect required" : action === "disconnect" ? "Finish disconnecting" : "Check configuration";
   return <Dialog>
-    <DialogTrigger render={<Badge variant="outline" className="text-muted-foreground" render={<button type="button" />} />} aria-label={`${name}: ${label}`}>
+    <DialogTrigger render={<Button variant="outline" size="xs" />} aria-label={`${name}: ${label}`}>
       <StatusDot tone="warning" />{label}
     </DialogTrigger>
     <DialogContent>

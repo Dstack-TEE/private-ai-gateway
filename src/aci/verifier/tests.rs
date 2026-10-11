@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aci_verify::dstack::verify_dstack_app_compose;
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
 use sha2::{Sha256, Sha384};
@@ -7,7 +8,7 @@ use sha3::{Digest, Keccak256};
 
 use super::aci_service::{declared_tls_channel_bindings, CachedAciServiceVerification};
 use super::appraisal::appraise_provenance;
-use super::dstack::{verify_dstack_app_compose, verify_dstack_kms_receipt_custody};
+use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;
@@ -19,6 +20,9 @@ use crate::aci::types::{
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
+
+mod aci_service;
+mod session_pinning;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
@@ -94,7 +98,7 @@ fn receipt_custody_fixture(
 /// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "near-ai" | "tinfoil" | "secret-ai" => Some("router"),
+        "near-ai" | "tinfoil" | "secret-ai" | "privatemode" => Some("router"),
         _ => None,
     }
 }
@@ -104,7 +108,7 @@ fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<Str
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -147,7 +151,7 @@ fn counting_provider_script(
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -243,7 +247,7 @@ async fn chutes_provider_verifier_records_provider_session_material() {
         "result": "verified",
         "verifier_id": "chutes/external-test/v1",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -347,7 +351,7 @@ async fn secret_ai_provider_verifier_passes_workload_pin_to_the_bridge() {
         "verifier_id": "private-ai-verifier/secret-ai/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -583,7 +587,7 @@ async fn router_shares_one_channel_verification_across_models() {
             "result": "verified",
             "verifier_id": "router-cache-test/v1",
             "evidence": {
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:1002ddd41f83cd5c03a5996c33385a9e55666861f126b9ce8d0f920bab742123",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
             },
             "channel_bindings": [{
@@ -666,6 +670,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
         let mut output = json!({
             "result": "verified",
             "verifier_id": "scope-seam-test/v1",
+            "evidence": {
+                "digest": "sha256:07bb47d210221ac3d4f98e79ee4e60aad10755302bb1a73f31b90eda0271b6e4",
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoic2NvcGUifQ==",
+            },
             "channel_bindings": [{
                 "type": "tls_spki_sha256",
                 "origin": "https://provider.example",
@@ -739,7 +747,7 @@ async fn external_provider_refresh_keeps_existing_cache_on_failure() {
         "verifier_id": "tinfoil/external-test/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -801,9 +809,10 @@ fi"#
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
-        expires_at: 10,
+        expires_at: tokio::time::Instant::now(),
+        not_after: u64::MAX,
         evidence: Some(json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:91e6e5801d0dfe51430cd6de68e48925ea49d48aeaba4bf83e09d1acf49ed51d",
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -824,6 +833,62 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
 
     assert_eq!(event.result, VerificationResult::Verified);
     assert_eq!(event.channel_bindings, cached.channel_bindings);
+}
+
+#[tokio::test(start_paused = true)]
+async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
+    // Nothing listens on port 1, so any fresh verification fails fast.
+    let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
+        "http://127.0.0.1:1",
+        "http://127.0.0.1:1",
+        AciServiceVerifierPolicy::new(
+            vec!["test-subject".to_string()],
+            Vec::new(),
+            vec![public_key_uncompressed_hex(&signing_key(1))],
+        )
+        .unwrap(),
+        300,
+        1,
+        1,
+    )
+    .unwrap()
+    .with_cached(CachedAciServiceVerification {
+        expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
+        not_after: u64::MAX,
+        evidence: None,
+        channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+            origin: "http://127.0.0.1:1".to_string(),
+            spki_sha256: "aa".repeat(32),
+        }],
+    });
+    let request = UpstreamVerificationRequest {
+        upstream_name: "aci-upstream".to_string(),
+        url_origin: Some("http://127.0.0.1:1".to_string()),
+        model_id: "model-a".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    };
+
+    let cached = verifier.verify(request.clone()).await;
+    tokio::time::advance(std::time::Duration::from_secs(240)).await;
+    let refreshed = verifier.refresh(request.clone()).await;
+
+    assert_eq!(cached.result, VerificationResult::Verified);
+    assert_eq!(refreshed.result, VerificationResult::Failed);
+    let retained = verifier
+        .cached(&request)
+        .expect("failed refresh keeps the old cache");
+    assert_eq!(retained.channel_bindings, cached.channel_bindings);
+    assert_eq!(
+        verifier.verify(request.clone()).await.channel_bindings,
+        cached.channel_bindings
+    );
+    let remaining = verifier.cache_remaining(&request).unwrap();
+    tokio::time::advance(remaining - std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_some());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_none());
+    assert!(verifier.cache_remaining(&request).is_none());
 }
 
 #[test]

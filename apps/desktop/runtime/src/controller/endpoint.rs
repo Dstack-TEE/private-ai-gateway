@@ -1,16 +1,13 @@
 use super::*;
 
 impl DesktopRuntime {
-    pub fn client_key(&self) -> Result<String, String> {
+    pub fn client_key(&self) -> Result<String, Error> {
         self.credentials.token()
     }
 
-    pub fn rotate_client_key(&self) -> Result<String, String> {
+    pub fn rotate_client_key(&self) -> Result<String, Error> {
         let _operation = self.configuration_change()?;
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
+        let _guard = self.lock_agents()?;
         self.proxy
             .set_tokens(self.proxy.tokens().without(LOCAL_TOOLS_AGENT));
         let token = match self.credentials.rotate() {
@@ -29,62 +26,84 @@ impl DesktopRuntime {
 
     pub async fn save_local_api_config(
         self: &Arc<Self>,
-        config: LocalApiConfig,
-    ) -> Result<GatewayState, String> {
+        config: ListenConfig,
+    ) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
-            return Err("Change Local API settings in the primary app instance".to_string());
+            return Err("Change Local API settings in the primary app instance".into());
         }
-        let previous = self.manager.snapshot()?;
-        if previous.status == "verifying" {
-            return Err("Wait for the current verification to finish".to_string());
+        let state = self.state();
+        if state.status == VerificationStatus::Verifying {
+            return Err(Error::verifying(&state));
         }
+        self.apply_local_api(config).await
+    }
+
+    /// Saves and rebinds the Local API, pausing protection around the change.
+    pub(super) async fn apply_local_api(
+        self: &Arc<Self>,
+        config: ListenConfig,
+    ) -> Result<AppState, Error> {
+        let previous = self.state();
         let current = self.manager.local_api()?;
-        let resolved = local_api::resolve(config.clone())?;
+        let resolved = settings_config::resolve_local_api(config.clone())?;
         if current.config == resolved.config && previous.endpoint_error.is_none() {
             return Ok(previous);
         }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
-        // Suspend projections before changing the URL; reconnect rebuilds them against the new endpoint.
-        self.stop_with_reconnect(reconnect || previous.reconnecting)?;
+        // The projections name the Local API URL. While the session goes on,
+        // they are rewritten to the new address from the last verified
+        // catalog, so agents never fall back to their own provider. Without
+        // one they are restored, and verification projects them again.
+        let reconnecting = reconnect || previous.reconnecting;
+        let catalog = (reconnecting && previous.session_active)
+            .then(|| self.verified_catalog.lock().ok()?.clone())
+            .flatten();
+        self.stop_verifier(reconnecting, catalog.is_none())?;
         let result = self.rebind_local_api(config, current, resolved).await;
-        if self.manager.snapshot()?.endpoint_error.is_some() {
+        if let Some(catalog) = catalog {
+            if let Err(error) = self.retarget_agents(&catalog) {
+                self.report_error(error);
+            }
+        }
+        if self.state().endpoint_error.is_some() {
             self.recovery.cancel();
             self.manager.cancel_reconnection();
         } else if previous.reconnecting && !self.recovery.online() {
             self.recovery.wait();
             result?;
-            return self.manager.snapshot();
+            return Ok(self.state());
         }
-        if (reconnect || previous.reconnecting) && self.manager.snapshot()?.endpoint_error.is_none()
-        {
+        if (reconnect || previous.reconnecting) && self.state().endpoint_error.is_none() {
             if let Err(error) = self.start_inner(previous.config) {
                 self.manager.cancel_reconnection();
                 return Err(match result {
                     Ok(_) => format!(
                         "Local API settings saved, but protection could not restart: {error}"
-                    ),
-                    Err(original) => format!("{original}. Protection could not restart: {error}"),
+                    )
+                    .into(),
+                    Err(original) => {
+                        format!("{original}. Protection could not restart: {error}").into()
+                    }
                 });
             }
         }
         result?;
-        self.manager.snapshot()
+        Ok(self.state())
     }
 
     pub(super) async fn rebind_local_api(
         self: &Arc<Self>,
-        config: LocalApiConfig,
-        current: ResolvedLocalApi,
-        resolved: ResolvedLocalApi,
-    ) -> Result<GatewayState, String> {
-        let needs_bind =
-            current.bind != resolved.bind || self.manager.snapshot()?.proxy_url.is_none();
+        config: ListenConfig,
+        current: ResolvedListen,
+        resolved: ResolvedListen,
+    ) -> Result<AppState, Error> {
+        let needs_bind = current.bind != resolved.bind || self.state().proxy_url.is_none();
         if !needs_bind {
-            let resolved = local_api::save(config)?;
+            let resolved = self.save_local_api(config)?;
             self.manager
                 .set_endpoint(resolved.config, Ok(resolved.endpoint));
-            return self.manager.snapshot();
+            return Ok(self.state());
         }
 
         // Different ports can be reserved without releasing the working listener.
@@ -95,30 +114,16 @@ impl DesktopRuntime {
             None
         };
         self.endpoint.stop().await?;
-        let listener = match prepared
-            .map(Ok)
-            .unwrap_or_else(|| proxy::bind_std(resolved.bind))
-        {
-            Ok(listener) => listener,
-            Err(error) => {
-                if let Err(restore_error) = self.restore_endpoint(current.clone()) {
-                    self.manager
-                        .set_endpoint(current.config, Err(restore_error.clone()));
-                    return Err(format!("{error}; {restore_error}"));
-                }
-                return Err(error);
-            }
+        let listener = match prepared {
+            Some(listener) => listener,
+            None => proxy::bind_std(resolved.bind)
+                .map_err(|error| self.restore_after(&current, error.into()))?,
         };
-        let resolved = match local_api::save(config) {
+        let resolved = match self.save_local_api(config) {
             Ok(resolved) => resolved,
             Err(error) => {
                 drop(listener);
-                if let Err(restore_error) = self.restore_endpoint(current.clone()) {
-                    self.manager
-                        .set_endpoint(current.config, Err(restore_error.clone()));
-                    return Err(format!("{error}; {restore_error}"));
-                }
-                return Err(error);
+                return Err(self.restore_after(&current, error));
             }
         };
         self.endpoint
@@ -130,17 +135,39 @@ impl DesktopRuntime {
             )
             .inspect_err(|error| {
                 self.manager
-                    .set_endpoint(resolved.config.clone(), Err(error.clone()));
+                    .set_endpoint(resolved.config.clone(), Err(error.to_string()));
             })?;
         self.manager
             .set_endpoint(resolved.config, Ok(resolved.endpoint));
-        self.manager.snapshot()
+        Ok(self.state())
+    }
+
+    fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, Error> {
+        let resolved = settings_config::resolve_local_api(config)?;
+        self.update_config(|settings| {
+            settings.local_api = resolved.config.clone();
+            Ok(())
+        })?;
+        Ok(resolved)
+    }
+
+    /// Rebinds the previous listener after `error`, which it returns, with
+    /// the reason the previous one could not be restored either.
+    fn restore_after(self: &Arc<Self>, previous: &ResolvedListen, error: Error) -> Error {
+        match self.restore_endpoint(previous) {
+            Ok(()) => error,
+            Err(restore_error) => {
+                self.manager
+                    .set_endpoint(previous.config.clone(), Err(restore_error.to_string()));
+                format!("{error}; {restore_error}").into()
+            }
+        }
     }
 
     pub(super) fn restore_endpoint(
         self: &Arc<Self>,
-        previous: ResolvedLocalApi,
-    ) -> Result<(), String> {
+        previous: &ResolvedListen,
+    ) -> Result<(), Error> {
         let listener = proxy::bind_std(previous.bind).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
@@ -150,39 +177,41 @@ impl DesktopRuntime {
             self.manager.clone(),
             self.proxy.clone(),
             listener,
-            previous.config,
+            previous.config.clone(),
         )
     }
 
-    pub async fn reset_settings(self: &Arc<Self>) -> Result<GatewayState, String> {
+    pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         if self.instance.is_none() {
             return Err("Reset settings in the primary backend instance".into());
         }
         self.recovery.cancel();
-        self.stop_inner()?;
-        self.disconnect_all_agents_inner()?;
+        self.stop_with_reconnect(false)?;
+        if self.agent_configuration {
+            self.disconnect_all_agents_inner()?;
+        }
         let current = self.manager.local_api()?;
-        let defaults = LocalApiConfig::default();
-        let resolved = local_api::resolve(defaults.clone())?;
+        let defaults = ListenConfig::default();
+        let resolved = settings_config::resolve_local_api(defaults.clone())?;
         self.rebind_local_api(defaults, current, resolved).await?;
-        let state = self.manager.snapshot()?;
-        let settings =
-            service_config::settings_from_state(state.profiles, state.active_profile_id, true)?;
-        let settings = service_config::save(settings)?;
-        let config = settings.runtime_config()?;
-        let credential_saved = settings
-            .active_profile()
-            .is_ok_and(|profile| profile.credential_saved);
-        self.manager.set_service_configuration(
-            config,
-            settings.profiles,
-            settings.active_profile_id,
-            credential_saved,
-            false,
-        );
-        crate::preferences::reset()?;
-        self.codex_sync.reset()?;
-        self.manager.snapshot()
+        // Profiles and keys are kept; everything else returns to its default.
+        self.update_config(|settings| {
+            *settings = Config {
+                active_profile: std::mem::take(&mut settings.active_profile),
+                profiles: std::mem::take(&mut settings.profiles),
+                ..Config::default()
+            };
+            Ok(())
+        })?;
+        self.update_credentials(|credentials| {
+            credentials.web_ui = Default::default();
+            Ok(())
+        })?;
+        self.publish_service_configuration(false)?;
+        self.web_ui.set_password(None);
+        self.apply_web_ui(&desktop_core::config::WebUiConfig::default())
+            .await;
+        Ok(self.state())
     }
 }

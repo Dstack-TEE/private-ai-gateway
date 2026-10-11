@@ -1,78 +1,41 @@
+use desktop_core::contracts::{
+    NotificationPermission as Permission, NotificationPermissionStatus as PermissionStatus,
+};
 use tauri::AppHandle;
 
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Permission {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Granted,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Denied,
-    #[cfg(target_os = "macos")]
-    NotDetermined,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    Unknown,
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Unsupported,
-}
+#[cfg(target_os = "macos")]
+pub use macos::{query, request};
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionStatus {
-    pub permission: Permission,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alerts_enabled: Option<bool>,
-}
-
-impl From<Permission> for PermissionStatus {
-    fn from(permission: Permission) -> Self {
-        Self {
-            permission,
-            alerts_enabled: None,
-        }
-    }
-}
-
+#[cfg(target_os = "windows")]
 pub async fn query(app: &AppHandle) -> PermissionStatus {
-    #[cfg(target_os = "macos")]
-    {
-        return macos::query(app).await;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let id = app.config().identifier.clone();
-        return crate::run_blocking(move || {
-            use windows::{
-                core::HSTRING,
-                UI::Notifications::{NotificationSetting, ToastNotificationManager},
-            };
-            let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
-                .and_then(|notifier| notifier.Setting());
-            Ok(match setting {
-                Ok(NotificationSetting::Enabled) => Permission::Granted,
-                Ok(_) => Permission::Denied,
-                Err(_) => Permission::Unknown,
-            })
+    let id = app.config().identifier.clone();
+    crate::run_blocking(move || {
+        use windows::{
+            core::HSTRING,
+            UI::Notifications::{NotificationSetting, ToastNotificationManager},
+        };
+        let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(id))
+            .and_then(|notifier| notifier.Setting());
+        Ok(match setting {
+            Ok(NotificationSetting::Enabled) => Permission::Granted,
+            Ok(_) => Permission::Denied,
+            Err(_) => Permission::Unknown,
         })
-        .await
-        .map(PermissionStatus::from)
-        .unwrap_or_else(|_| Permission::Unknown.into());
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app;
-        Permission::Unsupported.into()
-    }
+    })
+    .await
+    .map(PermissionStatus::from)
+    .unwrap_or_else(|_| Permission::Unknown.into())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub async fn query(_app: &AppHandle) -> PermissionStatus {
+    Permission::Unsupported.into()
+}
+
+/// Without a system prompt, asking for permission opens the system settings.
+#[cfg(not(target_os = "macos"))]
 pub async fn request(app: &AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        return macos::request(app).await;
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        super::open_notification_settings(app.clone())
-    }
+    super::open_notification_settings(app.clone()).map_err(String::from)
 }
 
 #[cfg(target_os = "macos")]
@@ -85,13 +48,14 @@ mod macos {
         UNAuthorizationOptions, UNAuthorizationStatus, UNNotificationSetting,
         UNNotificationSettings, UNUserNotificationCenter,
     };
-    use std::{ptr::NonNull, sync::Mutex, time::Duration};
+    use std::{ptr::NonNull, time::Duration};
+    use tokio::sync::mpsc::unbounded_channel;
 
     pub async fn query(app: &AppHandle) -> PermissionStatus {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // The completion handler is a `Fn` block; an unbounded sender sends from it.
+        let (sender, mut receiver) = unbounded_channel();
         if app
             .run_on_main_thread(move || {
-                let sender = Mutex::new(Some(sender));
                 let callback = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
                     // Apple guarantees the settings object is valid during this callback.
                     let settings = unsafe { settings.as_ref() };
@@ -108,14 +72,10 @@ mod macos {
                         UNNotificationSetting::Disabled => Some(false),
                         _ => None,
                     };
-                    if let Ok(mut sender) = sender.lock() {
-                        if let Some(sender) = sender.take() {
-                            let _ = sender.send(PermissionStatus {
-                                permission,
-                                alerts_enabled,
-                            });
-                        }
-                    }
+                    let _ = sender.send(PermissionStatus {
+                        permission,
+                        alerts_enabled,
+                    });
                 });
                 UNUserNotificationCenter::currentNotificationCenter()
                     .getNotificationSettingsWithCompletionHandler(&callback);
@@ -124,22 +84,17 @@ mod macos {
         {
             return Permission::Unknown.into();
         }
-        match tokio::time::timeout(Duration::from_secs(10), receiver).await {
-            Ok(Ok(permission)) => permission,
+        match tokio::time::timeout(Duration::from_secs(10), receiver.recv()).await {
+            Ok(Some(permission)) => permission,
             _ => Permission::Unknown.into(),
         }
     }
 
     pub async fn request(app: &AppHandle) -> Result<(), String> {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (sender, mut receiver) = unbounded_channel();
         app.run_on_main_thread(move || {
-            let sender = Mutex::new(Some(sender));
             let callback = RcBlock::new(move |_granted: Bool, error: *mut NSError| {
-                if let Ok(mut sender) = sender.lock() {
-                    if let Some(sender) = sender.take() {
-                        let _ = sender.send(error.is_null());
-                    }
-                }
+                let _ = sender.send(error.is_null());
             });
             UNUserNotificationCenter::currentNotificationCenter()
                 .requestAuthorizationWithOptions_completionHandler(
@@ -148,8 +103,9 @@ mod macos {
                 );
         })
         .map_err(|_| "Could not request notification permission")?;
-        match receiver.await {
-            Ok(true) => Ok(()),
+        // Bounded like `query`, but long enough to answer the system prompt.
+        match tokio::time::timeout(Duration::from_secs(120), receiver.recv()).await {
+            Ok(Some(true)) => Ok(()),
             _ => Err("Could not request notification permission".into()),
         }
     }

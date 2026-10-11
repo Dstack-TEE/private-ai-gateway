@@ -1,46 +1,79 @@
 [package]
 name = "private-ai-proxy-runtime"
-version = "0.1.0"
-description = "Platform-neutral state and persistence for Private AI Proxy"
+version.workspace = true
+description = "Private AI Proxy per-user backend: controller, settings files, the management API, verifier sessions, usage, account login and web UI"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.98"
+
+[features]
+default = []
+mac-app-store = ["agent-bridge/mac-app-store", "desktop-core/mac-app-store"]
+web-ui = ["dep:axum-extra", "dep:governor", "dep:mime", "dep:rust-embed", "dep:time"]
 
 [lib]
 name = "desktop_runtime"
 path = "src/lib.rs"
 
 [dependencies]
-axum = "0.7"
-base64 = "0.22"
-rand = "0.8"
-sha2 = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+aci-protocol = { path = "../../../crates/aci-protocol" }
+agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
+axum = "0.8"
+axum-extra = { version = "0.12", default-features = false, features = ["cookie"], optional = true }
+backon = { version = "1", default-features = false, features = ["std"] }
+async-stream = "0.3"
+base64 = "0.23"
+csv = "1"
+governor = { version = "0.10", default-features = false, features = ["std", "dashmap"], optional = true }
+hex = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+# Only for the one-time 0.1 import in settings/legacy.rs; remove with it.
+keyring = "4"
+notify-debouncer-mini = "0.7"
+oauth2 = { version = "5", default-features = false }
+rand = "0.10"
+mime = { version = "0.3", optional = true }
+rust-embed = { version = "8", features = ["mime-guess"], optional = true }
+sha2 = "0.11"
+subtle = "2.6"
+thiserror = "2"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "rustls-no-provider"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-tempfile = "3"
-rpassword = "7"
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["timeout"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite_migration = { version = "2", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "process", "io-util", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros", "net"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+tracing = "0.1"
+# The web UI session cookie's Max-Age, in the `cookie` crate's duration type.
+time = { version = "0.3", default-features = false, optional = true }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 netwatcher = "0.8"
+argon2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-socket2 = "0.6"
 rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop"] }
+objc2-io-kit = { version = "0.3", default-features = false, features = ["std", "libc", "pwr_mgt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util = "0.3"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Power", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging", "Win32_System_Environment"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
+futures-util = "0.3"
+tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1", features = ["io-util", "test-util"] }
+tower = { version = "0.5", features = ["util"] }

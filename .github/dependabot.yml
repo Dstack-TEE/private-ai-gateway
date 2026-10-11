@@ -1,0 +1,55 @@
+# Dependabot version updates for the desktop app (apps/desktop) only; the
+# rest of the repository is out of scope. `chore(deps)` commits do not bump
+# the desktop version or appear in its release-please changelog.
+version: 2
+updates:
+  # Tauri's npm packages and crates must move together: @tauri-apps/api needs
+  # the same minor version as the tauri crate. A Dependabot group cannot span
+  # the npm and cargo entries, so Tauri is excluded from both and bumped by
+  # hand, following
+  # https://v2.tauri.app/develop/updating-dependencies/ (npm install
+  # @tauri-apps/cli@latest @tauri-apps/api@latest, then the tauri, tauri-build
+  # and tauri-plugin-* versions in Cargo.toml and cargo update).
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+    ignore:
+      - dependency-name: "@tauri-apps/*"
+    groups:
+      desktop-npm:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+    ignore:
+      - dependency-name: tauri
+      - dependency-name: tauri-*
+      # src-tauri passes webview2-com and windows interfaces to wry, so both
+      # stay on wry's versions; bump them by hand together with Tauri.
+      - dependency-name: webview2-com
+      - dependency-name: windows
+        update-types: ["version-update:semver-major"]
+    groups:
+      # windows-registry returns windows-result errors, so the two crates
+      # must move together, major versions included.
+      windows-registry:
+        patterns:
+          - windows-registry
+          - windows-result
+      desktop-cargo:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

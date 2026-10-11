@@ -67,6 +67,7 @@ test('transcript: quote verify (id-1) fails closed on the stub quote; bindings p
     assert.equal(g(id).status, 'skip', `${id} must be an honest skip`);
     assert.ok((g(id).detail ?? '').length > 0, `${id} needs a reason`);
   }
+  assert.ok(g('id-5').detail?.includes('not implemented in this verifier'));
   assert.ok(g('id-6').detail?.includes('no live channel'));
 
   assert.equal(verdict.verified, false);

@@ -22,9 +22,8 @@ use crate::aci::types::{
 };
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
-use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
 use super::backend::{
@@ -211,34 +210,7 @@ pub(super) async fn admin_put_upstreams(
         Err(e) => return upstream_config_error_response(e),
     };
     match manager.replace(config) {
-        Ok(snapshot) => {
-            let manager = manager.clone();
-            tokio::spawn(async move {
-                let results = manager.prewarm_upstream_verification().await;
-                for result in results {
-                    match result.reason {
-                        Some(reason) => tracing::warn!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            reason = %reason,
-                            "upstream verification prewarm finished"
-                        ),
-                        None => tracing::info!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            "upstream verification prewarm finished"
-                        ),
-                    }
-                }
-            });
-            Json(snapshot).into_response()
-        }
+        Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => upstream_config_error_response(e),
     }
 }
@@ -509,6 +481,21 @@ pub(super) async fn responses(
         );
     }
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
+}
+
+pub(super) async fn systemone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if has_e2ee_headers(&headers) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE v2 is not supported on /v1/systemone",
+        );
+    }
+    openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
 #[derive(Debug, Default)]
@@ -782,6 +769,7 @@ pub(super) async fn openai_completion_endpoint(
             EMBEDDINGS_PATH => Endpoint::Embed,
             MESSAGES_PATH => Endpoint::Messages,
             RESPONSES_PATH => Endpoint::CreateModelResponse,
+            SYSTEMONE_PATH => Endpoint::SystemOne,
             _ => Endpoint::ChatComplete,
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
@@ -908,29 +896,27 @@ pub(super) async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let sessions = match q.model.as_deref() {
-        // Resolve the model to the upstream(s) serving it, then list each
-        // channel's sessions (honoring an upstream_name filter if both are given).
-        Some(model) => {
-            let names = state
-                .upstream_config
-                .as_ref()
-                .map(|c| c.upstream_names_for_model(model))
-                .unwrap_or_default();
-            let mut merged = names
-                .iter()
-                .filter(|n| q.upstream_name.as_deref().is_none_or(|p| p == n.as_str()))
-                .flat_map(|n| state.service.list_attested_sessions(Some(n)))
-                .collect::<Vec<_>>();
-            // Each per-upstream list is already sorted, but the fan-out just
-            // concatenates them — re-sort the merge so it matches the ordering of
-            // the single-channel path.
-            sort_sessions_newest_first(&mut merged);
-            merged
+    let requests = state
+        .upstream_config
+        .as_ref()
+        .map(|config| {
+            config.current_verification_requests(
+                q.model.as_deref(),
+                q.upstream_name.as_deref(),
+                state.middleware.is_some(),
+            )
+        })
+        .unwrap_or_default();
+    let sessions = match state.service.list_current_sessions(&requests) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to list attested sessions");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to list attested sessions",
+            );
         }
-        None => state
-            .service
-            .list_attested_sessions(q.upstream_name.as_deref()),
     };
     // List entries add a `session_id` member for lookup and keep the digest as
     // the integrity anchor while dropping the raw evidence `data` (§8.1). Only

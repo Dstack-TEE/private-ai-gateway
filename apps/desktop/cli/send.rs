@@ -4,9 +4,10 @@
 //! SPKI-pinned connection capturing the exact wire bytes, then fetches
 //! and verifies the receipt (spec 9.3) and the session it cites (9.2).
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
-use private_ai_proxy::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
+use crate::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
+use desktop_core::sse::DataLines;
 use serde_json::{json, Value};
 
 use crate::args::SendArgs;
@@ -14,27 +15,29 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
+use crate::print_json;
 use crate::verify::{verify_service, ServiceVerification};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
 pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, String> {
+    let bearer = api_key(&args)?;
     let verification = verify_service(
         &args.base_url,
         None,
-        &args.accepted_composes,
+        &args.policy.verifier_policy()?,
         require_production_os,
         false,
     )
     .await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human(false));
+        print!("{}", verification.transcript.render_human());
         println!();
     }
     if !verification.transcript.verified() {
         if args.json {
-            print_json(&verification.transcript.to_json(false))?;
+            print_json(&verification.transcript.to_json())?;
         }
         return Err("service verification failed; not sending the prompt (fail closed)".into());
     }
@@ -46,18 +49,13 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         client,
         base_url,
         host,
-        observed_spki,
+        tls_pins: pins,
+        ..
     } = verification;
 
-    // Enforce the just-verified SPKI on every further connection to this host.
-    if let Some(spki) = &observed_spki {
-        client.pin(&host, spki);
-    }
+    // Enforce the just-verified TLS keys on every further connection to this host.
+    client.pin(&host, &pins)?;
 
-    let bearer = args
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("ACI_API_KEY").ok());
     let model = match &args.model {
         Some(model) => model.clone(),
         None => first_model(&client, &base_url, bearer.as_deref()).await?,
@@ -67,26 +65,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         .clone()
         .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
     let stream = !args.no_stream;
-    let mut body = json!({
-        "model": model,
-        "messages": [{ "role": "user", "content": prompt }],
-        "stream": stream,
-    });
-    // §5.3 serving constraints ride in the body; the service consumes and
-    // strips the member before forwarding. Verified serving is the default —
-    // `--allow-unverified` drops the demand.
-    if !args.allow_unverified || !args.sessions.is_empty() {
-        let mut provider = serde_json::Map::new();
-        if !args.allow_unverified {
-            provider.insert(PROVIDER_ACI_VERIFIED.to_string(), json!(true));
-        }
-        if !args.sessions.is_empty() {
-            provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(args.sessions));
-        }
-        body["provider"] = Value::Object(provider);
-    }
-    let request_body =
-        serde_json::to_vec(&body).map_err(|e| format!("failed to serialize request body: {e}"))?;
+    let request_body = chat_request(&args, &model, &prompt, stream)?;
 
     if !args.json {
         println!("model:  {model}");
@@ -130,24 +109,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         println!();
     }
 
-    // A streaming response the aggregator committed before selecting an
-    // upstream (pre-first-byte keep-alive, §5.2) carries no X-Receipt-Id
-    // header; the receipt still exists once the stream finalized and is
-    // retrievable by the response's own id. That is only legitimate for an
-    // unverified stream — a constrained request (the default) is never
-    // committed early, so a missing header there is a §5.2 violation this
-    // command must keep surfacing, not paper over.
-    let receipt_id = match response
-        .headers
-        .get("x-receipt-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-    {
-        Some(id) => id,
-        None if args.allow_unverified && stream => response_chat_id(&response.body)
-            .ok_or("response carried no X-Receipt-Id header and no readable response id")?,
-        None => return Err("response carried no X-Receipt-Id header".into()),
-    };
+    let receipt_id = receipt_id(&response, args.allow_unverified && stream)?;
     let receipt_resp = client
         .fetch_receipt(&base_url, &receipt_id, bearer.as_deref())
         .await?;
@@ -177,7 +139,7 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
     );
 
     if args.json {
-        let mut output = transcript.to_json(false);
+        let mut output = transcript.to_json();
         output["model"] = json!(model);
         output["receipt_id"] = json!(receipt_id);
         output["request_body"] = json!(String::from_utf8_lossy(&request_body));
@@ -185,17 +147,75 @@ pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, Str
         print_json(&output)?;
     } else {
         println!("== receipt verification: {receipt_id} ==");
-        print!("{}", transcript.render_human(false));
+        print!("{}", transcript.render_human());
     }
     Ok(if transcript.verified() { 0 } else { 1 })
 }
 
-fn print_json(value: &Value) -> Result<(), String> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?
-    );
-    Ok(())
+/// The bearer key: piped to stdin, the deprecated `--api-key`, or `ACI_API_KEY`.
+fn api_key(args: &SendArgs) -> Result<Option<String>, String> {
+    if args.api_key_stdin {
+        if std::io::stdin().is_terminal() {
+            return Err("Refusing to read the API key from a terminal with --api-key-stdin; pipe it in or set ACI_API_KEY.".into());
+        }
+        return crate::read_api_key(std::io::stdin()).map(Some);
+    }
+    if let Some(key) = &args.api_key {
+        // Like the `aci` alias note, never mixed into JSON-mode stderr.
+        if !args.json {
+            tracing::warn!("warning: --api-key exposes the key to other local processes and will be removed in 0.3; use --api-key-stdin or ACI_API_KEY.");
+        }
+        return Ok(Some(key.clone()));
+    }
+    Ok(std::env::var("ACI_API_KEY").ok())
+}
+
+/// The chat completion request. §5.3 serving constraints ride in the body;
+/// the service consumes and strips the member before forwarding. Verified
+/// serving is the default — `--allow-unverified` drops the demand.
+fn chat_request(
+    args: &SendArgs,
+    model: &str,
+    prompt: &str,
+    stream: bool,
+) -> Result<Vec<u8>, String> {
+    let mut body = json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": prompt }],
+        "stream": stream,
+    });
+    if !args.allow_unverified || !args.sessions.is_empty() {
+        let mut provider = serde_json::Map::new();
+        if !args.allow_unverified {
+            provider.insert(PROVIDER_ACI_VERIFIED.to_string(), json!(true));
+        }
+        if !args.sessions.is_empty() {
+            provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(args.sessions));
+        }
+        body["provider"] = Value::Object(provider);
+    }
+    serde_json::to_vec(&body).map_err(|e| format!("failed to serialize request body: {e}"))
+}
+
+/// The response's receipt id. A streaming response the aggregator committed
+/// before selecting an upstream (pre-first-byte keep-alive, §5.2) carries no
+/// X-Receipt-Id header; the receipt still exists once the stream finalized
+/// and is retrievable by the response's own id. That is only legitimate for
+/// an unverified stream (`early_commit`) — a constrained request (the
+/// default) is never committed early, so a missing header there is a §5.2
+/// violation this command must keep surfacing, not paper over.
+fn receipt_id(response: &HttpResult, early_commit: bool) -> Result<String, String> {
+    let header = response
+        .headers
+        .get("x-receipt-id")
+        .and_then(|value| value.to_str().ok());
+    match header {
+        Some(id) => Ok(id.to_string()),
+        None if early_commit => response_chat_id(&response.body).ok_or_else(|| {
+            "response carried no X-Receipt-Id header and no readable response id".into()
+        }),
+        None => Err("response carried no X-Receipt-Id header".into()),
+    }
 }
 
 async fn first_model(
@@ -214,25 +234,24 @@ async fn first_model(
 /// The response's own `id`, from a buffered JSON body or the first SSE data
 /// event that carries one. The receipt endpoint accepts it as a lookup key.
 fn response_chat_id(body: &[u8]) -> Option<String> {
-    if let Ok(value) = serde_json::from_slice::<Value>(body) {
-        if let Some(id) = value["id"].as_str() {
-            return Some(id.to_string());
-        }
+    let id = |data: &[u8]| {
+        serde_json::from_slice::<Value>(data)
+            .ok()
+            .and_then(|value| value["id"].as_str().map(str::to_string))
+    };
+    if let Some(id) = id(body) {
+        return Some(id);
     }
-    for line in body.split(|b| *b == b'\n') {
-        let Ok(line) = std::str::from_utf8(line) else {
-            continue;
-        };
-        let Some(data) = line.trim_end_matches('\r').strip_prefix("data:") else {
-            continue;
-        };
-        if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
-            if let Some(id) = value["id"].as_str() {
-                return Some(id.to_string());
-            }
+    let mut found = None;
+    let mut lines = DataLines::new();
+    let mut first = |data: &str| {
+        if found.is_none() {
+            found = id(data.as_bytes());
         }
-    }
-    None
+    };
+    lines.push(body, &mut first);
+    lines.finish(&mut first);
+    found
 }
 
 fn buffered_response_text(response: &HttpResult) -> String {
@@ -246,11 +265,11 @@ fn buffered_response_text(response: &HttpResult) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned())
 }
 
-/// Reassembles SSE lines across chunk boundaries, collects the streamed
-/// `choices[0].delta.content` text, and optionally echoes it as it arrives.
-/// The wire bytes themselves are captured separately, untouched.
+/// Collects the streamed `choices[0].delta.content` text across chunk
+/// boundaries, and optionally echoes it as it arrives. The wire bytes
+/// themselves are captured separately, untouched.
 struct SseTextCollector {
-    buf: Vec<u8>,
+    lines: DataLines,
     text: String,
     echo: bool,
 }
@@ -258,55 +277,57 @@ struct SseTextCollector {
 impl SseTextCollector {
     fn new(echo: bool) -> Self {
         Self {
-            buf: Vec::new(),
+            lines: DataLines::new(),
             text: String::new(),
             echo,
         }
     }
 
     fn feed(&mut self, chunk: &[u8]) {
-        self.buf.extend_from_slice(chunk);
-        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            self.line(&line);
-        }
+        let (text, echo) = (&mut self.text, self.echo);
+        self.lines
+            .push(chunk, |data| append_delta(text, echo, data));
     }
 
     fn finish(&mut self) {
-        if !self.buf.is_empty() {
-            let rest = std::mem::take(&mut self.buf);
-            self.line(&rest);
-        }
+        let (text, echo) = (&mut self.text, self.echo);
+        self.lines.finish(|data| append_delta(text, echo, data));
     }
+}
 
-    fn line(&mut self, raw: &[u8]) {
-        let Ok(line) = std::str::from_utf8(raw) else {
-            return;
-        };
-        // Handles both `data:{..}` and `data: {..}`, and CRLF framing.
-        let Some(data) = line.trim_end_matches(['\r', '\n']).strip_prefix("data:") else {
-            return;
-        };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            return;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(data) else {
-            return;
-        };
-        if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
-            self.text.push_str(delta);
-            if self.echo {
-                print!("{delta}");
-                let _ = std::io::stdout().flush();
-            }
+/// Appends an event's content delta; `[DONE]` and other events carry none.
+fn append_delta(text: &mut String, echo: bool, data: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
+        text.push_str(delta);
+        if echo {
+            print!("{delta}");
+            let _ = std::io::stdout().flush();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SseTextCollector;
+    use super::{response_chat_id, SseTextCollector};
+
+    #[test]
+    fn reads_the_response_id_from_json_or_the_first_event_carrying_one() {
+        assert_eq!(
+            response_chat_id(br#"{"id":"chat-1"}"#).as_deref(),
+            Some("chat-1")
+        );
+        assert_eq!(
+            response_chat_id(
+                b": keep-alive\n\ndata: {\"id\":\"chat-2\"}\r\n\ndata: {\"id\":\"chat-3\"}\n"
+            )
+            .as_deref(),
+            Some("chat-2")
+        );
+        assert_eq!(response_chat_id(b"data: [DONE]\n"), None);
+    }
 
     #[test]
     fn collects_deltas_across_chunk_boundaries() {

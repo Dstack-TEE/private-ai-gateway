@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
@@ -8,64 +8,16 @@ use std::{
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
 };
-use serde::{Deserialize, Serialize};
+use rusqlite_migration::{Migrations, M};
 
-use crate::contracts::{RequestActivity, UsageSummary};
+use desktop_core::{
+    contracts::{RequestActivity, UsageSummary},
+    private_fs::{self, Publish},
+    usage::{UsageModelPoint, UsagePage, UsagePoint, UsageQuery},
+};
 
 const DEFAULT_PAGE_SIZE: usize = 20;
 const MAX_PAGE_SIZE: usize = 100;
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageQuery {
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub since: Option<u64>,
-    #[serde(default)]
-    pub until: Option<u64>,
-    #[serde(default)]
-    pub cursor: Option<String>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePoint {
-    pub day: String,
-    pub requests: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub tokens: u64,
-    pub cost_usd: f64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsagePage {
-    pub items: Vec<RequestActivity>,
-    pub next_cursor: Option<String>,
-    pub summary: UsageSummary,
-    pub series: Vec<UsagePoint>,
-    pub model_series: Vec<UsageModelPoint>,
-    pub agents: Vec<String>,
-    pub models: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageModelPoint {
-    pub day: String,
-    pub model: Option<String>,
-    pub requests: u64,
-    pub tokens: u64,
-    pub cost_usd: f64,
-}
 
 pub struct UsageStore {
     connection: Mutex<Connection>,
@@ -98,31 +50,49 @@ impl UsageStore {
             .map_err(|error| format!("Cannot end the current session: {error}"))
     }
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        secure_parent(&path)?;
+        let parent = path
+            .parent()
+            .ok_or("The usage database path has no parent")?;
+        private_fs::create_private_dir(parent)
+            .map_err(|error| format!("Cannot create the app data directory: {error}"))?;
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err("Refusing to open a symlink as the usage database".to_string());
             }
             Ok(_) => secure_file(&path)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                desktop_gateway::tokens::write_private(&path, "")
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                private_fs::write_private(&path, "")
                     .map_err(|error| format!("Cannot create the usage database: {error}"))?;
             }
             Err(error) => return Err(format!("Cannot inspect the usage database: {error}")),
         }
-        let connection = Connection::open(&path)
-            .map_err(|error| format!("Cannot open the usage database: {error}"))?;
-        initialize(&connection)?;
+        let store = Self::new(
+            Connection::open(&path)
+                .map_err(|error| format!("Cannot open the usage database: {error}"))?,
+        )?;
         secure_file(&path)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
+        Ok(store)
     }
 
     pub fn memory() -> Result<Self, String> {
-        let connection = Connection::open_in_memory()
-            .map_err(|error| format!("Cannot open the fallback usage database: {error}"))?;
-        initialize(&connection)?;
+        Self::new(
+            Connection::open_in_memory()
+                .map_err(|error| format!("Cannot open the fallback usage database: {error}"))?,
+        )
+    }
+
+    /// Brings the schema up to date; see [`MIGRATIONS`].
+    fn new(mut connection: Connection) -> Result<Self, String> {
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous = NORMAL;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .map_err(|error| format!("Cannot initialize the usage database: {error}"))?;
+        MIGRATIONS
+            .to_latest(&mut connection)
+            .map_err(|error| format!("Cannot upgrade the usage database: {error}"))?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -201,16 +171,14 @@ impl UsageStore {
         let connection = self.lock()?;
         let mut item_bindings = bindings;
         item_bindings.push(SqlValue::Integer((limit + 1) as i64));
-        let mut statement = connection
-            .prepare(&format!(
-                "SELECT {} FROM usage_records {where_sql} ORDER BY at DESC, id DESC LIMIT ?",
-                columns()
-            ))
-            .map_err(db_error)?;
-        let rows = statement
-            .query_map(params_from_iter(item_bindings.iter()), row_to_activity)
-            .map_err(db_error)?;
-        let mut items = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+        let mut items = query_all(
+            &connection,
+            &format!(
+                "SELECT {COLUMNS} FROM usage_records {where_sql} ORDER BY at DESC, id DESC LIMIT ?"
+            ),
+            &item_bindings,
+            row_to_activity,
+        )?;
         let has_more = items.len() > limit;
         items.truncate(limit);
         let next_cursor = has_more
@@ -249,11 +217,37 @@ impl UsageStore {
         self.lock()?
             .query_row(
                 &format!(
-                    "SELECT {} FROM usage_records WHERE id = ? AND path != '/v1/models'",
-                    columns()
+                    "SELECT {COLUMNS} FROM usage_records WHERE id = ? AND path != '/v1/models'"
                 ),
                 [record_id],
                 row_to_activity,
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
+    /// Keeps the receipt document an audit checked, exactly as the service
+    /// returned it, with its record.
+    pub fn save_receipt(&self, record_id: &str, receipt: &str) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "UPDATE usage_records SET receipt = ?2 WHERE id = ?1",
+                params![record_id, receipt],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("Cannot save the receipt: {error}"))
+    }
+
+    /// A record's saved receipt document (`Some(None)` when its audit fetched
+    /// none); `None` when there is no such record.
+    pub fn receipt(&self, record_id: &str) -> Result<Option<Option<String>>, String> {
+        let record_id = clean_filter(Some(record_id), "record")?
+            .ok_or_else(|| "Invalid usage record".to_string())?;
+        self.lock()?
+            .query_row(
+                "SELECT receipt FROM usage_records WHERE id = ? AND path != '/v1/models'",
+                [record_id],
+                |row| row.get(0),
             )
             .optional()
             .map_err(db_error)
@@ -266,69 +260,56 @@ impl UsageStore {
         let mut all = query.clone();
         all.cursor = None;
         let (where_sql, bindings) = filters(&all, false)?;
-        let connection = self.lock()?;
-        let mut statement = connection
-            .prepare(&format!(
-                "SELECT {} FROM usage_records {where_sql} ORDER BY at DESC, id DESC",
-                columns()
-            ))
-            .map_err(db_error)?;
-        let rows = statement
-            .query_map(params_from_iter(bindings.iter()), row_to_activity)
-            .map_err(db_error)?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let output = options.open(path).map_err(|_| {
-            "Cannot create the usage export. Choose a new writable file path.".to_string()
-        })?;
-        let mut writer = std::io::BufWriter::new(output);
-        let write_error =
-            |_| "The usage export could not be completed; its file may be partial.".to_string();
-        writer.write_all(b"timestamp,id,session_id,agent,model,method,path,status,streamed,left_device,receipt_id,verified,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_usd,detail\n").map_err(write_error)?;
+        // Render under the database lock, then write the file without it.
+        let mut csv = csv::Writer::from_writer(Vec::new());
+        csv.write_record([
+            "timestamp",
+            "id",
+            "session_id",
+            "agent",
+            "model",
+            "method",
+            "path",
+            "status",
+            "streamed",
+            "left_device",
+            "receipt_id",
+            "verified",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_usd",
+            "detail",
+        ])
+        .map_err(csv_error)?;
         let mut count = 0;
-        for item in rows {
-            let item = item.map_err(db_error)?;
-            let fields = [
-                item.at.to_string(),
-                item.id.clone(),
-                item.session_id.clone(),
-                item.agent.clone().unwrap_or_default(),
-                item.model.clone().unwrap_or_default(),
-                item.method.clone(),
-                item.path.clone(),
-                item.status.to_string(),
-                item.streamed.to_string(),
-                item.left_device.to_string(),
-                item.receipt_id.clone().unwrap_or_default(),
-                item.verified
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                optional_number(item.input_tokens),
-                optional_number(item.output_tokens),
-                optional_number(item.cache_read_tokens),
-                optional_number(item.cache_write_tokens),
-                item.cost_usd
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                item.detail.clone(),
-            ];
-            let line = fields
-                .iter()
-                .map(|field| csv_field(field))
-                .collect::<Vec<_>>()
-                .join(",");
-            writeln!(writer, "{line}").map_err(write_error)?;
-            count += 1;
+        {
+            let connection = self.lock()?;
+            let mut statement = connection
+                .prepare(&format!(
+                    "SELECT {COLUMNS} FROM usage_records {where_sql} ORDER BY at DESC, id DESC"
+                ))
+                .map_err(db_error)?;
+            let rows = statement
+                .query_map(params_from_iter(bindings.iter()), row_to_activity)
+                .map_err(db_error)?;
+            for item in rows {
+                csv.write_record(csv_record(&item.map_err(db_error)?))
+                    .map_err(csv_error)?;
+                count += 1;
+            }
         }
-        writer
-            .flush()
-            .and_then(|()| writer.get_ref().sync_all())
-            .map_err(write_error)?;
+        let csv = csv.into_inner().map_err(csv_error)?;
+        // The export appears complete or not at all, never over an existing file.
+        private_fs::publish(path, Publish::NoClobber, |file| file.write_all(&csv)).map_err(
+            |error| match error.kind() {
+                ErrorKind::AlreadyExists | ErrorKind::NotFound | ErrorKind::PermissionDenied => {
+                    "Cannot create the usage export. Choose a new writable file path.".to_string()
+                }
+                _ => "The usage export could not be completed.".to_string(),
+            },
+        )?;
         Ok(count)
     }
 
@@ -347,47 +328,76 @@ impl UsageStore {
     }
 }
 
-fn initialize(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS active_session (
-               singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-               session_id TEXT NOT NULL,
-               started_at INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS usage_records (
-               id TEXT PRIMARY KEY NOT NULL,
-               session_id TEXT NOT NULL,
-               at INTEGER NOT NULL,
-               agent TEXT,
-               model TEXT,
-               method TEXT NOT NULL,
-               path TEXT NOT NULL,
-               status INTEGER NOT NULL,
-               streamed INTEGER NOT NULL,
-               receipt_id TEXT,
-               verified INTEGER,
-               detail TEXT NOT NULL,
-               locally_constrained INTEGER,
-               rewritten INTEGER,
-               left_device INTEGER NOT NULL,
-               input_tokens INTEGER,
-               output_tokens INTEGER,
-               cache_read_tokens INTEGER,
-               cache_write_tokens INTEGER,
-               cost_usd REAL,
-               updated_at INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
-             CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);",
-        )
-        .map_err(|error| format!("Cannot initialize the usage database: {error}"))
+fn csv_record(item: &RequestActivity) -> [String; 18] {
+    [
+        item.at.to_string(),
+        item.id.clone(),
+        item.session_id.clone(),
+        item.agent.clone().unwrap_or_default(),
+        item.model.clone().unwrap_or_default(),
+        item.method.clone(),
+        item.path.clone(),
+        item.status.to_string(),
+        item.streamed.to_string(),
+        item.left_device.to_string(),
+        item.receipt_id.clone().unwrap_or_default(),
+        item.verified
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        optional_number(item.input_tokens),
+        optional_number(item.output_tokens),
+        optional_number(item.cache_read_tokens),
+        optional_number(item.cache_write_tokens),
+        item.cost_usd
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        item.detail.clone(),
+    ]
+    .map(neutralize_formula)
 }
+
+/// The usage schema, versioned by `PRAGMA user_version`. Version 1 is the 0.1
+/// schema: 0.1 databases (version 0) already have its tables, which its
+/// `IF NOT EXISTS` lets them adopt. Append migrations; never edit one.
+const SCHEMA_V1: &str = "CREATE TABLE IF NOT EXISTS active_session (
+       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+       session_id TEXT NOT NULL,
+       started_at INTEGER NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS usage_records (
+       id TEXT PRIMARY KEY NOT NULL,
+       session_id TEXT NOT NULL,
+       at INTEGER NOT NULL,
+       agent TEXT,
+       model TEXT,
+       method TEXT NOT NULL,
+       path TEXT NOT NULL,
+       status INTEGER NOT NULL,
+       streamed INTEGER NOT NULL,
+       receipt_id TEXT,
+       verified INTEGER,
+       detail TEXT NOT NULL,
+       locally_constrained INTEGER,
+       rewritten INTEGER,
+       left_device INTEGER NOT NULL,
+       input_tokens INTEGER,
+       output_tokens INTEGER,
+       cache_read_tokens INTEGER,
+       cache_write_tokens INTEGER,
+       cost_usd REAL,
+       updated_at INTEGER NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS usage_records_at ON usage_records(at DESC, id DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_agent ON usage_records(agent, at DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_model ON usage_records(model, at DESC);
+     CREATE INDEX IF NOT EXISTS usage_records_session ON usage_records(session_id, at DESC);";
+
+const MIGRATIONS_SLICE: &[M<'_>] = &[
+    M::up(SCHEMA_V1),
+    // The receipt document as the service returned it (spec §7.2).
+    M::up("ALTER TABLE usage_records ADD COLUMN receipt TEXT;"),
+];
+const MIGRATIONS: Migrations<'_> = Migrations::from_slice(MIGRATIONS_SLICE);
 
 fn filters(query: &UsageQuery, include_cursor: bool) -> Result<(String, Vec<SqlValue>), String> {
     let mut clauses = vec!["path != '/v1/models'".to_string()];
@@ -421,14 +431,7 @@ fn filters(query: &UsageQuery, include_cursor: bool) -> Result<(String, Vec<SqlV
             values.push(SqlValue::Text(id));
         }
     }
-    Ok((
-        if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        },
-        values,
-    ))
+    Ok((format!("WHERE {}", clauses.join(" AND ")), values))
 }
 
 fn clean_filter(value: Option<&str>, name: &str) -> Result<Option<String>, String> {
@@ -493,18 +496,18 @@ fn series(
     where_sql: &str,
     bindings: &[SqlValue],
 ) -> Result<Vec<UsagePoint>, String> {
-    let mut statement = connection
-        .prepare(&format!(
+    query_all(
+        connection,
+        &format!(
             "SELECT strftime('%Y-%m-%d', at, 'unixepoch', 'localtime') AS day, count(*),
                     coalesce(sum(input_tokens), 0),
                     coalesce(sum(output_tokens), 0),
                     coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
                     coalesce(sum(cost_usd), 0)
              FROM usage_records {where_sql} GROUP BY day ORDER BY day ASC"
-        ))
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map(params_from_iter(bindings.iter()), |row| {
+        ),
+        bindings,
+        |row| {
             Ok(UsagePoint {
                 day: row.get(0)?,
                 requests: row.get(1)?,
@@ -513,9 +516,8 @@ fn series(
                 tokens: row.get(4)?,
                 cost_usd: row.get(5)?,
             })
-        })
-        .map_err(db_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+        },
+    )
 }
 
 fn model_series(
@@ -523,16 +525,16 @@ fn model_series(
     where_sql: &str,
     bindings: &[SqlValue],
 ) -> Result<Vec<UsageModelPoint>, String> {
-    let mut statement = connection
-        .prepare(&format!(
+    query_all(
+        connection,
+        &format!(
             "SELECT strftime('%Y-%m-%d', at, 'unixepoch', 'localtime') AS day, model,
                 count(*), coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
                 coalesce(sum(cost_usd), 0)
          FROM usage_records {where_sql} GROUP BY day, model ORDER BY day, model"
-        ))
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map(params_from_iter(bindings.iter()), |row| {
+        ),
+        bindings,
+        |row| {
             Ok(UsageModelPoint {
                 day: row.get(0)?,
                 model: row.get(1)?,
@@ -540,30 +542,43 @@ fn model_series(
                 tokens: row.get(3)?,
                 cost_usd: row.get(4)?,
             })
-        })
-        .map_err(db_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+        },
+    )
 }
 
 fn facet(connection: &Connection, column: &str) -> Result<Vec<String>, String> {
-    let mut statement = connection
-        .prepare(&format!(
+    query_all(
+        connection,
+        &format!(
             "SELECT DISTINCT {column} FROM usage_records \
              WHERE path != '/v1/models' AND {column} IS NOT NULL AND {column} != '' \
              ORDER BY {column}"
-        ))
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map([], |row| row.get(0))
-        .map_err(db_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+        ),
+        &[],
+        |row| row.get(0),
+    )
 }
 
-fn columns() -> &'static str {
-    "id, session_id, method, path, model, status, streamed, receipt_id, verified,
-     detail, at, agent, locally_constrained, rewritten, left_device, input_tokens,
-     output_tokens, cache_read_tokens, cache_write_tokens, cost_usd"
+/// Every row `sql` selects with `bindings`, as `map` reads it.
+fn query_all<T>(
+    connection: &Connection,
+    sql: &str,
+    bindings: &[SqlValue],
+    map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, String> {
+    connection
+        .prepare(sql)
+        .and_then(|mut statement| {
+            statement
+                .query_map(params_from_iter(bindings), map)?
+                .collect()
+        })
+        .map_err(db_error)
 }
+
+const COLUMNS: &str = "id, session_id, method, path, model, status, streamed, receipt_id, verified,
+     detail, at, agent, locally_constrained, rewritten, left_device, input_tokens,
+     output_tokens, cache_read_tokens, cache_write_tokens, cost_usd";
 
 fn row_to_activity(row: &Row<'_>) -> rusqlite::Result<RequestActivity> {
     Ok(RequestActivity {
@@ -594,17 +609,18 @@ fn optional_number(value: Option<u64>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
-fn csv_field(value: &str) -> String {
-    let protected = if value.starts_with(['=', '+', '-', '@']) {
+/// OWASP CSV injection defense: a cell a spreadsheet would read as a formula
+/// gets a leading `'` so it is shown as text. The `csv` writer quotes it.
+fn neutralize_formula(value: String) -> String {
+    if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n', '＝', '＋', '－', '＠']) {
         format!("'{value}")
     } else {
-        value.to_string()
-    };
-    if protected.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", protected.replace('"', "\"\""))
-    } else {
-        protected
+        value
     }
+}
+
+fn csv_error<E>(_: E) -> String {
+    "The usage export could not be completed.".to_string()
 }
 
 fn to_i64(value: u64) -> Result<i64, String> {
@@ -613,14 +629,6 @@ fn to_i64(value: u64) -> Result<i64, String> {
 
 fn db_error(error: rusqlite::Error) -> String {
     format!("Cannot read usage: {error}")
-}
-
-fn secure_parent(path: &Path) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "The usage database path has no parent".to_string())?;
-    desktop_gateway::tokens::create_private_dir(parent)
-        .map_err(|error| format!("Cannot create the app data directory: {error}"))
 }
 
 #[cfg(unix)]
@@ -864,6 +872,67 @@ mod tests {
         let csv = fs::read_to_string(output).unwrap();
         assert!(csv.contains("'=MODEL()"));
         assert!(csv.contains("\"'+SUM(1,1)\""));
+        for formula in ["\t=1+2", "＝1+2", "-1+2"] {
+            assert_eq!(neutralize_formula(formula.into()), format!("'{formula}"));
+        }
+    }
+
+    #[test]
+    fn migrations_are_valid() {
+        MIGRATIONS.validate().unwrap();
+    }
+
+    #[test]
+    fn a_0_1_database_adopts_the_versioned_schema_with_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.sqlite3");
+        {
+            // 0.1 created the version 1 tables without setting user_version.
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(SCHEMA_V1).unwrap();
+            old.execute(
+                "INSERT INTO usage_records (id, session_id, at, method, path, status, streamed, detail, left_device, updated_at)
+                 VALUES ('kept', 'session-0', 5, 'POST', '/v1/responses', 200, 0, '', 1, 5)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = UsageStore::open(path.clone()).unwrap();
+        assert_eq!(store.get("kept").unwrap().unwrap().session_id, "session-0");
+        // Migration 2 added the receipt column.
+        store.save_receipt("kept", "{}").unwrap();
+        assert_eq!(store.receipt("kept").unwrap(), Some(Some("{}".to_string())));
+        let version: i64 = store
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS_SLICE.len() as i64);
+        drop(store);
+        // A database from a newer release is refused, not silently rewritten.
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", MIGRATIONS_SLICE.len() + 1)
+            .unwrap();
+        assert!(UsageStore::open(path).is_err());
+    }
+
+    #[test]
+    fn keeps_the_checked_receipt_document_verbatim() {
+        let store = UsageStore::memory().unwrap();
+        store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
+        assert_eq!(store.receipt("a1").unwrap(), Some(None));
+        let document = "{\"api_version\": \"aci/1\",\n  \"served_at\": 1750000000}";
+        store.save_receipt("a1", document).unwrap();
+        // Later events for the record do not clear it.
+        store.upsert(&item("a1", 10, "codex", "model-a")).unwrap();
+        assert_eq!(
+            store.receipt("a1").unwrap(),
+            Some(Some(document.to_string()))
+        );
+        assert_eq!(store.receipt("missing").unwrap(), None);
+        store.clear().unwrap();
+        assert_eq!(store.receipt("a1").unwrap(), None);
     }
 
     #[test]

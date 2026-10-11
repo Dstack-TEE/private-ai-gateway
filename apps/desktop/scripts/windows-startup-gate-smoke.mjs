@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { stringify } from "smol-toml";
 
 import { stagePortable } from "./package-cli.mjs";
 
@@ -20,14 +21,13 @@ const execute = promisify(execFile);
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetTriple = execFileSync("rustc", ["-vV"], { encoding: "utf8", timeout: 10_000 }).match(/^host: (.+)$/m)?.[1];
 assert.ok(targetTriple?.includes("windows"), "Expected a Windows Rust host target");
-const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.brand.conf.json"), "utf8"));
+const { identifier } = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
 assert.match(identifier, /^[A-Za-z0-9.-]+$/);
 
 const scratch = await mkdtemp(path.join(os.tmpdir(), "pap-windows-gate-"));
 const portable = path.join(scratch, "bin");
 const appData = path.join(scratch, "appdata");
 const profile = path.join(scratch, "profile");
-const data = path.join(appData, identifier);
 const acquired = path.join(scratch, "acquired");
 const release = path.join(scratch, "release");
 const fixture = path.join(scratch, "gate-fixture.exe");
@@ -78,6 +78,14 @@ const reservePort = async () => {
   return port;
 };
 
+// Matches the unique scratch name because TEMP may be an 8.3 short path.
+const killPortableProcesses = () => execute("powershell.exe", [
+  "-NoProfile",
+  "-NonInteractive",
+  "-Command",
+  "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ('*\\' + $env:PAP_SMOKE_SCRATCH + '\\bin\\*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+], { env: { ...process.env, PAP_SMOKE_SCRATCH: path.basename(scratch) }, timeout: 30_000, windowsHide: true });
+
 try {
   await stagePortable({
     sourceDir: path.join(appRoot, "src-tauri/binaries"),
@@ -99,20 +107,18 @@ try {
   await once(gate, "spawn");
   gateSpawned = true;
   await waitFor(() => access(acquired).then(() => true, () => false), 10_000, "NSIS did not acquire startup.lock");
-  await expectGateFailure(["app", "open"], 5_000);
+  // `app open` starts a backend too if the gate fails to hold.
   backendAttempted = true;
+  await expectGateFailure(["app", "open"], 5_000);
   await expectGateFailure(["service", "start"], 20_000);
 
   await writeFile(release, "release");
   await waitForExit(gate, 10_000);
   assert.equal(gate.exitCode, 0);
 
-  await mkdir(data, { recursive: true });
-  await writeFile(path.join(data, "local-api.json"), JSON.stringify({
-    listenAddress: "127.0.0.1",
-    allowNetworkAccess: false,
-    port: await reservePort(),
-  }));
+  const settings = path.join(profile, ".config", "private-ai-proxy");
+  await mkdir(settings, { recursive: true });
+  await writeFile(path.join(settings, "config.toml"), stringify({ "local-api": { port: await reservePort() } }));
   const started = JSON.parse((await execute(pap, ["--json", "service", "start"], { env, timeout: 20_000, windowsHide: true })).stdout);
   assert.ok(Number.isInteger(started.processId) && started.processId > 0);
 } finally {
@@ -131,6 +137,8 @@ try {
     });
   }
   if (cleanupError) {
+    // Keep the state for diagnosis but never a process running from it.
+    await killPortableProcesses().catch((error) => console.error(`Could not kill test-owned processes: ${error.message}`));
     console.error(`Preserving failed startup-gate state at ${scratch}`);
     throw cleanupError;
   }

@@ -25,9 +25,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -40,3 +40,6 @@ jobs:
 
       - name: Compile Python helpers
         run: python3 -m compileall scripts
+
+      - name: Run Python helper tests
+        run: uv run --locked python -m unittest discover -s scripts/live_e2e/tests -t .

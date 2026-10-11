@@ -1,14 +1,19 @@
 # `opencode-provider-phala-cloud`
 
-Phala Cloud's native OpenCode provider. OpenCode `1.18.24` or newer is
-recommended. Install it globally through OpenCode's official plugin command:
+Phala Cloud's native OpenCode provider. It verifies the Phala Cloud gateway and
+pins its attested TLS key before sending model traffic, and it verifies each
+response receipt before OpenCode finishes the turn.
+
+## Install
+
+OpenCode `1.18.24` or newer is recommended. Install the plugin globally
+through OpenCode's official plugin command:
 
 ```sh
 opencode plugin opencode-provider-phala-cloud --global
 ```
 
-Restart OpenCode after installing, then use its native provider and model
-pickers:
+Restart OpenCode, then use its native provider and model pickers:
 
 ```text
 /connect
@@ -19,16 +24,16 @@ pickers:
 ```
 
 The account method uses Phala Cloud's device flow to issue a Confidential AI
-key. It returns that key through OpenCode's documented browser-authorization
-hook, and OpenCode stores it as its native API credential. The plugin does not
-implement its own token or credential store. `PHALA_AI_API_KEY` is also
-supported for the current process, but environment variables are not copied
-into the auth store. Select `phala/<model-id>` in OpenCode; inference travels
-only through the attested, TLS-pinned ACI connection.
+key, and OpenCode stores it as its native API credential. `PHALA_AI_API_KEY`
+also works for the current process, but OpenCode does not save it.
 
-Attestation is verified before model discovery, and each response receipt is
-verified before OpenCode can finish the turn. These commands display the local
-evidence; they do not enable or weaken enforcement:
+Do not add a separate `provider.phala` block. The plugin registers the
+provider, model catalog, verified fetch, and auth loader.
+
+## Inspect
+
+These commands display local evidence; they do not enable or weaken
+enforcement:
 
 ```text
 /phala-attestation
@@ -37,11 +42,9 @@ evidence; they do not enable or weaken enforcement:
 /phala-session <session-id>
 ```
 
-They dispatch the read-only `phala_aci_inspect` tool. The local wire-digest
-history keeps the latest 32 receipt-bearing requests by default and is cleared
-when OpenCode exits. Gateway receipt and session artifacts have their own
-server-side retention.
+## Learn more
 
-Do not add a separate `provider.phala` block. The plugin registers the provider,
-model catalog, verified fetch, and auth loader through OpenCode's native
-server-plugin API.
+- [Coding-agent integrations](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/coding-agents.md#opencode):
+  settings and local receipt history.
+- [Client architecture](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/architecture.md):
+  what the verifier checks and how to pin reviewed releases.

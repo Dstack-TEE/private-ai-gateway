@@ -19,8 +19,9 @@ dependencies = [
   # Tinfoil's official Python verifier. SEV-SNP/TDX attestation is verified with the
   # reference implementation (AMD VCEK->ASK->ARK signature chain + policy, Sigstore
   # code-measurement provenance, and TLS-key binding) instead of our own crypto. Used
-  # by the bridge's verify_tinfoil. See docs/upstream-verification-lifecycle.md.
-  "tinfoil>=0.2",
+  # by the bridge's verify_tinfoil. Pinned exactly because the SDK is the verifier.
+  # See docs/upstream-verification-lifecycle.md.
+  "tinfoil==0.12.1",
   # SecretAI's official verifier supplies SEV-SNP VCEK-chain, TDX DCAP, and
   # NVIDIA NRAS verification. Pin the release because its bundled SecretVM
   # artifact registry is part of the accepted measurement root.

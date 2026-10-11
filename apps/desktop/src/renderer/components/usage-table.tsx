@@ -4,19 +4,21 @@ import type { RequestActivity } from "../../shared/contracts";
 import { agentName, currency, formatTokens, outcomeOf, usageTokens } from "../lib/usage-presentation";
 import { StateLabel } from "./state-label";
 import { Button } from "./ui/button";
-import { Hint } from "./hint";
+import { Hint, HoverDetails } from "./hint";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
 const features = tableFeatures({ rowPaginationFeature });
+/** Cells with their own controls; a click in one, or in a popover it opens, is not a click on the row. */
+const CONTROL_COLUMNS = new Set(["agent", "tokens"]);
 
 function TokenDetails({ item }: { item: RequestActivity }) {
   const total = usageTokens(item);
   const counts = [["Input", item.inputTokens], ["Output", item.outputTokens], ["Cache read", item.cacheReadTokens], ["Cache write", item.cacheWriteTokens]] as const;
-  return <Hint content={
-      <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
-        {counts.map(([label, count]) => <div key={label} className="contents"><dt>{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
-      </dl>
-  }><span tabIndex={0} aria-label="Token details" className="tabular-nums underline decoration-dotted underline-offset-4">{total === undefined ? "—" : formatTokens(total)}</span></Hint>;
+  return <HoverDetails value={<span className="tabular-nums">{total === undefined ? "—" : formatTokens(total)}</span>}>
+    <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 tabular-nums">
+      {counts.map(([label, count]) => <div key={label} className="contents"><dt>{label}</dt><dd className="text-right">{count === undefined ? "—" : count.toLocaleString()}</dd></div>)}
+    </dl>
+  </HoverDetails>;
 }
 
 export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspect }: {
@@ -37,10 +39,8 @@ export function UsageTable({ items, loading, pageIndex, pageSize, total, onInspe
   return <Table aria-label="Usage history" aria-busy={loading}>
       <TableHeader>{table.getHeaderGroups().map((group) => <TableRow key={group.id}>{group.headers.map((header) => <TableHead key={header.id} className={header.id === "costUsd" || header.id === "tokens" ? "text-right" : undefined}><table.FlexRender header={header} /></TableHead>)}</TableRow>)}</TableHeader>
       <TableBody>
-        {table.getRowModel().rows.map((row) => <TableRow key={row.id} className="cursor-pointer" onClick={(event) => {
-          if (event.target instanceof Element && event.target.closest("button, a, [role=dialog]")) return;
-          onInspect(row.original);
-        }}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
+        {table.getRowModel().rows.map((row) => <TableRow key={row.id} onClick={() => onInspect(row.original)}>{row.getAllCells().map((cell) => <TableCell key={cell.id} className={cell.column.id === "tokens" ? "text-right" : undefined}
+          onClick={CONTROL_COLUMNS.has(cell.column.id) ? (event) => event.stopPropagation() : undefined}><table.FlexRender cell={cell} /></TableCell>)}</TableRow>)}
         {items.length === 0 && <TableRow><TableCell colSpan={columns.length} className="h-24 text-center text-muted-foreground">{loading ? "Loading usage history…" : "No saved usage matches these filters."}</TableCell></TableRow>}
       </TableBody>
     </Table>;

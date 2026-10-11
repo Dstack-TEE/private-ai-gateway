@@ -1,0 +1,447 @@
+//! Test-owned install trees whose processes cannot outlive the test.
+//!
+//! Teardown runs in a watchdog process outside the test's process tree, so it
+//! also happens when the test process is killed rather than unwound. It starts
+//! when the [`Sandbox`] is dropped or the test process dies (the watchdog's
+//! stdin closes). It stops the backend through `service stop`, kills anything
+//! still running from the sandbox, and removes the sandbox.
+
+use serde_json::Value;
+use std::{
+    env, fs,
+    io::{self, Read, Write},
+    net::TcpListener,
+    path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
+    time::{Duration, Instant},
+};
+
+/// The ignored `#[test]` that hosts the watchdog; it must call [`watchdog`].
+pub const WATCHDOG_TEST: &str = "sandbox_teardown_watchdog";
+const ROOT_ENV: &str = "PAP_TEST_SANDBOX_ROOT";
+const ROLE_ENV: &str = "PAP_TEST_SANDBOX_ROLE";
+const FAILURE: &str = "sandbox teardown failed: ";
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const KILL_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub struct Sandbox {
+    root: PathBuf,
+    /// Closing this pipe starts teardown.
+    trigger: Option<ChildStdin>,
+    /// Reaches EOF once the watchdog has finished teardown.
+    report: Option<ChildStdout>,
+}
+
+impl Sandbox {
+    pub fn new() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("pap-test-")
+            .tempdir()
+            .unwrap()
+            .keep();
+        // The launcher starts the watchdog with the same pipes and exits, so
+        // killing this process tree does not reach the watchdog.
+        let mut launcher = Command::new(env::current_exe().unwrap())
+            .args(["--exact", WATCHDOG_TEST, "--ignored", "--quiet"])
+            .env(ROLE_ENV, "launcher")
+            .env(ROOT_ENV, &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let sandbox = Self {
+            root,
+            trigger: launcher.stdin.take(),
+            report: launcher.stdout.take(),
+        };
+        assert!(launcher.wait().unwrap().success());
+        sandbox
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// Runs teardown and waits for it; later calls do nothing.
+    pub fn close(&mut self) {
+        drop(self.trigger.take());
+        let Some(mut report) = self.report.take() else {
+            return;
+        };
+        let mut output = String::new();
+        let _ = report.read_to_string(&mut output);
+        let failures: Vec<_> = output
+            .lines()
+            .filter_map(|line| line.strip_prefix(FAILURE))
+            .collect();
+        if failures.is_empty() {
+            return;
+        }
+        let message = format!("{}: {}", self.root.display(), failures.join("; "));
+        if std::thread::panicking() {
+            eprintln!("{FAILURE}{message}");
+        } else {
+            panic!("{FAILURE}{message}");
+        }
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Entry point of [`WATCHDOG_TEST`]; does nothing outside a sandbox.
+pub fn watchdog() {
+    let Some(root) = env::var_os(ROOT_ENV).map(PathBuf::from) else {
+        return;
+    };
+    match env::var(ROLE_ENV).as_deref() {
+        Ok("launcher") => {
+            let mut command = Command::new(env::current_exe().unwrap());
+            command
+                .args(["--exact", WATCHDOG_TEST, "--ignored", "--quiet"])
+                .env(ROLE_ENV, "watchdog")
+                .stderr(Stdio::null());
+            detach(&mut command);
+            // Exiting without waiting orphans the watchdog on purpose.
+            #[allow(clippy::zombie_processes)]
+            let _watchdog = command.spawn().unwrap();
+        }
+        Ok("watchdog") => {
+            let _ = io::stdin().read_to_end(&mut Vec::new());
+            let mut report = io::stdout().lock();
+            for failure in teardown(&root) {
+                let _ = writeln!(report, "{FAILURE}{failure}");
+            }
+        }
+        _ => panic!("Unknown sandbox role"),
+    }
+}
+
+/// Keeps terminal interrupts aimed at the test from reaching the watchdog.
+fn detach(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+}
+
+fn teardown(root: &Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    let cli = root.join(executable("private-ai-proxy"));
+    if cli.is_file() {
+        // The product's own stop path, whichever backend owns the endpoint.
+        let mut stop = Command::new(cli);
+        stop.args(["service", "stop", "--yes", "--json"])
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, root.join("home"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Err(error) = run_bounded(stop, STOP_TIMEOUT) {
+            failures.push(format!("service stop: {error}"));
+        }
+    }
+    // Last resort for a stuck backend or a straggler started after the stop.
+    let deadline = Instant::now() + KILL_TIMEOUT;
+    loop {
+        match processes_under(root) {
+            Ok(pids) if pids.is_empty() => break,
+            Ok(pids) if Instant::now() < deadline => {
+                if let Err(error) = kill(&pids) {
+                    failures.push(error);
+                    break;
+                }
+            }
+            Ok(pids) => {
+                failures.push(format!("processes {pids:?} are still running"));
+                break;
+            }
+            Err(error) => {
+                failures.push(error);
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::remove_dir_all(root) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            // Windows keeps a file locked briefly after its process exits.
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                failures.push(format!("cannot remove sandbox: {error}"));
+                break;
+            }
+        }
+    }
+    failures
+}
+
+fn run_bounded(mut command: Command, timeout: Duration) -> Result<(), String> {
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + timeout;
+    while child
+        .try_wait()
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timed out after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+pub fn executable(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Live processes whose command starts inside `root`; every sandbox binary is
+/// launched by absolute path, so this finds backends however they started.
+#[cfg(unix)]
+fn processes_under(root: &Path) -> Result<Vec<u32>, String> {
+    let roots = sandbox_prefixes(root);
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "command="])
+        .output()
+        .map_err(|error| format!("cannot list processes: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("cannot list processes: {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(' ')?;
+            let command = command.trim_start();
+            if roots.iter().any(|root| command.starts_with(root.as_str())) {
+                pid.parse().ok()
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+#[cfg(unix)]
+fn kill(pids: &[u32]) -> Result<(), String> {
+    // A process may exit between listing and signalling; the next scan decides.
+    Command::new("kill")
+        .arg("-KILL")
+        .args(pids.iter().map(u32::to_string))
+        .stderr(Stdio::null())
+        .status()
+        .map(drop)
+        .map_err(|error| format!("cannot kill {pids:?}: {error}"))
+}
+
+#[cfg(windows)]
+fn processes_under(root: &Path) -> Result<Vec<u32>, String> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            // Match the unique sandbox name: TEMP may be an 8.3 short path.
+            "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like ('*\\' + $env:PAP_TEST_SANDBOX_ROOT + '\\*') } | ForEach-Object { $_.ProcessId }",
+        ])
+        .env(ROOT_ENV, root.file_name().unwrap())
+        .output()
+        .map_err(|error| format!("cannot list processes: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("cannot list processes: {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect())
+}
+
+#[cfg(windows)]
+fn kill(pids: &[u32]) -> Result<(), String> {
+    let mut command = Command::new("taskkill.exe");
+    command.arg("/F");
+    for pid in pids {
+        command.args(["/PID", &pid.to_string()]);
+    }
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(drop)
+        .map_err(|error| format!("cannot kill {pids:?}: {error}"))
+}
+
+/// `root` as spawned by tests and as canonicalized by the product launcher,
+/// each with a trailing separator so a sibling sandbox never matches.
+#[cfg(unix)]
+fn sandbox_prefixes(root: &Path) -> Vec<String> {
+    let mut prefixes = vec![root.to_path_buf()];
+    if let Ok(canonical) = fs::canonicalize(root) {
+        prefixes.push(canonical);
+    }
+    prefixes
+        .into_iter()
+        .map(|root| format!("{}{}", root.display(), std::path::MAIN_SEPARATOR))
+        .collect()
+}
+
+/// Readiness is bounded only to fail a hung startup; loaded hosts are slow.
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A backend in its own install tree and home. Dropping it stops every process
+/// started from that tree and removes it; see `support`.
+pub struct Backend {
+    pub directory: Sandbox,
+    child: Child,
+}
+
+impl Backend {
+    pub fn start() -> Self {
+        Self::start_with_credentials("")
+    }
+
+    /// Starts with `credentials` as `credentials.toml`, when not empty.
+    pub fn start_with_credentials(credentials: &str) -> Self {
+        let directory = Sandbox::new();
+        let binary = |name: &str| directory.path().join(executable(name));
+        install(
+            env!("CARGO_BIN_EXE_private-ai-proxy"),
+            &binary("private-ai-proxy"),
+        );
+        install(
+            env!("CARGO_BIN_EXE_private-ai-proxy-service"),
+            &binary("private-ai-proxy-service"),
+        );
+        // No test requests agent credentials. Keep this unused helper tiny:
+        // startup durably stages it, so copying a debug CLI would fsync hundreds
+        // of megabytes per backend before its management endpoint becomes ready.
+        let helper = binary("private-ai-proxy-helper");
+        fs::write(&helper, b"#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = directory.path().join("home");
+        let data = home.join(".private-ai-proxy");
+        let settings = data.join("Config");
+        desktop_core::private_fs::create_private_dir(&settings).unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        desktop_core::private_fs::write_private(
+            &settings.join("config.toml"),
+            &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
+        )
+        .unwrap();
+        if !credentials.is_empty() {
+            desktop_core::private_fs::write_private(
+                &settings.join("credentials.toml"),
+                credentials,
+            )
+            .unwrap();
+        }
+        let child = Command::new(binary("private-ai-proxy-service"))
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
+            .spawn()
+            .unwrap();
+        let mut backend = Self { directory, child };
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            let output = backend.command(&["status", "--json"]).output().unwrap();
+            if output.status.success() {
+                let state: Value = serde_json::from_slice(&output.stdout).unwrap();
+                if !state["backend"].is_null() {
+                    break;
+                }
+            }
+            assert!(
+                backend.child.try_wait().unwrap().is_none(),
+                "Backend exited during startup: {}",
+                backend.startup_diagnostics(&output)
+            );
+            assert!(
+                Instant::now() < deadline,
+                "Backend readiness timed out: {}",
+                backend.startup_diagnostics(&output)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        backend
+    }
+    fn startup_diagnostics(&self, output: &Output) -> String {
+        format!(
+            "status: {}; stdout: {}; stderr: {}; backend: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(self.directory.path().join("backend.log")).unwrap()
+        )
+    }
+    pub fn cli(&self) -> PathBuf {
+        self.directory.path().join(executable("private-ai-proxy"))
+    }
+    pub fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.cli());
+        command.args(args).env(
+            desktop_core::paths::HOME_OVERRIDE_ENV,
+            self.directory.path().join("home"),
+        );
+        command
+    }
+    pub fn run(&self, args: &[&str]) -> Value {
+        let output = self.command(args).arg("--json").output().unwrap();
+        assert_success(&output);
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.directory.close();
+        // Teardown already killed it; this only reaps the process.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Places a build output in a sandbox. A hard link avoids copying hundreds of
+/// megabytes of debug binaries per backend; the launcher still sees a sibling.
+pub fn install(source: &str, destination: &Path) {
+    if fs::hard_link(source, destination).is_err() {
+        fs::copy(source, destination).unwrap();
+    }
+}
+
+pub fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

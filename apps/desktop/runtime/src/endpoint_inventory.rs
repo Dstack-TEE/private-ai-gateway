@@ -1,18 +1,20 @@
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Read,
     path::PathBuf,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
-use desktop_gateway::catalog::EndpointInventory;
+use agent_bridge::catalog::EndpointInventory;
+use desktop_core::private_fs::{self, Publish};
 use reqwest::{
     header::{ETAG, IF_NONE_MATCH},
     Client, StatusCode,
 };
 use serde::Serialize;
 
+/// Released apps fetch this exact path; moving the file breaks their refresh.
 const SOURCE: &str = "https://raw.githubusercontent.com/Dstack-TEE/private-ai-gateway/main/apps/desktop/gateway/src/endpoint-support.json";
 const MAX_BYTES: usize = 1024 * 1024;
 
@@ -29,8 +31,7 @@ pub(crate) struct InventoryUpdater {
     cache_path: PathBuf,
     cache: Mutex<CachedInventory>,
     refreshing: tokio::sync::Mutex<()>,
-    #[cfg(test)]
-    source: Option<String>,
+    source: String,
 }
 
 impl InventoryUpdater {
@@ -51,22 +52,17 @@ impl InventoryUpdater {
             cache_path,
             cache: Mutex::new(cached),
             refreshing: tokio::sync::Mutex::new(()),
-            #[cfg(test)]
-            source: None,
+            source: SOURCE.to_string(),
         })
     }
 
     pub async fn refresh(&self) -> EndpointInventory {
-        #[cfg(test)]
-        if let Some(source) = &self.source {
-            return self.refresh_from(source).await;
-        }
-        self.refresh_from(SOURCE).await
+        self.refresh_from(&self.source).await
     }
 
     #[cfg(test)]
     pub(crate) fn with_source(mut self, source: String) -> Self {
-        self.source = Some(source);
+        self.source = source;
         self
     }
 
@@ -101,7 +97,7 @@ impl InventoryUpdater {
                 // Persist before replacing the in-memory copy. A full disk must
                 // not discard validated data already available to this session.
                 if let Err(error) = persist(&self.cache_path, &updated) {
-                    eprintln!("Cannot cache model endpoint inventory: {error}");
+                    tracing::warn!("Cannot cache model endpoint inventory: {error}");
                 }
                 *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = updated;
             }
@@ -168,15 +164,9 @@ fn read_cache(path: &std::path::Path) -> Option<CachedInventory> {
 }
 
 fn persist(path: &std::path::Path, cache: &CachedInventory) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("Missing cache directory"))?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(&mut file, cache)?;
-    file.flush()?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    private_fs::publish(path, Publish::Replace, |file| {
+        serde_json::to_writer(file, cache).map_err(std::io::Error::from)
+    })
 }
 
 #[cfg(test)]

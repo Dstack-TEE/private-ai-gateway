@@ -1,19 +1,48 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 
-export default defineConfig({
+/**
+ * Tauri adds a nonce to style-src for every <style> element in the bundled
+ * HTML, and a nonce makes browsers ignore the CSP's 'unsafe-inline', which the
+ * inline styles set at runtime (popup positions, charts) need. Keep the
+ * desktop HTML free of them.
+ */
+function noInlineStyleElements(): Plugin {
+  return {
+    name: "pap:no-inline-style-elements",
+    apply: "build",
+    transformIndexHtml: {
+      order: "post",
+      handler(html) {
+        if (/<style[\s>]/i.test(html)) throw new Error("index.html has a <style> element; Tauri would add a style-src nonce and disable 'unsafe-inline'");
+      },
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => {
+  const web = mode === "web";
+  return {
   root: "src/renderer",
-  plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": fileURLToPath(new URL("./src/renderer", import.meta.url)) } },
+  plugins: [react(), tailwindcss(), ...web ? [] : [noInlineStyleElements()]],
+  resolve: { alias: {
+    "@": fileURLToPath(new URL("./src/renderer", import.meta.url)),
+    "#backend": fileURLToPath(new URL(web ? "./src/renderer/backends/http-api.ts" : "./src/renderer/backends/tauri-api.ts", import.meta.url)),
+  } },
   build: {
     assetsInlineLimit: 0,
+    // Both builds load from a local source (the app bundle, or the backend's
+    // web UI listener), so the entry chunk is not split by route; the limit
+    // leaves room for it and still flags an unexpected dependency.
+    chunkSizeWarningLimit: 1_000,
     emptyOutDir: true,
-    outDir: "../../dist",
+    outDir: web ? "../../runtime/web-dist" : "../../dist",
   },
   clearScreen: false,
   server: {
     strictPort: true,
   },
+  };
 });

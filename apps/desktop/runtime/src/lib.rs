@@ -1,29 +1,27 @@
-//! Platform-neutral desktop state and persistence.
+//! The per-user backend: the controller that owns the settings files,
+//! profiles, verifier sessions, agent configuration, usage, account login and
+//! the optional web UI, and the management API (`desktop_core::protocol`) it
+//! serves on the local endpoint and the web UI listener.
 //!
 //! The Tauri shell owns window, menu, tray, clipboard, file-picker, and
-//! autostart integration. This crate owns product state and policy.
+//! autostart integration; clients reach this crate only through the API.
 
 pub mod account_login;
+mod api;
 mod balance_cache;
-pub mod cli;
-pub mod cli_install;
-pub mod client;
-pub mod contracts;
 pub mod controller;
+mod dispatch;
 mod endpoint_inventory;
-pub mod gateway;
-#[cfg(unix)]
+mod error;
+#[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;
-pub mod launch;
-pub mod local_api;
-pub mod maintenance;
+pub mod local_state;
 pub mod power;
-pub mod preferences;
-pub mod process;
-pub mod protocol;
 mod recovery;
 pub mod server;
-pub mod service_config;
-pub mod sidecar_protocol;
-pub mod transport;
+pub mod settings;
 pub mod usage;
+pub mod verifier_session;
+pub mod web_ui;
+
+pub use error::Error;

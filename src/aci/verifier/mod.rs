@@ -27,6 +27,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::aggregator::service::UpstreamVerificationRequest;
+
 pub const DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 pub const DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS: u64 = 60;
 
@@ -34,6 +37,7 @@ mod aci_service;
 mod appraisal;
 mod dstack;
 mod external;
+mod privatemode;
 mod providers;
 mod quote;
 mod report;
@@ -49,8 +53,9 @@ pub use appraisal::{
     appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckId, CheckResult,
     CustodyEvidence, FailureCause, Outcome, QuoteSource,
 };
-pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog};
+pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, VerifiedEventLog};
 pub use external::ProviderVerifierConfigError;
+pub use privatemode::PrivatemodeProviderVerifier;
 pub use providers::{
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
@@ -61,17 +66,22 @@ pub use report::{
 };
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
 
-fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
-    let value = value.strip_prefix("0x").unwrap_or(value);
-    hex::decode(value).map_err(|e| e.to_string())
+/// A verified event cached by a provider verifier, re-labelled per request.
+#[derive(Clone, Debug)]
+struct CachedProviderEvent {
+    expires_at: tokio::time::Instant,
+    event: UpstreamVerifiedEvent,
 }
 
-fn decode_hex_32(value: &str) -> Result<[u8; 32], String> {
-    let bytes = decode_hex(value)?;
-    bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("expected 32 bytes, got {}", bytes.len()))
+impl CachedProviderEvent {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let mut event = self.event.clone();
+        event.upstream_name = request.upstream_name.clone();
+        event.model_id = request.model_id.clone();
+        event.url_origin = request.url_origin.clone();
+        event.required = request.required;
+        event
+    }
 }
 
 fn current_unix_secs() -> u64 {

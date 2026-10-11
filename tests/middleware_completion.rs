@@ -31,11 +31,19 @@ use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
 use private_ai_gateway::middleware::request_transform::Endpoint;
 use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
 use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
-use private_ai_gateway::middleware::{CompletionInput, Middleware, MiddlewareConfig};
+use private_ai_gateway::middleware::{
+    CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
+};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
 use common::{event_from_request, StaticKeyProvider, StubQuoter};
+
+/// A middleware with a fixed prefix-hash key; the gateway derives the real
+/// key from dstack KMS.
+fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
+    Middleware::new(PrefixHashKey::new([7; 32]), config)
+}
 
 // A mock upstream that returns a fixed response for any forward.
 struct MockUpstream {
@@ -77,7 +85,13 @@ impl UpstreamBackend for RecordingUpstream {
         Ok(UpstreamResponse {
             status_code: self.status,
             body: self.body.clone(),
-            headers: HashMap::from([("content-type".to_string(), self.content_type.to_string())]),
+            headers: HashMap::from([
+                ("content-type".to_string(), self.content_type.to_string()),
+                (
+                    "x-typesafe-request-id".to_string(),
+                    "upstream-id".to_string(),
+                ),
+            ]),
             served_instance_id: None,
         })
     }
@@ -389,6 +403,7 @@ fn runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 600,
         verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     }
 }
 
@@ -581,14 +596,13 @@ fn assert_canary_absent(posts: &Arc<Mutex<Vec<Value>>>, probe: &str) {
 }
 
 fn middleware(control_url: String) -> Middleware {
-    Middleware::new(&MiddlewareConfig {
+    new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -617,6 +631,37 @@ fn chat_input() -> CompletionInput {
         aci_required: false,
         aci_session_ids: Vec::new(),
         request_id: "req-1".to_string(),
+        user_model: Some("gpt-test".to_string()),
+        stream: false,
+        tee_only: false,
+    }
+}
+
+fn systemone_input() -> CompletionInput {
+    let params = json!({
+        "model": "gpt-test",
+        "state": { "message": "export failed" },
+        "questions": {
+            "kind": {
+                "type": "choice",
+                "instructions": "Classify the issue",
+                "criteria": { "platform": "outage", "billing": null }
+            }
+        },
+        "stream": true
+    });
+    CompletionInput {
+        endpoint: Endpoint::SystemOne,
+        endpoint_path: "/v1/systemone",
+        surface: Surface::Openai,
+        received_body: serde_json::to_vec(&params).unwrap(),
+        params,
+        api_key_hash: Some("deadbeef".to_string()),
+        requester: None,
+        e2ee: None,
+        aci_required: false,
+        aci_session_ids: Vec::new(),
+        request_id: "req-systemone".to_string(),
         user_model: Some("gpt-test".to_string()),
         stream: false,
         tee_only: false,
@@ -671,6 +716,7 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
 ];
 
 fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
+    assert!(!headers.contains_key("x-typesafe-request-id"));
     for (name, _) in LEAKY_UPSTREAM_HEADERS {
         assert!(
             headers.get(*name).is_none(),
@@ -724,6 +770,241 @@ async fn buffered_success_hides_which_upstream_served_it() {
     assert_eq!(body["choices"][0]["message"]["content"], json!("hi"));
     assert_eq!(body["choices"][0]["finish_reason"], json!("stop"));
     assert_eq!(body["usage"]["completion_tokens"], json!(1));
+}
+
+#[tokio::test]
+async fn systemone_success_keeps_native_shape_and_uses_native_candidate() {
+    let (control_url, _) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "acme:model-a",
+                "format": "openai",
+                "supportedEndpoints": ["/v1/systemone"]
+            }],
+            "pricing": { "inputCostPerToken": "1", "outputCostPerToken": "2" }
+        }),
+    )
+    .await;
+    let upstream = br#"{
+        "model":"internal-model",
+        "answers":{"kind":{"type":"choice","choice":"platform","vendor_detail":"keep"}},
+        "usage":{"input_tokens":2,"output_tokens":3,"provider_trace":"drop"},
+        "error":null,
+        "provider":"drop"
+    }"#;
+    let (service, requests) = build_recording_service(200, upstream.to_vec(), "application/json");
+
+    let (status, headers, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(headers["x-typesafe-request-id"], "req-systemone");
+    assert_eq!(body["model"], json!("gpt-test"));
+    assert_eq!(body["answers"]["kind"]["vendor_detail"], json!("keep"));
+    assert_eq!(body["usage"]["input_tokens"], json!(2));
+    assert_eq!(body["usage"]["output_tokens"], json!(3));
+    assert_eq!(body["usage"]["cost"], json!(8));
+    assert!(body.get("provider").is_none());
+    assert!(body["usage"].get("provider_trace").is_none());
+    assert_eq!(body.as_object().unwrap().len(), 3);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path.as_deref(), Some("/v1/systemone"));
+    assert_eq!(
+        requests[0].body,
+        json!({
+            "model": "gpt-test",
+            "state": { "message": "export failed" },
+            "questions": {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Classify the issue",
+                    "criteria": { "platform": "outage", "billing": null }
+                }
+            }
+        })
+    );
+}
+
+#[tokio::test]
+async fn systemone_unsupported_candidates_never_forward() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "acme:chat", "format": "openai" },
+                { "routeId": "acme:responses", "format": "openai",
+                  "supportedEndpoints": ["/v1/responses"] }
+            ]
+        }),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert!(body.get("error").is_some());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn chat_never_forwards_to_a_native_only_route() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{ "routeId": "acme:kev", "format": "openai",
+                             "supportedEndpoints": ["/v1/systemone"] }]
+        }),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["type"], json!("model_not_found"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn systemone_non_2xx_uses_public_error_contract() {
+    for upstream_status in [400, 422] {
+        let control_url = spawn_control(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{
+                    "routeId": "acme:model-a", "format": "openai",
+                    "supportedEndpoints": ["/v1/systemone"]
+                }]
+            }),
+        )
+        .await;
+        let upstream = json!({
+            "error": { "message": "question q1 is invalid", "raw": "secret-detail" },
+            "trace": "secret-trace"
+        });
+        let (service, requests) = build_recording_service(
+            upstream_status,
+            serde_json::to_vec(&upstream).unwrap(),
+            "application/json",
+        );
+        let (status, _, body) = response_parts(
+            middleware(control_url)
+                .handle_completion(&service, systemone_input())
+                .await,
+        )
+        .await;
+
+        assert_eq!(status, upstream_status);
+        assert_eq!(
+            body,
+            json!({ "error": {
+            "type": "invalid_request_error", "message": "question q1 is invalid",
+            "code": null, "param": null
+        } })
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn systemone_top_level_inband_error_uses_public_error_contract() {
+    for code in [400, 422] {
+        let control_url = spawn_control(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{
+                    "routeId": "acme:model-a", "format": "openai",
+                    "supportedEndpoints": ["/v1/systemone"]
+                }]
+            }),
+        )
+        .await;
+        let upstream = json!({
+            "type": "error", "code": code, "message": "question q1 is invalid",
+            "trace": "secret-trace"
+        });
+        let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
+        let (status, _, body) = response_parts(
+            middleware(control_url)
+                .handle_completion(&service, systemone_input())
+                .await,
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            body,
+            json!({ "error": {
+            "type": "invalid_request_error", "message": "question q1 is invalid",
+            "code": code, "param": null
+        } })
+        );
+    }
+}
+
+#[tokio::test]
+async fn systemone_preserves_sanitized_inband_errors() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [{
+                "routeId": "acme:model-a",
+                "format": "openai",
+                "supportedEndpoints": ["/v1/systemone"]
+            }]
+        }),
+    )
+    .await;
+    let upstream = json!({
+        "model": "internal-model",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "question q1 is invalid",
+            "metadata": { "provider_name": "secret-provider" }
+        },
+        "trace": "secret-trace"
+    });
+    let service = build_service_with_upstream(200, serde_json::to_vec(&upstream).unwrap());
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, systemone_input())
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["model"], "gpt-test");
+    assert_eq!(
+        body["error"],
+        json!({
+            "type": "invalid_request_error",
+            "message": "question q1 is invalid",
+            "param": null,
+            "code": 400
+        })
+    );
+    assert!(body.get("trace").is_none());
 }
 
 #[tokio::test]
@@ -1801,7 +2082,6 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -2621,7 +2901,6 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -2687,7 +2966,6 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3199,14 +3477,13 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
         "allow": false, "status": 403, "message": "denied"
     }))
     .await;
-    let mw = Middleware::new(&MiddlewareConfig {
+    let mw = new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: Some(false),
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3434,7 +3711,6 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -3520,14 +3796,13 @@ impl UpstreamBackend for SlowStreamUpstream {
 }
 
 fn middleware_with_keepalive(control_url: String, ms: u64) -> Middleware {
-    Middleware::new(&MiddlewareConfig {
+    new_middleware(&MiddlewareConfig {
         control_url,
         control_token: None,
         control_timeout_ms: Some(2_000),
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: Some(ms),
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap()
@@ -3629,7 +3904,6 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     };
     let report_for = |id: &str, abort: &Arc<std::sync::atomic::AtomicBool>| StreamReport {
@@ -3985,7 +4259,6 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         control_post_timeout_ms: Some(2_000),
         sse_keepalive_ms: None,
         send_request_features: None,
-        prefix_hash_secret: None,
         tee_only_domains: Vec::new(),
     })
     .unwrap();
@@ -4018,4 +4291,104 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     assert_eq!(report["status"], json!(502));
     assert_eq!(report["errorMessage"], json!("stream_inband_error"));
     assert_canary_absent(&posts, "probe-canary-inband");
+}
+
+struct PartialUsageUpstream {
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl UpstreamBackend for PartialUsageUpstream {
+    fn name(&self) -> &str {
+        "partial-usage-fixture"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        None
+    }
+    async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!()
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&req.request.body).unwrap());
+        let events = [3,7].map(|n| Ok(Bytes::from(format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":{n},\"total_tokens\":{}}}}}\n\n",11+n))));
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers: HashMap::from([("content-type".into(), "text/event-stream".into())]),
+            body: Box::pin(
+                futures_util::stream::iter(events).chain(futures_util::stream::pending()),
+            ),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend, StreamingUsage};
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,
+        "candidates":[{"routeId":"endpoint:gpt-test","format":"openai"}]}),
+    )
+    .await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "gpt-test",
+                "actual-model",
+                Arc::new(PartialUsageUpstream {
+                    requests: requests.clone(),
+                }),
+                "endpoint:gpt-test",
+            )
+            .unwrap()
+            .with_streaming_usage(Some(StreamingUsage::Continuous)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let mut input = chat_input();
+    input.stream = true;
+    input.params["stream"] = json!(true);
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body().into_data_stream();
+    let mut received = String::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !received.contains("\"completion_tokens\":7") {
+            received.push_str(std::str::from_utf8(&body.next().await.unwrap().unwrap()).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["status"] == json!(499)).await;
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(report["usage"]["prompt_tokens"], 11);
+    assert_eq!(report["usage"]["total_tokens"], 18);
+    assert_eq!(
+        requests.lock().unwrap()[0]["stream_options"],
+        json!({"include_usage":true,"continuous_usage_stats":true})
+    );
+    assert_eq!(
+        posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["status"] == json!(499))
+            .count(),
+        1
+    );
 }

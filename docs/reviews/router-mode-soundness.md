@@ -1,5 +1,10 @@
 # Router-Mode Soundness Review
 
+> [!NOTE]
+> This is a point-in-time audit of the revisions listed below, dated 2026-05-18.
+> Source paths and line numbers refer to the repository layout at that time. Use
+> the provider `verification.md` pages for the gateway adapters.
+
 Reviewer: Codex (router-mode soundness lane only).
 Date: 2026-05-18 UTC.
 Scope: soundness, privacy, provenance, attested source/config/image/measurement,

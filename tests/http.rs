@@ -659,7 +659,7 @@ async fn attested_session_lookup_returns_audit_record() {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:c66545694666be261c5babe518913c3536f26b1dd34c5f14de71dd7ad1968c1a",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -759,11 +759,10 @@ async fn attested_session_lookup_returns_audit_record() {
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["sessions"][0]["session_id"], session_id);
-    // The broad list keeps the integrity digest but strips the evidence bytes;
-    // fetch a single session by id for the full bundle (see above).
-    assert!(body["sessions"][0]["evidence"]["digest"].is_string());
-    assert!(body["sessions"][0]["evidence"].get("data").is_none());
+    assert!(
+        body["sessions"].as_array().unwrap().is_empty(),
+        "a router without upstream config lists no sessions"
+    );
 
     // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
     let app = build_router(h.service.clone());
@@ -882,6 +881,7 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 30,
         verifier_request_timeout_seconds: 30,
+        privatemode_proxy: None,
     }
 }
 

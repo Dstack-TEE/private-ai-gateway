@@ -114,6 +114,15 @@ pub enum ChannelBinding {
         algorithm: String,
         public_key_sha256: String,
     },
+    /// Digests binding a provider proxy co-deployed in the gateway's measured
+    /// dstack Compose. The proxy verifies the provider's attestation chain.
+    ProxyImageSha256 {
+        provider: String,
+        proxy_image_digest: String,
+        /// Digest of the exact Compose secret mounted into both the measured
+        /// gateway and proxy.
+        credential_sha256: String,
+    },
 }
 
 /// One flat event: `type` plus type-specific fields, in insertion order.

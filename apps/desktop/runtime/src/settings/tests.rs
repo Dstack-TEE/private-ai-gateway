@@ -1,0 +1,409 @@
+use super::*;
+use desktop_core::{config::Appearance, contracts::ServiceProvider};
+
+fn open(dir: &Path) -> Settings {
+    let (settings, problems) = Settings::open(dir.join("config"), &dir.join("data"));
+    assert!(problems.is_empty(), "{problems:?}");
+    settings
+}
+
+fn config_text(dir: &Path) -> String {
+    fs::read_to_string(dir.join("config").join(CONFIG_FILE)).unwrap()
+}
+
+#[test]
+fn a_new_settings_directory_gets_a_commented_file_and_its_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    assert_eq!(config_text(dir.path()), CONFIG_HEADER);
+    let schema = fs::read_to_string(dir.path().join("config").join(SCHEMA_FILE)).unwrap();
+    assert_eq!(schema, config::schema());
+    assert!(!dir.path().join("config").join(CREDENTIALS_FILE).exists());
+    assert_eq!(settings.config().unwrap(), Config::default());
+    let files = settings.files();
+    assert!(files.config_path.ends_with(CONFIG_FILE));
+    assert!(files.credentials_path.ends_with(CREDENTIALS_FILE));
+    assert_eq!(files.error, None);
+}
+
+#[test]
+fn programmatic_writes_keep_comments_order_and_untouched_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let original = "# My settings\n\
+        appearance = \"dark\" # night owl\n\
+        \n\
+        # The listener agents use.\n\
+        [local-api]\n\
+        port = 4190 # moved off the default\n";
+    fs::write(dir.path().join("config").join(CONFIG_FILE), original).unwrap();
+    settings.reload().unwrap();
+    assert_eq!(settings.config().unwrap().appearance, Appearance::Dark);
+
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Light;
+            config.web_ui.enabled = true;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        config_text(dir.path()),
+        "# My settings\n\
+         appearance = \"light\" # night owl\n\
+         \n\
+         # The listener agents use.\n\
+         [local-api]\n\
+         port = 4190 # moved off the default\n\
+         \n\
+         [web-ui]\n\
+         enabled = true\n"
+    );
+    // A no-op change does not rewrite the file.
+    settings.update_config(|_| Ok(())).unwrap();
+    assert!(config_text(dir.path()).contains("night owl"));
+}
+
+#[test]
+fn profiles_are_added_and_removed_as_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let profile = |name: &str| config::Profile {
+        name: name.into(),
+        provider: ServiceProvider::Custom,
+        remote_url: "https://gateway.example".into(),
+        auth: Default::default(),
+        verified_at: None,
+    };
+    settings
+        .update_config(|config| {
+            config.upsert("work".into(), profile("Work"))?;
+            Ok(config.upsert("home".into(), profile("Home"))?)
+        })
+        .unwrap();
+    let text = config_text(dir.path());
+    assert!(text.contains("active-profile = \"work\""), "{text}");
+    assert!(text.contains("[profiles.work]\nname = \"Work\""), "{text}");
+    assert!(text.contains("[profiles.home]"), "{text}");
+    settings
+        .update_config(|config| {
+            config.profiles.shift_remove("work");
+            config.active_profile.clear();
+            Ok(())
+        })
+        .unwrap();
+    let text = config_text(dir.path());
+    assert!(!text.contains("[profiles.work]"), "{text}");
+    assert!(text.contains("active-profile = \"home\""), "{text}");
+    assert_eq!(
+        config::parse(&text).unwrap().value,
+        settings.config().unwrap()
+    );
+}
+
+#[test]
+fn an_invalid_edit_keeps_the_last_good_settings_and_blocks_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let path = dir.path().join("config").join(CONFIG_FILE);
+    fs::write(&path, "[local-api]\nport = 5180\n").unwrap();
+    let (_, current) = settings.reload().unwrap();
+    assert_eq!(current.config.local_api.port, 5180);
+
+    fs::write(&path, "[local-api]\nport = \"oops\"\n").unwrap();
+    let (previous, current) = settings.reload().unwrap();
+    assert_eq!(previous, current);
+    assert_eq!(settings.config().unwrap().local_api.port, 5180);
+    let error = settings.files().error.unwrap();
+    assert!(error.starts_with("config.toml:2:8: "), "{error}");
+    let refused = settings
+        .update_config(|config| {
+            config.appearance = Appearance::Dark;
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        desktop_core::protocol::ErrorCode::InvalidState
+    );
+    assert!(refused.to_string().contains("Fix config.toml"), "{refused}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[local-api]\nport = \"oops\"\n"
+    );
+    assert!(settings.reload().is_none(), "nothing new to apply");
+
+    fs::write(&path, "[local-api]\nport = 5181\n").unwrap();
+    let (_, current) = settings.reload().unwrap();
+    assert_eq!(current.config.local_api.port, 5181);
+    assert_eq!(settings.files().error, None);
+}
+
+#[test]
+fn a_concurrent_edit_is_never_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let path = dir.path().join("config").join(CONFIG_FILE);
+    // The user saves between our read and our write.
+    let current = fs::read_to_string(&path).unwrap();
+    fs::write(&path, "appearance = \"dark\"\n").unwrap();
+    let error = private_fs::write_atomic(&path, "", Some(Some(&current))).unwrap_err();
+    assert!(private_fs::ChangedOnDisk::is(&error));
+    // An edit made before our read is kept, and the watcher applies it later.
+    settings
+        .update_config(|config| {
+            config.connect_on_launch = true;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "appearance = \"dark\"\nconnect-on-launch = true\n"
+    );
+    let (_, current) = settings.reload().unwrap();
+    assert_eq!(current.config.appearance, Appearance::Dark);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_config_file_is_saved_to_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    use std::os::unix::fs::PermissionsExt;
+    let target = dir.path().join("dotfiles-config.toml");
+    fs::write(&target, "appearance = \"dark\"\n").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    let link = dir.path().join("config").join(CONFIG_FILE);
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    settings.reload().unwrap();
+
+    settings
+        .update_config(|config| {
+            config.connect_on_launch = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "appearance = \"dark\"\nconnect-on-launch = true\n"
+    );
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+
+    // A read-only target is reported, not replaced.
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+    let error = settings
+        .update_config(|config| {
+            config.connect_on_launch = false;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("links to a read-only file"),
+        "{error}"
+    );
+    assert!(fs::read_to_string(&target)
+        .unwrap()
+        .contains("connect-on-launch = true"));
+}
+
+#[test]
+fn credentials_stay_owner_only_and_errors_never_quote_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    settings
+        .update_credentials(|credentials| {
+            credentials.profiles.insert(
+                "work".into(),
+                ProfileCredential {
+                    api_key: "sk-first".into(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    let path = dir.path().join("config").join(CREDENTIALS_FILE);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with(CREDENTIALS_HEADER));
+    assert!(
+        text.ends_with("[profiles.work]\napi-key = \"sk-first\"\n"),
+        "{text}"
+    );
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    settings
+        .update_credentials(|credentials| {
+            credentials.web_ui.password = Some("correct horse battery".into());
+            Ok(())
+        })
+        .unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    fs::write(&path, "[profiles]\nwork = \"sk-secret-value\"\n").unwrap();
+    settings.reload().unwrap();
+    let error = settings.files().error.unwrap();
+    assert_eq!(error, "credentials.toml:2:8: invalid entry");
+    assert_eq!(
+        settings.profile_key("work").unwrap().as_deref(),
+        Some("sk-first")
+    );
+    fs::write(&path, "[profiles.work]\napi-key = \"sk two\"\n").unwrap();
+    settings.reload();
+    let error = settings.files().error.unwrap();
+    assert!(!error.contains("sk two"), "{error}");
+    assert!(error.contains("profiles.work.api-key"), "{error}");
+}
+
+#[test]
+fn credential_identities_change_with_the_key_and_hide_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let mut snapshot = Snapshot::default();
+    snapshot.config.profiles.insert(
+        "work".into(),
+        config::Profile {
+            name: "Work".into(),
+            provider: ServiceProvider::Custom,
+            remote_url: "https://gateway.example".into(),
+            auth: Default::default(),
+            verified_at: None,
+        },
+    );
+    assert_eq!(settings.profile_views(&snapshot)[0].credential_ref, None);
+    let with_key = |key: &str| {
+        let mut snapshot = snapshot.clone();
+        snapshot.credentials.profiles.insert(
+            "work".into(),
+            ProfileCredential {
+                api_key: key.into(),
+            },
+        );
+        settings.profile_views(&snapshot).remove(0)
+    };
+    let first = with_key("sk-first");
+    assert!(first.credential_saved);
+    let identity = first.credential_ref.unwrap();
+    assert!(!identity.contains("sk-first"));
+    assert_eq!(with_key("sk-first").credential_ref.unwrap(), identity);
+    assert_ne!(with_key("sk-second").credential_ref.unwrap(), identity);
+}
+
+#[test]
+fn unknown_keys_warn_and_the_rest_of_the_file_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let config_dir = dir.path().join("config");
+    fs::write(
+        config_dir.join(CONFIG_FILE),
+        "appearance = \"dark\"\nfuture-option = true\n[local-api]\nport = 5180\n",
+    )
+    .unwrap();
+    fs::write(
+        config_dir.join(CREDENTIALS_FILE),
+        "[profiles.work]\napi-key = \"sk-work\"\nlabel = \"secret-looking\"\n",
+    )
+    .unwrap();
+    let (_, current) = settings.reload().unwrap();
+    assert_eq!(current.config.appearance, Appearance::Dark);
+    assert_eq!(current.config.local_api.port, 5180);
+    assert_eq!(
+        settings.profile_key("work").unwrap().as_deref(),
+        Some("sk-work")
+    );
+    let files = settings.files();
+    assert_eq!(files.error, None);
+    assert_eq!(
+        files.warnings,
+        [
+            "config.toml:2:17: future-option: unknown key, ignored",
+            "credentials.toml:3:9: profiles.work.label: unknown key, ignored",
+        ]
+    );
+    // Writes keep the unknown keys, like every other line the app did not change.
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Light;
+            Ok(())
+        })
+        .unwrap();
+    assert!(config_text(dir.path()).contains("future-option = true"));
+    fs::write(config_dir.join(CONFIG_FILE), "appearance = \"dark\"\n").unwrap();
+    settings.reload().unwrap();
+    assert_eq!(settings.files().warnings.len(), 1);
+}
+
+#[test]
+fn the_header_stays_on_top_and_key_comments_stay_with_their_keys() {
+    let doc = |text: &str| text.parse::<DocumentMut>().unwrap();
+    let edited = |text: Option<&str>, from: &str, to: &str| {
+        edit(text, "# New file\n", &doc(from), &doc(to)).unwrap()
+    };
+    // A new file: its header, a blank line, then the keys.
+    assert_eq!(
+        edited(None, "", "appearance = \"dark\"\n"),
+        "# New file\n\nappearance = \"dark\"\n"
+    );
+    // A file of comments only is all header.
+    assert_eq!(
+        edited(Some("# Mine\n# More\n"), "", "appearance = \"dark\"\n"),
+        "# Mine\n# More\n\nappearance = \"dark\"\n"
+    );
+    // A root key added above the first table goes below the header.
+    assert_eq!(
+        edited(
+            Some("# Header\n\n# The listener\n[local-api]\nport = 4190\n"),
+            "[local-api]\nport = 4190\n",
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+        ),
+        "# Header\n\nappearance = \"dark\"\n# The listener\n[local-api]\nport = 4190\n"
+    );
+    // Removing the first key keeps the header and drops the key's own comment.
+    assert_eq!(
+        edited(
+            Some("# Header\n\n# Mine\nappearance = \"dark\"\n[local-api]\nport = 4190\n"),
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+            "[local-api]\nport = 4190\n",
+        ),
+        "# Header\n\n[local-api]\nport = 4190\n"
+    );
+    // Without a blank line, the comments belong to the first key; a dotted
+    // key's are found too.
+    assert_eq!(
+        edited(
+            Some("# Mine\nlocal-api.port = 4190\nappearance = \"dark\"\n"),
+            "appearance = \"dark\"\n[local-api]\nport = 4190\n",
+            "appearance = \"dark\"\n",
+        ),
+        "appearance = \"dark\"\n"
+    );
+    // Leading blank lines alone are not a header.
+    assert_eq!(
+        edited(Some("\n\nappearance = \"dark\"\n"), "", "port = 1\n"),
+        "appearance = \"dark\"\nport = 1\n"
+    );
+}
+
+/// `toml_edit` writes LF line endings, so an edited CRLF file comes back with
+/// LF throughout, its header included.
+#[test]
+fn crlf_files_are_written_with_lf() {
+    let doc = |text: &str| text.parse::<DocumentMut>().unwrap();
+    let edited = edit(
+        Some("# Header\r\n\r\n# Mine\r\nappearance = \"dark\"\r\n"),
+        "",
+        &doc("appearance = \"dark\"\n"),
+        &doc("appearance = \"light\"\n"),
+    )
+    .unwrap();
+    assert_eq!(edited, "# Header\n\n# Mine\nappearance = \"light\"\n");
+}

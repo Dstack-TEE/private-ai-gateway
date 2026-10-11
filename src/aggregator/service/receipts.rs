@@ -1,8 +1,13 @@
+use std::collections::HashSet;
+
 use super::helpers::legacy_signature_text;
-use super::{AciService, LegacySignatureResult, ReceiptOwner, ServiceError};
+use super::{
+    AciService, LegacySignatureResult, ReceiptOwner, ServiceError, UpstreamVerificationRequest,
+};
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
 use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 use crate::aggregator::session::AttestedSession;
+use crate::aggregator::session_store::sort_sessions_newest_first;
 
 impl AciService {
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<SignedReceipt> {
@@ -52,13 +57,36 @@ impl AciService {
             .get_session(session_id, self.clock.now_secs())
     }
 
-    /// List current attested sessions (TEE channels), optionally filtered by
-    /// `upstream_name` (the operator's upstream config name). A model→channel
-    /// lookup belongs to the caller, since a session is per-channel, not
-    /// per-model.
-    pub fn list_attested_sessions(&self, upstream_name: Option<&str>) -> Vec<AttestedSession> {
-        self.session_store
-            .list_sessions(upstream_name, self.clock.now_secs())
+    /// List the sessions accepted by the verifier's current cached state.
+    pub fn list_current_sessions(
+        &self,
+        requests: &[UpstreamVerificationRequest],
+    ) -> Result<Vec<AttestedSession>, ServiceError> {
+        if self.serves_directly() {
+            return Ok(Vec::new());
+        }
+        let Some(verifier) = self.upstream_verifier.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let now = self.clock.now_secs();
+        let mut ids = HashSet::new();
+        let mut sessions = Vec::new();
+        for event in requests.iter().filter_map(|r| verifier.cached(r)) {
+            for sealed in self.record_attested_upstream_session(&event)? {
+                if !ids.insert(sealed.session_id.clone()) {
+                    continue;
+                }
+                if let Some(session) = self
+                    .session_store
+                    .get_session(&sealed.session_id, now)
+                    .filter(|s| now < s.document().expires_at)
+                {
+                    sessions.push(session);
+                }
+            }
+        }
+        sort_sessions_newest_first(&mut sessions);
+        Ok(sessions)
     }
 
     /// E2EE protocol versions this workload has actually wired.

@@ -1,0 +1,305 @@
+import {
+  ABOUT_LINKS,
+  AGENTS,
+  API_KEY_PAGES,
+  SERVICE_PROVIDERS,
+  STATE_EVENT,
+  UNAVAILABLE_STATE,
+  WEB_DISTRIBUTION,
+  type AppState,
+  type ProfileBackup,
+  type UiEvent,
+  type UiEventPayloads,
+  type UiMethod,
+  type UiResponses,
+  type UpdateInfo,
+  type WebBootstrap,
+} from "../../shared/contracts";
+import { createDesktopApi, type Backend, type UiParams, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
+import { AuthoredError, SessionEndedError } from "../lib/error-message";
+
+const sessionEnded = "Your web UI session ended or expired. Sign in again.";
+const signedOut = "You signed out. Sign in again to continue.";
+/** Dispatches each event of the stream as a `MessageEvent` of its name. */
+const listeners = new EventTarget();
+const endListeners = new Set<(notice: string) => void>();
+let events: EventSource | undefined;
+/** A session was confirmed and has not ended since, so its end is announced once. */
+let signedIn = false;
+
+export function createBackend(): Backend {
+  const transport: UiTransport = { call: rpc, subscribe };
+  const session: WebSession = {
+    check,
+    signIn,
+    signOut,
+    onEnded: (listener) => {
+      endListeners.add(listener);
+      return () => endListeners.delete(listener);
+    },
+  };
+  return {
+    desktopApi: createDesktopApi(transport, platform),
+    distributionCapabilities: WEB_DISTRIBUTION,
+    session,
+    windowFocus: undefined,
+  };
+}
+
+const unavailable = async (): Promise<never> => {
+  throw new AuthoredError("This is only available in the desktop app");
+};
+
+const platform: UiPlatform = {
+  showEditMenu: async () => undefined,
+  getAppVersion: async () => (await request<WebBootstrap>("/api/bootstrap")).version,
+  setUpdateChannel: async (channel) => channel,
+  // The backend's own installation owns updates; the browser only announces them.
+  prepareUpdate: async (): Promise<UpdateInfo> => {
+    const notice = await rpc("get_update_notice");
+    return {
+      enabled: false,
+      systemManaged: true,
+      currentVersion: notice.currentVersion,
+      channel: notice.channel,
+      version: notice.version,
+      upgradeCommands: notice.commands,
+      downloadUrl: notice.downloadUrl,
+    };
+  },
+  restartToUpdate: async () => undefined,
+  getCliRegistration: unavailable,
+  setCliRegistration: unavailable,
+  stopAllAndQuit: async () => undefined,
+  // Only the desktop app has a tray and a menu bar.
+  onNavigate: () => () => undefined,
+  closeWindow: undefined,
+  quit: undefined,
+  copyText: async (text) => {
+    // Absent outside secure contexts, such as plain HTTP on a network address.
+    if (!window.isSecureContext) throw new AuthoredError("Copying needs 127.0.0.1 or HTTPS in this browser. Select and copy the text instead.");
+    await navigator.clipboard.writeText(text);
+  },
+  selectProfileBackup,
+  saveProfileExport: async () => download(
+    "private-ai-proxy-profiles.json",
+    await rpc("export_profiles_content"),
+  ),
+  saveDiagnosticsExport: async () => download(
+    "private-ai-proxy-diagnostics.json",
+    await rpc("export_diagnostics_content"),
+  ),
+  requestNotificationPermission: async () => ({ permission: "unsupported", alertsEnabled: false }),
+  openNotificationSettings: async () => undefined,
+  openWebUi: async () => {
+    throw new AuthoredError("The web UI is already open in this browser");
+  },
+  openAboutLink: async (target) => openAllowed(ABOUT_LINKS[target]),
+  openAgentWebsite: async (agentId) => openAllowed(AGENTS.find((agent) => agent.id === agentId)?.website),
+  openApiKeyPage: async (provider) => openAllowed(API_KEY_PAGES[provider]),
+  presentAccountLogin: (login) => {
+    // The sign-in also shows a link to the page, so a blocked or rejected tab must not fail the login.
+    try {
+      openAllowed(login.url);
+    } catch {
+      return;
+    }
+  },
+  openOrganization: async (organizationSlug) => openAllowed(
+    await rpc("get_organization_url", { organizationSlug }),
+  ),
+  openTopUp: async (provider, scopeSlug) => openAllowed(
+    await rpc("get_top_up_url", { provider, scopeSlug }),
+  ),
+};
+
+async function check(): Promise<boolean> {
+  // Confirmed sessions are remembered until they end, so navigating costs no request.
+  if (signedIn) return true;
+  const response = await send("/api/bootstrap");
+  // Signed-in requests are never throttled, so 429 also means there is no session.
+  if (response.status === 401 || response.status === 429) return false;
+  await read<WebBootstrap>(response);
+  signedIn = true;
+  events ??= readEvents();
+  return true;
+}
+
+async function signIn(password: string): Promise<void> {
+  const response = await send("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
+}
+
+/** Ends this browser's session on the server. */
+async function signOut(): Promise<void> {
+  await answer(await send("/api/session", { method: "DELETE" }));
+  endSession(signedOut);
+}
+
+function endSession(notice: string): void {
+  events?.close();
+  events = undefined;
+  if (!signedIn) return;
+  signedIn = false;
+  for (const listener of endListeners) listener(notice);
+}
+
+async function rpc<M extends UiMethod>(method: M, ...[params]: UiParams<M>): Promise<UiResponses[M]> {
+  const { result } = await request<{ result: UiResponses[M] }>(`/api/rpc/${encodeURIComponent(method)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params ?? {}),
+  });
+  return result;
+}
+
+/** Answers are `{"result": …}` in the shapes the generated contracts declare. */
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return read(await send(path, init));
+}
+
+/** Requests carry the session cookie and are never cached. */
+function send(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(path, { ...init, cache: "no-store", credentials: "same-origin" });
+}
+
+async function read<T>(response: Response): Promise<T> {
+  return (await answer(response)).json();
+}
+
+/** A failed answer is `{"error": {code, message}}` with the status of its code. */
+async function answer(response: Response): Promise<Response> {
+  if (response.status === 401) {
+    endSession(sessionEnded);
+    throw new SessionEndedError(sessionEnded);
+  }
+  if (!response.ok) throw errorFrom(await response.json().catch(() => undefined));
+  return response;
+}
+
+/** The backend's API error, whose message is authored; any other answer, such as a proxy's, is not. */
+function errorFrom(payload: unknown): Error {
+  if (payload && typeof payload === "object" && "error" in payload) {
+    const error = payload.error;
+    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+      return new AuthoredError(error.message);
+    }
+  }
+  return new Error("Web UI request failed");
+}
+
+function subscribe<E extends UiEvent>(event: E, listener: (payload: UiEventPayloads[E]) => void): () => void {
+  const receive = (message: Event) => {
+    if (message instanceof MessageEvent) listener(message.data);
+  };
+  listeners.addEventListener(event, receive);
+  return () => listeners.removeEventListener(event, receive);
+}
+
+/** The server sends a full state snapshot on every connection, so reconnecting loses nothing. */
+function readEvents(): EventSource {
+  const source = new EventSource("/api/events");
+  source.addEventListener("message", (message) => {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(message.data);
+    } catch {
+      return;
+    }
+    if (isWebEvent(decoded)) listeners.dispatchEvent(new MessageEvent(decoded.event, { data: decoded.payload }));
+  });
+  // EventSource retries dropped connections itself but stops at an error
+  // response, such as after the session ended. Meanwhile the state is read
+  // again, so a backend that stopped doesn't keep showing its last state.
+  source.addEventListener("error", () => {
+    if (events !== source) return;
+    rpc("get_state").then(publishState, () => {
+      if (signedIn) publishState(UNAVAILABLE_STATE);
+    });
+    if (source.readyState === EventSource.CLOSED) window.setTimeout(() => void resumeEvents(source), 1_000);
+  });
+  return source;
+}
+
+/** Reopens the stream while the session lives; an ended session returns to sign-in. */
+async function resumeEvents(closed: EventSource): Promise<void> {
+  if (events !== closed) return;
+  try {
+    await request("/api/bootstrap");
+  } catch {
+    if (events === closed) window.setTimeout(() => void resumeEvents(closed), 5_000);
+    return;
+  }
+  if (events === closed) events = readEvents();
+}
+
+function publishState(state: AppState): void {
+  listeners.dispatchEvent(new MessageEvent(STATE_EVENT, { data: state }));
+}
+
+function isWebEvent(value: unknown): value is { event: string; payload: unknown } {
+  return Boolean(
+    value && typeof value === "object" && "event" in value
+      && typeof value.event === "string" && "payload" in value,
+  );
+}
+
+function selectProfileBackup(): Promise<ProfileBackup | null> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      if (file.size > 256 * 1024) {
+        reject(new AuthoredError("Profile configuration file is too large"));
+        return;
+      }
+      void parseProfileBackup(file).then(resolve, reject);
+    }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
+    input.click();
+  });
+}
+
+async function parseProfileBackup(file: File): Promise<ProfileBackup> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch {
+    throw new AuthoredError("Could not read the profile configuration file");
+  }
+  if (!isProfileBackup(parsed)) throw new AuthoredError("The profile configuration file is invalid");
+  return parsed;
+}
+
+function isProfileBackup(value: unknown): value is ProfileBackup {
+  if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1
+    || !("profiles" in value) || !Array.isArray(value.profiles)) return false;
+  return value.profiles.every((profile: unknown) => Boolean(
+    profile && typeof profile === "object"
+      && "name" in profile && typeof profile.name === "string"
+      && "provider" in profile && typeof profile.provider === "string" && Object.hasOwn(SERVICE_PROVIDERS, profile.provider)
+      && "remoteUrl" in profile && typeof profile.remoteUrl === "string",
+  ));
+}
+
+function download(name: string, content: string): void {
+  const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+function openAllowed(url: string | undefined): void {
+  if (!url) throw new AuthoredError("This link is unavailable");
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new AuthoredError("Only secure external links are allowed");
+  window.open(parsed.href, "_blank", "noopener,noreferrer");
+}

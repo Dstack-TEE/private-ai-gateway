@@ -1,22 +1,20 @@
+use desktop_core::contracts::{
+    AccountBalance, AccountBalanceTarget, AccountLoginDetails, AccountSaveResult,
+};
+use tokio::sync::{MappedMutexGuard, MutexGuard as AsyncMutexGuard};
+
 use super::*;
+use crate::account_login::PendingLogin;
 
 impl DesktopRuntime {
-    pub(super) async fn cancel_pending(
-        &self,
-        pending: &mut crate::account_login::PendingLogin,
-    ) -> Result<(), String> {
-        let profile = self
-            .manager
-            .snapshot()?
-            .profiles
-            .into_iter()
-            .find(|p| p.id == pending.profile_id() && p.credential_saved);
-        let key = match profile {
-            Some(profile) => self
-                .secrets
-                .get(&service_config::profile_credential_entry(&profile)?)?,
-            None => None,
-        };
+    /// The sign-in in progress.
+    async fn pending_login(&self) -> Result<MappedMutexGuard<'_, PendingLogin>, Error> {
+        AsyncMutexGuard::try_map(self.account_login.lock().await, Option::as_mut)
+            .map_err(|_| "Account connection is no longer active".into())
+    }
+
+    pub(super) async fn cancel_pending(&self, pending: &mut PendingLogin) -> Result<(), Error> {
+        let key = self.load_profile_key(pending.profile_id())?;
         pending.protect_saved_key(key.as_deref()).await;
         pending.cancel().await
     }
@@ -24,16 +22,17 @@ impl DesktopRuntime {
     pub async fn begin_account_login(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-    ) -> Result<crate::account_login::LoginPresentation, String> {
+    ) -> Result<desktop_core::account::LoginPresentation, Error> {
         let mut slot = self.account_login.try_lock().map_err(|_| {
-            "Account: An account operation is in progress. Finish it before signing in again."
+            Error::account(
+                "Account: An account operation is in progress. Finish it before signing in again.",
+            )
         })?;
         if let Some(pending) = slot.as_mut() {
             if pending.is_active() && pending.profile_id() != profile.id {
-                return Err(
-                    "Account: Another sign-in is open. Finish or cancel it in the other window."
-                        .into(),
-                );
+                return Err(Error::account(
+                    "Account: Another sign-in is open. Finish or cancel it in the other window.",
+                ));
             }
             self.cancel_pending(pending).await?;
         }
@@ -47,14 +46,8 @@ impl DesktopRuntime {
     pub async fn poll_account_login(
         self: &Arc<Self>,
         id: String,
-    ) -> Result<Option<crate::contracts::AccountLoginDetails>, String> {
-        self.account_login
-            .lock()
-            .await
-            .as_mut()
-            .ok_or("Account login is no longer active")?
-            .poll(&id)
-            .await
+    ) -> Result<Option<AccountLoginDetails>, Error> {
+        self.pending_login().await?.poll(&id).await
     }
 
     pub fn begin_account_save(
@@ -64,8 +57,7 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<crate::contracts::AccountSaveResult, String> {
-        use crate::contracts::AccountSaveResult;
+    ) -> Result<AccountSaveResult, Error> {
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
         let mut operation = self
             .account_save
@@ -92,10 +84,10 @@ impl DesktopRuntime {
                 .await
             {
                 Ok(state) => AccountSaveResult::Complete {
-                    state: Box::new(state),
+                    state: Box::new(state.into()),
                 },
                 Err(error) => AccountSaveResult::Failed {
-                    error: crate::protocol::RpcError::operation(&error).message,
+                    error: desktop_core::protocol::Error::from(error).message,
                 },
             };
             sender.send_replace(result);
@@ -103,10 +95,7 @@ impl DesktopRuntime {
         Ok(AccountSaveResult::Running)
     }
 
-    pub fn account_save_result(
-        &self,
-        operation_id: &str,
-    ) -> Result<crate::contracts::AccountSaveResult, String> {
+    pub fn account_save_result(&self, operation_id: &str) -> Result<AccountSaveResult, Error> {
         let operation = self
             .account_save
             .lock()
@@ -114,14 +103,12 @@ impl DesktopRuntime {
         let (_, result) = operation
             .as_ref()
             .filter(|(id, _)| id == operation_id)
-            .ok_or(
+            .ok_or(Error::account(
                 "Account: Save outcome is unavailable. Check the saved profile before retrying.",
-            )?;
+            ))?;
         let outcome = result.borrow().clone();
-        if matches!(outcome, crate::contracts::AccountSaveResult::Running)
-            && result.has_changed().is_err()
-        {
-            return Ok(crate::contracts::AccountSaveResult::Failed {
+        if matches!(outcome, AccountSaveResult::Running) && result.has_changed().is_err() {
+            return Ok(AccountSaveResult::Failed {
                 error: "Account: Save was interrupted. Check the saved profile before retrying."
                     .into(),
             });
@@ -135,11 +122,11 @@ impl DesktopRuntime {
         profile: ConfidentialProfileInput,
         require_production_os: bool,
         workspace_id: Option<i64>,
-    ) -> Result<GatewayState, String> {
+    ) -> Result<AppState, Error> {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()
-            .ok_or("Account login is no longer active")?
+            .ok_or("Account connection is no longer active")?
             .credential(&id, &profile, workspace_id)
             .await?;
         let saved = self
@@ -158,81 +145,43 @@ impl DesktopRuntime {
         self.finish_configuration(saved)
     }
 
-    pub async fn complete_account_login(
-        &self,
-        id: String,
-        callback_url: String,
-    ) -> Result<(), String> {
-        self.account_login
-            .lock()
-            .await
-            .as_ref()
-            .ok_or("Account login is no longer active")?
-            .complete_callback(&id, &callback_url)
-            .await
-    }
-
-    pub async fn account_details(
-        &self,
-        profile_id: String,
-    ) -> Result<crate::contracts::AccountLoginDetails, String> {
-        use crate::contracts::{ProfileAuth, ServiceProvider};
-        let state = self.manager.snapshot()?;
-        let profile = state
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .ok_or("Profile not found")?;
-        if profile.provider != ServiceProvider::Redpill
-            || !matches!(profile.auth, ProfileAuth::OAuth { .. })
-        {
-            return Err("Sign in with RedPill to select a workspace".into());
+    pub async fn account_details(&self, profile_id: String) -> Result<AccountLoginDetails, Error> {
+        let state = self.state();
+        let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
+        if !account_key(profile.provider, &profile.auth) {
+            return Err("Connect RedPill to select a workspace".into());
         }
-        let entry = service_config::profile_credential_entry(profile)?;
         let key = self
-            .secrets
-            .get(&entry)?
+            .load_profile_key(&profile.id)?
             .ok_or("This profile has no saved credential")?;
         crate::account_login::account_details(&key).await
     }
 
     pub async fn account_balance(
         &self,
-        target: crate::contracts::AccountBalanceTarget,
-    ) -> Result<Option<crate::contracts::AccountBalance>, String> {
-        use crate::contracts::{AccountBalanceTarget, ProfileAuth};
+        target: AccountBalanceTarget,
+    ) -> Result<Option<AccountBalance>, Error> {
         match target {
             AccountBalanceTarget::Login { id } => {
                 self.balances
                     .get(format!("login:{id}"), async {
-                        let (provider, secret) = self
-                            .account_login
-                            .lock()
-                            .await
-                            .as_mut()
-                            .ok_or("Account login is no longer active")?
-                            .balance_credential(&id)
-                            .await?;
+                        let (provider, secret) =
+                            self.pending_login().await?.balance_credential(&id).await?;
                         crate::account_login::account_balance(&provider, &secret).await
                     })
                     .await
             }
             AccountBalanceTarget::Profile { profile_id } => {
-                let state = self.manager.snapshot()?;
-                let profile = state
-                    .profiles
-                    .iter()
-                    .find(|p| p.id == profile_id)
-                    .ok_or("Profile not found")?;
+                let state = self.state();
+                let profile = find_profile(&state, &profile_id).ok_or("Profile not found")?;
                 if !matches!(profile.auth, ProfileAuth::OAuth { .. }) || !profile.credential_saved {
-                    return Err("Sign in with an account to view its balance".into());
+                    return Err("Connect the account to view its balance".into());
                 }
-                let entry = service_config::profile_credential_entry(profile)?;
+                let credential = profile.credential_ref.clone().unwrap_or_default();
                 self.balances
-                    .get(format!("profile:{profile_id}:{entry}"), async {
+                    .get(format!("profile:{profile_id}:{credential}"), async {
                         let key = self
-                            .secrets
-                            .get(&entry)?
+                            .load_profile_key(&profile_id)?
                             .ok_or("This profile has no saved credential")?;
                         crate::account_login::account_balance(&profile.provider, &key).await
                     })
@@ -241,7 +190,7 @@ impl DesktopRuntime {
         }
     }
 
-    pub async fn cancel_account_login(&self, id: String) -> Result<(), String> {
+    pub async fn cancel_account_login(&self, id: String) -> Result<(), Error> {
         let mut slot = self.account_login.lock().await;
         if let Some(pending) = slot
             .as_mut()

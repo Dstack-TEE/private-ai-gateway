@@ -1,21 +1,16 @@
 [package]
 name = "private-ai-proxy"
-version = "0.1.0"
+version.workspace = true
 description = "Private AI Proxy command-line client and user backend"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.98"
 
 [features]
-default = ["managed-client"]
-managed-client = [
-    "dep:async-stream",
-    "dep:axum",
-    "dep:clap",
-    "dep:desktop-gateway",
-    "dep:desktop-runtime",
-    "dep:tokio-util",
-]
+default = ["web-ui"]
+mac-app-store = ["desktop-runtime/mac-app-store"]
+# The service-hosted browser UI; App Store builds disable default features to omit it.
+web-ui = ["desktop-runtime/web-ui"]
 
 [lib]
 name = "private_ai_proxy"
@@ -24,39 +19,61 @@ path = "lib.rs"
 [[bin]]
 name = "private-ai-proxy"
 path = "main.rs"
-required-features = ["managed-client"]
 
 [[bin]]
 name = "private-ai-proxy-service"
 path = "service.rs"
-required-features = ["managed-client"]
 
 [dependencies]
 aci-protocol = { path = "../../../crates/aci-protocol" }
-async-stream = { version = "0.3", optional = true }
-axum = { version = "0.7", optional = true }
-base64 = "0.22"
+aci-verify = { path = "../../../crates/aci-verify" }
+agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
+async-stream = "0.3"
+axum = "0.8"
+backon = { version = "1", default-features = false, features = ["std", "tokio-sleep"] }
+base64 = "0.23"
 bytes = "1"
-clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
-dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway", optional = true }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime", optional = true }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
+desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http-body-util = "0.1"
+open = "5"
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
+rpassword = "7"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
-thiserror = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "process", "io-util", "sync", "time"] }
-tokio-util = { version = "0.7", optional = true }
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-appender = "0.2"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
 webpki-roots = "1"
-x509-parser = "0.16"
+x509-parser = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.100"
+windows-result = "0.100"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+k256 = { version = "0.14", features = ["ecdsa"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+regex = "1"
+sha3 = "0.12"
+snapbox = { version = "1", features = ["cmd", "regex"] }
 tempfile = "3"
 
 [lints.rust]

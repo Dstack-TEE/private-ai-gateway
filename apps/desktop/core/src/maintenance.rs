@@ -1,0 +1,277 @@
+use crate::{
+    config::{self, Config, Profile},
+    contracts::{AppState, ConfidentialProfile, ConfidentialProfileInput, ServiceProvider},
+    private_fs::{self, Publish},
+};
+use serde::{Deserialize, Serialize};
+use std::{fs::File, io::Read, path::Path};
+
+const MAX_BACKUP_BYTES: usize = 256 * 1024;
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ProfileConfiguration {
+    pub name: String,
+    pub provider: ServiceProvider,
+    pub remote_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileBackup {
+    pub version: u8,
+    pub profiles: Vec<ProfileConfiguration>,
+}
+
+#[derive(Serialize, Deserialize, ts_rs::TS)]
+pub struct ImportResult {
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+impl ProfileBackup {
+    pub fn from_profiles(profiles: &[ConfidentialProfile]) -> Self {
+        Self {
+            version: 1,
+            profiles: profiles
+                .iter()
+                .map(|profile| ProfileConfiguration {
+                    name: profile.name.clone(),
+                    provider: profile.provider,
+                    remote_url: profile.remote_url.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != 1 || self.profiles.len() > 50 {
+            return Err("Unsupported or oversized profile configuration file".into());
+        }
+        for profile in &self.profiles {
+            resolve(profile)?;
+        }
+        Ok(())
+    }
+
+    pub fn read(path: &Path) -> Result<Self, String> {
+        let metadata = std::fs::metadata(path)
+            .map_err(|_| "Could not inspect the profile configuration file")?;
+        if !metadata.is_file() {
+            return Err("Select a regular JSON file".into());
+        }
+        if metadata.len() > MAX_BACKUP_BYTES as u64 {
+            return Err("Profile configuration file is too large".into());
+        }
+        let file = File::open(path).map_err(|_| "Could not open the profile configuration file")?;
+        let mut bytes = Vec::new();
+        file.take((MAX_BACKUP_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Could not read the profile configuration file")?;
+        if bytes.len() > MAX_BACKUP_BYTES {
+            return Err("Profile configuration file is too large".into());
+        }
+        let backup: Self = serde_json::from_slice(&bytes).map_err(|_| "Invalid profile configuration file. Credentials and verification state must not be included.")?;
+        backup.validate()?;
+        Ok(backup)
+    }
+
+    pub fn merge(&self, settings: &mut Config) -> Result<ImportResult, String> {
+        self.validate()?;
+        let mut candidate = settings.clone();
+        let mut result = ImportResult {
+            imported: 0,
+            skipped: 0,
+        };
+        for profile in &self.profiles {
+            let resolved = resolve(profile)?;
+            if candidate.profiles.values().any(|existing| {
+                existing.name == resolved.name
+                    && existing.provider == resolved.provider
+                    && existing.remote_url == resolved.remote_url
+            }) {
+                result.skipped += 1;
+                continue;
+            }
+            let id = format!("profile-{}", uuid::Uuid::new_v4());
+            if candidate.profiles.is_empty() {
+                candidate.active_profile = id.clone();
+            }
+            candidate.upsert(
+                id,
+                Profile {
+                    name: resolved.name,
+                    provider: resolved.provider,
+                    remote_url: resolved.remote_url,
+                    auth: resolved.auth,
+                    verified_at: None,
+                },
+            )?;
+            result.imported += 1;
+        }
+        *settings = candidate;
+        Ok(result)
+    }
+}
+
+fn resolve(profile: &ProfileConfiguration) -> Result<ConfidentialProfile, String> {
+    config::resolve_profile(
+        ConfidentialProfileInput {
+            id: "import-validation".into(),
+            name: profile.name.clone(),
+            provider: profile.provider,
+            remote_url: profile.remote_url.clone(),
+        },
+        None,
+    )
+}
+
+/// Exports to a path given on the command line (`--output`): only the
+/// completed file is published, and an existing destination is refused
+/// atomically. The desktop app writes files chosen in its save panel itself.
+pub fn write_export(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    private_fs::publish(path, Publish::NoClobber, |file| {
+        file.write_all(text.as_bytes())
+    })
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "Export target already exists; choose a new path.".to_string()
+        } else {
+            "Could not save the export file".to_string()
+        }
+    })
+}
+
+pub fn json_content(data: &impl Serialize) -> Result<String, String> {
+    let mut text = serde_json::to_string_pretty(data).map_err(|_| "Could not encode the export")?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// An allowlist of typed fields; never serialize state, raw errors or stderr.
+pub fn diagnostics(state: &AppState, version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "formatVersion": 1, "appVersion": version, "os": std::env::consts::OS, "architecture": std::env::consts::ARCH,
+        "wakeMonitorAvailable": state.wake_monitor_available,
+        "gateway": { "status": state.status, "hasError": state.error.is_some(), "configurationVerification": state.configuration_verification, "productionOsRequired": state.config.require_production_os },
+        "localApi": { "bound": state.proxy_url.is_some(), "hasError": state.endpoint_error.is_some(), "networkAccessAllowed": state.local_api.allow_network_access },
+        "webUi": { "enabled": state.web_ui.enabled, "bound": state.web_ui.url.is_some(), "hasError": state.web_ui.error.is_some(), "networkAccessAllowed": state.web_ui.allow_network_access },
+        "profiles": { "count": state.profiles.len(), "activeCredentialAvailable": state.api_key_saved },
+        "verification": { "identityPresent": state.identity.is_some(), "passedChecks": state.checks.iter().filter(|check| check.status == "pass").count(), "failedChecks": state.checks.iter().filter(|check| check.status == "fail").count() },
+        "catalog": { "modelCount": state.catalog.as_ref().map_or(0, |catalog| catalog.models.len()) },
+        "usage": { "requestsThisSession": state.session_usage.requests, "failedProofsThisSession": state.session_usage.failed_proof },
+        "logDirectory": redacted_logs_dir(),
+    })
+}
+
+/// The service log directory with the home directory shown as `~`, so the
+/// report names no user; `None` outside the home directory.
+fn redacted_logs_dir() -> Option<String> {
+    let logs = crate::paths::logs_dir().ok()?;
+    let relative = logs.strip_prefix(crate::paths::home_dir().ok()?).ok()?;
+    Some(Path::new("~").join(relative).to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn export_never_replaces_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("profiles.json");
+        write_export(&destination, "original").unwrap();
+        let original = std::fs::read(&destination).unwrap();
+        assert!(write_export(&destination, "replacement").is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), original);
+        #[cfg(unix)]
+        {
+            let link = directory.path().join("link.json");
+            std::os::unix::fs::symlink(&destination, &link).unwrap();
+            assert!(write_export(&link, "").is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), original);
+        }
+    }
+    #[test]
+    fn content_exports_are_complete_json_documents() {
+        let content = json_content(&serde_json::json!({"formatVersion": 1})).unwrap();
+        assert!(content.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&content).unwrap(),
+            serde_json::json!({"formatVersion": 1})
+        );
+    }
+    fn backup() -> ProfileBackup {
+        ProfileBackup {
+            version: 1,
+            profiles: vec![ProfileConfiguration {
+                name: "Phala".into(),
+                provider: ServiceProvider::Phala,
+                remote_url: "https://inference.phala.com".into(),
+            }],
+        }
+    }
+    #[test]
+    fn imports_are_untrusted_additive_and_idempotent() {
+        let mut settings = Config::default();
+        assert_eq!(backup().merge(&mut settings).unwrap().imported, 1);
+        assert_eq!(settings.profiles[0].verified_at, None);
+        let id = settings.active_profile.clone();
+        assert!(settings.profiles.contains_key(&id));
+        assert_eq!(backup().merge(&mut settings).unwrap().skipped, 1);
+        assert_eq!(settings.active_profile, id);
+        let mut invalid = backup();
+        invalid.profiles[0].remote_url = "http://untrusted.example".into();
+        assert!(invalid.merge(&mut settings).is_err());
+        assert_eq!(settings.profiles.len(), 1);
+    }
+    #[test]
+    fn import_capacity_and_file_limits_fail_without_partial_changes() {
+        let mut settings = Config::default();
+        for index in 0..49 {
+            let mut item = backup();
+            item.profiles[0].name = format!("Profile {index}");
+            item.merge(&mut settings).unwrap();
+        }
+        let mut incoming = backup();
+        incoming.profiles.push(ProfileConfiguration {
+            name: "Another profile".into(),
+            ..incoming.profiles[0].clone()
+        });
+        assert!(incoming.merge(&mut settings).is_err());
+        assert_eq!(settings.profiles.len(), 49);
+        let directory = tempfile::tempdir().unwrap();
+        assert!(ProfileBackup::read(directory.path()).is_err());
+        let path = directory.path().join("profiles.json");
+        std::fs::write(&path, vec![b' '; MAX_BACKUP_BYTES + 1]).unwrap();
+        assert!(ProfileBackup::read(&path)
+            .unwrap_err()
+            .contains("too large"));
+        let exported = ProfileBackup::from_profiles(&settings.profile_views(|_| None));
+        let text = serde_json::to_string(&exported).unwrap();
+        for excluded in ["credential", "verified", "auth", "activeProfileId"] {
+            assert!(!text.contains(excluded));
+        }
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(ProfileBackup::read(&path).unwrap().profiles.len(), 49);
+    }
+    #[test]
+    fn diagnostic_allowlist_omits_untrusted_strings() {
+        let mut state = AppState {
+            error: Some("SECRET".into()),
+            remote_url: Some("https://SECRET".into()),
+            endpoint_error: Some("/home/SECRET".into()),
+            ..Default::default()
+        };
+        state.config.remote_url = "https://SECRET".into();
+        let report = diagnostics(&state, "test");
+        assert!(!report.to_string().contains("SECRET"));
+        if let (Some(logs), Ok(home)) = (report["logDirectory"].as_str(), crate::paths::home_dir())
+        {
+            assert!(logs.starts_with('~') && !logs.contains(&*home.to_string_lossy()));
+        }
+        assert!(serde_json::from_str::<ProfileBackup>(
+            r#"{"version":1,"profiles":[],"apiKey":"SECRET"}"#
+        )
+        .is_err());
+    }
+}

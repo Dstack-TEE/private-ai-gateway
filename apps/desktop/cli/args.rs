@@ -1,8 +1,11 @@
 //! ACI command arguments for Private AI Proxy, built on clap's derive API.
 
+use std::ffi::OsString;
+
 use clap::{Args, Subcommand};
 
-use crate::checks::RequiredClaim;
+use crate::aci::verifier::{CustodyPolicy, CustodyPolicyError};
+use crate::checks::{RequiredClaim, VerifierPolicy};
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -25,9 +28,16 @@ pub enum Command {
     #[command(
         about = "Verify the service (fail closed), send one chat completion over an \
                  SPKI-pinned connection, then fetch and verify its receipt. The API key \
-                 is also read from the ACI_API_KEY environment variable."
+                 is read from stdin with --api-key-stdin or from the ACI_API_KEY \
+                 environment variable."
     )]
     Send(SendArgs),
+    #[command(
+        about = "Verify the target's ACI service (fail closed), then run the system curl \
+                 with the attested TLS key pinned. Exits 125 when pap refuses the request, \
+                 otherwise with curl's exit code."
+    )]
+    Curl(CurlArgs),
     #[command(
         about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
                  Verifies the service on startup and refuses to start unless VERIFIED, \
@@ -37,10 +47,10 @@ pub enum Command {
     Serve(ServeArgs),
 }
 
-#[derive(Debug, Args)]
-pub struct VerifyArgs {
-    #[arg(help = "Base URL of the ACI service to verify.")]
-    pub base_url: String,
+/// The verifier policy (spec 1.3) every command that appraises a report runs
+/// under. Names follow the gateway's upstream policy configuration.
+#[derive(Debug, Default, Args)]
+pub struct PolicyArgs {
     #[arg(
         long = "accept-compose",
         value_name = "HEX",
@@ -49,6 +59,64 @@ pub struct VerifyArgs {
                 the provenance yourself."
     )]
     pub accepted_composes: Vec<String>,
+    #[arg(
+        long = "accept-subject",
+        value_name = "app-id:0xHEX",
+        help = "Measured dstack app-id to accept for key custody (spec 9.1(5)); \
+                repeatable. Custody is checked when this and \
+                --accept-dstack-kms-root-public-key are given; with neither, id-5 is \
+                skipped."
+    )]
+    pub accepted_subjects: Vec<String>,
+    #[arg(
+        long = "accept-dstack-kms-root-public-key",
+        value_name = "HEX",
+        help = "dstack KMS root public key the receipt-key custody chain must end at \
+                (spec 3.3, 9.1(5)); repeatable."
+    )]
+    pub accepted_dstack_kms_root_public_keys: Vec<String>,
+}
+
+impl PolicyArgs {
+    /// Validate the flags once, before any report is fetched.
+    pub fn verifier_policy(&self) -> Result<VerifierPolicy, String> {
+        let custody_configured = !(self.accepted_subjects.is_empty()
+            && self.accepted_dstack_kms_root_public_keys.is_empty());
+        let custody = custody_configured
+            .then(|| {
+                CustodyPolicy::new(
+                    self.accepted_subjects.clone(),
+                    self.accepted_dstack_kms_root_public_keys.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|e| match e {
+                CustodyPolicyError::EmptySubjects => {
+                    "--accept-dstack-kms-root-public-key needs --accept-subject".to_string()
+                }
+                CustodyPolicyError::EmptyKmsRoots => {
+                    "--accept-subject needs --accept-dstack-kms-root-public-key".to_string()
+                }
+                CustodyPolicyError::InvalidSubject(subject) => {
+                    format!("invalid --accept-subject {subject:?}: expected app-id:0x<hex>")
+                }
+                CustodyPolicyError::InvalidKmsRootPublicKey(e) => {
+                    format!("invalid --accept-dstack-kms-root-public-key: {e}")
+                }
+            })?;
+        Ok(VerifierPolicy {
+            accepted_composes: self.accepted_composes.clone(),
+            custody,
+        })
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    #[arg(help = "Base URL of the ACI service to verify.")]
+    pub base_url: String,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         help = "Nonce to send with the attestation request; a fresh random one is \
@@ -75,14 +143,8 @@ pub struct AuditArgs {
         help = "Path to the saved spec 9.1 attestation report JSON."
     )]
     pub report: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "FILE",
@@ -145,14 +207,8 @@ pub struct AuditArgs {
 pub struct SendArgs {
     #[arg(help = "Base URL of the ACI service to send the request to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -166,9 +222,17 @@ pub struct SendArgs {
     )]
     pub prompt: Option<String>,
     #[arg(
+        long = "api-key-stdin",
+        help = "Read the bearer API key from stdin; otherwise it is read from the \
+                ACI_API_KEY environment variable."
+    )]
+    pub api_key_stdin: bool,
+    /// Deprecated: a key in argv is visible to other local processes. Removed in 0.3.
+    #[arg(
         long = "api-key",
         value_name = "KEY",
-        help = "Bearer API key; falls back to the ACI_API_KEY environment variable."
+        hide = true,
+        conflicts_with = "api_key_stdin"
     )]
     pub api_key: Option<String>,
     #[arg(long = "no-stream", help = "Request a non-streaming chat completion.")]
@@ -202,17 +266,32 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct CurlArgs {
+    #[arg(help = "HTTPS URL to request after its ACI service has been verified.")]
+    pub url: String,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
+    #[arg(
+        long,
+        help = "Print the verification transcript as JSON on stderr; stdout stays curl's."
+    )]
+    pub json: bool,
+    #[arg(
+        last = true,
+        allow_hyphen_values = true,
+        value_name = "CURL_ARG",
+        help = "Supported request options passed to system curl. Put them after `--`; \
+                pap owns the URL and transport-security options."
+    )]
+    pub curl_args: Vec<OsString>,
+}
+
+#[derive(Debug, Args)]
 pub struct SessionsArgs {
     #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
@@ -235,14 +314,8 @@ pub struct SessionsArgs {
 pub struct ServeArgs {
     #[arg(help = "Base URL of the ACI service to proxy to.")]
     pub base_url: String,
-    #[arg(
-        long = "accept-compose",
-        value_name = "HEX",
-        help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
-                it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
-    )]
-    pub accepted_composes: Vec<String>,
+    #[command(flatten)]
+    pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "ADDR:PORT",
@@ -253,7 +326,7 @@ pub struct ServeArgs {
         long,
         value_name = "ADDR:PORT",
         help = "Local control endpoint for on-demand receipt verification \
-                (default 127.0.0.1:4181)."
+                (default 127.0.0.1:4183)."
     )]
     pub control: Option<String>,
     #[arg(
@@ -306,6 +379,7 @@ fn session_id(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::FromArgMatches;
 
     // Only `session_id` is ours; clap's own parsing needs no test, and
     // `RequiredClaim::parse` is covered in checks.rs.
@@ -320,5 +394,33 @@ mod tests {
         );
         let err = session_id("not-hex").unwrap_err();
         assert!(err.contains("spec 5.3"), "{err}");
+    }
+
+    #[test]
+    fn curl_args_after_separator_are_passed_through() {
+        let matches = Command::augment_subcommands(clap::Command::new("pap"))
+            .try_get_matches_from([
+                "pap",
+                "curl",
+                "https://example.com/v1/chat/completions",
+                "--accept-compose",
+                "abcd",
+                "--json",
+                "--",
+                "--json",
+                "{}",
+                "--data-binary",
+                "@request.json",
+            ])
+            .unwrap();
+        let Command::Curl(args) = Command::from_arg_matches(&matches).unwrap() else {
+            panic!("expected curl command");
+        };
+        assert_eq!(args.policy.accepted_composes, ["abcd"]);
+        assert!(args.json);
+        assert_eq!(
+            args.curl_args,
+            ["--json", "{}", "--data-binary", "@request.json"].map(OsString::from)
+        );
     }
 }

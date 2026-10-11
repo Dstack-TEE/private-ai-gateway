@@ -1,0 +1,602 @@
+# Distribution architecture
+
+The desktop shell selects `DistributionCapabilities` once at compile time and
+injects the same policy into every native window. Native commands enforce it too.
+The shared local runtime and Agent projector remain independent of the remote
+Gateway server. Build and submission instructions live in [Mac App Store](mac-app-store.md).
+
+## Difference matrix
+
+| Area | Direct | Mac App Store | Classification |
+| --- | --- | --- | --- |
+| macOS Open at Login | `SMAppService.mainAppService` | Same | Shared; explicit user action only |
+| Windows / Linux startup | Existing auto-launch backend | Not a MAS target | Platform difference, not a distribution capability |
+| Minimum macOS | 13.0 | 13.0 | Shared SMAppService requirement |
+| Agent discovery, config projection, token issuance / revocation | Shared projector | Same | Shared |
+| Home filesystem access | Ordinary Home | NSOpenPanel selection and persistent security-scoped bookmark | Sandbox requirement |
+| Agent credentials | Bundled helper / native file reference | Authorized Home token files / native file reference | Sandbox parent boundary |
+| Settings and upstream API keys / OAuth secrets | `config.toml` and owner-only `credentials.toml` in `~/.config/private-ai-proxy` ([Settings files](configuration.md)) | Same files, in the app container's `Config` subdirectory: the sandbox cannot write `~/.config` | Shared; never projected into Home |
+| App update | Tauri signed background updater | App Store | Channel requirement |
+| CLI registration | Available | Disabled | No shared-location code installation in MAS |
+| OAuth, manual key entry, account balance | Available | Available | Shared |
+| Provider billing from balance | Available | Available when the provider returns `canTopUp` and a scoped account slug | Shared external cloud-account action |
+| Account / Get API key web portals | Available | Hidden and native commands denied pending neutral destinations | Free companion review policy |
+| Backend after GUI exit | Existing persistent service | Stops on GUI exit, including parent loss | MAS lifecycle requirement |
+| Packaging | Platform packages and updater artifacts | Universal app and signed pkg, provisioning profile | Channel requirement |
+
+Capabilities describe only channel policy: `nativeUpdates`, `cliRegistration`,
+`accountPortalLinks`, and `sandboxHomeAccess`. Autostart backend,
+helper paths, and signing mechanics are not capabilities. Platform/feature guards
+remain at native API and process boundaries, not throughout product components.
+
+## Release orchestration
+
+Versions, changelog and tags come from
+[release-please](https://github.com/googleapis/release-please)
+(`release-please-config.json`, `.release-please-manifest.json`). On every push
+to `main` that touches `apps/desktop`, `Desktop release PR` keeps a release PR
+open. The PR carries the next version in `package.json`,
+`src-tauri/tauri.conf.json`, the workspace `Cargo.toml` (every crate inherits
+its `version`) and `Cargo.lock`, plus the new `CHANGELOG.md` section built from
+Conventional Commit titles.
+Merging the PR tags the merge commit `desktop-v<version>` and creates a draft
+GitHub release with that changelog section as its notes.
+
+- **Beta** is the default: versions go `x.y.z-beta.1`, `-beta.2`, and so on
+  (release-please `versioning: prerelease`). After a stable release, a `fix`
+  proposes `x.y.(z+1)-beta.1` and a `feat` proposes `x.(y+1).0-beta.1`. A
+  `feat` on a patch-level beta moves to the next minor version but keeps the
+  beta number: `0.2.1-beta.3` becomes `0.3.0-beta.3`. That is release-please's
+  prerelease strategy, not a skipped release.
+- **Stable**: the prerelease strategy only ever proposes another beta, so
+  going from `<version>-beta.N` to `<version>` needs a commit on `main` whose
+  message has the footer `Release-As: <version>`
+  ([release-please: Release-As](https://github.com/googleapis/release-please#how-do-i-change-the-version-number)).
+  An empty commit, as in the release-please README example, pushes nothing
+  under `apps/desktop/`, so run `Desktop release PR` from the Actions tab
+  (`workflow_dispatch`) afterwards. The next release PR then proposes `<version>`.
+  Afterwards, betas continue from the next version. The
+  [Release runbook](#release-runbook) lists every step.
+- **Correcting the changelog**: edit the merged PR's body with a
+  `BEGIN_COMMIT_OVERRIDE` … `END_COMMIT_OVERRIDE` block
+  ([release-please: overriding release PR messages](https://github.com/googleapis/release-please#how-can-i-fix-release-notes)),
+  for example to list a `refactor` PR's user-visible fixes. release-please uses
+  the text after the first occurrence of the start marker in the body, so do
+  not mention the marker anywhere else in the PR description, and separate
+  entries with blank lines. Then run `Desktop release PR` manually to refresh
+  the release PR.
+- **Shared crates**: release-please assigns a commit to Private AI Proxy only
+  if it changes a file under `apps/desktop/`
+  ([commit splitting](https://github.com/googleapis/release-please/blob/v17.11.2/src/util/commit-split.ts)),
+  and it has no option to add other paths. A commit that changes only
+  `crates/aci-protocol` or `crates/aci-verify` therefore never reaches the
+  Private AI Proxy changelog or version, even when run manually. When such a
+  change affects Private AI Proxy, include a change under `apps/desktop/` in
+  the same commit, or follow it with an empty commit whose Conventional Commit
+  title describes the user-visible change (release-please counts an empty commit for
+  every package), then run `Desktop release PR` manually.
+
+The tag starts `Desktop release` (`desktop-release.yml`), which runs only for
+release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
+commit. The tag must match the committed version and be contained in `main`.
+The run verifies and builds all six targets. For a stable version it also calls
+`Desktop Mac App Store` in parallel, which signs, validates and uploads the App
+Store build. Only stable versions reach the App Store.
+
+The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
+A Mac app's build number must increase with every upload, across versions, and
+is at most three integers and 18 characters
+([TN2420](https://developer.apple.com/library/archive/technotes/tn2420/_index.html)).
+The run number increases only on release tags, and a re-run keeps it. Beta
+tags use a run number but upload nothing. The offset starts above the hand-numbered builds 1–17, as Xcode Cloud's
+[next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
+does for existing Mac apps.
+
+Once every package and the App Store upload have succeeded, the run:
+
+1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
+   Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
+   (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`).
+   Each package also gets CycloneDX SBOM attestations (add
+   `--predicate-type https://cyclonedx.org/bom`): every package for the CLI
+   crates and the web UI renderer's runtime npm dependencies, which the CLI
+   service embeds, and each desktop package for the desktop shell crate too.
+   The renderer SBOM omits devDependencies, such as the build-time CSS
+   tooling. The verify job generates the SBOMs on every run; they are not
+   release assets;
+2. publishes it (stable releases become Latest);
+3. advances the updater feeds. The publish is idempotent, so after a transient
+   GitHub failure use **Re-run failed jobs**, which also runs the npm publish
+   that the failure skipped. Dispatching `desktop-update-feed.yml` on the tag
+   instead leaves `publish-npm` skipped in the release run; then also dispatch
+   `private-ai-proxy-npm.yml` on the tag with `release_tag` set to the tag and
+   `publish` enabled;
+4. dispatches the dedicated npm publisher at the release tag and waits for it.
+   npm checks the top-level workflow identity for OIDC trusted publishing.
+
+A MAS failure therefore cannot leave a newly public Direct release. A later
+Direct failure can leave only an uploaded, unsubmitted App Store build. To
+recover, use **Re-run failed jobs** on the tag's `Desktop release` run, never
+**Re-run all jobs**, which would upload the same App Store build number again
+([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)). Windows
+Authenticode remains optional and does not block the release.
+
+### Live end-to-end test
+
+`Desktop live E2E` (`desktop-e2e.yml`) installs a published Linux x64 desktop
+package in a fresh `ubuntu:24.04` container and, for Claude Code, Codex,
+DeepSeek Harness, OpenCode, Pi, Oh My Pi, OpenClaw and Hermes, checks a real reply through the
+live RedPill service, its verified usage record, restoration on disconnect and
+token revocation, then fail-closed behavior and restoration on stop
+([E2E harness](../e2e/README.md)). A second job repeats the OpenCode checks
+with OpenCode 2. It runs nightly on the newest `desktop-v*`
+release and on demand for a given tag. Its `desktop-e2e` environment holds the
+`PAP_E2E_API_KEY` secret and allows only `main`, so the test never runs on
+pull requests. Agent versions are pinned in `e2e/versions.env`.
+
+### Release GitHub App
+
+Workflows never start from events that `GITHUB_TOKEN` creates. `Desktop release
+PR` therefore acts as a GitHub App, so its release PR runs CI and its tag starts
+the release build. The Homebrew tap's `update.yml`
+([`Dstack-TEE/homebrew-private-ai`](https://github.com/Dstack-TEE/homebrew-private-ai))
+uses the same App, so its update pull requests run the tap's tests. Until both
+settings below exist, the workflow fails with a message naming them.
+
+1. Create a GitHub App owned by the Dstack-TEE organization. Disable its
+   webhook. It needs these repository permissions, with nothing else beyond the
+   mandatory Metadata read:
+   - Contents: read and write (release commits, tags, draft releases);
+   - Pull requests: read and write (the release PR);
+   - Issues: read and write (release PR labels).
+2. Install it only on `Dstack-TEE/private-ai-gateway` and
+   `Dstack-TEE/homebrew-private-ai`.
+3. In the `desktop-release` environment, store the App's client ID as the
+   variable `DESKTOP_RELEASE_APP_CLIENT_ID` and a private key (the whole `.pem`)
+   as the secret `DESKTOP_RELEASE_APP_PRIVATE_KEY`. Keep the environment's
+   deployment rules to `main` and `desktop-v*`, so other branches cannot mint
+   the token. The tap stores the same variable and secret at repository level.
+
+To rotate the key:
+
+1. Generate a new private key in the App settings.
+2. Replace the secret here and in the tap.
+3. Confirm the next `Desktop release PR` run and a manual run of the tap's
+   `update.yml` succeed.
+4. Delete the old key in the App settings.
+
+Installation tokens last one hour and are minted per run, so nothing else
+expires.
+
+### Release runbook
+
+In these steps, `<version>` is the stable version being released,
+`<previous>` the stable version before it, `<latest-beta>` the newest beta
+version, and `<next-patch>` the patch version after `<version>`.
+
+#### Promoting a beta to stable
+
+release-please does not aggregate prereleases: the stable section it writes
+lists only the commits since the last beta, so curate the notes before merging.
+
+1. Run the [live end-to-end test](#live-end-to-end-test) on the beta tag being
+   promoted and wait for it to pass:
+
+   ```sh
+   gh workflow run desktop-e2e.yml --ref main -f tag=desktop-v<latest-beta>
+   gh run watch --exit-status   # choose the Desktop live E2E run
+   ```
+
+   Runs share one concurrency group, so a second dispatch while a run is
+   queued cancels the queued run; wait for the run you started to begin.
+
+2. Check the App Store path: `gh workflow run desktop-mac-app-store.yml --ref main`.
+   A manual run packages, signs and validates the App Store build without
+   uploading it ([Mac App Store](mac-app-store.md#build-and-signing-prerequisites)).
+3. Push an empty commit with the stable version in a `Release-As` footer, then
+   run `Desktop release PR`, because an empty commit does not match its path
+   filter:
+
+   ```sh
+   git switch main && git pull --ff-only
+   git commit --allow-empty -m "chore(desktop): release <version>" -m "Release-As: <version>"
+   git push origin main
+   gh workflow run desktop-release-please.yml --ref main
+   ```
+
+4. Curate the release PR (`gh pr list --label "autorelease: pending"`) so that
+   it covers every change since the previous stable release, using the beta sections of
+   `CHANGELOG.md`:
+   - its body becomes the release notes, which the release job places
+     between the download links and the integrity details. Keep the header, the `## [<version>]`
+     heading and the footer, and replace the sections below the heading:
+     `gh pr edit <number> --body-file notes.md`;
+   - commit the same sections to the top of `apps/desktop/CHANGELOG.md` on
+     its branch, `release-please--branches--main--components--desktop`.
+
+   Every `Desktop release PR` run rewrites both, so while the PR is open, do
+   not push `apps/desktop` changes to `main` or run that workflow.
+5. Save both update feeds, which [stopping a bad stable
+   release](#stopping-a-bad-stable-release) restores, then merge the PR:
+
+   ```sh
+   gh release download desktop-updates-stable --dir feeds/stable
+   gh release download desktop-updates-beta --dir feeds/beta
+   ```
+
+6. If the tag's `Desktop release` run fails, use only **Re-run failed jobs**,
+   never **Re-run all jobs**, which would upload the App Store build number
+   again.
+7. After the release:
+   - submit the uploaded build in App Store Connect
+     ([Submit and rollback](mac-app-store.md#submit-and-rollback));
+   - run the tap's `update.yml`
+     (`gh workflow run update.yml --repo Dstack-TEE/homebrew-private-ai`) or
+     wait for its daily schedule, then merge its `private-ai-proxy <version>` pull
+     request;
+   - optionally, from a maintainer's npm login (OIDC cannot move dist-tags),
+     `npm dist-tag add private-ai-proxy@<version> beta`
+     ([Dist-tags](../npm/README.md#dist-tags-and-version-ranges)).
+
+#### If the App Store job fails on the tag
+
+The release job needs the App Store job, so nothing is published: the draft
+release, the feeds and npm are unchanged.
+
+- If the cause is outside the tagged commit (a secret, certificate, profile or
+  App Store Connect agreement, or the runner), fix it and **Re-run failed
+  jobs**. The build number was never uploaded, so the App Store job can use it
+  again.
+- Otherwise, or if App Store Connect already lists the build, keep the notes,
+  delete the draft release and its tag, land the fix on `main` and release
+  `<next-patch>` with the steps above. release-please has already recorded
+  `<version>` on `main` and does not tag it again. Its empty commit needs the
+  footer `Release-As: <next-patch>`; without it, prerelease versioning proposes
+  `<next-patch>-beta.1`.
+
+  ```sh
+  gh release view desktop-v<version> --json body --jq .body > notes.md
+  gh release delete desktop-v<version> --cleanup-tag --yes
+  ```
+
+#### Stopping a bad stable release
+
+A stable release rewrites the stable feed's `latest.json` and its
+`latest-<os>-<arch>.json` files, which clients up to 0.1.7-beta.4, including
+every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
+
+1. Restore the saved feeds. Installed updates are not rolled back; clients
+   never downgrade.
+
+   ```sh
+   gh release upload desktop-updates-stable feeds/stable/latest*.json --clobber
+   gh release upload desktop-updates-beta feeds/beta/latest.json --clobber
+   ```
+
+   Without the saved copy, the `latest.json` assets of the previous stable
+   tag and of the latest beta tag are the previous `latest.json` files, but the
+   per-platform files existed only in the stable feed. To find the latest
+   beta tag:
+
+   ```sh
+   gh release list --exclude-drafts --json tagName,isPrerelease \
+     --jq '[.[] | select(.isPrerelease and (.tagName | startswith("desktop-v")))][0].tagName'
+   ```
+
+2. Make the previous stable release Latest again:
+   `gh release edit desktop-v<previous> --latest`.
+3. From a maintainer's npm login, since OIDC cannot move dist-tags:
+   `npm dist-tag add private-ai-proxy@<previous> latest`. If `beta` was moved to
+   `<version>`, move it back with
+   `npm dist-tag add private-ai-proxy@<latest-beta> beta`.
+4. Do not merge the tap's `private-ai-proxy <version>` pull request
+   (`gh pr close <number> --repo Dstack-TEE/homebrew-private-ai`); if it is
+   already merged, revert it
+   (`gh pr revert <number> --repo Dstack-TEE/homebrew-private-ai`) and merge
+   the revert. The tap reads the stable feed, so it then proposes nothing
+   newer. Do not submit the App Store build, or withdraw it
+   ([Submit and rollback](mac-app-store.md#submit-and-rollback)).
+5. Ship the fix as `<next-patch>` with the promotion steps above.
+
+## Updates by installation
+
+Every Direct installation follows the saved update channel (the desktop app's
+**Update channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
+choice it follows the channel of the running build. Each client reads one
+static Tauri manifest, `desktop-updates-<channel>/latest.json`. Stable releases
+are published to both feeds (as electron-builder's
+`generateUpdatesFilesForAllChannels` does), so beta users also receive a stable
+release that is newer than the latest beta. The stable feed never carries a
+beta. A feed only advances to a newer SemVer version, and switching channels
+never downgrades: a beta build stays installed until the new channel has a newer
+release.
+
+Feeds are the GitHub releases `desktop-updates-beta` and `desktop-updates-stable`.
+`latest.json` lists every platform under Tauri's `<os>-<arch>` and
+`<os>-<arch>-<installer>` keys; its `version` must belong to the feed. Every
+artifact is signed with the updater key and verified before installation.
+
+Clients up to 0.1.7-beta.4 read per-platform `latest-<os>-<arch>.json` files
+instead and require their `channel` to match the feed. Releases 0.1.7-beta.2 to
+0.1.7-beta.4 read both the beta and the stable feed and offer whichever release
+is newer; releases up to and including 0.1.7-beta.1 only read their own
+channel's feed. Each release keeps writing those files to its own channel's
+feed until 0.3 (see [Removal in 0.3](configuration.md#removal-in-03)).
+
+Beta builds that predate per-platform feeds (before 0.1.2-beta.44) read the beta
+feed's `latest.json` and accept only a beta. After a stable release is published
+to the beta feed, they report "The update does not match the selected channel"
+until the next beta is published. This is an accepted consequence of
+publishing stable releases to the beta feed.
+
+| Installation | Update key or source | How it updates | Backend and restart |
+| --- | --- | --- | --- |
+| macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first; the relaunched app starts the new bundled backend |
+| Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
+| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; the app restarts and starts the new backend |
+| Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
+| Arch desktop package | Version from `latest.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
+| CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
+| CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
+| CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
+| npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
+| Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
+| Mac App Store | App Store | App Store | MAS has no feed checks |
+| AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
+
+Package-manager installs never modify themselves: they announce the release and
+print exact commands built from the compiled feed location and the validated
+version. Linux CLI and Arch packages record their owner in
+`/usr/share/private-ai-proxy/package-manager` (`deb`, `rpm` or `pacman`); the
+desktop app disables in-app installation only when that marker says `pacman`. CLI
+packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
+system package without commands.
+
+Native package versions keep prereleases ordered before their stable release:
+DEB and RPM `x.y.z~beta.n` (RPM release `1`, no epoch) and Arch `x.y.zbeta.n`.
+Tauri writes the SemVer string verbatim, so the package job builds the desktop
+DEB, RPM and Arch packages from the payload of Tauri's DEB with
+[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager, as it builds the
+CLI packages (`scripts/package-linux.mjs`), then signs the final DEB and RPM for
+the updater before the manifest is created. nfpm writes a SemVer prerelease
+with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
+rpm (Fedora versioning guidelines). Its archlinux packager drops the
+prerelease from `pkgver`, so Arch packages get the pacman form instead, which
+sorts a trailing letter segment before the release (`vercmp`). Every earlier package sorts before
+`0.2.0~beta.1`, including the RPMs published as `0.1.7-0.beta.n.1` and the
+0.1.7-beta.1 desktop RPM published as `0.1.7-beta.1-1`, so they update in place.
+
+The packages do not check for running processes, like the Chrome, VS Code and
+Firefox packages: dpkg, rpm and pacman already refuse files that another
+package owns, and replacing the executables of a running program is safe on
+Linux. A backend keeps running its old build until it stops; the next client
+command restarts a backend from another build. Run `pap --yes service stop` as
+the owning user to switch at once. Package metadata (name,
+maintainer, homepage and the desktop description) comes from the brand
+configuration, as Tauri's does, and every entry carries the commit time (or
+`SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.
+
+Packages up to 0.1.7-beta.n refuse removal while a Private AI Proxy process
+other than the updating app runs. Only DEB upgrades met that: dpkg runs the old
+package's `prerm upgrade` before unpacking. The DEBs therefore carry one
+maintainer script, a `prerm` that succeeds for `failed-upgrade`, which dpkg runs
+when the old `prerm` fails (Debian Policy 6.6) and which lets the upgrade
+continue. rpm runs the old `%preun` only after the new files are installed, and
+pacman runs only the new package's scripts on upgrade.
+
+### Planned removals (0.3)
+
+The packaging compatibility code for installations of 0.1.x (the DEB `prerm`
+for `failed-upgrade`, the Windows `.cmd` shim migration) is listed with every
+other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
+
+A feed advances only after its release is public and every manifest URL
+responds, so a feed never names an unpublished asset. Assets are replaced one
+file at a time; a client that reads during the replacement sees the previous
+release or a transient "temporarily unavailable" error and retries.
+
+## Agent access and credentials
+
+MAS exposes **Agent Integrations** as an explicitly enabled, app-level module.
+Before activation, startup, window focus, and opening Agents only check bookmark
+status; neither the renderer nor background reconciliation scans Home or opens a
+permission panel. Overview and the Agents page expose the same Enable action,
+backed by one shared query and authorization flow. Agent connection toggles on
+both pages are disabled while integrations are inactive or Enable is pending;
+the connection handler enforces the same gate. After activation, Overview shows
+**View all** to open the Agents page.
+
+Before activation, the Agents page still shows the supported Agent catalog with
+an **Access required** state; it does not claim that any Agent is detected.
+
+Enable opens the native directory picker directly, initially at the real Home
+from the OS user account. It accepts directories only, and both selection and
+bookmark restoration compare canonical paths with the current user's actual
+Home (including symlink resolution). The explanation covers detection in Agent
+configuration folders and configuration of Agents the user chooses to connect,
+with revocable local proxy tokens; workspace contents are not read. Cancel
+leaves the module inactive and retryable, without a scan, Agent configuration,
+token issuance, or error alert. No intermediate webview dialog is created.
+
+After selection, MAS stores a persistent app-scoped security bookmark in the app
+container. Before every backend launch or restart, the app resolves that bookmark
+and creates a fresh process-shareable bookmark for its owned backend, holding
+scoped access only while it does so. The backend resolves the shared bookmark,
+starts scoped access and holds it for its lifetime, and immediately
+scans and shows the detected Agents. Detection derives each Agent's configuration path
+from that authorized Home and reports the Agent when the folder holding that file exists
+(for example `~/.codex`). Every supported Agent creates this folder on its first run,
+so detection is the same for every install method (package managers, standalone
+installers, Homebrew, or wrappers such as Superset) and in both distributions, with no
+PATH or login-shell lookup. An Agent installed but never run is listed as not detected
+until its first run; one uninstalled while its folder remains stays listed, and
+connecting it only edits that folder. Other tools can create these folders too:
+Superset writes `~/.claude/settings.json`, `~/.codex/hooks.json`,
+`~/.pi/agent/extensions` and `~/.omp/agent/extensions` whether or not those Agents
+are installed, so they show as detected on a machine that runs Superset.
+Location overrides such as `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `HERMES_HOME` are
+read only by the Direct build, and only from the backend's own environment. A backend
+started from Finder, the Dock or a login item inherits the launchd environment, not
+variables exported in shell startup files, so it uses the default locations; the MAS
+build always uses them. Enable does not connect an Agent.
+Connect/Disconnect remain independent configuration operations and never open the
+Home picker.
+
+On subsequent launches and refreshes, the persistent app bookmark restores access
+silently; a stale but recoverable bookmark is refreshed while scoped access is
+active. The process-shareable bookmark is regenerated before each backend start
+because its implicit sandbox extension is not a durable replacement for the
+app-scoped bookmark. Unrecoverable access clears the backend bookmark and returns
+the module to its inactive state with
+**Re-enable Agent Integrations**, without a background panel. The backend stops
+scanning and withdraws in-memory Agent token authority. Existing owned files and
+recovery records remain for restoration after reauthorization; inaccessible Home
+is not modified. The backend retains the resolved security scope for the entire
+period in which it scans or updates Agent files, and releases it through RAII.
+
+Disconnect preserves app-level Home authorization. Existing **Reset settings**
+stops protection and restores/disconnects managed Agents when access is available;
+it retains the bookmark, just as it retains system notification permission. There
+is no existing explicit Home revoke control, and no new Disable control is added.
+Direct, Windows, and Linux retain ordinary discovery without this module gate.
+
+MAS exports only random, revocable, agent-scoped **local proxy tokens** to
+`~/.org.dstack.private-ai-proxy-agents/agent-tokens/` (directories 0700, files
+0600). Public Codex model metadata lives alongside these files. Neither provider
+API keys nor OAuth credentials are written there. These tokens authorize the
+agent's local inference surface, not management RPC or upstream API access. They
+do not protect against other programs running as the same OS user.
+
+OpenCode uses its file reference and OpenClaw its `singleValue` file SecretRef.
+Codex invokes `/bin/cat` with a separate absolute-path argument; Claude Code,
+Pi, Oh My Pi and Hermes use their existing credential-command contracts with a
+quoted `/bin/cat` path. DeepSeek Harness has no command or file reference, so its
+token is written into dsh's own owner-only credential store (see below). No external Agent launches a PAP executable or reads the
+app container. The same transaction journal restores owned configuration,
+revokes tokens on disconnect/suspend, and rotates them on reconnect. In-memory
+proxy authority is withdrawn before restoration; restoration failures remain
+retryable. File removal alone is not the entire revocation mechanism.
+
+MAS bundles only the service, which contains the verifier and inherits the
+sandboxed application's sandbox. The credential helper remains Direct-only;
+MAS neither copies it to the container nor installs it in Home/shared paths.
+The private management socket uses the short `pap-ipc/api.sock` path at the
+root of the App Container so the Unix socket length limit is respected; it never
+uses `/private/tmp`.
+
+### DeepSeek Harness
+
+DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is supported at 0.1.7-rc.2, the
+version the live test installs; 0.2.0-rc.1 has the same configuration contract.
+dsh composes each profile from its bundle layers, then
+`$DSH_HOME/profiles/<name>/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`
+(`~/.dsh` by default), then any `--patch` overlays. Each layer is a list of items
+such as `{id: llm-pi-ai, config: ...}`, and a later item's `config` replaces the
+row's whole config. Every profile, the dsh desktop app's included, reads the home
+layer, and dsh never writes it, so a connection edits only that file. Profiles
+created later are covered too.
+
+The connection adds four keyed items there:
+- a `private-ai-proxy` provider in `llm-pi-ai` (Chat Completions, `[TEE]` model
+  names, and the compatibility switches the Local API needs);
+- the default model in `agent-default-model`;
+- the same provider and model in `acp`, the acp profile's row, which picks its
+  own model instead of the default (the pinned acp-app bundle ships its config
+  as just `provider` and `model`, and the live test fails if that changes);
+- `disabled: true` on `web-search-deepseek`. That row would otherwise send
+  search queries to DeepSeek with the user's own key. Search providers the
+  user installs (Exa, Perplexity) keep using their own keys.
+
+A layer that disables the `acp` row, or that inserts a row of
+`@deepseek-ai/dsh-web-search-deepseek` or `@deepseek-ai/dsh-acp` under another
+id, is refused. Those packages act under any id: one registers the same
+`deepseek-official` search provider, and the other serves ACP with its own
+model.
+
+Profiles without an `acp` row log the loader's "entry not found" note for that
+item, as dsh documents for a home patch that is shared across profiles.
+
+The provider reads its token through `apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`,
+which the connection stores in dsh's `.credentials.yaml`:
+- The store is owner-only, reloads live and is never exported to the processes
+  dsh starts.
+- Writes hold dsh's own `<file>.lock` writer lock. A lock whose holder has
+  exited is taken over by dsh's own `takeOverExitedLock` rule, with the same
+  process probe Node uses on Unix and Windows; a live holder is waited for,
+  never taken over.
+- The token is one key under `refs`. If `refs` has to be created, it is
+  recorded separately and removed on disconnect only if it is empty, so keys
+  dsh saves there meanwhile stay and never block reconnecting.
+- The connection record keeps only SHA-256 digests of the token and of any
+  store text it wrote, never the token.
+
+A patch list or store the connection created is removed on disconnect while it
+still holds exactly what was written. A list file that was empty or blank gets
+its original bytes back.
+
+Keyed items are a general `ConfigDoc` capability. yaml-edit restores lists byte
+for byte only through appending and removing whole items, adding and removing
+keys, and replacing scalars. So in the user's own items the connection only
+adds keys or replaces scalars, journaling each scalar's source text. A missing
+parent is created as its own empty block mapping and removed only while it is
+still empty. Anything else is refused as a configuration conflict that names
+the file:
+- replacing a structured value;
+- removing an existing key (such as a `reasoningEffort`);
+- non-empty flow-style lists or items;
+- an indented list;
+- a file without a final newline;
+- duplicate ids.
+
+The same checks deauthorize a connection when the configuration changes
+afterwards:
+- a profile's own `llm-pi-ai` config, which the home item would hide (move it
+  to the home layer);
+- a layer that disables or re-inserts these rows, or moves the credential store;
+- a foreign or changed `PRIVATE_AI_PROXY_DSH_TOKEN`;
+- a relative `DSH_HOME`;
+- a legacy `settings.yaml` not yet imported.
+
+Not protected, and named in the connect note:
+- the `sdk` and `sdk-minimal` profiles, for developers embedding dsh, which
+  choose their provider in code;
+- runs started with `--patch` overlays;
+- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell;
+- a `DSH_HOME` exported in the user's shell. The app reads `DSH_HOME` only from
+  its own environment, and the MAS build never does.
+
+Only new sessions go through the proxy: existing sessions, resumed acp sessions
+included, keep the provider and model they were recorded with. dsh web and the
+dsh desktop app reload both files live; `dsh headless` and acp read them at
+start.
+
+## Removed duplication and retained boundaries
+
+The macOS Direct LaunchAgent plugin is removed. A one-time Direct-only upgrade
+bridge queries and removes that registration with `auto-launch`'s LaunchAgent
+mode, the same crate Windows and Linux use for Open at Login.
+The verified tauri-plugin-autostart 2.5.1 contract uses `app.package_info().name`
+for both label and `~/Library/LaunchAgents/{name}.plist`, with the canonical
+executable followed by `--autostart` in ProgramArguments. No path is guessed.
+
+An existing registration preserves the user's prior Enable choice: startup
+registers SMAppService silently and removes the legacy entry only after the new
+service reports Enabled. Failure or pending approval retains the old entry and
+retries on the next launch without opening Settings or a global error. The UI
+continues to reflect the retained registration. Explicit Disable attempts both
+native unregister and legacy removal, reporting failure rather than a false
+success. Legacy `--autostart` launches remain quiet during this transition.
+Successful removal makes later launches a no-op; the bridge and argument support
+can be removed when upgrades from plugin-based releases are no longer supported.
+MAS and non-macOS production builds exclude the bridge entirely. New login-item
+registration otherwise occurs only through the user's toggle.
+
+Updater initialization and native commands check the same policy as the renderer;
+MAS has no background feed checks. The MAS overlay also removes updater config
+and artifacts. Shared account presentation renders balance as a button when the
+provider explicitly permits top-up and returns a validated account scope; it opens
+that provider's external billing page in the system browser. General account and
+API-key portals remain channel-gated because they are broader, unverified surfaces.
+
+The app-owned [Codex catalog](codex-catalog.md) replaces runtime CLI probing in
+both distributions. Its existing pinned baseline and refresh workflow are reused.

@@ -6,37 +6,44 @@ on:
       tag:
         required: true
         type: string
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published desktop release tag to promote
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+# One group per channel: GitHub keeps only one pending run per group, so a
+# shared group could drop a queued publish. A stable publish also writes the
+# beta feed's latest.json; if it overlaps a beta publish, the later upload
+# stands until the next release advances the feed.
 concurrency:
-  group: desktop-update-feed-${{ contains(inputs.tag || github.event.release.tag_name, '-beta.') && 'beta' || 'stable' }}
+  group: desktop-update-feed-${{ contains(inputs.tag, '-beta.') && 'beta' || 'stable' }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: inputs.tag != '' || startsWith(github.event.release.tag_name, 'desktop-v')
     environment: desktop-release
     runs-on: ubuntu-24.04
     env:
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: ./.github/actions/desktop-node
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Install release tooling
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts
+          ignore-scripts: true
+      # The script is idempotent: it re-reads both feeds and uploads only what
+      # is still behind. After a transient GitHub API or asset upload failure,
+      # use "Re-run failed jobs" on the release run, which also runs the npm
+      # publish that was skipped (see distribution.md).
       - name: Validate and advance the selected channel
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ github.token }}
         run: node apps/desktop/scripts/publish-update-feed.mjs

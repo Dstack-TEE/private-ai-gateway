@@ -1,7 +1,11 @@
-mod permission;
-use desktop_runtime::{
-    client::Client, contracts::GatewayState, preferences::NotificationPreferences,
-    protocol::Preference,
+pub(crate) mod permission;
+use desktop_core::{
+    client::{CallError, Client},
+    config::NotificationPreferences,
+    contracts::{
+        AppState, NotificationPermission, NotificationPermissionStatus, VerificationStatus,
+    },
+    protocol::rpc,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -10,75 +14,52 @@ use std::{
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
-#[derive(Default)]
-pub struct Settings(Mutex<NotificationPreferences>);
-
-#[derive(serde::Serialize)]
-pub struct Configuration {
-    preferences: NotificationPreferences,
-    #[serde(flatten)]
-    system: permission::PermissionStatus,
-}
-
-pub fn initialize(app: &AppHandle) {
-    match app.state::<Arc<Client>>().preferences() {
-        Ok(preferences) => {
-            if let Ok(mut current) = app.state::<Settings>().0.lock() {
-                *current = preferences.notifications;
-            }
+/// Asks for the system permission at startup while the backend's preferences
+/// have notifications on and the user has not decided yet, so alerts can show
+/// without opening Settings. Where the system has no prompt, it never opens
+/// anything. Returns whether the preferences could be read, which decides.
+pub async fn request_startup_permission(app: &AppHandle, client: &Arc<Client>) -> bool {
+    let Ok(settings) = desktop_core::ui_api::call(client, rpc::Settings).await else {
+        return false;
+    };
+    if settings.notifications.enabled
+        && permission::query(app).await.permission == NotificationPermission::NotDetermined
+    {
+        if let Err(error) = permission::request(app).await {
+            tracing::warn!("Cannot request notification permission: {error}");
         }
-        Err(error) => eprintln!("Cannot load notification preferences: {error}"),
     }
-}
-
-#[tauri::command]
-pub async fn get_notification_settings(app: AppHandle) -> Result<Configuration, String> {
-    let client = app.state::<Arc<Client>>().inner().clone();
-    let preferences = crate::run_blocking(move || Ok(client.preferences()?.notifications)).await?;
-    Ok(Configuration {
-        preferences,
-        system: permission::query(&app).await,
-    })
-}
-
-#[tauri::command]
-pub async fn save_notification_settings(
-    app: AppHandle,
-    config: NotificationPreferences,
-) -> Result<(), String> {
-    let client = app.state::<Arc<Client>>().inner().clone();
-    crate::run_blocking(move || client.set_preference(Preference::Notifications(config))).await?;
-    *app.state::<Settings>()
-        .0
-        .lock()
-        .map_err(|_| "Notification settings are unavailable")? = config;
-    Ok(())
+    true
 }
 
 #[tauri::command]
 pub async fn request_notification_permission(
     app: AppHandle,
-) -> Result<permission::PermissionStatus, String> {
+) -> Result<NotificationPermissionStatus, CallError> {
     permission::request(&app).await?;
     Ok(permission::query(&app).await)
 }
 
 #[tauri::command]
-pub fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+pub fn open_notification_settings(app: AppHandle) -> Result<(), CallError> {
     use tauri_plugin_opener::OpenerExt;
-    #[cfg(target_os = "macos")]
-    let url = "x-apple.systempreferences:com.apple.Notifications-Settings.extension";
-    #[cfg(target_os = "windows")]
-    let url = "ms-settings:notifications";
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    return app
-        .opener()
+    let url = if cfg!(target_os = "macos") {
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+    } else if cfg!(target_os = "windows") {
+        "ms-settings:notifications"
+    } else {
+        return Err("Open Notifications in your desktop environment's settings.".into());
+    };
+    app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|_| "Could not open system notification settings".into());
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = app.opener();
-        Err("Open Notifications in your desktop environment's settings.".into())
+        .map_err(|_| "Could not open system notification settings".into())
+}
+
+/// Reports an action the tray or the menu bar started, which has no window
+/// to show its failure in.
+pub fn show_failure(app: &AppHandle, title: &str, error: &str) {
+    if let Err(notification) = app.notification().builder().title(title).body(error).show() {
+        tracing::warn!("{title}: {error}; the notification failed too: {notification}");
     }
 }
 
@@ -90,7 +71,7 @@ pub struct Observer {
 }
 
 impl Observer {
-    pub fn new(state: &GatewayState) -> Self {
+    pub fn new(state: &AppState) -> Self {
         Self {
             faults: [false; 2],
             session: state.session_id.clone(),
@@ -100,14 +81,17 @@ impl Observer {
     }
     fn next(
         &mut self,
-        state: &GatewayState,
+        state: &AppState,
         background: bool,
         config: NotificationPreferences,
         now: Instant,
     ) -> Vec<(&'static str, &'static str)> {
         let faults = [
             !state.reconnecting
-                && (matches!(state.status.as_str(), "blocked" | "error") || state.error.is_some()),
+                && (matches!(
+                    state.status,
+                    VerificationStatus::Blocked | VerificationStatus::Error
+                ) || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
         let proof = if self.session == state.session_id {
@@ -125,7 +109,7 @@ impl Observer {
         self.failed_proof = state.session_usage.failed_proof;
         let allowed = [config.gateway, config.local_api, config.verification];
         let messages = [
-            ("Gateway needs attention", "Protection or a gateway operation encountered a problem. Open Private AI Proxy to review its status."),
+            ("Protection needs attention", "Protection or a Private AI Proxy operation encountered a problem. Open Private AI Proxy to review its status."),
             ("Local API unavailable", "The local listener encountered a problem. Open Local API settings to review it."),
             ("Response verification failed", "A response failed proof verification. Open Usage to review the recorded result."),
         ];
@@ -144,17 +128,20 @@ impl Observer {
         }
         result
     }
-    pub fn update(&mut self, app: &AppHandle, state: &GatewayState) {
+    pub fn update(&mut self, app: &AppHandle, state: &AppState) {
         let background = !app
             .webview_windows()
             .values()
             .any(|window| window.is_focused().unwrap_or(true));
-        let Ok(config) = app.state::<Settings>().0.lock().map(|config| *config) else {
+        let preferences = app.state::<Mutex<NotificationPreferences>>();
+        let Ok(config) = preferences.lock().map(|config| *config) else {
             return;
         };
         for (title, body) in self.next(state, background, config, Instant::now()) {
+            // On Linux the plugin sends from a spawned task, so a delivery
+            // failure there never reaches this result.
             if let Err(error) = app.notification().builder().title(title).body(body).show() {
-                eprintln!("Cannot submit notification: {error}");
+                tracing::warn!("Cannot submit notification: {error}");
             }
         }
     }
@@ -165,14 +152,14 @@ mod tests {
     use super::*;
     #[test]
     fn categories_deduplicate_and_respect_foreground_and_master_switch() {
-        let mut state = GatewayState::default();
+        let mut state = AppState::default();
         let mut observer = Observer::new(&state);
         let now = Instant::now();
         let config = NotificationPreferences {
             gateway: false,
             ..Default::default()
         };
-        state.status = "error".into();
+        state.status = VerificationStatus::Error;
         assert!(observer.next(&state, true, config, now).is_empty());
         state.endpoint_error = Some("private detail".into());
         assert_eq!(observer.next(&state, true, config, now).len(), 1);

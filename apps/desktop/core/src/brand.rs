@@ -1,0 +1,86 @@
+//! Product identity; see "Branding" in apps/desktop/README.md.
+
+use serde::{Deserialize, Serialize};
+
+use crate::contracts::ServiceProvider;
+
+/// [`PRODUCT_NAME`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! product_name {
+    () => {
+        "Private AI Proxy"
+    };
+}
+/// `productName` in src-tauri/tauri.conf.json.
+pub const PRODUCT_NAME: &str = product_name!();
+/// `bundle.publisher` in src-tauri/tauri.conf.json.
+pub const ORGANIZATION_NAME: &str = "Dstack TEE";
+/// [`BYLINE`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! byline {
+    () => {
+        "by dstack TEE"
+    };
+}
+/// The renderer receives it as a generated constant.
+pub const BYLINE: &str = byline!();
+pub const SERVICE_NAME: &str = ServiceProvider::DEFAULT.label();
+pub const SERVICE_DEFAULT_URL: &str = match ServiceProvider::DEFAULT.preset_url() {
+    Some(url) => url,
+    None => panic!("the default provider has a preset URL"),
+};
+/// [`APP_IDENTIFIER`] as a literal, for `concat!`.
+#[macro_export]
+macro_rules! app_identifier {
+    () => {
+        "org.dstack.private-ai-proxy"
+    };
+}
+/// `identifier` in src-tauri/tauri.conf.json. It names the per-user app data
+/// directory and credential namespace on every platform.
+pub const APP_IDENTIFIER: &str = app_identifier!();
+
+/// A project resource Settings, the Help menu and the tray link to. The
+/// renderer receives the URLs as generated constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum AboutLink {
+    Documentation,
+    Github,
+    Aci,
+}
+
+impl AboutLink {
+    pub const ALL: [Self; 3] = [Self::Documentation, Self::Github, Self::Aci];
+
+    pub const fn url(self) -> &'static str {
+        match self {
+            Self::Documentation => {
+                "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md"
+            }
+            Self::Github => "https://github.com/Dstack-TEE/private-ai-gateway",
+            Self::Aci => "https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tauri.conf.json is the source of the identity it shares with Rust.
+    #[test]
+    fn identity_matches_the_tauri_config() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../src-tauri/tauri.conf.json"))
+                .expect("tauri.conf.json is valid JSON");
+        assert_eq!(config["productName"], PRODUCT_NAME);
+        assert_eq!(config["app"]["windows"][0]["title"], PRODUCT_NAME);
+        assert_eq!(config["identifier"], APP_IDENTIFIER);
+        assert_eq!(
+            config["plugins"]["deep-link"]["desktop"]["schemes"],
+            serde_json::json!([APP_IDENTIFIER])
+        );
+        assert_eq!(config["bundle"]["publisher"], ORGANIZATION_NAME);
+    }
+}

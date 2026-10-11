@@ -7,7 +7,9 @@
 //! legacy E2EE request paths.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 mod common;
 
@@ -26,7 +28,7 @@ use private_ai_gateway::aci::e2ee::{
 };
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -37,8 +39,10 @@ use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
     UpstreamVerifier,
 };
-use private_ai_gateway::http::build_router;
+use private_ai_gateway::aggregator::session::EvidenceRef;
+use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
+use tokio::time::Instant;
 use tower::ServiceExt;
 use x25519_dalek::StaticSecret as X25519SecretKey;
 
@@ -220,6 +224,10 @@ impl UpstreamBackend for RecordingUpstream {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "x-typesafe-request-id".to_string(),
+            "upstream-id".to_string(),
+        );
         Ok(UpstreamResponse {
             status_code: 200,
             body: self.response_body.clone(),
@@ -275,7 +283,7 @@ impl UpstreamVerifier for AlwaysVerified {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
             evidence: Some(serde_json::json!({
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:b30c37cf9f05fd749ffcb958a95794dc48e4cafad6316877c9e84b1e590c31dd",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
             })),
             ..event_from_request(&request, VerificationResult::Verified)
@@ -294,6 +302,69 @@ impl UpstreamVerifier for AlwaysFailed {
             reason: Some("quote verification failed".to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
         }
+    }
+}
+
+type VerificationKey = (String, Option<String>, String);
+
+#[derive(Default)]
+struct RotatingVerifier {
+    verifications: AtomicUsize,
+    cache: Mutex<HashMap<VerificationKey, (Instant, UpstreamVerifiedEvent)>>,
+}
+
+impl RotatingVerifier {
+    fn key(request: &UpstreamVerificationRequest) -> VerificationKey {
+        (
+            request.upstream_name.clone(),
+            request.url_origin.clone(),
+            request.model_id.clone(),
+        )
+    }
+
+    fn cache_event(&self, request: &UpstreamVerificationRequest, event: UpstreamVerifiedEvent) {
+        self.cache.lock().unwrap().insert(
+            Self::key(request),
+            (Instant::now() + Duration::from_secs(300), event),
+        );
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for RotatingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        self.refresh(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cache = self.cache.lock().unwrap();
+        let (expires_at, event) = cache.get(&Self::key(request))?;
+        if Instant::now() >= *expires_at {
+            return None;
+        }
+        let mut event = event.clone();
+        event.required = request.required;
+        Some(event)
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let nonce = self.verifications.fetch_add(1, Ordering::Relaxed);
+        let event = UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            evidence: Some(
+                serde_json::to_value(EvidenceRef::from_bytes(
+                    "application/json",
+                    nonce.to_string().as_bytes(),
+                ))
+                .unwrap(),
+            ),
+            ..event_from_request(&request, VerificationResult::Verified)
+        };
+        self.cache_event(&request, event.clone());
+        event
     }
 }
 
@@ -356,6 +427,24 @@ fn harness_with(
         service,
         upstream_calls,
     }
+}
+
+fn harness_for_sessions(
+    verifier: Arc<dyn UpstreamVerifier>,
+    provider: &str,
+) -> (Harness, UpstreamVerificationRequest) {
+    let mut harness = harness_with(RecordingUpstream::default(), verifier, false);
+    let config = common::session_config(serde_json::json!([{
+        "name": "surface-upstream",
+        "provider": provider,
+        "base_url": "https://surface-upstream.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    harness.requester.app = build_router_with_admin(harness.service.clone(), config.clone(), None);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
+    (harness, request)
 }
 
 fn harness_with_streaming_upstream_error() -> Harness {
@@ -1022,7 +1111,7 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 async fn e2ee_v2_is_rejected_on_prompt_endpoints_without_a_v2_field_contract() {
     let h = harness_with_e2ee(RecordingUpstream::default());
 
-    for path in ["/v1/messages", "/v1/responses"] {
+    for path in ["/v1/messages", "/v1/responses", "/v1/systemone"] {
         let resp = h
             .requester
             .post(path, CHAT_REQUEST, &[("x-e2ee-version", "2")])
@@ -1616,12 +1705,13 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// /v1/completions and /v1/embeddings surfaces (plaintext)
+// /v1/completions, /v1/embeddings, and /v1/systemone surfaces (plaintext)
 // ---------------------------------------------------------------------------
 
 const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
 const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
     br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
+const SYSTEMONE_RESPONSE: &[u8] = br#"{"model":"aci-model","answers":{"kind":{"type":"choice","choice":"platform"}},"usage":{"input_tokens":3,"output_tokens":2},"provider_trace":"keep-in-direct-mode"}"#;
 
 #[tokio::test]
 async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
@@ -1721,6 +1811,41 @@ async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     assert_eq!(
         payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(EMBEDDINGS_PLAIN_RESPONSE)
+    );
+}
+
+#[tokio::test]
+async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(SYSTEMONE_RESPONSE));
+    let request = br#"{"model":"aci-model","state":{"message":"export failed"},"questions":{"kind":{"type":"choice","instructions":"Classify the issue","criteria":{"platform":"outage","billing":null}}},"stream":true}"#;
+
+    let resp = h.requester.post("/v1/systemone", request, &[]).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, SYSTEMONE_RESPONSE);
+    let request_id = header(&resp.headers, "x-typesafe-request-id");
+    assert!(request_id.starts_with("req_"));
+    assert_ne!(request_id, "upstream-id");
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "false");
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/systemone"));
+        assert_eq!(calls[0].body, request);
+    }
+
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/systemone");
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(request)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(SYSTEMONE_RESPONSE)
     );
 }
 
@@ -2366,15 +2491,26 @@ async fn aci_constraint_refuses_a_route_not_classed_as_attested() {
 // refuses (§5.3 "a direct service has no sessions").
 #[tokio::test]
 async fn direct_service_satisfies_aci_verified_by_construction() {
+    struct UnreadCache;
+    #[async_trait]
+    impl UpstreamVerifier for UnreadCache {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            event_from_request(&request, VerificationResult::Verified)
+        }
+        fn cached(&self, _: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+            panic!("direct services must not inspect the verifier cache");
+        }
+    }
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities.serving = "direct".to_string();
     let upstream = RecordingUpstream::default();
     let calls = upstream.calls();
     let service = Arc::new(
-        AciService::new(
+        AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(upstream),
+            Arc::new(UnreadCache),
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
             Arc::new(FixedClock(1_700_000_000)),
@@ -2388,6 +2524,17 @@ async fn direct_service_satisfies_aci_verified_by_construction() {
         service,
         upstream_calls: calls,
     };
+    assert!(h
+        .service
+        .list_current_sessions(&[UpstreamVerificationRequest {
+            upstream_name: "surface-upstream".to_string(),
+            model_id: "aci-model".to_string(),
+            url_origin: Some("https://surface-upstream.example".to_string()),
+            forwarded_body_hash: sha256_hex(b""),
+            required: true,
+        }])
+        .unwrap()
+        .is_empty());
 
     let body = br#"{"model":"aci-model","messages":[],"provider":{"aci_verified":true}}"#;
     let resp = h.requester.post("/v1/chat/completions", body, &[]).await;
@@ -2805,4 +2952,208 @@ async fn legacy_v1_e2ee_still_works_when_aci_e2ee_is_off() {
     );
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
     assert_eq!(header(&resp.headers, "x-e2ee-version"), "1");
+}
+
+async fn listed_sessions(harness: &Harness, query: &str) -> Vec<Value> {
+    let listed = harness
+        .requester
+        .get(&format!("/v1/aci/sessions{query}"), &[])
+        .await;
+    assert_eq!(listed.status, StatusCode::OK);
+    json_body(&listed)["sessions"].as_array().unwrap().clone()
+}
+
+async fn pin_session(harness: &Harness, id: &str) -> HttpResult {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "aci-model", "messages": [], "provider": {"aci_session_ids": [id]},
+    }))
+    .unwrap();
+    harness
+        .requester
+        .post("/v1/chat/completions", &body, &[])
+        .await
+}
+
+fn cited_session(harness: &Harness, response: &HttpResult) -> String {
+    let receipt = harness
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    receipt_event(&receipt, "upstream.verified")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[derive(Default)]
+struct InterleavingVerifier {
+    inner: RotatingVerifier,
+    service: Mutex<Weak<AciService>>,
+}
+
+#[async_trait]
+impl UpstreamVerifier for InterleavingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        let first = self.inner.refresh(request.clone()).await;
+        self.inner.refresh(request.clone()).await;
+        self.service
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .list_current_sessions(&[request])
+            .unwrap();
+        first
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.inner.cached(request)
+    }
+}
+
+#[tokio::test]
+async fn stale_inflight_verification_cannot_replace_the_cached_listing() {
+    let verifier = Arc::new(InterleavingVerifier::default());
+    let (h, _) = harness_for_sessions(verifier.clone(), "phala-direct");
+    *verifier.service.lock().unwrap() = Arc::downgrade(&h.service);
+    let first = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_id = cited_session(&h, &first);
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    let second_id = listed[0]["session_id"].as_str().unwrap();
+    assert_ne!(second_id, first_id);
+    let accepted = pin_session(&h, second_id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), second_id);
+    let refused = pin_session(&h, &first_id).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert!(json_body(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("re-list /v1/aci/sessions"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_listing_tracks_cache_warmth_and_keeps_historical_lookup() {
+    let verifier = Arc::new(RotatingVerifier::default());
+    let (h, request) = harness_for_sessions(verifier.clone(), "phala-direct");
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_eq!(
+        verifier.verifications.load(Ordering::Relaxed),
+        0,
+        "listing never verifies afresh"
+    );
+    verifier.verify(request).await;
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
+    tokio::time::advance(Duration::from_secs(300)).await;
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_eq!(verifier.verifications.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{id}"), &[])
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
+    let verifier = Arc::new(RotatingVerifier::default());
+    let (h, request) = harness_for_sessions(verifier.clone(), "chutes");
+    let event = |instances: &[&str]| UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        verifier_id: "chutes-fixture/v1".to_string(),
+        channel_bindings: instances
+            .iter()
+            .map(|instance| ChannelBinding::E2eePublicKeySha256 {
+                provider: "chutes".to_string(),
+                algorithm: "rsa-oaep-sha256".to_string(),
+                key_id: Some((*instance).to_string()),
+                public_key_sha256: sha256_hex(instance.as_bytes()),
+            })
+            .collect(),
+        ..event_from_request(&request, VerificationResult::Verified)
+    };
+    verifier.cache_event(&request, event(&["instance-a", "instance-b"]));
+    let before = listed_sessions(&h, "").await;
+    assert_eq!(before.len(), 2);
+    let removed = before
+        .iter()
+        .find(|session| session["channel_binding"][0]["key_id"] == "instance-a")
+        .unwrap();
+    let retained = before
+        .iter()
+        .find(|session| session["channel_binding"][0]["key_id"] == "instance-b")
+        .unwrap();
+    verifier.cache_event(&request, event(&["instance-b"]));
+    let after = listed_sessions(&h, "").await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["session_id"], retained["session_id"]);
+    assert_eq!(
+        h.requester
+            .get(
+                &format!(
+                    "/v1/aci/sessions/{}",
+                    removed["session_id"].as_str().unwrap()
+                ),
+                &[]
+            )
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
+    let event = UpstreamVerifiedEvent {
+        verifier_id: "surface-verifier/v1".to_string(),
+        evidence: Some(serde_json::json!({
+            "digest": sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        })),
+        ..Default::default()
+    };
+    let (h, _) = harness_for_sessions(
+        Arc::new(
+            private_ai_gateway::aci::verifier::StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+                result: VerificationResult::Verified,
+                channel_bindings: vec![common::test_channel_binding()],
+                ..event
+            }),
+        ),
+        "phala-direct",
+    );
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["evidence"]["digest"], sha256_hex(b"evidence"));
+    assert!(listed[0]["evidence"].get("data").is_none());
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let full = h
+        .requester
+        .get(&format!("/v1/aci/sessions/{id}"), &[])
+        .await;
+    assert_eq!(full.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&full)["evidence"]["data"],
+        "data:text/plain;base64,ZXZpZGVuY2U="
+    );
+    assert_eq!(
+        hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
+        id
+    );
 }

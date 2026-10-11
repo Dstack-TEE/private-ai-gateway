@@ -1,0 +1,374 @@
+//! Owner-only files and atomic replacement, shared by every process that
+//! writes app state and settings: credentials, local state, locks, tokens and
+//! agent configs.
+
+use std::{fs, io, path::Path};
+
+/// Owner-only (0700) directory on Unix; on Windows the per-user app data
+/// directory already carries the profile's ACL.
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
+/// Create an owner-only file that must not exist yet (never follows a
+/// symlink). It is owner-only before it holds anything: mode 0600 on Unix, the
+/// owner-only DACL on Windows.
+pub fn write_private(path: &Path, content: &str) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    crate::windows_acl::allow_dacl_change(&mut options);
+    use std::io::Write;
+    let mut file = options.open(path)?;
+    #[cfg(windows)]
+    crate::windows_acl::restrict_to_current_user(&file)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()
+}
+
+/// Open a private file read-only without following symlinks (`O_NOFOLLOW`
+/// on Unix). `Ok(None)` when the file does not exist.
+fn open_private(path: &Path) -> io::Result<Option<fs::File>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(symlink_refused());
+    }
+    match options.open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            // The open already refused; the metadata only names the reason.
+            if fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(symlink_refused());
+            }
+            Err(error)
+        }
+    }
+}
+
+pub fn symlink_refused() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "the path is a symlink; refusing to use it",
+    )
+}
+
+/// Read a private file, refusing symlinks; `Ok(None)` when absent. A pure
+/// read: permissions are never touched here.
+pub fn read_private_text(path: &Path) -> io::Result<Option<String>> {
+    use std::io::Read;
+    match open_private(path)? {
+        None => Ok(None),
+        Some(mut file) => {
+            let mut text = String::new();
+            file.read_to_string(&mut text)?;
+            Ok(Some(text))
+        }
+    }
+}
+
+/// Restore owner-only permissions on an existing private file, through a
+/// handle that does not follow links, so the file checked is the file
+/// changed: mode 0600 on Unix; on Windows a protected DACL for the current
+/// user (and LocalSystem and Administrators), so it is owner-only wherever it
+/// lives, not only under the profile's inherited ACL. Missing files are fine.
+pub fn tighten_private(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(file) = open_private(path)? {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = file.metadata()?.permissions();
+        if permissions.mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    #[cfg(windows)]
+    if open_private(path)?.is_some() {
+        let file = crate::windows_acl::open_for_dacl_change(path)?;
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(symlink_refused());
+        }
+        crate::windows_acl::restrict_to_current_user(&file)?;
+    }
+    Ok(())
+}
+
+/// Whether other users can read an existing private file: group or other
+/// permission bits on Unix, an allow entry for anyone but the current user,
+/// LocalSystem and Administrators on Windows. `Ok(None)` when it is absent.
+pub fn readable_by_others(path: &Path) -> io::Result<Option<bool>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o077 != 0)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(windows)]
+    {
+        let handle = match crate::windows_acl::open_for_inspection(path) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        crate::windows_acl::read(&handle)
+            .map(|acl| Some(acl.readable_by_others()))
+            .map_err(io::Error::other)
+    }
+}
+
+/// Persist Unix directory entries through an O_DIRECTORY handle. A symlinked
+/// directory is followed, as writing the entries into it was.
+#[cfg(unix)]
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_DIRECTORY);
+    options.open(dir)?.sync_all()
+}
+
+/// Windows has no directory handle to flush; token revocation clears the file
+/// before unlinking it instead.
+#[cfg(windows)]
+pub fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Replace `path` atomically: refuse symlinks, re-check that the file still
+/// holds `expected` right before the swap, and keep the target's permissions
+/// when it exists; see [`publish`]. Callers that need cross-process exclusion
+/// wrap this in `lock::with_apply_lock`.
+pub fn write_atomic(path: &Path, content: &str, expected: Option<Option<&str>>) -> io::Result<()> {
+    replace(path, content, expected, false)
+}
+
+/// [`write_atomic`] for a file only its owner may read (credentials, local
+/// secrets): the replacement is made owner-only before it moves into place,
+/// whatever the permissions of the file it replaces, so there is no moment
+/// when another user can read it (0600 on Unix, the owner-only DACL on
+/// Windows).
+pub fn write_private_atomic(
+    path: &Path,
+    content: &str,
+    expected: Option<Option<&str>>,
+) -> io::Result<()> {
+    replace(path, content, expected, true)
+}
+
+fn replace(
+    path: &Path,
+    content: &str,
+    expected: Option<Option<&str>>,
+    private: bool,
+) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
+    fs::create_dir_all(dir)?;
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to replace a symlink",
+            ))
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    if let Some(expected) = expected {
+        let current = match fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current.as_deref() != expected {
+            return Err(io::Error::other(ChangedOnDisk));
+        }
+    }
+    publish(path, Publish::Replace, |file| {
+        use std::io::Write;
+        if private {
+            #[cfg(windows)]
+            crate::windows_acl::restrict_to_current_user(file)?;
+        } else if let Some(metadata) = &existing {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(content.as_bytes())
+    })
+}
+
+/// [`write_atomic`] found other content than expected: someone else wrote the file.
+#[derive(Debug, thiserror::Error)]
+#[error("the file changed on disk since it was read")]
+pub struct ChangedOnDisk;
+
+impl ChangedOnDisk {
+    pub fn is(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
+}
+
+/// What [`publish`] does when the destination already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publish {
+    Replace,
+    /// Fail with `AlreadyExists` instead, atomically.
+    NoClobber,
+}
+
+/// Write a file so that readers only ever see the complete result: `write`
+/// fills a new owner-only temporary file (`.<name>.<random>.tmp`) beside
+/// `path`, which is synced, closed and then moved into place; the directory
+/// entry is synced on Unix. Nothing is left behind on failure.
+pub fn publish(
+    path: &Path,
+    mode: Publish,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    // Created owner-only (0600 on Unix, as tempfile does; on Windows with
+    // the access `write` needs to replace its DACL before anything is in it).
+    let mut temporary = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .make_in(dir, |path| {
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            #[cfg(windows)]
+            crate::windows_acl::allow_dacl_change(&mut options);
+            options.open(path)
+        })?;
+    write(temporary.as_file_mut())?;
+    temporary.as_file().sync_all()?;
+    // Publish through a closed handle: nothing can observe the destination
+    // while it is still open for writing.
+    persist(temporary.into_temp_path(), path, mode)?;
+    sync_dir(dir)
+}
+
+/// Moves a finished temporary file to `path`. On Windows another process
+/// briefly holding the destination (an antivirus scanner, a search indexer,
+/// an editor) fails the move with ERROR_ACCESS_DENIED or
+/// ERROR_SHARING_VIOLATION, so the move is retried for about two seconds, as
+/// graceful-fs (under npm's write-file-atomic) retries renames.
+fn persist(temporary: tempfile::TempPath, path: &Path, mode: Publish) -> io::Result<()> {
+    let mut temporary = Some(temporary);
+    // A failed move hands the temporary file back for the next attempt.
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut attempt = || {
+        let temporary_path = temporary
+            .take()
+            .ok_or_else(|| io::Error::other("the temporary file is gone"))?;
+        match mode {
+            Publish::Replace => temporary_path.persist(path),
+            Publish::NoClobber => temporary_path.persist_noclobber(path),
+        }
+        .map_err(|failure| {
+            temporary = Some(failure.path);
+            failure.error
+        })
+    };
+    #[cfg(windows)]
+    {
+        use backon::{BlockingRetryable, ExponentialBuilder};
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+
+        attempt
+            .retry(
+                ExponentialBuilder::default()
+                    .with_min_delay(std::time::Duration::from_millis(10))
+                    .with_max_delay(std::time::Duration::from_millis(100))
+                    .with_max_times(20),
+            )
+            .when(|error| {
+                [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION]
+                    .iter()
+                    .any(|code| error.raw_os_error() == Some(*code as i32))
+            })
+            .call()
+    }
+    #[cfg(not(windows))]
+    attempt()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    use super::*;
+
+    // Regression: the open(2) flags once came from hand-written constants
+    // that were only O_DIRECTORY/O_NOFOLLOW on x86_64 Linux.
+    #[test]
+    fn private_reads_refuse_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::write(&target, "secret").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+        let link = temp.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let error = read_private_text(&link).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(tighten_private(&link).is_err());
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(
+            read_private_text(&target).unwrap().as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn sync_dir_opens_only_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("dir");
+        create_private_dir(&dir).unwrap();
+        sync_dir(&dir).unwrap();
+
+        let file = temp.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert!(sync_dir(&file).is_err());
+    }
+}

@@ -49,7 +49,7 @@ pub(super) struct SealedSession {
     /// The per-instance key (Chutes instance id) for a multi-instance backend;
     /// `None` for a single-channel backend.
     instance_key: Option<String>,
-    session_id: String,
+    pub(super) session_id: String,
 }
 
 /// Pick which sealed session the receipt cites. For a backend that fronts
@@ -92,7 +92,7 @@ struct ChannelMaterial<'a> {
     identity: &'a Option<WorkloadIdentityRef>,
     channel_binding: &'a [ChannelBinding],
     claims: &'a SessionClaims,
-    evidence_digest: &'a Option<String>,
+    evidence_digest: Option<&'a str>,
 }
 
 impl ChannelMaterial<'_> {
@@ -668,7 +668,7 @@ impl AciService {
     ) -> Result<Vec<SealedSession>, ServiceError> {
         // §4.1: a direct service has no upstream hop and publishes no
         // attested sessions — this also covers the middleware commit paths
-        // and the background prewarm sink.
+        // and on-demand session listing.
         if self.serves_directly() {
             return Ok(Vec::new());
         }
@@ -699,26 +699,17 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // A per-instance (Chutes) binding excludes the shared, nonce-bound raw
-            // evidence so re-verifying the same instance is a no-op; a single
-            // channel keeps the event's evidence.
-            let evidence = if instance.is_some() {
-                EvidenceRef::default()
-            } else {
-                event
-                    .evidence
-                    .as_ref()
-                    .map(EvidenceRef::from_value)
-                    .unwrap_or_default()
-            };
+            // Chutes evidence changes every round, so an instance session
+            // leaves it out of the fingerprint and keeps re-verification on
+            // the same session.
             let session_id = self.seal_attested_session(
                 event,
                 identity.clone(),
                 vec![binding.clone()],
                 claims,
-                evidence,
                 now,
                 expires_at,
+                instance.is_none(),
             )?;
             sealed.push(SealedSession {
                 instance_key: instance.map(str::to_string),
@@ -813,7 +804,8 @@ impl AciService {
     /// persisting a fresh document only when no session with identical
     /// verified material has a live validity period. The store's channel
     /// fingerprint provides the dedup — the document bytes themselves change
-    /// with every validity period, so the id cannot.
+    /// with every validity period, so the id cannot. A new session stores the
+    /// event's evidence even when the fingerprint leaves it out.
     #[allow(clippy::too_many_arguments)]
     fn seal_attested_session(
         &self,
@@ -821,10 +813,15 @@ impl AciService {
         identity: Option<WorkloadIdentityRef>,
         channel_bindings: Vec<ChannelBinding>,
         claims: SessionClaims,
-        evidence: EvidenceRef,
         now: u64,
         expires_at: u64,
+        fingerprint_includes_evidence: bool,
     ) -> Result<String, ServiceError> {
+        let evidence = event.evidence.as_ref();
+        let evidence_digest = match evidence {
+            Some(evidence) if fingerprint_includes_evidence => evidence["digest"].as_str(),
+            _ => None,
+        };
         let fingerprint = ChannelMaterial {
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
@@ -832,42 +829,37 @@ impl AciService {
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest: &evidence.digest,
+            evidence_digest,
         }
         .fingerprint()
         .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
 
         // Each citation obligates retention for another receipt TTL.
         let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
-        if let Some(existing) =
-            self.session_store
-                .current_session(&fingerprint, retention_until, now)
-        {
-            return Ok(existing.session_id().to_string());
-        }
-
-        let session = AttestedSession::seal(SessionDocument {
-            api_version: SESSION_API_VERSION.to_string(),
-            upstream_name: event.upstream_name.clone(),
-            endpoint: event.url_origin.clone(),
-            verifier_id: event.verifier_id.clone(),
-            established_at: now,
-            expires_at,
-            identity,
-            channel_binding: channel_bindings,
-            claims,
-            evidence,
-        })
-        .map_err(|err| ServiceError::SessionStore(format!("seal attested session: {err}")))?;
-        let session_id = session.session_id().to_string();
+        // Runs only when the channel has no current session, so the evidence
+        // is copied only for a new session.
+        let mut seal = || {
+            AttestedSession::seal(SessionDocument {
+                api_version: SESSION_API_VERSION.to_string(),
+                upstream_name: event.upstream_name.clone(),
+                endpoint: event.url_origin.clone(),
+                verifier_id: event.verifier_id.clone(),
+                established_at: now,
+                expires_at,
+                identity: identity.clone(),
+                channel_binding: channel_bindings.clone(),
+                claims: claims.clone(),
+                evidence: evidence.map(EvidenceRef::from_value).unwrap_or_default(),
+            })
+            .map_err(std::io::Error::other)
+        };
         self.session_store
-            .put_session(&fingerprint, session, retention_until, now)
+            .current_or_seal(&fingerprint, retention_until, now, &mut seal)
             .map_err(|err| {
                 ServiceError::SessionStore(format!(
-                    "failed to persist attested session {session_id}: {err}"
+                    "failed to seal or persist attested session: {err}"
                 ))
-            })?;
-        Ok(session_id)
+            })
     }
 
     /// Lift the response-signing address out of provider claims into a verified

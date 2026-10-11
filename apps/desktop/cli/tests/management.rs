@@ -1,276 +1,557 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
-use serde_json::Value;
+mod support;
+
+use serde_json::{json, Value};
 use std::{
     fs,
-    net::TcpListener,
-    path::PathBuf,
-    process::{Child, Command, Output, Stdio},
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    process::{Output, Stdio},
     time::{Duration, Instant},
 };
-
-struct Backend {
-    directory: tempfile::TempDir,
-    child: Child,
-}
+use support::{assert_success, Backend};
 
 #[test]
-fn argument_errors_are_machine_readable_in_json_mode() {
+#[ignore = "subprocess fixture that tears down a test sandbox"]
+fn sandbox_teardown_watchdog() {
+    support::watchdog();
+}
+
+/// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
+/// streams; the legacy alias must stay byte-for-byte the canonical command.
+#[cfg(unix)]
+#[test]
+fn legacy_aci_alias_output_matches_the_canonical_command() {
+    use std::path::Path;
+    use std::process::Command;
+    let directory = tempfile::tempdir().unwrap();
+    let alias = directory.path().join("aci");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
+    let missing = directory.path().join("missing-report.json");
     for args in [
-        vec!["--json", "--non-interactive", "unknown-command"],
-        vec!["status", "--json", "--no-interactive", "--unknown-option"],
+        vec!["--version"],
+        vec!["audit", "--report", missing.to_str().unwrap(), "--json"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["error"]["code"], "invalid_arguments");
+        let run = |program: &Path| {
+            Command::new(program)
+                .args(&args)
+                .env("PRIVATE_AI_PROXY_HOME", directory.path())
+                .stdin(Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let canonical = run(Path::new(env!("CARGO_BIN_EXE_private-ai-proxy")));
+        let legacy = run(&alias);
+        assert_eq!(legacy.status.code(), canonical.status.code(), "{args:?}");
+        assert_eq!(legacy.stdout, canonical.stdout, "{args:?}");
+        assert_eq!(legacy.stderr, canonical.stderr, "{args:?}");
     }
 }
 
-#[test]
-fn command_discovery_is_detailed_and_machine_readable() {
-    let settings = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["settings", "set", "--help"])
-        .output()
-        .unwrap();
-    assert_success(&settings);
-    let settings = String::from_utf8(settings.stdout).unwrap();
-    for key in [
-        "autoCliRegistration",
-        "connectOnLaunch",
-        "allowNetworkAccess",
-        "clientHost",
-    ] {
-        assert!(settings.contains(key), "missing settings key {key}");
-    }
-
-    let usage = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["usage", "export", "--help"])
-        .output()
-        .unwrap();
-    assert_success(&usage);
-    let usage = String::from_utf8(usage.stdout).unwrap();
-    assert!(usage.contains("Unix timestamp in seconds"));
-    assert!(!usage.contains("--cursor"));
-    assert!(!usage.contains("--limit"));
-
-    let schema = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .arg("schema")
-        .output()
-        .unwrap();
-    assert_success(&schema);
-    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
-    assert_eq!(schema["name"], "private-ai-proxy");
-    for name in ["verify", "audit", "sessions", "send", "serve"] {
-        assert!(schema["commands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|command| command["name"] == name));
-        let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-            .args([name, "--help"])
-            .output()
-            .unwrap();
-        assert_success(&output);
-    }
-    let json_flag = schema["arguments"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["long"] == "json")
-        .unwrap();
-    assert_eq!(json_flag["takesValue"], false);
-    assert_eq!(json_flag["numArgs"]["max"], 0);
-    assert_eq!(json_flag["possibleValues"], serde_json::json!([]));
-    assert!(schema["commands"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|command| command["name"] == "profiles"));
-
-    let completion = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args(["completions", "bash"])
-        .output()
-        .unwrap();
-    assert_success(&completion);
-    assert!(String::from_utf8(completion.stdout)
-        .unwrap()
-        .contains("private-ai-proxy"));
-
-    let conflict = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args([
-            "agents",
-            "connect",
-            "codex",
-            "--dry-run",
-            "--revision",
-            "preview-revision",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(conflict.status.code(), Some(2));
-}
+const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
-fn adding_a_profile_requires_consent_before_startup_or_credential_input() {
-    let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_private-ai-proxy"))
-        .args([
-            "--json",
-            "profiles",
-            "add",
-            "--id",
-            "test",
-            "--name",
-            "Test",
-            "--url",
-            "https://example.com",
-            "--key-stdin",
-        ])
-        .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, home.path())
+fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
+    let backend = Backend::start();
+    let status = &backend.run(&["status"])["gateway"]["webUi"];
+    assert_eq!(status["enabled"], false);
+    // Revealing the password needs consent, like `token show`.
+    let refused = backend
+        .command(&["web-ui", "password", "show", "--json"])
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("--yes"));
-    assert!(fs::read_dir(home.path()).unwrap().next().is_none());
-}
+    assert!(!refused.status.success());
+    let password = backend.web_ui_password();
+    assert_eq!(password.len(), 32, "{password}");
+    // Passwords never travel in arguments.
+    let refused = backend
+        .command(&[
+            "settings",
+            "set",
+            "web-ui.password",
+            WEB_PASSWORD,
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--value-stdin"));
+    let short = backend.set_web_ui_password("too short");
+    assert!(!short.status.success());
+    assert!(String::from_utf8_lossy(&short.stderr).contains("at least 12 characters"));
 
-impl Backend {
-    fn start() -> Self {
-        let directory = tempfile::tempdir().unwrap();
-        let binary = |name: &str| {
-            directory.path().join(if cfg!(windows) {
-                format!("{name}.exe")
-            } else {
-                name.into()
-            })
-        };
-        fs::copy(
-            env!("CARGO_BIN_EXE_private-ai-proxy"),
-            binary("private-ai-proxy"),
-        )
-        .unwrap();
-        fs::copy(
-            env!("CARGO_BIN_EXE_private-ai-proxy-service"),
-            binary("private-ai-proxy-service"),
-        )
-        .unwrap();
-        // No test requests agent credentials. Keep this unused helper tiny:
-        // startup durably stages it, so copying a debug CLI would fsync hundreds
-        // of megabytes per backend before its management endpoint becomes ready.
-        let helper = binary("private-ai-proxy-helper");
-        fs::write(&helper, b"#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let home = directory.path().join("home");
-        let data = home.join(".private-ai-proxy");
-        desktop_gateway::tokens::create_private_dir(&data).unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        desktop_gateway::tokens::write_private(
-            &data.join("local-api.json"),
-            &format!(r#"{{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":{port}}}"#),
-        )
-        .unwrap();
-        let child = Command::new(binary("private-ai-proxy-service"))
-            .env(desktop_gateway::agents::HOME_OVERRIDE_ENV, &home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
-            .spawn()
-            .unwrap();
-        let mut backend = Self { directory, child };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let output = backend.command(&["status", "--json"]).output().unwrap();
-            if output.status.success() {
-                let state: Value = serde_json::from_slice(&output.stdout).unwrap();
-                if !state["backend"].is_null() {
-                    break;
-                }
-            }
-            assert!(
-                backend.child.try_wait().unwrap().is_none(),
-                "Backend exited during startup: {}",
-                backend.startup_diagnostics(&output)
-            );
-            assert!(
-                Instant::now() < deadline,
-                "Backend readiness timed out: {}",
-                backend.startup_diagnostics(&output)
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        backend
-    }
-    fn startup_diagnostics(&self, output: &Output) -> String {
-        format!(
-            "status: {}; stdout: {}; stderr: {}; backend: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-            fs::read_to_string(self.directory.path().join("backend.log")).unwrap()
-        )
-    }
-    fn cli(&self) -> PathBuf {
-        self.directory.path().join(if cfg!(windows) {
-            "private-ai-proxy.exe"
-        } else {
-            "private-ai-proxy"
-        })
-    }
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(self.cli());
-        command.args(args).env(
-            desktop_gateway::agents::HOME_OVERRIDE_ENV,
-            self.directory.path().join("home"),
-        );
-        command
-    }
-    fn run(&self, args: &[&str]) -> Value {
-        let output = self.command(args).arg("--json").output().unwrap();
-        assert_success(&output);
-        serde_json::from_slice(&output.stdout).unwrap()
-    }
-}
-impl Drop for Backend {
-    fn drop(&mut self) {
-        let _ = self.command(&["service", "stop", "--yes"]).output();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-fn assert_success(output: &Output) {
+    let data = backend
+        .directory
+        .path()
+        .join("home/.private-ai-proxy/Config");
+    let saved = fs::read_to_string(data.join("credentials.toml")).unwrap();
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        saved.contains(&format!("[web-ui]\npassword = \"{password}\"\n")),
+        "{saved}"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(data.join("credentials.toml"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+    }
+    let config = fs::read_to_string(data.join("config.toml")).unwrap();
+    assert!(config.starts_with("# Kept by every write.\n"), "{config}");
+    let diagnostics = backend.directory.path().join("web-diagnostics.json");
+    backend.run(&["diagnostics", "--output", diagnostics.to_str().unwrap()]);
+    for (name, text) in [
+        (
+            "settings show",
+            backend.run(&["settings", "show"]).to_string(),
+        ),
+        ("status", backend.run(&["status"]).to_string()),
+        ("diagnostics", fs::read_to_string(&diagnostics).unwrap()),
+        ("config.toml", config),
+        (
+            "backend log",
+            fs::read_to_string(backend.directory.path().join("backend.log")).unwrap(),
+        ),
+    ] {
+        assert!(!text.contains(&password), "{name} contains the password");
+    }
+
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port().to_string();
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
+    // --yes enables the web UI through the same setting; the bind conflict stays in state.
+    let failed = backend.web(&["app", "open", "--web", "--yes", "--json"]);
+    assert!(!failed.status.success());
+    let status = &backend.run(&["settings", "show"])["webUi"];
+    assert_eq!(status["enabled"], true);
+    let error = status["error"].as_str().unwrap();
+    if error.contains("assets are not built") {
+        // Development builds without `npm run build:web` report this instead of serving.
+        return;
+    }
+    assert_eq!(error, format!("Port {port} is already in use on 127.0.0.1"));
+    drop(occupied);
+
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    let url = format!("http://127.0.0.1:{port}");
+    assert_eq!(state["webUi"]["url"], url);
+    let opened = backend.web(&["app", "open", "--web", "--json"]);
+    assert_success(&opened);
+    let opened: Value = serde_json::from_slice(&opened.stdout).unwrap();
+    // The address carries no secret.
+    assert_eq!(opened["url"], url);
+    let authority = format!("127.0.0.1:{port}");
+    let wrong = json!({ "password": "wrong horse battery staple" }).to_string();
+    assert_eq!(
+        http(&authority, "POST", "/api/session", None, &wrong).0,
+        401
+    );
+    let token = web_session(&authority, &password);
+    let other = web_session(&authority, &password);
+    assert_eq!(
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+    assert_eq!(http(&authority, "GET", "/api/bootstrap", None, "").0, 401);
+    // A signed-in browser can neither read nor change the password.
+    for method in [
+        "get_web_ui_password",
+        "rotate_web_ui_password",
+        "set_web_ui_password",
+    ] {
+        let body = json!({ "password": "another long passphrase" }).to_string();
+        let path = format!("/api/rpc/{method}");
+        assert_eq!(http(&authority, "POST", &path, Some(&token), &body).0, 404);
+    }
+
+    // Rotating ends every session; only the new password signs in.
+    let refused = backend
+        .command(&["web-ui", "password", "rotate", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    backend.run(&["web-ui", "password", "rotate", "--yes"]);
+    let rotated = backend.web_ui_password();
+    assert_ne!(rotated, password);
+    for token in [&token, &other] {
+        assert_eq!(
+            http(&authority, "GET", "/api/bootstrap", Some(token), "").0,
+            401
+        );
+    }
+    let old = json!({ "password": password }).to_string();
+    assert_eq!(http(&authority, "POST", "/api/session", None, &old).0, 401);
+    let token = web_session(&authority, &rotated);
+
+    // A chosen password replaces it the same way.
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    assert_eq!(backend.web_ui_password(), WEB_PASSWORD);
+    assert_eq!(
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
+    );
+    web_session(&authority, WEB_PASSWORD);
+
+    backend.run(&["settings", "set", "web-ui.enabled", "false", "--yes"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(&authority).is_ok() {
+        assert!(Instant::now() < deadline, "the web UI listener stayed open");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
+fn an_unreadable_password_reports_its_cause() {
+    // Not TOML, so no password can be read or generated until the file is fixed.
+    let backend = Backend::start_with_credentials("[web-ui\n");
+    let failed = backend
+        .command(&["web-ui", "password", "show", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(error.contains("credentials.toml:"), "{error}");
+    assert!(!error.contains("earlier version"), "{error}");
+}
+
+/// `correct horse battery staple` as a version that kept only an Argon2id hash saved it.
+const LEGACY_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$djbiNHLjbn9XvtGL3ibJIw$m2FuaZoY7r75d2/IFuBacNsBsp03lFrOk8x5zAWO8mU";
+
+#[test]
+fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
+    let backend =
+        Backend::start_with_credentials(&format!("[web-ui]\npassword-hash = \"{LEGACY_HASH}\"\n"));
+    // Only the hash is known, so there is nothing to show.
+    let hidden = backend
+        .command(&["web-ui", "password", "show", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!hidden.status.success());
+    assert!(String::from_utf8_lossy(&hidden.stderr).contains("pap web-ui password rotate"));
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port().to_string()
+    };
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let authority = format!("127.0.0.1:{port}");
+    let token = web_session(&authority, WEB_PASSWORD);
+
+    backend.run(&["web-ui", "password", "rotate", "--yes"]);
+    let password = backend.web_ui_password();
+    let saved = fs::read_to_string(
+        backend
+            .directory
+            .path()
+            .join("home/.private-ai-proxy/Config/credentials.toml"),
+    )
+    .unwrap();
+    assert!(!saved.contains("password-hash"), "{saved}");
+    assert_eq!(
+        http(&authority, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
+    );
+    let old = json!({ "password": WEB_PASSWORD }).to_string();
+    assert_eq!(http(&authority, "POST", "/api/session", None, &old).0, 401);
+    web_session(&authority, &password);
+}
+#[test]
+fn service_log_keeps_diagnostics_but_never_secrets() {
+    const API_KEY: &str = "sk-log-test-0123456789abcdef";
+    let backend = Backend::start();
+    let mut add = backend
+        .command(&[
+            "profiles",
+            "add",
+            "--id",
+            "local",
+            "--name",
+            "Local",
+            "--url",
+            "https://127.0.0.1:9",
+            "--key-stdin",
+            "--yes",
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    write!(add.stdin.take().unwrap(), "{API_KEY}").unwrap();
+    // Adding verifies the profile with the key; the unreachable service fails
+    // that, and the failure is logged.
+    assert!(!add.wait_with_output().unwrap().status.success());
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    backend.run(&["service", "stop", "--yes"]);
+
+    let logs = backend.directory.path().join("home/.private-ai-proxy/logs");
+    let mut log = String::new();
+    for entry in fs::read_dir(&logs).unwrap() {
+        log.push_str(&fs::read_to_string(entry.unwrap().path()).unwrap());
+    }
+    assert!(log.contains("Private AI Proxy backend"), "{log}");
+    assert!(log.contains("Protection error"), "{log}");
+    for secret in [API_KEY, WEB_PASSWORD, "$argon2"] {
+        assert!(!log.contains(secret), "the service log contains {secret}");
+    }
+}
+
+#[test]
+fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
+    let backend = Backend::start();
+    let data = backend.directory.path().join("home/.private-ai-proxy");
+    let gate = desktop_core::lock::startup(&data).unwrap().unwrap();
+    let started = Instant::now();
+    let blocked = backend
+        .command(&["app", "open", "--web", "--yes", "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    // Backend startup would wait out a brief gate; app open reports it at once.
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr)
+        .contains("Backend startup or an update is already in progress"));
+    drop(gate);
+    assert_eq!(
+        backend.run(&["status"])["gateway"]["webUi"]["enabled"],
+        false
+    );
+}
+
+/// Every 127.0.0.0/8 address is loopback on Linux, so moving the listener needs no confirmation.
+#[cfg(target_os = "linux")]
+#[test]
+fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
+    let backend = Backend::start();
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port().to_string()
+    };
+    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
+    let set = |key: &str, value: &str| {
+        backend
+            .command(&["settings", "set", key, value, "--yes", "--json"])
+            .output()
+            .unwrap()
+    };
+    let refused = set("web-ui.listen-address", "0.0.0.0");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("explicit confirmation"));
+    assert_success(&set("web-ui.allow-network-access", "true"));
+    let refused = set("web-ui.listen-address", "0.0.0.0");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("Client host is required"));
+    assert_success(&set("web-ui.allow-network-access", "false"));
+
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let first = format!("127.0.0.1:{port}");
+    let token = web_session(&first, WEB_PASSWORD);
+    assert_eq!(
+        http(&first, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+
+    let state = backend.run(&[
+        "settings",
+        "set",
+        "web-ui.listen-address",
+        "127.0.0.2",
+        "--yes",
+    ]);
+    let second = format!("127.0.0.2:{port}");
+    assert_eq!(state["webUi"]["url"], format!("http://{second}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(&first).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the old web UI listener stayed open"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Moving the listener revokes every session; the password signs in on the new address.
+    assert_eq!(
+        http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
+        401
+    );
+    let token = web_session(&second, WEB_PASSWORD);
+    assert_eq!(
+        http(&second, "GET", "/api/bootstrap", Some(&token), "").0,
+        200
+    );
+}
+
+/// Saving the web UI settings restarts its listener, which must not wait for
+/// the browser request that asked for it.
+#[test]
+fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
+    let backend = Backend::start();
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port()
+    };
+    backend.run(&["settings", "set", "web-ui.port", &port.to_string(), "--yes"]);
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+    if state["webUi"]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("assets are not built"))
+    {
+        return;
+    }
+    let authority = format!("127.0.0.1:{port}");
+    let token = web_session(&authority, WEB_PASSWORD);
+    let config = json!({
+        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": port }
+    });
+    let started = Instant::now();
+    let (status, body) = http(
+        &authority,
+        "POST",
+        "/api/rpc/save_web_ui",
+        Some(&token),
+        &config.to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "saving took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        body["result"]["webUi"]["url"],
+        format!("http://{authority}")
+    );
+}
+
+/// Signs in to the web UI at `authority` and returns its session cookie.
+fn web_session(authority: &str, password: &str) -> String {
+    let body = json!({ "password": password }).to_string();
+    let (status, headers, _) = exchange(authority, "POST", "/api/session", None, &body);
+    assert_eq!(status, 204);
+    let cookie = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(": ")?;
+            name.eq_ignore_ascii_case("set-cookie").then_some(value)
+        })
+        .expect("sign-in sets the session cookie");
+    assert!(cookie.contains("; HttpOnly; SameSite=Strict; Path=/"));
+    cookie.split_once(';').unwrap().0.to_string()
+}
+
+impl Backend {
+    /// Runs as a remote shell so no browser is launched.
+    fn web(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .env("SSH_CONNECTION", "test")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    /// Reads the web UI password the way scripts do.
+    fn web_ui_password(&self) -> String {
+        self.run(&["web-ui", "password", "show", "--yes"])["password"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Sets the web UI password the way scripts do, through stdin.
+    fn set_web_ui_password(&self, password: &str) -> Output {
+        let mut child = self
+            .command(&[
+                "settings",
+                "set",
+                "web-ui.password",
+                "--value-stdin",
+                "--yes",
+                "--json",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(child.stdin.take().unwrap(), "{password}").unwrap();
+        child.wait_with_output().unwrap()
+    }
+}
+/// Sends a same-origin request to `authority` (`IP:PORT`).
+fn http(
+    authority: &str,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, Value) {
+    let (status, _, body) = exchange(authority, method, path, cookie, body);
+    (status, body)
+}
+
+/// Like [`http`], also returning the response headers.
+fn exchange(
+    authority: &str,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    body: &str,
+) -> (u16, String, Value) {
+    let mut stream = TcpStream::connect(authority).unwrap();
+    // A backend that never answers fails the test instead of hanging it.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let cookie = cookie
+        .map(|cookie| format!("Cookie: {cookie}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\n{cookie}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let status = response[9..12].parse().unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    (
+        status,
+        headers.to_string(),
+        serde_json::from_str(body).unwrap_or(Value::Null),
+    )
+}
+#[test]
 fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
+    // Declared first so it is released only after the backend has stopped.
+    let _default_port = default_port_lock();
     let backend = Backend::start();
     let backup = backend.directory.path().join("profiles-reset.json");
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
     backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
-    backend.run(&["settings", "set", "connectOnLaunch", "true", "--yes"]);
+    backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
+    assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
     backend.run(&["agents", "connect", "codex", "--yes"]);
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);
@@ -281,7 +562,8 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
         .unwrap();
     assert!(!refused.status.success());
     assert_eq!(backend.run(&["settings", "show"]), before);
-    let occupied = TcpListener::bind("127.0.0.1:4180").unwrap();
+    let occupied = TcpListener::bind("127.0.0.1:4180")
+        .expect("127.0.0.1:4180 is in use outside the tests; stop the local Private AI Proxy");
     let failed = backend
         .command(&["settings", "reset", "--yes", "--json"])
         .output()
@@ -305,13 +587,26 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
         .iter()
         .all(|agent| agent["recorded"] == false));
     let settings = backend.run(&["settings", "show"]);
-    assert_eq!(settings["preferences"]["appearance"], "system");
-    assert_eq!(settings["preferences"]["connectOnLaunch"], false);
-    assert_eq!(settings["preferences"]["notifications"]["enabled"], true);
+    assert_eq!(settings["settings"]["appearance"], "system");
+    assert_eq!(settings["settings"]["connect-on-launch"], false);
+    assert_eq!(settings["settings"]["notifications"]["enabled"], true);
+    // A fresh password replaces the chosen one.
+    assert_ne!(backend.web_ui_password(), WEB_PASSWORD);
+}
+
+/// Reset moves the Local API to its fixed default port, which every test
+/// process on this host shares; hold this while a test backend may bind it.
+fn default_port_lock() -> fs::File {
+    let lock =
+        fs::File::create(std::env::temp_dir().join("private-ai-proxy-test-4180.lock")).unwrap();
+    lock.lock().unwrap();
+    lock
 }
 
 #[test]
 fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
+    // Outputs and errors are pinned by `tests/golden/management.txt`; this
+    // checks the state behind them.
     let backend = Backend::start();
     #[cfg(unix)]
     assert!(backend
@@ -320,64 +615,21 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
         .join("home/.private-ai-proxy/helpers/private-ai-proxy-helper")
         .is_file());
     let first = backend.run(&["status"]);
-    let rejected = backend
-        .command(&[
-            "--json",
-            "--yes",
-            "agents",
-            "disconnect",
-            "codex",
-            "--revision",
-            "stale-revision",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(rejected.status.code(), Some(1));
-    let rejected: Value = serde_json::from_slice(&rejected.stderr).unwrap();
-    assert!(rejected["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("revision_conflict"));
-    assert_eq!(first["gateway"]["status"], "stopped");
+    // Every state output carries the protection it presents, as the API sends it.
+    assert_eq!(first["gateway"]["protection"]["phase"], "profileRequired");
+    assert_eq!(
+        backend.run(&["stop"])["protection"],
+        first["gateway"]["protection"]
+    );
     let second = backend.run(&["service", "start"]);
     assert_eq!(first["backend"]["instanceId"], second["instanceId"]);
-    backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
-    assert_eq!(
-        backend.run(&["settings", "show"])["preferences"]["appearance"],
-        "dark"
-    );
-    backend.run(&[
-        "settings",
-        "set",
-        "notifications",
-        r#"{"enabled":false}"#,
-        "--yes",
-    ]);
-    let settings = backend.run(&["settings", "show"]);
-    assert_eq!(settings["preferences"]["notifications"]["enabled"], false);
-    assert_eq!(settings["preferences"]["appearance"], "dark");
-    backend.run(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
-    assert_eq!(
-        backend.run(&["settings", "show"])["preferences"]["autoCliRegistration"],
-        false
-    );
     backend.run(&["token", "rotate", "--yes"]);
     let state = backend.run(&["status"]);
     assert_eq!(state["gateway"]["clientKeyRevision"], 1);
     assert_eq!(state["gateway"]["clientKeyAvailable"], true);
-    assert_eq!(backend.run(&["profiles", "list"]), serde_json::json!([]));
     let backup = backend.directory.path().join("profiles.json");
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
-    assert_eq!(
-        backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"])["imported"],
-        1
-    );
-    let profiles = backend.run(&["profiles", "list"]);
-    let profile_id = profiles[0]["id"].as_str().unwrap();
-    assert_eq!(
-        backend.run(&["profiles", "show", profile_id])["name"],
-        "Work"
-    );
+    backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
     let exported = backend.directory.path().join("exported.json");
     backend.run(&["profiles", "export", "--output", exported.to_str().unwrap()]);
     let text = fs::read_to_string(exported).unwrap();
@@ -388,20 +640,126 @@ fn two_cli_clients_share_state_and_disconnect_does_not_stop_service() {
     let report: Value = serde_json::from_str(&fs::read_to_string(diagnostics).unwrap()).unwrap();
     assert_eq!(report["profiles"]["count"], 1);
     assert_eq!(report["gateway"]["status"], "stopped");
-    let rejected = backend
-        .command(&["usage", "clear", "--json"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--yes"));
-    assert_eq!(
-        backend.run(&["usage", "list"])["items"],
-        serde_json::json!([])
-    );
     assert_eq!(
         backend.run(&["status"])["backend"]["instanceId"],
         first["backend"]["instanceId"]
+    );
+}
+
+#[test]
+fn settings_files_are_edited_in_place_and_hand_edits_apply_live() {
+    let backend = Backend::start();
+    let data = backend
+        .directory
+        .path()
+        .join("home/.private-ai-proxy/Config");
+    let config = data.join("config.toml");
+    let show = backend.run(&["settings", "show"]);
+    assert_eq!(show["files"]["config"], config.to_str().unwrap());
+    assert!(show["files"]["error"].is_null());
+
+    backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(
+        text.starts_with("# Kept by every write.\n\nappearance = \"dark\"\n"),
+        "{text}"
+    );
+    assert!(text.contains("appearance = \"dark\""), "{text}");
+
+    let wait = |check: &dyn Fn(&Value) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let show = backend.run(&["settings", "show"]);
+            if check(&show) {
+                return show;
+            }
+            assert!(Instant::now() < deadline, "not applied: {show}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // A hand edit is saved the way editors and this store save: written
+    // beside the file and renamed over it, so the watcher never reads a
+    // truncated file. (`fs::write` truncates first; a runner stalled past the
+    // debounce window between truncate and write would apply an empty file.)
+    let save = |contents: &str| {
+        let staged = data.join("config.toml.edit");
+        fs::write(&staged, contents).unwrap();
+        fs::rename(&staged, &config).unwrap();
+    };
+    let edited = |line: &str| {
+        text.replacen(
+            "appearance = \"dark\"\n",
+            &format!("appearance = \"dark\"\n{line}\n"),
+            1,
+        )
+    };
+    save(&edited("connect-on-launch = true"));
+    wait(&|show| show["settings"]["connect-on-launch"] == true);
+
+    // An unknown key warns but never rejects the file.
+    save(&edited("connect-on-launch = true\nfuture-option = 1"));
+    let show = wait(&|show| {
+        show["files"]["warnings"]
+            .as_array()
+            .is_some_and(|warnings| !warnings.is_empty())
+    });
+    assert!(show["files"]["error"].is_null(), "{show}");
+    assert_eq!(show["settings"]["connect-on-launch"], true);
+    assert!(show["files"]["warnings"][0]
+        .as_str()
+        .unwrap()
+        .contains("future-option: unknown key, ignored"));
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(
+        doctor["warnings"]["settingsFiles"],
+        show["files"]["warnings"]
+    );
+    assert!(doctor["errors"]["settings"].is_null(), "{doctor}");
+
+    // A broken edit keeps the last good settings and names the position.
+    save(&edited("connect-on-launch = \"yes\""));
+    let show = wait(&|show| show["files"]["error"].is_string());
+    let error = show["files"]["error"].as_str().unwrap();
+    assert!(error.starts_with("config.toml:"), "{error}");
+    assert_eq!(show["settings"]["connect-on-launch"], true);
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(doctor["errors"]["settings"], error);
+    let refused = backend
+        .command(&["settings", "set", "appearance", "light", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("config.toml:"));
+
+    save(&text);
+    let show = wait(&|show| show["files"]["error"].is_null());
+    assert_eq!(show["settings"]["connect-on-launch"], false);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
+        let credentials = data.join("credentials.toml");
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644)).unwrap();
+        let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+        let doctor: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        assert!(doctor["warnings"]["credentials"]
+            .as_str()
+            .unwrap()
+            .contains("chmod 600"));
+    }
+
+    let schema = backend.command(&["settings", "schema"]).output().unwrap();
+    assert_success(&schema);
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert!(schema["properties"]["local-api"].is_object());
+    assert_eq!(
+        fs::read_to_string(data.join("config.schema.json"))
+            .unwrap()
+            .trim_end(),
+        serde_json::to_string_pretty(&schema).unwrap()
     );
 }
 
@@ -412,6 +770,14 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
     let stopped = backend.run(&["status"]);
     assert!(stopped["backend"].is_null());
     assert_eq!(stopped["status"], "not_running");
+    // It restores without starting one.
+    let agents = backend.run(&["stop", "--offline"]);
+    assert!(agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|agent| agent["recorded"] == false));
+    assert_eq!(backend.run(&["status"]), stopped);
     // A fresh CLI starts a backend without needing or launching a desktop UI.
     let starter = backend
         .command(&["service", "start", "--json"])
@@ -430,8 +796,8 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
 
 #[cfg(unix)]
 #[test]
-fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
-    use std::io::{BufReader, Write};
+fn malformed_requests_and_event_streams_do_not_stop_backend() {
+    use std::io::Write;
     let backend = Backend::start();
     let home = backend.directory.path().join("diagnostic-home");
     let command_dir = home.join(".local/bin");
@@ -451,48 +817,122 @@ fn malformed_client_and_watch_disconnect_do_not_stop_backend() {
         .as_str()
         .unwrap()
         .to_owned();
-    let mut stream = std::os::unix::net::UnixStream::connect(&endpoint).unwrap();
-    stream
-        .write_all(b"{\"version\":1,\"id\":1,\"command\":{\"method\":\"notACommand\"}}\n")
-        .unwrap();
-    drop(stream);
-    {
-        use desktop_runtime::protocol::{
-            self, Command as RpcCommand, Hello, Outcome, Request, Response,
-        };
-        let mut subscribers = Vec::new();
-        for index in 0..5 {
-            let stream = std::os::unix::net::UnixStream::connect(&endpoint).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut reader = BufReader::new(stream);
-            let _: Hello = protocol::read(&mut reader).unwrap();
-            protocol::write(
-                reader.get_mut(),
-                &Request {
-                    version: protocol::VERSION,
-                    id: index,
-                    command: RpcCommand::Watch,
-                },
-            )
-            .unwrap();
-            let response: Response = protocol::read(&mut reader).unwrap();
-            if index < 4 {
-                let Outcome::Result(snapshot) = response.outcome else {
-                    panic!("Subscription failed");
-                };
-                assert!(snapshot["proxyUrl"]
-                    .as_str()
-                    .is_some_and(|url| url.starts_with("http://127.0.0.1:")));
-                subscribers.push(reader);
-            } else {
-                assert!(matches!(response.outcome, Outcome::Error(_)));
-            }
-        }
-        assert!(backend.run(&["status"])["backend"]["processId"].is_number());
+    use std::{io::BufRead, os::unix::net::UnixStream};
+    // A pre-0.2 frame and a truncated request are not HTTP; each closes only its connection.
+    for garbage in [
+        &b"{\"version\":3,\"id\":1,\"command\":{\"method\":\"notACommand\"}}\n"[..],
+        b"POST /api/rpc/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 99\r\n\r\n{",
+    ] {
+        let mut stream = UnixStream::connect(&endpoint).unwrap();
+        stream.write_all(garbage).unwrap();
+        drop(stream);
     }
+    // Event streams start with the state; a subscriber may leave at any time.
+    let mut subscribers = Vec::new();
+    for _ in 0..8 {
+        let mut stream = UnixStream::connect(&endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let snapshot = (0..64)
+            .map_while(|_| {
+                let mut line = String::new();
+                reader.read_line(&mut line).ok().filter(|read| *read > 0)?;
+                Some(line)
+            })
+            .find_map(|line| {
+                let event: Value = serde_json::from_str(line.strip_prefix("data: ")?).ok()?;
+                (event["event"] == "pap://state").then(|| event["payload"].clone())
+            })
+            .expect("the event stream starts with the state");
+        assert!(snapshot["proxyUrl"]
+            .as_str()
+            .is_some_and(|url| url.starts_with("http://127.0.0.1:")));
+        subscribers.push(reader);
+    }
+    drop(subscribers.pop());
+    assert!(backend.run(&["status"])["backend"]["processId"].is_number());
+    drop(subscribers);
     assert!(backend.run(&["status"])["backend"]["processId"]
         .as_u64()
         .is_some());
+}
+
+/// A 0.1.4 to 0.2 beta backend speaks only NDJSON on the old endpoint; this
+/// client still stops it (`client::legacy`, removed in 0.3).
+#[cfg(unix)]
+#[test]
+fn a_legacy_backend_is_stopped_over_its_own_protocol() {
+    use std::process::Command;
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+    };
+    use support::{executable, install, Sandbox};
+    let sandbox = Sandbox::new();
+    let cli = sandbox.path().join(executable("private-ai-proxy"));
+    install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    let home = sandbox.path().join("home");
+    let runtime = home.join(".private-ai-proxy/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener = UnixListener::bind(runtime.join("backend.sock")).unwrap();
+    // Stands in for the old backend process whose exit the client awaits.
+    let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = process.id();
+    let server = std::thread::spawn(move || {
+        let request = loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = json!({
+                "protocolVersion": 3,
+                "product": desktop_core::brand::APP_IDENTIFIER,
+                "version": "0.1.7",
+                "instanceId": "legacy-1",
+                "processId": pid,
+                "executable": "/opt/old/private-ai-proxy-service",
+            });
+            writeln!(stream, "{hello}").unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = String::new();
+            let _ = BufReader::new(&stream).read_line(&mut request);
+            if !request.is_empty() {
+                writeln!(stream, r#"{{"id":1,"outcome":{{"result":null}}}}"#).unwrap();
+                break request;
+            }
+        };
+        process.kill().unwrap();
+        process.wait().unwrap();
+        request
+    });
+    let command = |args: &[&str]| {
+        Command::new(&cli)
+            .args(args)
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let status = command(&["status", "--json"]);
+    assert!(String::from_utf8_lossy(&status.stderr).contains("service start to replace it"));
+    assert_success(&command(&["service", "stop", "--yes", "--json"]));
+    let request: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+    assert_eq!(
+        request,
+        json!({
+            "version": 3,
+            "id": 1,
+            "command": {
+                "method": "shutdown",
+                "params": { "instance_id": "legacy-1", "mode": "quit" },
+            },
+        })
+    );
 }

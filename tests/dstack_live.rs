@@ -234,6 +234,12 @@ async fn dstack_live_provider_keys_are_stable_for_same_paths() {
     assert_eq!(a.receipt_keys(), b.receipt_keys());
     assert_eq!(a.e2ee_keys(), b.e2ee_keys());
     assert_eq!(a.legacy_e2ee_keys(), b.legacy_e2ee_keys());
+    // Replicas of one app must derive the same key, or cache affinity
+    // fragments per replica.
+    assert_eq!(
+        a.prefix_hash_key().await.unwrap(),
+        b.prefix_hash_key().await.unwrap()
+    );
 }
 
 #[tokio::test]

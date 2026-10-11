@@ -169,6 +169,27 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
         }
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .as_ref()?
+            .cached(request)
+    }
+
+    fn cache_remaining(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<std::time::Duration> {
+        self.state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .as_ref()?
+            .cache_remaining(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verifier = self
             .state

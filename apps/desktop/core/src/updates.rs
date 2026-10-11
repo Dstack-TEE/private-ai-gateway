@@ -1,0 +1,504 @@
+//! Release channel policy shared by the in-app updater and notify-only installs.
+//!
+//! The desktop DMG, NSIS, DEB, and RPM installs download and verify signed
+//! packages through the Tauri updater. Every other installation belongs to a
+//! package manager or was installed by hand, so it only learns that a newer
+//! release exists and shows the exact steps that install it.
+
+use std::{path::Path, time::Duration};
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{self, UpdateChannel};
+
+/// The channel feed configured for release builds; development builds have none.
+pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
+
+const INVALID_FEED: &str = "Updates are not configured correctly for this build";
+const PACKAGE_MANAGER_MARKER: &str = "/usr/share/private-ai-proxy/package-manager";
+
+pub fn channel_name(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Beta => "beta",
+        UpdateChannel::Stable => "stable",
+    }
+}
+
+/// Whether a release version may be published in `feed`. Stable releases are
+/// also published to the beta feed, so beta users receive them too.
+pub fn belongs_to_feed(version: &semver::Version, feed: UpdateChannel) -> bool {
+    version.pre.is_empty()
+        || feed == UpdateChannel::Beta && version.pre.as_str().starts_with("beta.")
+}
+
+/// Whether `release`, announced by `feed`, updates `current`: a newer release
+/// of the feed, never a reinstall or a downgrade (after switching from beta to
+/// stable, the stable feed may still announce an older release).
+pub fn offers_update(
+    current: &semver::Version,
+    release: &semver::Version,
+    feed: UpdateChannel,
+) -> bool {
+    release > current && belongs_to_feed(release, feed)
+}
+
+/// The channel of the running build, used until one is saved.
+pub fn build_channel(current_version: &str) -> UpdateChannel {
+    if semver::Version::parse(current_version).is_ok_and(|version| !version.pre.is_empty()) {
+        UpdateChannel::Beta
+    } else {
+        UpdateChannel::Stable
+    }
+}
+
+/// The saved channel as `config.toml` holds it, for processes that may run
+/// without the backend (the CLI). The desktop app asks the backend instead.
+pub fn selected_channel(current_version: &str) -> UpdateChannel {
+    let default = build_channel(current_version);
+    match config::load() {
+        Ok(saved) => saved.update_channel.unwrap_or(default),
+        Err(error) => {
+            tracing::warn!("Could not read the update channel; using the build channel: {error}");
+            default
+        }
+    }
+}
+
+/// Splits `https://github.com/<repo>/releases/download/desktop-updates-<channel>/latest.json`
+/// into the release download root and validates the configured channel feed.
+fn release_root(configured: &str) -> Result<url::Url, String> {
+    let mut root = url::Url::parse(configured).map_err(|_| INVALID_FEED)?;
+    let path = root.path().to_owned();
+    let marker = path.rfind("/desktop-updates-").ok_or(INVALID_FEED)?;
+    let feed = &path[marker + 1..];
+    if feed != "desktop-updates-beta/latest.json" && feed != "desktop-updates-stable/latest.json" {
+        return Err(INVALID_FEED.into());
+    }
+    root.set_path(&path[..=marker]);
+    Ok(root)
+}
+
+/// The static update manifest of `feed` derived from the configured feed.
+pub fn feed_url(configured: &str, feed: UpdateChannel) -> Result<url::Url, String> {
+    release_root(configured)?
+        .join(&format!(
+            "desktop-updates-{}/latest.json",
+            channel_name(feed)
+        ))
+        .map_err(|_| INVALID_FEED.into())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub enum Installation {
+    /// Desktop app that installs signed updates in-app.
+    DesktopApp,
+    /// Desktop app owned by pacman.
+    DesktopPacman,
+    /// CLI-only native packages.
+    Deb,
+    Rpm,
+    Pacman,
+    /// A native package from a release that did not record its package manager.
+    SystemPackage,
+    Npm,
+    Portable,
+}
+
+/// Classifies the installation that owns the running executable.
+pub fn installation() -> Installation {
+    let Some(executable) = std::env::current_exe().and_then(std::fs::canonicalize).ok() else {
+        return Installation::Portable;
+    };
+    let directory = executable.parent().unwrap_or(Path::new(""));
+    let desktop = directory
+        .join(format!(
+            "private-ai-proxy-desktop{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+        .is_file();
+    let package_manager = std::fs::read_to_string(PACKAGE_MANAGER_MARKER).ok();
+    classify(
+        directory,
+        desktop,
+        package_manager.as_deref().map(str::trim),
+    )
+}
+
+fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> Installation {
+    let packaged = cfg!(target_os = "linux")
+        && (directory == Path::new("/usr/bin")
+            || directory == Path::new("/usr/libexec/private-ai-proxy"));
+    let package_manager = package_manager.filter(|_| packaged);
+    if desktop {
+        return if package_manager == Some("pacman") && directory == Path::new("/usr/bin") {
+            Installation::DesktopPacman
+        } else {
+            Installation::DesktopApp
+        };
+    }
+    match package_manager {
+        Some("deb") => Installation::Deb,
+        Some("rpm") => Installation::Rpm,
+        Some("pacman") => Installation::Pacman,
+        _ if packaged => Installation::SystemPackage,
+        _ if directory
+            .components()
+            .any(|component| component.as_os_str() == "node_modules") =>
+        {
+            Installation::Npm
+        }
+        _ => Installation::Portable,
+    }
+}
+
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateNotice {
+    pub installation: Installation,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    /// A newer release in the selected channel.
+    pub version: Option<String>,
+    /// Shell steps that install `version`, when the installation has them.
+    pub commands: Vec<String>,
+    /// Portable archive to extract into a fresh directory.
+    pub download_url: Option<String>,
+}
+
+/// The desktop app's update check result for the renderer.
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub enabled: bool,
+    pub system_managed: bool,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+    pub version: Option<String>,
+    /// Steps that install `version` when a package manager or the user owns
+    /// the installation.
+    pub upgrade_commands: Vec<String>,
+    /// Portable archive to extract into a fresh directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub download_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Manifest {
+    version: String,
+}
+
+/// Checks the release feed of `channel` without downloading a package.
+pub async fn check(
+    configured: &str,
+    channel: UpdateChannel,
+    current_version: &str,
+    installation: Installation,
+) -> Result<UpdateNotice, String> {
+    let current = semver::Version::parse(current_version)
+        .map_err(|_| "The installed version is invalid".to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| "Could not check for updates")?;
+    let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
+    let latest = offers_update(&current, &published, channel).then_some(published);
+    let (commands, download_url) = match &latest {
+        Some(version) => upgrade_steps(
+            installation,
+            release_root(configured)?.as_str(),
+            &version.to_string(),
+        )?,
+        None => (Vec::new(), None),
+    };
+    Ok(UpdateNotice {
+        installation,
+        channel,
+        current_version: current_version.into(),
+        version: latest.map(|version| version.to_string()),
+        commands,
+        download_url,
+    })
+}
+
+/// The version a feed announces.
+async fn published_version(
+    client: &reqwest::Client,
+    url: url::Url,
+    feed: UpdateChannel,
+) -> Result<semver::Version, String> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "Could not check for updates. Try again later.")?;
+    if !response.status().is_success() {
+        return Err("Could not check for updates. Try again later.".into());
+    }
+    let manifest: Manifest = response
+        .json()
+        .await
+        .map_err(|_| "The update feed is invalid")?;
+    let version =
+        semver::Version::parse(&manifest.version).map_err(|_| "The update feed is invalid")?;
+    if !belongs_to_feed(&version, feed) {
+        return Err("The update does not match the selected channel".into());
+    }
+    Ok(version)
+}
+
+/// Checks the release feeds for the running executable's installation.
+pub async fn check_installation() -> Result<UpdateNotice, String> {
+    let configured = RELEASE_FEED.ok_or("Update checks are unavailable in this build")?;
+    let version = crate::protocol::BUILD_VERSION;
+    let (channel, installation) =
+        tokio::task::spawn_blocking(move || (selected_channel(version), installation()))
+            .await
+            .map_err(|_| "Could not check for updates")?;
+    check(configured, channel, version, installation).await
+}
+
+/// `root` and `version` come from the compiled feed and a parsed SemVer, so the
+/// steps contain no text from the downloaded manifest. Commands are POSIX
+/// shell words joined by `shlex`.
+fn upgrade_steps(
+    installation: Installation,
+    root: &str,
+    version: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    let platform = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    // Mirrors artifactName() in scripts/release-artifacts.mjs.
+    let name = |cli: bool, suffix: &str| {
+        let kind = if cli { "-cli" } else { "" };
+        format!("private-ai-proxy{kind}-{version}-{platform}-{arch}{suffix}")
+    };
+    let tag = format!("desktop-v{version}");
+    let asset =
+        |name: &str| -> Result<String, String> { Ok(crate::endpoint(root, &[&tag, name])?.into()) };
+    let command = |words: &[&str]| {
+        shlex::try_join(words.iter().copied())
+            .map_err(|_| "Cannot write the upgrade command".to_string())
+    };
+    let stop = command(&["private-ai-proxy", "--yes", "service", "stop"])?;
+    Ok(match installation {
+        Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
+        Installation::DesktopPacman => (
+            vec![
+                stop,
+                command(&[
+                    "sudo",
+                    "pacman",
+                    "-U",
+                    &asset(&name(false, ".pkg.tar.zst"))?,
+                ])?,
+            ],
+            None,
+        ),
+        Installation::Pacman => (
+            vec![
+                stop,
+                command(&["sudo", "pacman", "-U", &asset(&name(true, ".pkg.tar.zst"))?])?,
+            ],
+            None,
+        ),
+        Installation::Rpm => (
+            vec![
+                stop,
+                command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
+            ],
+            None,
+        ),
+        Installation::Deb => {
+            let file = name(true, ".deb");
+            (
+                vec![
+                    stop,
+                    command(&["curl", "-fLO", &asset(&file)?])?,
+                    command(&["sudo", "apt", "install", &format!("./{file}")])?,
+                ],
+                None,
+            )
+        }
+        Installation::Npm => (
+            vec![
+                stop,
+                command(&[
+                    "npm",
+                    "install",
+                    "--global",
+                    &format!("private-ai-proxy@{version}"),
+                ])?,
+            ],
+            None,
+        ),
+        Installation::Portable => (
+            Vec::new(),
+            Some(asset(&name(
+                true,
+                if cfg!(windows) { ".zip" } else { ".tar.gz" },
+            ))?),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FEED: &str =
+        "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
+
+    #[test]
+    fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {
+        let belongs =
+            |version: &str, feed| belongs_to_feed(&semver::Version::parse(version).unwrap(), feed);
+        assert!(belongs("0.2.0", UpdateChannel::Stable));
+        assert!(belongs("0.2.0", UpdateChannel::Beta));
+        assert!(belongs("0.2.0-beta.10", UpdateChannel::Beta));
+        assert!(!belongs("0.2.0-beta.1", UpdateChannel::Stable));
+        assert!(!belongs("0.2.0-rc.1", UpdateChannel::Beta));
+    }
+
+    #[test]
+    fn only_newer_releases_of_the_feed_are_updates() {
+        let offers = |current: &str, release: &str, feed| {
+            offers_update(
+                &semver::Version::parse(current).unwrap(),
+                &semver::Version::parse(release).unwrap(),
+                feed,
+            )
+        };
+        use UpdateChannel::{Beta, Stable};
+        assert!(offers("0.2.0-beta.8", "0.2.0-beta.9", Beta));
+        assert!(
+            offers("0.2.0-beta.8", "0.2.0", Beta),
+            "beta follows a newer stable release"
+        );
+        assert!(offers("0.2.0-beta.8", "0.2.0", Stable));
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.8", Beta),
+            "no reinstall"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.2.0-beta.7", Beta),
+            "no downgrade"
+        );
+        assert!(
+            !offers("0.2.0-beta.8", "0.1.9", Stable),
+            "switching to stable waits for a newer stable release"
+        );
+        assert!(!offers("0.2.0", "0.2.1-beta.1", Stable));
+    }
+
+    #[test]
+    fn channel_feeds_derive_from_the_configured_feed() {
+        assert_eq!(
+            feed_url(FEED, UpdateChannel::Stable)
+                .expect("valid feed")
+                .as_str(),
+            "https://example.test/o/r/releases/download/desktop-updates-stable/latest.json"
+        );
+        assert!(feed_url(
+            "https://example.test/releases/latest.json",
+            UpdateChannel::Beta
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn installations_are_classified_by_their_owner() {
+        let classify =
+            |directory: &str, desktop, manager| classify(Path::new(directory), desktop, manager);
+        assert_eq!(
+            classify(
+                "/Applications/Private AI Proxy.app/Contents/MacOS",
+                true,
+                None
+            ),
+            Installation::DesktopApp
+        );
+        assert_eq!(
+            classify(
+                "/home/u/.npm-global/lib/node_modules/private-ai-proxy/node_modules/private-ai-proxy-linux-x64/vendor",
+                false,
+                None
+            ),
+            Installation::Npm
+        );
+        assert_eq!(
+            classify("/home/u/private-ai-proxy-cli-0.1.7-linux-x64", false, None),
+            Installation::Portable
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(classify("/usr/bin", true, None), Installation::DesktopApp);
+            assert_eq!(
+                classify("/usr/bin", true, Some("pacman")),
+                Installation::DesktopPacman
+            );
+            let libexec = "/usr/libexec/private-ai-proxy";
+            assert_eq!(classify(libexec, false, Some("deb")), Installation::Deb);
+            assert_eq!(classify(libexec, false, Some("rpm")), Installation::Rpm);
+            assert_eq!(
+                classify(libexec, false, Some("pacman")),
+                Installation::Pacman
+            );
+            assert_eq!(classify(libexec, false, None), Installation::SystemPackage);
+            assert_eq!(
+                classify("/opt/pap", false, Some("deb")),
+                Installation::Portable,
+                "the marker only describes package-owned paths"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_steps_name_exact_release_assets() {
+        let root = release_root(FEED).expect("valid feed");
+        let root = root.as_str();
+        assert_eq!(root, "https://example.test/o/r/releases/download/");
+        let upgrade_steps = |installation, root, version| {
+            super::upgrade_steps(installation, root, version).unwrap()
+        };
+        let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
+        assert_eq!(
+            npm,
+            [
+                "private-ai-proxy --yes service stop",
+                "npm install --global private-ai-proxy@0.1.8"
+            ]
+        );
+        assert_eq!(
+            upgrade_steps(Installation::DesktopApp, root, "0.1.8"),
+            (Vec::new(), None)
+        );
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(
+                upgrade_steps(Installation::DesktopPacman, root, "0.1.8-beta.2").0[1],
+                "sudo pacman -U https://example.test/o/r/releases/download/desktop-v0.1.8-beta.2/private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst"
+            );
+            assert_eq!(
+                upgrade_steps(Installation::Deb, root, "0.1.8").0[1..],
+                [
+                    "curl -fLO https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.deb",
+                    "sudo apt install ./private-ai-proxy-cli-0.1.8-linux-x64.deb"
+                ]
+            );
+            assert_eq!(
+                upgrade_steps(Installation::Portable, root, "0.1.8").1.as_deref(),
+                Some("https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.tar.gz")
+            );
+        }
+    }
+}

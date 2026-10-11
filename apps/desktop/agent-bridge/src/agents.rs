@@ -1,0 +1,613 @@
+//! Agent configuration projection: point an agent at the local proxy by
+//! editing only the fields this app owns, remember what those fields held
+//! before, and put them back on disconnect. Credential fields a connection
+//! takes over are parked in the backend's secret store and referenced opaquely;
+//! configs reference a machine-local agent token (through the bundled helper)
+//! never the RedPill key.
+//!
+//! Codex, Claude Code, and OpenCode are projected through their documented
+//! custom-provider settings. Disconnecting never depends on the endpoint or
+//! the catalog, so current connections can be restored while offline.
+
+mod codex_service;
+mod discovery;
+mod dsh;
+mod error;
+mod projection;
+mod providers;
+mod registry;
+mod transactions;
+mod validation;
+
+pub use codex_service::{CodexService, StopFailed};
+use discovery::*;
+pub use error::AgentError;
+use projection::*;
+use providers::*;
+pub(crate) use registry::AgentIntegration;
+
+use std::{
+    collections::BTreeMap,
+    env, fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+#[cfg(test)]
+use std::process::Command;
+
+mod oh_my_pi;
+mod openclaw;
+mod selection;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use desktop_core::{
+    agents::{Agent, AgentPreview, AgentRepairAction, AgentStatus, ConfigChange, ConnectOptions},
+    brand::{APP_IDENTIFIER, PRODUCT_NAME},
+    lock,
+    paths::{app_data_dir, env_path, home_dir, HOME_OVERRIDE_ENV},
+    private_fs::{self, write_atomic},
+};
+
+use crate::{
+    catalog::{Catalog, Surface},
+    config_doc::{parse_jsonc, ConfigDoc, ConfigValue, EntryKey, Format},
+    secrets::SecretStore,
+    tokens::{TokenFiles, TokenSet},
+};
+
+const STORE_FILE: &str = "agent-connections.json";
+const CODEX_CATALOG_FILE: &str = "codex-model-catalog.json";
+const HELPER_MISSING: &str =
+    "The credential helper is missing or invalid in this installation, so \
+                              agents cannot be connected";
+const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
+    Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
+
+/// File name of the bundled console helper that prints an agent's token.
+pub fn helper_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "private-ai-proxy-helper.exe"
+    } else {
+        "private-ai-proxy-helper"
+    }
+}
+
+#[derive(Debug)]
+enum ConnectFailure {
+    Conflict(AgentError),
+    Unavailable(AgentError),
+}
+
+impl From<AgentError> for ConnectFailure {
+    fn from(error: AgentError) -> Self {
+        Self::Unavailable(error)
+    }
+}
+impl ConnectFailure {
+    fn error(self) -> AgentError {
+        match self {
+            Self::Conflict(message) | Self::Unavailable(message) => message,
+        }
+    }
+
+    fn message(self) -> String {
+        self.error().to_string()
+    }
+}
+
+/// What a connection wrote, kept so a disconnect can restore exactly that.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct Connection {
+    /// Last catalog reconciled, including failed attempts, to avoid repeated writes.
+    #[serde(default)]
+    catalog_revision: Option<String>,
+    config_path: PathBuf,
+    fields: Vec<OwnedField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<selection::Journal>,
+    /// User intent survives protection sessions; suspended links retain only provider definitions.
+    suspended: bool,
+    options: ConnectOptions,
+    #[serde(default)]
+    attention: Option<String>,
+    /// The Local API endpoint the fields name. Reconcile projects a record
+    /// that names another one again, so an interrupted address change heals;
+    /// a record from before this field is taken to match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    /// A YAML list config that was empty before the connection: restoring
+    /// the list to empty puts back exactly this rather than `[]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    empty_original: Option<EmptyOriginal>,
+    /// The agent is not authorized (disconnect in progress).
+    disabled: bool,
+    /// A disconnect started; the record stays until token, parked secrets,
+    /// and config are all cleaned up, so a retry is idempotent.
+    cleanup_pending: bool,
+}
+
+impl Connection {
+    fn restored(&self) -> bool {
+        self.suspended
+            && self.selection.is_none()
+            && self
+                .fields
+                .iter()
+                .all(|field| retain_provider_field(field, &self.fields))
+    }
+
+    fn disconnected(&self) -> bool {
+        self.disabled && !self.cleanup_pending && self.restored()
+    }
+
+    fn validate_recovery(&self) -> Result<(), String> {
+        if let Some(selection) = &self.selection {
+            selection.validate()?;
+        }
+        if self
+            .fields
+            .iter()
+            .any(|field| matches!(field.previous, Some(Previous::Plain(ConfigValue::Json(_)))))
+        {
+            return Err("The connection record contains an unsafe structured plaintext backup. Access is disabled; secure manual recovery is required and the existing record is retained".to_string());
+        }
+        Ok(())
+    }
+
+    fn restore_path(&self) -> Result<&Path, String> {
+        if self.config_path.is_absolute() {
+            Ok(&self.config_path)
+        } else {
+            Err(RESTORE_PATH_MISSING.to_string())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct OwnedField {
+    path: Vec<String>,
+    /// What the connection wrote; `None` when it made the key absent.
+    #[serde(default)]
+    value: Option<ConfigValue>,
+    previous: Option<Previous>,
+    /// The keyed list item `path` is relative to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry: Option<OwnedEntry>,
+    /// Written only by adding a key or replacing a scalar, and restored byte
+    /// for byte: the added key is removed, or the scalar's `source` put back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact: bool,
+    /// The previous scalar's YAML source text, quoting included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// `value` is the SHA-256 of what was written ([`value_digest`]): a
+    /// credential the connection writes is never kept in the record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hashed: bool,
+    /// An empty mapping an exact field needed as its parent: kept while it
+    /// is a mapping, and removed on restore only while it is still empty.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    container: bool,
+}
+
+impl OwnedField {
+    /// Whether `current` is what the connection wrote.
+    fn holds(&self, current: Option<&ConfigValue>) -> bool {
+        if self.container {
+            matches!(current, Some(ConfigValue::Json(value)) if value.is_object())
+        } else if self.hashed {
+            current.is_some_and(|current| {
+                self.value.as_ref() == Some(&ConfigValue::Str(value_digest(current)))
+            })
+        } else {
+            current == self.value.as_ref()
+        }
+    }
+}
+
+/// The SHA-256 a hashed field journals in place of the value it wrote.
+fn value_digest(value: &ConfigValue) -> String {
+    hex::encode(Sha256::digest(value.to_json().to_string()))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum EmptyOriginal {
+    /// The file did not exist.
+    Absent,
+    /// The file held only this whitespace.
+    Blank(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnedEntry {
+    #[serde(flatten)]
+    key: EntryKey,
+    /// The connection appended the item, so restoring removes it whole.
+    created: bool,
+}
+
+/// The value a field held before the connection. Sensitive values are parked
+/// in the credential store and referenced by entry name only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Previous {
+    Secret { secret_ref: String },
+    Plain(ConfigValue),
+}
+
+type Store = BTreeMap<String, Connection>;
+
+/// A secret to park in the credential store when the edit is committed.
+struct PendingSecret {
+    entry: String,
+    value: String,
+}
+
+#[derive(Default)]
+struct Edit {
+    selection: Option<selection::Edit>,
+    changes: Vec<ConfigChange>,
+    record: Option<Connection>,
+    pending_secrets: Vec<PendingSecret>,
+    /// Restore entries whose value was put back (or confirmed gone); only
+    /// these are released from the credential store.
+    consumed_secrets: Vec<String>,
+}
+
+pub struct Projector {
+    home: PathBuf,
+    data_dir: PathBuf,
+    helper_exe: PathBuf,
+    endpoint: String,
+    tool_env: bool,
+    file_credentials: bool,
+    tokens: TokenFiles,
+    secrets: Arc<dyn SecretStore>,
+}
+
+impl Projector {
+    pub fn new(
+        helper_exe: PathBuf,
+        endpoint: &str,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, String> {
+        let home_override = env_path(HOME_OVERRIDE_ENV);
+        let tool_env = home_override.is_none();
+        let home = home_override.map_or_else(home_dir, Ok)?;
+        Ok(Self::at(
+            home,
+            app_data_dir()?,
+            helper_exe,
+            endpoint,
+            tool_env,
+            secrets,
+        ))
+    }
+
+    /// Build a projector against an explicitly authorized Home directory.
+    /// Sandboxed macOS processes must not derive the user's real Home from
+    /// `HOME`, which resolves to the app container.
+    pub fn new_for_home(
+        home: PathBuf,
+        data_dir: PathBuf,
+        helper_exe: PathBuf,
+        endpoint: &str,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, String> {
+        if !home.is_absolute() {
+            return Err("The authorized Home directory must be absolute".to_string());
+        }
+        validate_authorized_home(&home)?;
+        Ok(Self::at(
+            home, data_dir, helper_exe, endpoint, false, secrets,
+        ))
+    }
+
+    fn at(
+        home: PathBuf,
+        data_dir: PathBuf,
+        helper_exe: PathBuf,
+        endpoint: &str,
+        tool_env: bool,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            home,
+            tokens: TokenFiles::new(&data_dir),
+            data_dir,
+            helper_exe,
+            endpoint: endpoint.to_string(),
+            tool_env,
+            file_credentials: false,
+            secrets,
+        }
+    }
+
+    /// Expose only revocable local-proxy tokens and public model metadata in
+    /// the user-authorized Home. Private state and provider secrets stay put.
+    pub fn with_home_credentials(mut self) -> Self {
+        self.file_credentials = true;
+        self.tokens = TokenFiles::new(&self.credential_directory());
+        self
+    }
+
+    fn credential_directory(&self) -> PathBuf {
+        if self.file_credentials {
+            self.home.join(format!(".{APP_IDENTIFIER}-agents"))
+        } else {
+            self.data_dir.clone()
+        }
+    }
+
+    fn store_path(&self) -> PathBuf {
+        self.data_dir.join(STORE_FILE)
+    }
+
+    fn codex_catalog_path(&self) -> PathBuf {
+        self.credential_directory().join(CODEX_CATALOG_FILE)
+    }
+
+    /// One scan: every agent's status and the token set those statuses
+    /// authorize, from the same reads. Callers publish the returned set to
+    /// the proxy, so what the UI reports and what the proxy accepts can
+    /// never diverge; a drifted, corrupted, or unreadable config
+    /// deauthorizes its token on the very next scan.
+    pub fn scan(&self, catalog: Option<&Catalog>) -> Result<(Vec<AgentStatus>, TokenSet), String> {
+        let store = self.load_store()?;
+        let statuses: Vec<AgentStatus> = Agent::ALL
+            .iter()
+            .map(|agent| self.status(*agent, &store, catalog))
+            .collect();
+        let authorized: Vec<&str> = statuses
+            .iter()
+            .filter(|status| status.authorized)
+            .map(|status| status.id.as_str())
+            .collect();
+        let tokens = self.tokens.load(&authorized)?;
+        Ok((statuses, tokens))
+    }
+
+    /// Startup permission maintenance under the apply lock.
+    pub fn initialize_store(&self) -> Result<(), String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            self.maintain_store_permissions()?;
+            let _ = self.load_store()?;
+            self.repair_codex_provider_name()?;
+            Ok(())
+        })
+    }
+
+    /// Codex validates every custom provider at startup, including inactive
+    /// definitions left by an older connection. Repair only this app's
+    /// provider id and only when its required display name is invalid.
+    fn repair_codex_provider_name(&self) -> Result<(), String> {
+        let path = Agent::Codex.config_path(&self.home, self.tool_env);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Cannot read the Codex config: {error}")),
+        };
+        let mut doc = match ConfigDoc::parse(Format::Toml, &text) {
+            Ok(doc) => doc,
+            // The normal agent status reports malformed TOML without trying
+            // to rewrite a document that cannot be preserved safely.
+            Err(_) => return Ok(()),
+        };
+        let provider = &["model_providers", "private_ai_proxy"];
+        let name = &["model_providers", "private_ai_proxy", "name"];
+        if !doc.is_table(provider)
+            || doc
+                .get_str(name)
+                .is_some_and(|name| !name.trim().is_empty())
+        {
+            return Ok(());
+        }
+        doc.set_str(name, PRODUCT_NAME)
+            .map_err(|_| "Cannot repair the Codex provider name".to_string())?;
+        let repaired = doc
+            .render()
+            .map_err(|_| "Cannot render the repaired Codex config".to_string())?;
+        write_atomic(&path, &repaired, Some(Some(&text)))
+            .map_err(|error| format!("Cannot repair the Codex provider name: {error}"))
+    }
+
+    /// The exact edits `apply` would make, computed on a scratch copy, plus a
+    /// revision of everything they were computed from. Nothing is persisted.
+    pub fn preview(
+        &self,
+        agent: Agent,
+        connect: bool,
+        catalog: Option<&Catalog>,
+        options: &ConnectOptions,
+    ) -> Result<AgentPreview, AgentError> {
+        let store = self
+            .load_store()
+            .map_err(|_| AgentError::RecordUnavailable)?;
+        if connect {
+            self.require_helper()?;
+        }
+        let path = self.action_path(agent, store.get(agent.id()), connect);
+        if connect {
+            path.as_ref()
+                .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
+        }
+        let (text, read_error) = self.config_text_at(&path);
+        if connect && read_error.is_some() {
+            return Err(AgentError::ConfigurationRead);
+        }
+        let mut restore_problem = path.as_ref().err().cloned();
+        let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
+            _ if !connect && path.is_err() => Edit::default(),
+            Ok(_) if connect && catalog.is_none() => Edit::default(),
+            Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
+                Ok(edit) => edit,
+                Err(error) if !connect && store.contains_key(agent.id()) => {
+                    restore_problem = Some(error.to_string());
+                    Edit::default()
+                }
+                Err(error) => return Err(error),
+            },
+            // A broken config does not prevent revocation. Applying the
+            // disconnect keeps its restoration journal until repair succeeds.
+            Err(_) if !connect => {
+                store.get(agent.id()).ok_or(AgentError::InvalidState)?;
+                Edit::default()
+            }
+            Err(reason) => {
+                return Err(AgentError::InvalidConfiguration(
+                    self.parse_error(agent, &reason),
+                ))
+            }
+        };
+        Ok(AgentPreview {
+            agent: self.status(agent, &store, catalog),
+            connect,
+            changes: edit.changes,
+            note: restore_problem.map_or_else(
+                || agent.note(connect).to_string(),
+                |reason| {
+                    format!("Access will be revoked before restoration is attempted. {reason}")
+                },
+            ),
+            revision: revision(
+                agent,
+                connect,
+                path.as_deref().ok(),
+                text.as_deref(),
+                store.get(agent.id()),
+                catalog,
+                options,
+            ),
+        })
+    }
+
+    /// Load the connection record. A pure read (symlinks refused, no
+    /// permission side effects); maintenance happens only under
+    /// the apply lock.
+    fn load_store(&self) -> Result<Store, String> {
+        let text = private_fs::read_private_text(&self.store_path())
+            .map_err(|error| format!("Cannot read the agent connection record: {error}"))?;
+        match text {
+            None => Ok(Store::new()),
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|_| "The agent connection record is corrupted".to_string()),
+        }
+    }
+
+    /// Restore owner-only permissions on the record and token files, through
+    /// `O_NOFOLLOW` descriptors. Called only under the apply lock (startup
+    /// and transactions); reads never change permissions.
+    fn maintain_store_permissions(&self) -> Result<(), String> {
+        if self.file_credentials {
+            // Never follow a redirected credential directory into shared storage.
+            for path in [
+                self.credential_directory(),
+                self.credential_directory().join("agent-tokens"),
+            ] {
+                private_fs::create_private_dir(&path)
+                    .map_err(|_| "Cannot create Agent credential directory")?;
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|_| "Cannot inspect Agent credential directory")?;
+                if !metadata.is_dir() {
+                    return Err("Agent credential directory must not be a symlink".into());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                    if metadata.uid() != unsafe { libc::getuid() }
+                        || metadata.permissions().mode() & 0o077 != 0
+                    {
+                        return Err("Agent credential directory must be private and owned by the current user".into());
+                    }
+                }
+            }
+        }
+        private_fs::tighten_private(&self.store_path())
+            .map_err(|error| format!("Cannot secure the agent connection record: {error}"))?;
+        self.tokens.maintain(&Agent::ALL.map(Agent::id))
+    }
+}
+
+#[derive(Default)]
+struct Rollback {
+    revoke_token: bool,
+    secrets: Vec<(String, Option<String>)>,
+    configs: Vec<(PathBuf, Option<String>)>,
+    /// Puts back a companion file the connection wrote.
+    companion: Option<selection::Edit>,
+}
+
+/// Remove `path` if it still holds `expected`.
+fn remove_unchanged(path: &Path, expected: Option<&str>) -> io::Result<()> {
+    if fs::read_to_string(path).ok().as_deref() != expected {
+        return Err(io::Error::other(
+            "The file changed while it was being restored",
+        ));
+    }
+    fs::remove_file(path)
+}
+
+/// SHA-256 over everything a preview was computed from: the config text, the
+/// existing connection record, the catalog revision, and the user's choices.
+/// Each part is length-prefixed so boundaries cannot shift. The digest is
+/// compared only, never logged or shown, since the text may contain
+/// credentials.
+fn revision(
+    agent: Agent,
+    connect: bool,
+    path: Option<&Path>,
+    text: Option<&str>,
+    record: Option<&Connection>,
+    catalog: Option<&Catalog>,
+    options: &ConnectOptions,
+) -> String {
+    let mut hasher = Sha256::new();
+    let mut part = |bytes: &[u8]| {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    part(agent.id().as_bytes());
+    part(&[u8::from(connect)]);
+    part(path.map_or(&[][..], |path| path.as_os_str().as_encoded_bytes()));
+    part(text.unwrap_or_default().as_bytes());
+    if let Some(path) = path {
+        part(
+            selection::fingerprint(agent, path, record.and_then(|r| r.selection.as_ref()))
+                .unwrap_or_else(|error| error)
+                .as_bytes(),
+        );
+    }
+    part(
+        serde_json::to_string(&record)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    part(
+        catalog
+            .map_or("", |catalog| catalog.revision.as_str())
+            .as_bytes(),
+    );
+    part(
+        options
+            .default_model
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hex::encode(hasher.finalize())
+}
+
+fn secret_entry(agent: Agent, path: &[String]) -> String {
+    format!(
+        "restore:{}:{}",
+        agent.id(),
+        hex::encode(Sha256::digest(path.join("\u{1f}")))
+    )
+}
+
+#[cfg(test)]
+mod tests;

@@ -19,6 +19,7 @@ from live_e2e.common import (  # noqa: E402
     assert_port_free,
     load_dotenv,
     load_providers,
+    pap_bin,
     run_cmd,
 )
 
@@ -43,7 +44,7 @@ def preflight(
     if missing:
         raise RuntimeError(f"missing required env vars: {', '.join(sorted(set(missing)))}")
 
-    for binary in ("cargo", "uv"):
+    for binary in ("cargo", "uv", pap_bin()):
         if shutil.which(binary) is None:
             raise RuntimeError(f"required binary not found on PATH: {binary}")
 

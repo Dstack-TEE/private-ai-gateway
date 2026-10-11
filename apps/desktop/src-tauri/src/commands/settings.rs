@@ -1,180 +1,136 @@
-use crate::*;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+use desktop_core::{
+    client::{CallError, Client},
+    maintenance::ProfileBackup,
+    protocol::rpc,
+};
+use tauri::{Manager, State, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, FileDialogBuilder, FilePath};
+
+use crate::run_blocking;
+
+/// Imports a profile backup the user picks in the system open panel; `None`
+/// when they cancel.
 #[tauri::command]
-pub(crate) async fn get_launch_preferences(
-    app: AppHandle,
-    client: State<'_, Arc<Client>>,
-) -> Result<LaunchPreferences, String> {
-    let client = client.inner().clone();
-    run_blocking(move || load_launch_preferences(&app, &client)).await
+pub(crate) async fn select_profile_backup(
+    window: WebviewWindow,
+) -> Result<Option<ProfileBackup>, CallError> {
+    let dialog = json_dialog(&window, "Import Profile Configurations");
+    Ok(run_blocking(move || {
+        chosen(dialog.blocking_pick_file())?
+            .map(|path| ProfileBackup::read(&path))
+            .transpose()
+    })
+    .await?)
 }
 
+/// Exports the profiles, without keys, where the user chooses, unless they
+/// cancel.
 #[tauri::command]
-pub(crate) async fn set_launch_preference(
-    app: AppHandle,
+pub(crate) async fn export_profiles(
+    window: WebviewWindow,
     client: State<'_, Arc<Client>>,
-    name: String,
-    enabled: bool,
-) -> Result<LaunchPreferences, String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        match name.as_str() {
-            "openAtLogin" => tray::set_open_at_login(&app, enabled)?,
-            "connectOnLaunch" => {
-                client.set_preference(Preference::ConnectOnLaunch(enabled))?;
-            }
-            _ => return Err("Unknown startup preference".to_string()),
-        }
-        let preferences = load_launch_preferences(&app, &client)?;
-        let _ = app.emit("gateway://launch-preferences", &preferences);
-        Ok(preferences)
-    })
+) -> Result<(), CallError> {
+    let content = desktop_core::ui_api::call(client.inner(), rpc::ExportProfilesContent).await?;
+    save(
+        &window,
+        "Export Profiles (No Keys)",
+        "private-ai-proxy-profiles.json",
+        content,
+    )
     .await
 }
 
-#[tauri::command]
-pub(crate) async fn reset_settings(
-    app: AppHandle,
-    client: State<'_, Arc<Client>>,
-    prepared: State<'_, updates::PreparedUpdate>,
-) -> Result<GatewayState, String> {
-    let mut prepared = prepared
-        .0
-        .try_lock()
-        .map_err(|_| "An update operation is in progress")?;
-    let worker_app = app.clone();
-    let client = client.inner().clone();
-    let worker = client.clone();
-    let result = run_blocking(move || {
-        let state = worker.reset_settings()?;
-        tray::set_open_at_login(&worker_app, false)?;
-        if let (Some(window), Some(defaults)) = (
-            worker_app.get_webview_window("main"),
-            worker_app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|window| window.label == "main"),
-        ) {
-            window
-                .set_fullscreen(false)
-                .map_err(|_| "Could not reset the window")?;
-            window
-                .unmaximize()
-                .map_err(|_| "Could not reset the window")?;
-            window
-                .set_size(tauri::LogicalSize::new(defaults.width, defaults.height))
-                .map_err(|_| "Could not reset the window size")?;
-            window.center().map_err(|_| "Could not center the window")?;
-        }
-        Ok(state)
-    })
-    .await;
-    *prepared = None;
-    refresh_preferences(&app, &client);
-    let state = result.map_err(|error| {
-        format!("Reset did not finish. Review the error and retry Reset settings. {error}")
-    })?;
-    app.emit_to("main", "gateway://settings-reset", ())
-        .map_err(|_| "Settings reset, but the interface could not refresh")?;
-    Ok(state)
-}
-
-#[tauri::command]
-pub(crate) async fn get_appearance(client: State<'_, Arc<Client>>) -> Result<Appearance, String> {
-    let client = client.inner().clone();
-    run_blocking(move || Ok(client.preferences()?.appearance)).await
-}
-
-#[tauri::command]
-pub(crate) async fn set_appearance(
-    app: AppHandle,
-    client: State<'_, Arc<Client>>,
-    appearance: Appearance,
-) -> Result<(), String> {
-    let client = client.inner().clone();
-    run_blocking(move || {
-        client.set_preference(Preference::Appearance(appearance))?;
-        Ok(())
-    })
-    .await?;
-    apply_appearance(&app, appearance);
-    app.emit("gateway://appearance", appearance)
-        .map_err(|_| "Could not sync appearance".to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn read_profile_backup(
-    path: PathBuf,
-) -> Result<desktop_runtime::maintenance::ProfileBackup, String> {
-    run_blocking(move || desktop_runtime::maintenance::ProfileBackup::read(&path)).await
-}
-
-#[tauri::command]
-pub(crate) async fn import_profiles(
-    runtime: State<'_, Arc<Client>>,
-    backup: desktop_runtime::maintenance::ProfileBackup,
-) -> Result<desktop_runtime::maintenance::ImportResult, String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.import_profiles(backup)).await
-}
-
-#[tauri::command]
-pub(crate) async fn export_profiles(
-    runtime: State<'_, Arc<Client>>,
-    path: PathBuf,
-) -> Result<(), String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_profiles(path)).await
-}
-
+/// Exports redacted diagnostics where the user chooses, unless they cancel.
 #[tauri::command]
 pub(crate) async fn export_diagnostics(
-    runtime: State<'_, Arc<Client>>,
-    path: PathBuf,
-) -> Result<(), String> {
-    let runtime = runtime.inner().clone();
-    run_blocking(move || runtime.export_diagnostics(path)).await
+    window: WebviewWindow,
+    client: State<'_, Arc<Client>>,
+) -> Result<(), CallError> {
+    let version = window.app_handle().package_info().version.to_string();
+    let client = client.inner().clone();
+    let content = run_blocking(move || {
+        desktop_core::maintenance::json_content(&desktop_core::maintenance::diagnostics(
+            &client.state()?,
+            &version,
+        ))
+    })
+    .await?;
+    save(
+        &window,
+        "Export Redacted Diagnostics",
+        "private-ai-proxy-diagnostics.json",
+        content,
+    )
+    .await
 }
 
-#[tauri::command]
-pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistration, String> {
-    #[cfg(target_os = "macos")]
-    register_cli_on_startup(&app).await;
-    let registration = run_cli_command(&app, vec!["cli", "status", "--json"]).await?;
-    let startup_error = app.state::<CliStartup>().0.lock().await.last_error.clone();
-    Ok(CliRegistration {
-        registration,
-        startup_error,
-    })
+fn json_dialog(window: &WebviewWindow, title: &str) -> FileDialogBuilder<tauri::Wry> {
+    window
+        .dialog()
+        .file()
+        .set_parent(window)
+        .set_title(title)
+        .add_filter("JSON", &["json"])
 }
 
-#[tauri::command]
-pub(crate) async fn set_cli_registration(
-    app: AppHandle,
-    installed: bool,
-) -> Result<CliRegistration, String> {
-    #[cfg(target_os = "macos")]
-    register_cli_on_startup(&app).await;
-    let startup = app.state::<CliStartup>();
-    let mut state = startup.0.lock().await;
-    let client = app.state::<Arc<Client>>().inner().clone();
-    if !installed {
-        let writer = client.clone();
-        run_blocking(move || writer.set_preference(Preference::AutoCliRegistration(false))).await?;
-    }
-    let registration = if installed {
-        run_cli_command(&app, vec!["cli", "install", "--json"]).await
-    } else {
-        run_cli_command(&app, vec!["cli", "uninstall", "--json", "--yes"]).await
-    }?;
-    if installed {
-        run_blocking(move || client.set_preference(Preference::AutoCliRegistration(true))).await?;
-    }
-    state.last_error = None;
-    Ok(CliRegistration {
-        registration,
-        startup_error: None,
+/// The file the user chose in a file panel the plugin showed off the main
+/// thread; `None` when they cancelled.
+fn chosen(selection: Option<FilePath>) -> Result<Option<PathBuf>, String> {
+    selection
+        .map(|path| {
+            path.into_path()
+                .map_err(|_| "The chosen file is not on this computer".to_string())
+        })
+        .transpose()
+}
+
+/// Writes `content` where the user chooses in the system save panel, which
+/// asks before replacing an existing file. The app, not the backend, writes
+/// it, so a sandboxed build uses the access the panel granted.
+async fn save(
+    window: &WebviewWindow,
+    title: &str,
+    file_name: &str,
+    content: String,
+) -> Result<(), CallError> {
+    let dialog = json_dialog(window, title).set_file_name(file_name);
+    Ok(run_blocking(move || {
+        let Some(path) = chosen(dialog.blocking_save_file())? else {
+            return Ok(());
+        };
+        write_chosen(&path, content.as_bytes())
+            .map_err(|_| "Could not save the file. Check that the folder is writable.".into())
     })
+    .await?)
+}
+
+/// Writes the file the user chose in a save panel, which already asked before
+/// replacing an existing one. The panel extends a sandboxed app's access to
+/// exactly that file ("Accessing files from the macOS App Sandbox"), so it is
+/// written in place rather than through a temporary file beside it.
+fn write_chosen(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn chosen_files_are_replaced_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("diagnostics.json");
+        std::fs::write(&destination, "an original that is longer").unwrap();
+        super::write_chosen(&destination, b"replacement").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "replacement"
+        );
+    }
 }

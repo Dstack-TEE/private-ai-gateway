@@ -1,9 +1,13 @@
 # `@phala/opencode-provider-aci`
 
-Native OpenCode provider for an ACI gateway. The plugin registers the provider,
-discovers its live model catalog over an attested and SPKI-pinned connection,
-maps reasoning/tool/modality/cost/limit metadata, and verifies every inference
-receipt before the response stream can finish.
+Native OpenCode provider for an Attested Confidential Inference (ACI) gateway.
+The plugin verifies the gateway workload and pins its attested TLS key before
+sending model traffic, discovers the gateway's models, and verifies every
+inference receipt before the response stream can finish.
+
+## Install and configure
+
+The neutral package has no default gateway, so set `baseURL`:
 
 ```jsonc
 {
@@ -22,8 +26,8 @@ receipt before the response stream can finish.
 }
 ```
 
-After adding the configured plugin tuple above, restart OpenCode and use its
-native provider and model pickers:
+`trust.acceptedComposeHashes` lists reviewed compose hashes and is optional.
+Restart OpenCode, then use its native provider and model pickers:
 
 ```text
 /connect
@@ -32,43 +36,29 @@ native provider and model pickers:
 # search for aci/ and select a model
 ```
 
-The neutral package has no default gateway, so `baseURL` must be configured.
-`ACI_API_KEY` is also supported for the current process, but environment
-variables are not copied into OpenCode's auth store.
+`ACI_API_KEY` also works for the current process, but OpenCode does not save
+it. Do not also configure a separate `provider.aci`: the plugin owns that
+provider, so a failed attestation or channel check leaves no ordinary HTTPS
+path available.
 
-The plugin discovers the public `/v1/models` catalog over the verified
-connection without sending the inference API key. OpenCode stores the key and
-attaches it to model requests through its native auth loader. The plugin uses
-OpenCode's server-plugin, provider config, auth, model, and disposal hooks; it
-does not maintain parallel config or credential files.
+## Inspect
 
-Capability flags come only from the catalog. The plugin does not create
-model-family variants or rewrite reasoning parameters; OpenCode's official
-OpenAI-compatible provider handles its standard reasoning request and response
-fields.
-Optional cache prices stay absent when the catalog does not publish them.
+`/aci-attestation`, `/aci-receipts`, `/aci-receipt [id]`, and
+`/aci-session <id>` dispatch the read-only `aci_inspect` tool. Its actions are
+`status`, `attestation`, `receipts`, `receipt`, and `session`. It returns
+verification metadata only, never model traffic or raw evidence. Verification
+runs automatically; the commands only display evidence or rerun an audit.
 
-The plugin registers `/aci-attestation`, `/aci-receipts`, `/aci-receipt [id]`,
-and `/aci-session <id>` as native OpenCode custom commands. They dispatch the
-read-only `aci_inspect` tool, whose five actions are `status`, `attestation`,
-`receipts`, `receipt`, and `session`. Receipt inspection verifies the latest
-recorded exchange when no id is supplied. Session inspection requires the bare
-64-hex session id and verifies its content address, API version, validity
-window, and evidence digest. The tool returns verification metadata only,
-never model traffic or raw evidence. Branded plugins scope both commands and
-the tool name to their provider id.
+## Build a branded plugin
 
-Attestation and response receipt verification are automatic and fail closed;
-the commands only display evidence or rerun an audit. The local wire-digest
-history keeps the latest 32 receipt-bearing requests by default and is cleared
-when OpenCode exits. Credential persistence and gateway artifact retention are
-independent of this local history.
+A programmatic branded plugin may pass a shared `AccountApiKeyAuth` as
+`accountAuth`. The plugin maps it into OpenCode's browser auth hook and keeps
+the manual API-key method.
 
-Do not also configure a separate `provider.aci`. The plugin owns that provider
-so installation, attestation, or channel-binding failure leaves no ordinary
-HTTPS path available.
+## Learn more
 
-Programmatic branded plugins may pass a shared `AccountApiKeyAuth` as
-`accountAuth`. The core maps it into OpenCode's official browser auth hook and
-automatically keeps the manual API-key method; the brand does not build its own
-OpenCode credential flow.
+- [Coding-agent integrations](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/coding-agents.md#opencode):
+  settings, local receipt history, and branded packages.
+- [Client architecture](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/architecture.md):
+  what the verifier checks, how the model catalog maps, and release
+  acceptance.

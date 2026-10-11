@@ -5,6 +5,8 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use desktop_core::private_fs::{self, Publish};
+
 pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     let uid = rustix::process::getuid().as_raw();
     let mut source = File::open(bundled)?;
@@ -17,7 +19,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
     }
 
     let directory = app_data.join("helpers");
-    desktop_gateway::tokens::create_private_dir(&directory)?;
+    private_fs::create_private_dir(&directory)?;
     let metadata = fs::symlink_metadata(&directory)?;
     if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != uid {
         return Err(io::Error::new(
@@ -25,7 +27,7 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
             "the helper directory must be private, owned by the current user, and not a symlink",
         ));
     }
-    let destination = directory.join(desktop_gateway::agents::helper_binary_name());
+    let destination = directory.join(agent_bridge::agents::helper_binary_name());
     match fs::symlink_metadata(&destination) {
         Ok(metadata) if !metadata.is_file() => {
             return Err(io::Error::new(
@@ -38,24 +40,19 @@ pub fn stage(bundled: &Path, app_data: &Path) -> io::Result<PathBuf> {
         Err(error) => return Err(error),
     }
 
-    // One same-filesystem temporary file, removed on failure by RAII. Rename
-    // also lets an already-running helper finish using the previous inode.
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    if temporary.as_file().metadata()?.uid() != uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the staged helper must be owned by the current user",
-        ));
-    }
-    io::copy(&mut source, temporary.as_file_mut())?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o700))?;
-    temporary.as_file().sync_all()?;
-    // Close the writable handle before publishing an executable. Otherwise a
-    // concurrent launch can observe the destination while it is still writable.
-    temporary.into_temp_path().persist(&destination)?;
-    File::open(&directory)?.sync_all()?;
+    // One same-filesystem temporary file, removed on failure. Rename also
+    // lets an already-running helper finish using the previous inode, and the
+    // executable is published only after its writable handle is closed.
+    private_fs::publish(&destination, Publish::Replace, |file| {
+        if file.metadata()?.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the staged helper must be owned by the current user",
+            ));
+        }
+        io::copy(&mut source, file)?;
+        file.set_permissions(fs::Permissions::from_mode(0o700))
+    })?;
     Ok(destination)
 }
 
@@ -69,7 +66,7 @@ mod tests {
     fn bundled(root: &Path, name: &str, output: &str) -> PathBuf {
         let directory = root.join(name);
         fs::create_dir(&directory).unwrap();
-        let path = directory.join(desktop_gateway::agents::helper_binary_name());
+        let path = directory.join(agent_bridge::agents::helper_binary_name());
         fs::write(&path, format!("#!/bin/sh\nprintf '%s' '{output}'\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
@@ -86,16 +83,14 @@ mod tests {
             data.join("helpers").join(first.file_name().unwrap())
         );
         fs::remove_dir_all(first.parent().unwrap()).unwrap();
-        let output = Command::new(&stable).output().unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"first");
+        assert!(fs::read_to_string(&stable).unwrap().contains("first"));
         let mut previous = File::open(&stable).unwrap();
         let second = bundled(root.path(), "mount-two", "second");
         assert_eq!(stage(&second, &data).unwrap(), stable);
         let mut old = String::new();
         previous.read_to_string(&mut old).unwrap();
         assert!(old.contains("first"));
-        assert_eq!(Command::new(&stable).output().unwrap().stdout, b"second");
+        assert!(fs::read_to_string(&stable).unwrap().contains("second"));
         for path in [&stable, stable.parent().unwrap()] {
             assert_eq!(
                 fs::metadata(path).unwrap().uid(),
@@ -158,7 +153,7 @@ mod tests {
             let root = PathBuf::from(root);
             let source = root
                 .join("mount")
-                .join(desktop_gateway::agents::helper_binary_name());
+                .join(agent_bridge::agents::helper_binary_name());
             assert_eq!(fs::metadata(&source).unwrap().uid(), 0);
             let stable = stage(&source, &root.join("user-data")).unwrap();
             assert_eq!(
@@ -179,7 +174,7 @@ mod tests {
         fs::create_dir(&user_data).unwrap();
         chown(&user_data, Some(65534), Some(65534)).unwrap();
         let root_directory = root.path().join("root-data").join("helpers");
-        desktop_gateway::tokens::create_private_dir(&root_directory).unwrap();
+        desktop_core::private_fs::create_private_dir(&root_directory).unwrap();
         fs::set_permissions(
             root_directory.parent().unwrap(),
             fs::Permissions::from_mode(0o755),

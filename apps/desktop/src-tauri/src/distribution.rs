@@ -1,0 +1,72 @@
+use desktop_core::contracts::{DistributionCapabilities, DistributionChannel};
+
+const APP_STORE: bool = cfg!(feature = "mac-app-store");
+
+/// The App Store updates the app and sandboxes it: no updater, `pap` command,
+/// account portal links or web UI.
+pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabilities {
+    channel: if APP_STORE {
+        DistributionChannel::MacAppStore
+    } else {
+        DistributionChannel::Direct
+    },
+    native_updates: !APP_STORE,
+    cli_registration: !APP_STORE,
+    account_portal_links: !APP_STORE,
+    sandbox_home_access: APP_STORE && cfg!(target_os = "macos"),
+    launch_at_login: true,
+    notifications: true,
+    web_ui: !APP_STORE,
+};
+
+/// The distribution's capabilities, and the platform (`macos`, `windows` or
+/// `linux`) that `appearance-init.js` puts on the root element.
+pub(crate) fn initialization_script() -> String {
+    let capabilities = serde_json::to_string(&CAPABILITIES)
+        .expect("distribution capabilities must be serializable");
+    let window = serde_json::json!({ "platform": std::env::consts::OS });
+    format!("window.__PAP_DISTRIBUTION__ = {capabilities};\nwindow.__PAP_WINDOW__ = {window};")
+}
+
+pub(crate) fn require(available: bool, message: &str) -> Result<(), String> {
+    available.then_some(()).ok_or_else(|| message.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn injected_capabilities_enforce_the_channel_contract() {
+        let script = initialization_script();
+        let (distribution, _) = script.split_once('\n').unwrap();
+        let json = distribution
+            .strip_prefix("window.__PAP_DISTRIBUTION__ = ")
+            .unwrap()
+            .strip_suffix(';')
+            .unwrap();
+        let actual: serde_json::Value = serde_json::from_str(json).unwrap();
+        let app_store = cfg!(feature = "mac-app-store");
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "channel": if app_store { "macAppStore" } else { "direct" },
+                "nativeUpdates": !app_store,
+                "cliRegistration": !app_store,
+                "accountPortalLinks": !app_store,
+                "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
+                "launchAtLogin": true,
+                "notifications": true,
+                "webUi": !app_store,
+            })
+        );
+        assert_eq!(
+            require(CAPABILITIES.native_updates, "App Store").is_err(),
+            app_store
+        );
+        assert_eq!(
+            require(CAPABILITIES.account_portal_links, "App Store").is_err(),
+            app_store
+        );
+    }
+}

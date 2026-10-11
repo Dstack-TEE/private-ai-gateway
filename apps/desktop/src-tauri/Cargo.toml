@@ -1,13 +1,15 @@
 [package]
 name = "private-ai-proxy-desktop"
-version = "0.1.0"
-description = "Menu bar controller for the ACI local verifying proxy"
+version.workspace = true
+description = "Private AI Proxy desktop app: the Tauri shell for windows, tray, menus, notifications and updates"
 authors = ["Dstack-TEE"]
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.98"
 
-[workspace]
+[features]
+default = []
+mac-app-store = ["desktop-core/mac-app-store"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -16,45 +18,44 @@ name = "private_ai_proxy_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-desktop-gateway = { package = "private-ai-proxy-gateway", path = "../gateway" }
-desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
-serde = { version = "1.0", features = ["derive"] }
+auto-launch = "0.6"
+desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-semver = "1"
-if-addrs = "0.15"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
-tauri = { version = "2.11.5", features = ["image-png", "tray-icon"] }
-tauri-plugin-clipboard-manager = "2.3.3"
-tauri-plugin-dialog = "2.7.3"
-tauri-plugin-opener = "2.5.5"
-tauri-plugin-shell = "2.3.6"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tauri = { version = "2.12.2", features = ["image-png", "tray-icon"] }
+tauri-plugin-clipboard-manager = "2.4.1"
+tauri-plugin-dialog = "2.8.1"
+tauri-plugin-opener = "2.7.0"
+tauri-plugin-shell = "2.4.1"
 tauri-plugin-single-instance = { version = "2.4", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-notification = "2"
 tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-auto-launch = "0.6"
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = "5"
 futures-util = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.61", features = ["Foundation", "UI_Notifications", "UI_ViewManagement"] }
-windows-registry = "0.6.1"
-auto-launch-windows = { package = "auto-launch", version = "0.5.0" }
+windows = { version = "0.62", features = ["Foundation", "UI_Notifications", "UI_ViewManagement"] }
+windows-registry = "0.100"
+# The version Tauri's WebView2 runtime uses, for the webview's settings.
+webview2-com = "0.39"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.6"
 objc2-user-notifications = "0.3"
-objc2-foundation = "0.3"
+objc2-foundation = { version = "0.3", features = ["NSAppleEventDescriptor", "NSAppleEventManager", "objc2-core-services"] }
+objc2-core-services = "0.3"
+objc2-service-management = "0.3"
 block2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
-tauri-plugin-autostart = "2.5.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,10 +1,11 @@
 # @phala/pi-provider-aci
 
 Vendor-neutral Pi provider for an Attested Confidential Inference (ACI)
-gateway. It establishes an instance-scoped verified connection with
-`@phala/aci-verifier`, injects the scoped transport into Pi, discovers models,
-verifies every inference receipt before stream completion, and exposes
-attestation, receipt, and session audit commands.
+gateway. It verifies the gateway workload and pins its attested TLS key before
+sending model traffic, discovers the gateway's models, and verifies every
+inference receipt before the model turn finishes.
+
+## Install
 
 ```bash
 pi install npm:@phala/pi-provider-aci
@@ -21,33 +22,49 @@ In Pi, store the gateway key and save a default model through the native UI:
 # search for aci/, select a model, and press Ctrl+S
 ```
 
-Pi owns all persistence: credentials are stored in
-`~/.pi/agent/auth.json`, refreshed catalogs in
-`~/.pi/agent/models-store.json`, and a default selected with `Ctrl+S` in
-`~/.pi/agent/settings.json`. The cached catalog remains available offline.
-`ACI_API_KEY` is also supported for the current process, but Pi does not copy
-environment variables into its credential store.
+Pi stores the credential, catalog, and default model in its own files.
+`ACI_API_KEY` also works for the current process, but Pi does not save it.
 
-The provider fails closed when workload or channel verification fails. For a
-production reviewed-release claim, configure `ACI_ACCEPTED_COMPOSE_HASHES` with
-the comma-separated compose hashes published by the deployment operator.
-Model capabilities come only from the gateway catalog. Pi reasoning levels use
-the gateway's public normalized reasoning field; upstream model dialects are
-handled by the gateway, not by this extension.
-Pi requires numeric rates for every token category, so an omitted cache rate is
-represented at the ordinary input rate rather than as a free cache operation.
+## Configure
 
-`/aci-receipts` lists retained exchanges. `/aci-receipt [id]` displays or
-re-verifies the latest or selected exchange's signed receipt, exact wire body
-hashes, and cited attested session. `/aci-session <id>` fetches the public
-session artifact over the pinned connection and validates it locally; it does
-not require an inference API key.
+| Environment variable          | Effect                                                                           |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| `ACI_BASE_URL`                | Gateway endpoint. Required.                                                      |
+| `ACI_ACCEPTED_COMPOSE_HASHES` | Comma-separated reviewed compose hashes. Set these for a reviewed-release claim. |
+| `ACI_ACCEPTED_SESSION_IDS`    | Comma-separated audited session IDs that requests may use.                       |
 
-The local wire-digest history retains the latest 32 receipt-bearing requests by
-default and is cleared when Pi exits. Credential, model-catalog, and
-default-model persistence are independent of that audit history. Gateway
-receipt and session artifacts remain subject to the deployment's server-side
-retention policy.
+`/aci-settings`, `/aci-attestation`, `/aci-receipts`, `/aci-receipt [id]`, and
+`/aci-session <id>` show the settings, attestation, retained receipts, and
+sessions. Verification runs automatically; the commands only display evidence
+or rerun an audit.
 
-See the [full client documentation](https://github.com/Dstack-TEE/private-ai-gateway/tree/main/clients/pi-provider)
-for configuration, trust boundaries, and branded packages.
+## Build a branded provider
+
+`createProvider()` registers the provider under your brand:
+
+```ts
+import { createProvider } from "@phala/pi-provider-aci";
+export default createProvider({
+  profile: {
+    providerId: "my-brand",
+    label: "My Brand",
+    defaultBaseURL: "https://gateway.example/v1",
+    apiKeyEnv: "MY_AI_API_KEY",
+    envPrefix: "MY",
+    logPrefix: "[my-brand]",
+    acceptedComposeHashes: ["<reviewed-sha256-app-compose>"],
+  },
+  footerKey: "my-brand",
+});
+```
+
+A product with an account-to-API-key flow can also pass a shared
+`accountAuth`. The adapter maps it into `/login` next to manual API-key entry.
+
+## Learn more
+
+- [Coding-agent integrations](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/coding-agents.md#pi):
+  persistence, local receipt history, and branded packages.
+- [Client architecture](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/clients/architecture.md):
+  what the verifier checks, when receipts are verified, and release
+  acceptance.

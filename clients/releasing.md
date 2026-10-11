@@ -66,7 +66,5 @@ example `clients-v0.5.1`. The workflow checks that the tag matches every package
 manifest, runs all release gates, then publishes in dependency order. Do not
 move or reuse a release tag after publication; npm versions are immutable.
 
-Package publication and reviewed deployment approval are separate operations.
-The branded release claims a reviewed gateway deployment after the
-RedPill/Phala release pipeline independently publishes the accepted compose
-hashes through an authenticated release channel.
+Publishing packages does not approve a gateway deployment; see
+[Release acceptance](architecture.md#release-acceptance).

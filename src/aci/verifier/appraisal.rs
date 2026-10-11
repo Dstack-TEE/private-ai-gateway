@@ -1,21 +1,20 @@
 //! The §9.1 report appraisal: which checks run, in what order, and what each
 //! outcome means.
 //!
-//! Both verifiers go through [`appraise_report`] — the gateway folds the
-//! outcomes into one accept/reject, the CLI renders each as a transcript line.
-//! Deciding separately is how the two drift while each keeps passing its own
-//! tests.
+//! This gateway's upstream verifiers go through [`appraise_report`] and fold
+//! the outcomes into one accept/reject. The mechanisms beneath each check
+//! come from `aci-verify`, which Private AI Proxy's own appraisal also uses.
 
+use aci_verify::decode_hex_32;
+use aci_verify::dstack::{dstack_app_id, verify_dstack_compose_measurement};
+use aci_verify::quote::quote_binds_report_data;
+use aci_verify::report::verify_report_binding;
 use serde_json::Value;
 
-use super::dstack::{
-    dstack_app_id, verify_dstack_compose_measurement, verify_dstack_kms_receipt_custody,
-};
-use super::quote::{
-    parse_quote_evidence, quote_binds_report_data, verify_quote_to_root, QuoteStepError,
-};
-use super::report::{verify_report_binding, AciReportValidationError, ReportBinding};
-use super::{verify_dstack_event_log, AciServiceVerifierPolicy};
+use super::dstack::verify_dstack_kms_receipt_custody;
+use super::quote::{parse_quote_evidence, verify_quote_to_root, QuoteStepError};
+use super::report::{AciReportValidationError, ReportBinding};
+use super::{dcap_report_data, verify_dstack_event_log, AciServiceVerifierPolicy};
 use crate::aci::receipt::ChannelBinding;
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 
@@ -151,7 +150,7 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     // §9.1(1) checks the quote against the report_data the report states;
     // §9.1(2) proves that value is the one the keyset and nonce produce. They
     // are independent, so each reports its own problem.
-    let claimed_report_data = super::decode_hex_32(&report.attestation.report_data_hex);
+    let claimed_report_data = decode_hex_32(&report.attestation.report_data_hex);
     let (quote_result, verified_quote) = match claimed_report_data {
         Ok(claimed) => appraise_quote(&inputs, claimed).await,
         Err(e) => (
@@ -283,10 +282,14 @@ async fn appraise_quote(
         format!(
             "report_data (32 bytes) = {}\nquote report_data slot (64 bytes) = {}",
             inputs.report.attestation.report_data_hex,
-            hex::encode(super::dcap_report_data(&quote.report))
+            hex::encode(dcap_report_data(&quote.report))
         )
     });
-    if let Err(e) = quote_binds_report_data(evidence, &quote.report, claimed_report_data) {
+    if let Err(e) = quote_binds_report_data(
+        evidence,
+        dcap_report_data(&quote.report),
+        claimed_report_data,
+    ) {
         return (
             failed(CheckId::Quote, e.into()).with_explain(explain),
             Some(quote.report),

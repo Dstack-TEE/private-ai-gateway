@@ -5,18 +5,24 @@ use std::collections::BTreeSet;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aci_verify::channel::{declared_tls_pins, ChannelBindingError};
+use aci_verify::dstack::{compressed_k256_public_key_hex, KeyCustodyError};
+use aci_verify::report::raw_evidence;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::appraisal::{
-    appraise_report, AppraisalInputs, ChannelEvidence, CheckResult, CustodyEvidence, FailureCause,
-    QuoteSource,
+    appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckResult, CustodyEvidence,
+    FailureCause, QuoteSource,
 };
-use super::dstack::compressed_k256_public_key_hex;
 use super::quote::QuoteStepError;
 use super::report::AciReportValidationError;
-use super::{DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS};
+use super::{
+    current_unix_secs, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+};
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
@@ -87,7 +93,7 @@ impl AciServiceVerifierPolicy {
     /// free-form subject is otherwise the workload's own claim (§3.1:
     /// "Generic verifiers MUST NOT trust it by itself") — or the report's
     /// source-provenance image digest (uncorroborated; conformance-gaps
-    /// item 17).
+    /// item 16).
     pub(super) fn accepts_measured(
         &self,
         keyset: &WorkloadKeyset,
@@ -150,22 +156,10 @@ pub(super) enum AciServiceVerificationError {
     QuoteReportDataMismatch,
     #[error("invalid dstack event_log evidence: {0}")]
     InvalidEventLog(String),
-    #[error("missing dstack app_compose evidence")]
-    MissingAppCompose,
-    #[error("dstack app_compose preimage does not match the RTMR3-bound compose hash")]
-    AppComposeHashMismatch,
-    #[error("missing dstack KMS key custody evidence")]
-    MissingKeyCustody,
-    #[error("unsupported key custody provider: {0}")]
-    UnsupportedKeyCustodyProvider(String),
+    #[error(transparent)]
+    KeyCustody(#[from] KeyCustodyError),
     #[error("invalid dstack KMS key custody evidence: {0}")]
     InvalidKeyCustody(String),
-    #[error("missing dstack KMS receipt key custody evidence")]
-    MissingReceiptKeyCustody,
-    #[error("dstack KMS receipt key custody public key does not match the attested keyset")]
-    ReceiptKeyCustodyMismatch,
-    #[error("dstack KMS signature chain verification failed: {0}")]
-    KmsSignatureChain(String),
     #[error("dstack KMS root public key is not accepted by verifier policy")]
     KmsRootRejected,
     #[error("verified ACI/dstack upstream report did not publish a TLS SPKI binding")]
@@ -234,12 +228,22 @@ impl From<QuoteStepError> for AciServiceVerificationError {
 
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
-    pub(super) expires_at: u64,
+    pub(super) expires_at: Instant,
+    pub(super) not_after: u64,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
 }
 
 impl CachedAciServiceVerification {
+    fn remaining(&self) -> Option<Duration> {
+        let ttl = self.expires_at.checked_duration_since(Instant::now())?;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is before UNIX_EPOCH");
+        let remaining = ttl.min(Duration::from_secs(self.not_after).checked_sub(wall)?);
+        (!remaining.is_zero()).then_some(remaining)
+    }
+
     pub(super) fn event_for(
         &self,
         request: UpstreamVerificationRequest,
@@ -259,143 +263,53 @@ impl CachedAciServiceVerification {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SelectedDownstreamTlsBinding {
-    domain: String,
-    spki_sha256: String,
+/// Keep the deployment's existing error surface while the §9.1(6) selection
+/// lives in `aci-verify`.
+impl From<ChannelBindingError> for AciServiceVerificationError {
+    fn from(e: ChannelBindingError) -> Self {
+        match e {
+            ChannelBindingError::MissingTlsSpkiBinding => Self::MissingTlsSpkiBinding,
+            ChannelBindingError::MissingDownstreamTlsBinding => Self::MissingDownstreamTlsBinding,
+            ChannelBindingError::InvalidDownstreamTlsBinding(m) => {
+                Self::InvalidDownstreamTlsBinding(m)
+            }
+            ChannelBindingError::InvalidBaseUrl { origin, reason } => {
+                Self::InvalidDownstreamTlsBinding(format!(
+                    "invalid report base URL {origin:?}: {reason}"
+                ))
+            }
+            ChannelBindingError::BaseUrlWithoutHost { origin } => {
+                Self::InvalidDownstreamTlsBinding(format!("report base URL {origin:?} has no host"))
+            }
+            ChannelBindingError::InvalidBaseUrlHost { host, reason } => {
+                Self::InvalidDownstreamTlsBinding(format!(
+                    "invalid report base URL host {host:?}: {reason}"
+                ))
+            }
+            ChannelBindingError::DownstreamTlsBindingHostMismatch { reported, expected } => {
+                Self::DownstreamTlsBindingHostMismatch { reported, expected }
+            }
+            ChannelBindingError::DownstreamTlsBindingNotInKeyset => {
+                Self::DownstreamTlsBindingNotInKeyset
+            }
+        }
+    }
 }
 
+/// The channel bindings this deployment enforces for `origin`: the attested
+/// TLS entries the report declares clients pin (§4.2).
 pub(super) fn declared_tls_channel_bindings(
     keyset: &WorkloadKeyset,
     evidence: &Value,
     origin: &str,
 ) -> Result<Vec<ChannelBinding>, AciServiceVerificationError> {
-    let tls_public_keys = &keyset.tls_public_keys;
-    if tls_public_keys.is_empty() {
-        return Err(AciServiceVerificationError::MissingTlsSpkiBinding);
-    }
-
-    let has_domain_scoped_keys = tls_public_keys.iter().any(|key| key.domain.is_some());
-    if !has_domain_scoped_keys {
-        return tls_public_keys
-            .iter()
-            .map(|key| {
-                Ok(ChannelBinding::TlsSpkiSha256 {
-                    origin: origin.to_string(),
-                    spki_sha256: normalize_sha256_hex(&key.spki_sha256_hex).map_err(|e| {
-                        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-                            "invalid keyset TLS SPKI digest: {e}"
-                        ))
-                    })?,
-                })
-            })
-            .collect();
-    }
-
-    let selected = selected_downstream_tls_binding(evidence)?;
-    let origin_domain = origin_host_domain(origin)?;
-    if selected.domain != origin_domain {
-        return Err(
-            AciServiceVerificationError::DownstreamTlsBindingHostMismatch {
-                reported: selected.domain,
-                expected: origin_domain,
-            },
-        );
-    }
-
-    // §3.1 decides which entries apply to the hostname (shared with the CLI
-    // verifier); this deployment then narrows to the entry the report declares.
-    for key in keyset.tls_keys_for_host(&selected.domain) {
-        let key_spki = normalize_sha256_hex(&key.spki_sha256_hex).map_err(|e| {
-            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-                "invalid keyset TLS SPKI digest: {e}"
-            ))
-        })?;
-        if key_spki == selected.spki_sha256 {
-            return Ok(vec![ChannelBinding::TlsSpkiSha256 {
-                origin: origin.to_string(),
-                spki_sha256: selected.spki_sha256,
-            }]);
-        }
-    }
-
-    Err(AciServiceVerificationError::DownstreamTlsBindingNotInKeyset)
-}
-
-fn selected_downstream_tls_binding(
-    evidence: &Value,
-) -> Result<SelectedDownstreamTlsBinding, AciServiceVerificationError> {
-    let binding = evidence
-        .get("downstream_tls_binding")
-        .ok_or(AciServiceVerificationError::MissingDownstreamTlsBinding)?;
-    let domain = binding
-        .get("domain")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AciServiceVerificationError::InvalidDownstreamTlsBinding(
-                "downstream_tls_binding.domain must be a string".to_string(),
-            )
-        })?;
-    let spki_sha256 = binding
-        .get("spki_sha256")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            AciServiceVerificationError::InvalidDownstreamTlsBinding(
-                "downstream_tls_binding.spki_sha256 must be a string".to_string(),
-            )
-        })?;
-    Ok(SelectedDownstreamTlsBinding {
-        domain: normalize_tls_domain(domain).map_err(|e| {
-            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-                "invalid downstream_tls_binding.domain: {e}"
-            ))
-        })?,
-        spki_sha256: normalize_sha256_hex(spki_sha256).map_err(|e| {
-            AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-                "invalid downstream_tls_binding.spki_sha256: {e}"
-            ))
-        })?,
-    })
-}
-
-fn origin_host_domain(origin: &str) -> Result<String, AciServiceVerificationError> {
-    let url = reqwest::Url::parse(origin).map_err(|e| {
-        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-            "invalid report base URL {origin:?}: {e}"
-        ))
-    })?;
-    let host = url.host_str().ok_or_else(|| {
-        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-            "report base URL {origin:?} has no host"
-        ))
-    })?;
-    normalize_tls_domain(host).map_err(|e| {
-        AciServiceVerificationError::InvalidDownstreamTlsBinding(format!(
-            "invalid report base URL host {host:?}: {e}"
-        ))
-    })
-}
-
-fn normalize_tls_domain(raw: &str) -> Result<String, String> {
-    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    if domain.is_empty()
-        || domain.contains('/')
-        || domain.contains(':')
-        || domain.contains('=')
-        || domain.contains(',')
-        || domain.chars().any(char::is_whitespace)
-    {
-        return Err(format!("invalid TLS domain {raw:?}"));
-    }
-    Ok(domain)
-}
-
-fn normalize_sha256_hex(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.len() != 64 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err("expected 64 hex characters".to_string());
-    }
-    Ok(value.to_ascii_lowercase())
+    Ok(declared_tls_pins(keyset, evidence, origin)?
+        .into_iter()
+        .map(|spki_sha256| ChannelBinding::TlsSpkiSha256 {
+            origin: origin.to_string(),
+            spki_sha256,
+        })
+        .collect())
 }
 
 /// Verifies an upstream ACI service: fetches its canonical report
@@ -408,6 +322,9 @@ pub struct AciServiceUpstreamVerifier {
     cache_ttl_seconds: u64,
     request_timeout_seconds: u64,
     cache: RwLock<Option<CachedAciServiceVerification>>,
+    verify_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    appraisal: Option<fn(&AttestationReport, &str) -> Appraisal>,
     verifier_id: String,
 }
 
@@ -454,6 +371,9 @@ impl AciServiceUpstreamVerifier {
             cache_ttl_seconds,
             request_timeout_seconds,
             cache: RwLock::new(None),
+            verify_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            appraisal: None,
             verifier_id: "aci-service/v2".to_string(),
         })
     }
@@ -489,9 +409,28 @@ impl AciServiceUpstreamVerifier {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn with_cached(self, cached: CachedAciServiceVerification) -> Self {
+        *self
+            .cache
+            .write()
+            .expect("ACI service verifier cache poisoned") = Some(cached);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_appraisal(
+        mut self,
+        appraisal: fn(&AttestationReport, &str) -> Appraisal,
+    ) -> Self {
+        self.appraisal = Some(appraisal);
+        self
+    }
+
     async fn verify_uncached(
         &self,
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
+        let started = Instant::now();
         let nonce = random_nonce_hex();
         // Canonical report, not the legacy alias: the binding check below expects
         // `report_data = sha256(statement bytes)` (§3.2), which only the canonical
@@ -518,13 +457,16 @@ impl AciServiceUpstreamVerifier {
 
         let report: AttestationReport = serde_json::from_slice(&body)
             .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
-        let verified_at = now_secs();
-        // One appraisal, shared with the CLI verifier (`appraisal.rs`): this
-        // deployment folds the §9.1 outcomes into a single accept/reject.
+        #[cfg(test)]
+        if let Some(appraise) = self.appraisal {
+            return self.finish_verification(started, &body, appraise(&report, &nonce));
+        }
+        // One appraisal (`appraisal.rs`): this deployment folds the §9.1
+        // outcomes into a single accept/reject.
         let appraisal = appraise_report(AppraisalInputs {
             report: &report,
             nonce: Some(&nonce),
-            now_secs: verified_at,
+            now_secs: current_unix_secs(),
             expiry_waived: false,
             quote: QuoteSource::Online {
                 pccs_url: &self.pccs_url,
@@ -541,6 +483,15 @@ impl AciServiceUpstreamVerifier {
         .await
         .map_err(AciServiceVerificationError::InvalidJson)?;
 
+        self.finish_verification(started, &body, appraisal)
+    }
+
+    fn finish_verification(
+        &self,
+        started: Instant,
+        body: &[u8],
+        appraisal: Appraisal,
+    ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
         if let Some(problem) = appraisal.first_problem() {
             return Err(problem.into());
         }
@@ -552,35 +503,36 @@ impl AciServiceUpstreamVerifier {
             .clone();
         // Recency of a cached verification is bounded by the cache TTL and the
         // keyset's own expiry — the report carries no other freshness metadata.
-        let expires_at = verified_at
-            .saturating_add(self.cache_ttl_seconds)
-            .min(keyset.not_after);
-        let evidence = Some(super::report::raw_evidence(&body, "application/json", None));
+        if keyset.is_expired_at(current_unix_secs()) {
+            return Err(AciReportValidationError::KeysetExpired.into());
+        }
+        let evidence = Some(raw_evidence(body, "application/json", None));
         let channel_bindings = appraisal.channel_bindings;
 
         Ok(CachedAciServiceVerification {
-            expires_at,
+            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
+            not_after: keyset.not_after,
             evidence,
             channel_bindings,
         })
     }
-}
 
-#[async_trait]
-impl UpstreamVerifier for AciServiceUpstreamVerifier {
-    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let now_secs = now_secs();
-        if let Some(cached) = self
-            .cache
-            .read()
-            .expect("ACI service verifier cache poisoned")
-            .clone()
-        {
-            if now_secs < cached.expires_at {
-                return cached.event_for(request, &self.verifier_id);
+    async fn verify_serialized(
+        &self,
+        request: UpstreamVerificationRequest,
+        force: bool,
+    ) -> UpstreamVerifiedEvent {
+        if !force {
+            if let Some(event) = self.cached(&request) {
+                return event;
             }
         }
-
+        let _guard = self.verify_lock.lock().await;
+        if !force {
+            if let Some(event) = self.cached(&request) {
+                return event;
+            }
+        }
         match tokio::time::timeout(
             Duration::from_secs(self.request_timeout_seconds),
             self.verify_uncached(),
@@ -610,19 +562,50 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
     }
 }
 
+#[async_trait]
+impl UpstreamVerifier for AciServiceUpstreamVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verify_serialized(request, false).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cache = self
+            .cache
+            .read()
+            .expect("ACI service verifier cache poisoned");
+        let cached = cache.as_ref()?;
+        cached.remaining()?;
+        Some(cached.event_for(request.clone(), &self.verifier_id))
+    }
+
+    fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.cache
+            .read()
+            .expect("ACI service verifier cache poisoned")
+            .as_ref()?
+            .remaining()
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verify_serialized(request, true).await
+    }
+
+    fn invalidate(&self, _request: &UpstreamVerificationRequest) {
+        // `verify` caches one verification for the whole service regardless of
+        // the request, so invalidation clears that single entry.
+        *self
+            .cache
+            .write()
+            .expect("ACI service verifier cache poisoned") = None;
+    }
+}
+
 fn random_nonce_hex() -> String {
     // §3.2: a nonce is a 32-byte value as exactly 64 lowercase hex
     // characters; a conformant upstream rejects anything else.
     let mut nonce = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     hex::encode(nonce)
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .expect("system time is before UNIX_EPOCH")
 }
 
 /// The `report_data` field of a parsed DCAP quote, across report variants.

@@ -1,5 +1,10 @@
 # Router-Mode Provider Review
 
+Maintainer record last updated: 2026-06-10.
+
+This page records the review method and first-pass scope. For how each adapter
+verifies its provider, see [Provider verification](providers/README.md).
+
 Status: first-pass review complete. Provider-specific reports and the shared
 admission checklist are under `docs/providers/`.
 

@@ -1,101 +1,89 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type PropsWithChildren } from "react";
-import { useQuery } from "@tanstack/react-query";
-import type { DesktopApi, NotificationPreferences } from "../../shared/contracts";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { NotificationConfiguration, NotificationPreferences } from "../../shared/contracts";
 import { SettingsList, SettingsToggle } from "./settings";
-import { Sheet, SheetActions } from "./sheet";
+import { AppDialog, AppDialogBody, type DialogControl } from "./app-dialog";
 import { Alert, AlertDescription } from "./ui/alert";
+import { DialogFooter } from "./ui/dialog";
 import { Button } from "./ui/button";
-import { ErrorAlert } from "./error-alert";
-import { useErrorAlert } from "../lib/error-alert";
+import { errorMessage } from "../lib/error-message";
+import { desktopApi } from "../lib/environment";
 
-function useNotificationSettings(api: DesktopApi) {
-  const { data, error: readError, refetch } = useQuery({
-    queryKey: ["notifications"], queryFn: () => api.getNotificationSettings(), staleTime: 0,
+/**
+ * The notification preferences and the system permission. The shell asks for
+ * the permission once at startup while notifications are on; here it is asked
+ * for again when the user turns notifications on or presses Allow.
+ */
+function useNotificationSettings() {
+  const client = useQueryClient();
+  const { data, error: readError } = useQuery({
+    queryKey: ["notifications"], queryFn: () => desktopApi.getNotificationSettings(), staleTime: 0,
   });
-  const [mutationError, setError] = useState<string>();
-  const error = mutationError ?? (readError ? "Could not read notification settings." : undefined);
-  const reportError = useErrorAlert("Notification action failed", undefined, api);
-  const [busy, setBusy] = useState(false);
-  const startupRequested = useRef(false);
-  useEffect(() => {
-    if (!data || new URLSearchParams(window.location.search).has("native-dialog") || startupRequested.current) return;
-    startupRequested.current = true;
-    if (!data.preferences.enabled || data.permission !== "notDetermined") return;
-    let active = true;
-    void api.requestNotificationPermission().then(() => refresh()).catch(() => { if (active) setError("Could not request notification permission. Check system settings."); });
-    return () => { active = false; };
-  }, [api, data]);
-  const refresh = useCallback(async () => {
-    setError(undefined);
-    try { await refetch({ throwOnError: true }); }
-    catch { setError("Could not read notification settings."); }
-  }, [refetch]);
-  const change = async (key: keyof NotificationPreferences, enabled: boolean) => {
-    if (!data || busy) return;
-    setBusy(true); setError(undefined);
-    try {
-      await api.saveNotificationSettings({ ...data.preferences, [key]: enabled });
-      let permissionFailed = false;
-      if (key === "enabled" && enabled && data.permission === "notDetermined") {
-        try { await api.requestNotificationPermission(); }
-        catch { permissionFailed = true; }
-      }
-      await refresh();
-      if (permissionFailed) reportError("Notifications are enabled in this app, but system permission could not be requested.");
-    }
-    catch { reportError("Could not save notification settings."); }
-    finally { setBusy(false); }
+  const refresh = () => client.invalidateQueries({ queryKey: ["notifications"] });
+  // Resolves whether the system permission the change needs could be requested.
+  const change = useMutation({
+    mutationFn: async ({ key, enabled, current }: { key: keyof NotificationPreferences; enabled: boolean; current: NotificationConfiguration }) => {
+      await desktopApi.saveNotificationSettings({ ...current.preferences, [key]: enabled });
+      if (key !== "enabled" || !enabled || current.permission !== "notDetermined") return true;
+      return desktopApi.requestNotificationPermission().then(() => true, () => false);
+    },
+    onSettled: refresh,
+  });
+  const permission = useMutation({
+    mutationFn: async () => {
+      if (data?.permission === "notDetermined") await desktopApi.requestNotificationPermission();
+      else await desktopApi.openNotificationSettings();
+    },
+    onSettled: refresh,
+  });
+  const busy = change.isPending || permission.isPending;
+  const error = change.error ? `Could not save notification settings. ${errorMessage(change.error)}`
+    : change.data === false ? "Notifications are enabled in this app, but system permission could not be requested."
+    : permission.error ? `Could not open notification permissions. ${errorMessage(permission.error)}`
+    : readError ? `Could not read notification settings. ${errorMessage(readError)}` : undefined;
+  return {
+    data,
+    error,
+    busy,
+    // One result shows at a time: the latest action's.
+    change: (key: keyof NotificationPreferences, enabled: boolean) => {
+      if (!data) return;
+      permission.reset();
+      change.mutate({ key, enabled, current: data });
+    },
+    permissionAction: () => {
+      change.reset();
+      permission.mutate();
+    },
   };
-  const permissionAction = async () => {
-    if (busy) return;
-    setBusy(true); setError(undefined);
-    try {
-      if (data?.permission === "notDetermined") await api.requestNotificationPermission();
-      else await api.openNotificationSettings();
-      await refresh();
-    } catch { reportError("Could not open notification permissions. Check your system settings."); }
-    finally { setBusy(false); }
-  };
-  return { data, error, busy, change, permissionAction, refresh };
 }
 
-const Context = createContext<ReturnType<typeof useNotificationSettings> | null>(null);
-export function NotificationsProvider({ api, children }: PropsWithChildren<{ api: DesktopApi }>) {
-  return <Context.Provider value={useNotificationSettings(api)}>{children}</Context.Provider>;
-}
-export function useNotifications() {
-  const value = useContext(Context);
-  if (!value) throw new Error("NotificationsProvider is required");
-  return value;
-}
-
-function NotificationPermissionNotice() {
-  const { data, busy, permissionAction } = useNotifications();
+function NotificationPermissionNotice({ data, busy, permissionAction }: Pick<ReturnType<typeof useNotificationSettings>, "data" | "busy" | "permissionAction">) {
   if (!data || !data.preferences.enabled || (data.permission === "granted" && data.alertsEnabled !== false)) return null;
   const supported = data.permission !== "unsupported";
-  return <Alert className="border-warning/30 bg-warning/10">
+  return <Alert role="status" className="border-warning/30 bg-warning/10">
     <AlertDescription className="flex flex-wrap items-center justify-between gap-3 text-warning">
       <span>{data.permission === "granted" ? "Notifications are allowed, but banner alerts are disabled in system settings." : data.permission === "denied" ? "Notifications are disabled in system settings." : data.permission === "notDetermined" ? "System permission is needed to show notifications." : "System notification permission could not be confirmed. Check your desktop notification settings."}</span>
-      {supported && <Button variant="outline" size="sm" disabled={busy} onClick={() => void permissionAction()}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>}
+      {supported && <Button variant="outline" size="sm" disabled={busy} onClick={permissionAction}>{data.permission === "notDetermined" ? "Allow Notifications" : "System Settings"}</Button>}
     </AlertDescription>
   </Alert>;
 }
 
-export function NotificationsSheet({ onClose }: { onClose(): void }) {
-  const { data, error, busy, change } = useNotifications();
-  return <Sheet title="Notifications" className="notifications-sheet w-[min(580px,_calc(var(--window-dialog-width,_100vw)_-_32px))] [&[open]]:flex [&[open]]:flex-col" dismissible={!busy} onClose={onClose}>
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto py-4">
-      <NotificationPermissionNotice />
-      <ErrorAlert title="Notification settings unavailable" error={error} />
+export function NotificationsDialog(control: DialogControl) {
+  const notifications = useNotificationSettings();
+  const { data, error, busy, change } = notifications;
+  return <AppDialog {...control} title="Notifications" className="sm:max-w-xl" dismissible={!busy}>
+    <AppDialogBody className="flex flex-1 flex-col gap-4 py-1">
+      <NotificationPermissionNotice {...notifications} />
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
       {data && <>
-        <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => void change("enabled", !data.preferences.enabled)} /></SettingsList>
+        <SettingsList><SettingsToggle label="Allow notifications" checked={data.preferences.enabled} disabled={busy} onToggle={() => change("enabled", !data.preferences.enabled)} /></SettingsList>
         <SettingsList>{([
-          ["gateway", "Gateway problems", "Protection, connection and agent configuration errors."],
+          ["gateway", "Protection problems", "Protection, connection and agent configuration errors."],
           ["localApi", "Local API problems", "The local listener becomes unavailable."],
           ["verification", "Response verification failures", "A response fails proof verification."],
-        ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => void change(key, !data.preferences[key])} />)}</SettingsList>
+        ] as const).map(([key, label, description]) => <SettingsToggle key={key} label={label} description={description} checked={data.preferences[key]} disabled={busy || !data.preferences.enabled} onToggle={() => change(key, !data.preferences[key])} />)}</SettingsList>
       </>}
-    </div>
-    <SheetActions><Button variant="outline" disabled={busy} onClick={onClose}>Done</Button></SheetActions>
-  </Sheet>;
+    </AppDialogBody>
+    <DialogFooter><Button variant="outline" disabled={busy} onClick={control.onClose}>Done</Button></DialogFooter>
+  </AppDialog>;
 }

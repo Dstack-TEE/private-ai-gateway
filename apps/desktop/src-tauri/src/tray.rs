@@ -1,307 +1,305 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+//! The tray icon and its menu, which show the backend state; their actions use
+//! the same client as the window.
+
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, Submenu},
-    tray::TrayIconBuilder,
+    image::Image,
+    menu::{
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+        PredefinedMenuItem, Submenu, SubmenuBuilder,
+    },
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Wry,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use desktop_gateway::agents::{Agent, AgentStatus, ConnectOptions};
-use desktop_gateway::brand::PRODUCT_NAME as APP_NAME;
-use desktop_runtime::{client::Client, contracts::GatewayState};
+use desktop_core::{
+    agents::{Agent, AgentStatus},
+    brand::PRODUCT_NAME,
+    client::Client,
+    contracts::{AppState, NavigationTarget, VerificationStatus},
+    protection::{ProtectionOperation, ProtectionPhase},
+    protocol::rpc,
+    ui_api::{LaunchPreference, LAUNCH_PREFERENCES_EVENT},
+};
 
-/// Native menu handles mirror backend state; actions use the same client as the window.
+use crate::{notifications::show_failure, window};
+
+pub(crate) const TRAY_ID: &str = "gateway";
+
+/// The menu items that show the backend state.
 pub struct TrayMenu {
-    toggle: MenuItem<Wry>,
     status: MenuItem<Wry>,
-    autostart: CheckMenuItem<Wry>,
+    toggle: MenuItem<Wry>,
     endpoint: MenuItem<Wry>,
-    agents: Vec<(Agent, CheckMenuItem<Wry>)>,
     profiles: Submenu<Wry>,
-    profile_items: Mutex<Option<Vec<ProfileMenuItem>>>,
-    protected_icon: AtomicBool,
-    dark_icon: AtomicBool,
+    agents: Vec<(Agent, CheckMenuItem<Wry>)>,
+    autostart: CheckMenuItem<Wry>,
+    shown: Mutex<Shown>,
 }
 
-struct ProfileMenuItem {
-    id: String,
-    name: String,
-    item: CheckMenuItem<Wry>,
+/// What the menu and the icon show, so only a change updates them.
+#[derive(Default)]
+struct Shown {
+    /// Each listed profile's id and name, and its item.
+    profiles: Option<Vec<(String, String, CheckMenuItem<Wry>)>>,
+    /// The backend instance and agents revision the agent items show.
+    agents: Option<(Option<String>, u64)>,
+    /// Whether the icon shows protection, and whether it is the dark variant.
+    icon: (bool, bool),
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let state = GatewayState::default();
-    let status_line = protection_title(&state);
-    let toggle = MenuItemBuilder::with_id("toggle", protection_action(&state)).build(app)?;
-    let status = MenuItemBuilder::with_id("status", &status_line)
+    let protection = AppState::default().protection();
+    let status = MenuItemBuilder::with_id("status", &protection.title)
         .enabled(false)
         .build(app)?;
-    let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
-        .checked(crate::autostart::is_enabled(app).unwrap_or(false))
-        .build(app)?;
+    let toggle = MenuItemBuilder::with_id("toggle", &protection.action.label).build(app)?;
     let endpoint = MenuItemBuilder::with_id("copy-endpoint", "Copy Local API Endpoint")
         .enabled(false)
         .build(app)?;
-    let profiles = Submenu::with_items(app, "Profiles", true, &[])?;
-    let agents_menu = Submenu::with_items(app, "Agents", true, &[])?;
+    let profiles = SubmenuBuilder::new(app, "Profiles").build()?;
+    let mut agents_menu = SubmenuBuilder::new(app, "Agents");
     let mut agents = Vec::new();
     for agent in Agent::ALL {
         let item = CheckMenuItemBuilder::with_id(format!("agent:{}", agent.id()), agent.name())
+            .checked(false)
             .enabled(false)
             .build(app)?;
-        agents_menu.append(&item)?;
+        agents_menu = agents_menu.item(&item);
         agents.push((agent, item));
     }
-    agents_menu.append(&tauri::menu::PredefinedMenuItem::separator(app)?)?;
-    agents_menu.append(&MenuItemBuilder::with_id("agents", "Manage Agents…").build(app)?)?;
+    let autostart = CheckMenuItemBuilder::with_id("autostart", "Open at Login")
+        .checked(crate::autostart::is_enabled(app).unwrap_or(false))
+        .build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&status)
         .item(&toggle)
         .separator()
-        .text("open", format!("Open {APP_NAME}"))
+        .text("open", format!("Open {PRODUCT_NAME}"))
         .text("settings", "Settings…")
         .separator()
         .item(&endpoint)
         .text("copy-key", "Copy Local API Key")
         .separator()
         .item(&profiles)
-        .item(&agents_menu)
+        .item(
+            &agents_menu
+                .separator()
+                .text("agents", "Manage Agents…")
+                .build()?,
+        )
         .separator()
         .item(&autostart)
         .separator()
-        .text("quit", format!("Quit {APP_NAME}"))
+        .text("quit", format!("Quit {PRODUCT_NAME}"))
         .text("stop-all-quit", "Stop All and Quit…")
         .build()?;
     app.manage(TrayMenu {
-        toggle,
         status,
-        autostart,
+        toggle,
         endpoint,
-        agents,
         profiles,
-        profile_items: Mutex::new(None),
-        protected_icon: AtomicBool::new(false),
-        dark_icon: AtomicBool::new(false),
+        agents,
+        autostart,
+        shown: Mutex::default(),
     });
-
-    let icon = tray_icon(false, false)?;
-    TrayIconBuilder::with_id("gateway")
-        .icon(icon)
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon_image((false, false))?)
         .icon_as_template(cfg!(target_os = "macos"))
-        .tooltip(format!("{APP_NAME} - {status_line}"))
+        .tooltip(tooltip(&protection.title))
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle" => toggle_or_open_settings(app),
-            "open" => show_window(app),
-            "settings" | "agents" => {
-                show_window(app);
-                let _ = app.emit(crate::menu::NAVIGATE_EVENT, event.id().as_ref());
-            }
-            "autostart" => sync_autostart(app),
-            "quit" => {
-                app.exit(0);
-            }
-            "stop-all-quit" => {
-                show_window(app);
-                let _ = app.emit("gateway://confirm-stop-all", ());
-            }
-            id if matches!(id, "profiles" | "copy-key" | "copy-endpoint")
-                || id.starts_with("profile:")
-                || id.starts_with("agent:") =>
+        // Windows opens a notification area app's window on a left click and
+        // its menu on a right click; macOS and Linux show the menu.
+        .show_menu_on_left_click(!cfg!(target_os = "windows"))
+        .on_tray_icon_event(|tray, event| {
+            if cfg!(target_os = "windows")
+                && matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                )
             {
-                perform_action(app, id.to_string())
+                window::show(tray.app_handle());
             }
-            _ => {}
         })
         .build(app)?;
     Ok(())
 }
 
-fn perform_action(app: &AppHandle, id: String) {
+/// What a tray item, or the menu bar's Settings… item, which shares its id,
+/// does.
+#[derive(Debug, PartialEq)]
+enum Action {
+    Toggle,
+    Open,
+    Navigate(NavigationTarget),
+    OpenAtLogin,
+    Quit,
+    Background(Task),
+}
+
+/// An action that runs off the main thread and reports its failure in a
+/// notification.
+#[derive(Debug, PartialEq)]
+enum Task {
+    CopyEndpoint,
+    CopyKey,
+    ActivateProfile(String),
+    ToggleAgent(String),
+}
+
+impl Action {
+    fn of(id: &str) -> Option<Self> {
+        Some(match id {
+            "toggle" => Self::Toggle,
+            "open" => Self::Open,
+            "settings" => Self::Navigate(NavigationTarget::Settings),
+            "agents" => Self::Navigate(NavigationTarget::Agents),
+            "profiles" => Self::Navigate(NavigationTarget::Profiles),
+            "stop-all-quit" => Self::Navigate(NavigationTarget::ConfirmStopAll),
+            "autostart" => Self::OpenAtLogin,
+            "quit" => Self::Quit,
+            "copy-endpoint" => Self::Background(Task::CopyEndpoint),
+            "copy-key" => Self::Background(Task::CopyKey),
+            _ => Self::Background(match id.strip_prefix("profile:") {
+                Some(profile_id) => Task::ActivateProfile(profile_id.into()),
+                None => Task::ToggleAgent(id.strip_prefix("agent:")?.into()),
+            }),
+        })
+    }
+}
+
+impl Task {
+    fn failure(&self) -> &'static str {
+        match self {
+            Self::CopyEndpoint => "Could not copy the Local API endpoint",
+            Self::CopyKey => "Could not copy the Local API key",
+            Self::ActivateProfile(_) => "Could not switch profiles",
+            Self::ToggleAgent(_) => "Could not change the agent connection",
+        }
+    }
+
+    fn run(self, app: &AppHandle, client: &Client) -> Result<(), String> {
+        match self {
+            Self::CopyEndpoint => {
+                let endpoint = client.state()?.proxy_url;
+                copy(app, endpoint.ok_or("The Local API is unavailable")?)
+            }
+            Self::CopyKey => copy(app, client.call(rpc::GetClientKey)?),
+            Self::ActivateProfile(profile_id) => {
+                client.call(rpc::ActivateProfile { profile_id })?;
+                Ok(())
+            }
+            Self::ToggleAgent(agent_id) => {
+                let result = set_agent_connection(app, client, &agent_id);
+                // A check item flips when clicked; show what actually applies.
+                refresh_agents(app);
+                result
+            }
+        }
+    }
+}
+
+/// `menu::handle_event` is the one menu event handler.
+pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    match Action::of(id) {
+        Some(Action::Toggle) => toggle_or_set_up(app),
+        Some(Action::Open) => window::show(app),
+        Some(Action::Navigate(target)) => window::navigate(app, target),
+        Some(Action::OpenAtLogin) => sync_autostart(app),
+        Some(Action::Quit) => app.exit(0),
+        Some(Action::Background(task)) => in_background(app, task),
+        None => {}
+    }
+}
+
+/// Runs `task`, reports its failure, and then shows the state that applies.
+fn in_background(app: &AppHandle, task: Task) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let client = app.state::<Arc<Client>>().inner().clone();
-        let result = (|| -> Result<(), String> {
-            match id.as_str() {
-                "copy-endpoint" => {
-                    let endpoint = client
-                        .state()?
-                        .proxy_url
-                        .ok_or("Local API is unavailable")?;
-                    app.clipboard()
-                        .write_text(endpoint)
-                        .map_err(|_| "Cannot copy the endpoint")?;
-                }
-                "copy-key" => {
-                    app.clipboard()
-                        .write_text(client.client_key()?)
-                        .map_err(|_| "Cannot copy the client key")?;
-                }
-                "profiles" => {
-                    show_window(&app);
-                    crate::native_dialog::open_profiles(&app, false)?;
-                }
-                _ if id.starts_with("profile:") => {
-                    client.activate_profile(id[8..].to_string())?;
-                }
-                _ if id.starts_with("agent:") => {
-                    let agent_id = &id[6..];
-                    let agent = client
-                        .list_agents()?
-                        .into_iter()
-                        .find(|agent| agent.id == agent_id)
-                        .ok_or("Agent is no longer available")?;
-                    if !agent.installed && !agent.recorded {
-                        return Err("Agent is not installed".into());
-                    }
-                    let connect = !agent.recorded;
-                    let options = ConnectOptions::default();
-                    let preview =
-                        client.preview_agent(agent.id.clone(), connect, options.clone())?;
-                    client.apply_agent(agent.id, connect, preview.revision, options)?;
-                }
-                _ => return Ok(()),
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let scope = if id.starts_with("agent:") {
-                crate::SurfaceErrorScope::Agents
-            } else if id.starts_with("profile:") || id == "profiles" {
-                crate::SurfaceErrorScope::Profiles
-            } else {
-                crate::SurfaceErrorScope::LocalApi
-            };
-            crate::report_surface_error(&app, scope, error);
-            show_window(&app);
+        let failure = task.failure();
+        if let Err(error) = task.run(&app, &client) {
+            show_failure(&app, failure, &error);
         }
-        let state = client.state().unwrap_or_else(|_| client.cached_state());
-        sync(&app, &state);
-        if id.starts_with("agent:") {
-            if let Ok(agents) = client.list_agents() {
-                sync_agents(&app, &agents);
-            }
-            let _ = app.emit("gateway://agents-changed", ());
-        }
-    });
-}
-
-pub fn sync_agents(app: &AppHandle, agents: &[AgentStatus]) {
-    let handle = app.clone();
-    let agents = agents.to_vec();
-    let _ = app.run_on_main_thread(move || sync_agents_inner(&handle, &agents));
-}
-
-fn sync_agents_inner(app: &AppHandle, agents: &[AgentStatus]) {
-    let Some(menu) = app.try_state::<TrayMenu>() else {
-        return;
-    };
-    for (kind, item) in &menu.agents {
-        let agent = agents.iter().find(|agent| agent.id == kind.id());
-        let _ = item.set_checked(agent.is_some_and(|agent| agent.recorded));
-        let _ = item.set_enabled(
-            agent.is_some_and(|agent| agent.recorded || (agent.installed && agent.error.is_none())),
+        sync(
+            &app,
+            &client.state().unwrap_or_else(|_| client.cached_state()),
         );
-        let suffix = match agent {
-            Some(agent) if agent.attention.is_some() || agent.error.is_some() => {
-                " - Needs attention"
-            }
-            Some(agent) if agent.installed => "",
-            _ => " - Not installed",
-        };
-        let _ = item.set_text(format!("{}{suffix}", kind.name()));
-    }
+    });
 }
 
-fn sync_profiles(app: &AppHandle, state: &GatewayState, menu: &TrayMenu) -> tauri::Result<()> {
-    let Ok(mut cached) = menu.profile_items.lock() else {
-        return Ok(());
-    };
-    let changed = cached.as_ref().is_none_or(|items| {
-        items.len() != state.profiles.len()
-            || items
-                .iter()
-                .zip(&state.profiles)
-                .any(|(entry, profile)| entry.id != profile.id || entry.name != profile.name)
-    });
-    if changed {
-        while menu.profiles.remove_at(0)?.is_some() {}
-        let mut items = Vec::new();
-        for profile in &state.profiles {
-            let item =
-                CheckMenuItemBuilder::with_id(format!("profile:{}", profile.id), &profile.name)
-                    .build(app)?;
-            menu.profiles.append(&item)?;
-            items.push(ProfileMenuItem {
-                id: profile.id.clone(),
-                name: profile.name.clone(),
-                item,
-            });
-        }
-        if !items.is_empty() {
-            menu.profiles
-                .append(&tauri::menu::PredefinedMenuItem::separator(app)?)?;
-        }
-        menu.profiles.append(
-            &MenuItemBuilder::with_id(
-                "profiles",
-                if items.is_empty() {
-                    "New Profile…"
-                } else {
-                    "Manage Profiles…"
-                },
-            )
-            .build(app)?,
-        )?;
-        *cached = Some(items);
-    }
-    for (entry, profile) in cached.iter().flatten().zip(&state.profiles) {
-        let _ = entry
-            .item
-            .set_checked(profile.id == state.active_profile_id);
-        let _ = entry
-            .item
-            .set_enabled(state.status != "verifying" && profile.credential_saved);
+fn copy(app: &AppHandle, text: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|_| "The clipboard is unavailable".into())
+}
+
+/// Connects a disconnected agent, or disconnects a connected one. Codex's
+/// background service keeps the previous settings, so while it runs the
+/// window asks whether to stop it, as after a change there. The backend
+/// never reports it running in the Mac App Store build.
+fn set_agent_connection(app: &AppHandle, client: &Client, agent_id: &str) -> Result<(), String> {
+    let agent = client
+        .call(rpc::ListAgents)?
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or("The agent is no longer available")?;
+    client.call(rpc::SetAgentConnection {
+        agent_id: agent.id.clone(),
+        connect: !agent.recorded,
+    })?;
+    if agent.id == Agent::Codex.id()
+        && client
+            .call(rpc::AgentServiceRunning { agent_id: agent.id })
+            .unwrap_or(false)
+    {
+        window::navigate(app, NavigationTarget::ConfirmCodexServiceStop);
     }
     Ok(())
 }
 
-fn toggle_or_open_settings(app: &AppHandle) {
+/// Starts or stops protection, or opens profile setup when there is no
+/// profile to start with.
+fn toggle_or_set_up(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let client = app.state::<std::sync::Arc<Client>>();
+        let client = app.state::<Arc<Client>>();
         let Ok(state) = client.state() else {
             sync(&app, &client.cached_state());
-            show_window(&app);
+            window::show(&app);
             return;
         };
-        if !protection_action_enabled(&state) {
-            sync(&app, &state);
-            return;
+        let action = state.protection().action;
+        if !action.enabled {
+            return sync(&app, &state);
         }
-        if !should_stop(&state) && !active_profile_ready(&state) {
-            sync(&app, &state);
-            show_window(&app);
-            let opened = if state.profiles.is_empty() {
-                crate::native_dialog::open(&app, "setup-profile", false, None, None)
-            } else {
-                crate::native_dialog::open_profiles(&app, true)
-            };
-            if let Err(error) = opened {
-                crate::report_surface_error(&app, crate::SurfaceErrorScope::Profiles, error);
+        let result = match action.operation {
+            ProtectionOperation::SetUpProfile => {
+                sync(&app, &state);
+                return window::navigate(&app, NavigationTarget::ProfileSetup);
             }
-            return;
+            ProtectionOperation::Stop => client
+                .call(rpc::Stop)
+                .map_err(|error| ("Could not stop protection", error)),
+            ProtectionOperation::Start => client
+                .call(rpc::Start {
+                    config: state.config,
+                })
+                .map_err(|error| ("Could not start protection", error)),
+        };
+        if let Err((title, error)) = result {
+            show_failure(&app, title, &error.to_string());
         }
-        if let Err(error) = client.toggle() {
-            crate::report_surface_error(&app, crate::SurfaceErrorScope::Protection, error);
-            show_window(&app);
-        }
-        let state = client.state().unwrap_or_else(|_| client.cached_state());
-        sync(&app, &state);
+        sync(
+            &app,
+            &client.state().unwrap_or_else(|_| client.cached_state()),
+        );
     });
 }
 
@@ -309,20 +307,25 @@ fn sync_autostart(app: &AppHandle) {
     let menu = app.state::<TrayMenu>();
     let checked = menu.autostart.is_checked().unwrap_or(false);
     let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let menu = app.state::<TrayMenu>();
-        let result = set_open_at_login(&app, checked);
+    tauri::async_runtime::spawn(async move {
+        let client = app.state::<Arc<Client>>().inner().clone();
+        let host = crate::ui_api::TauriHost(app.clone());
+        let result = desktop_core::ui_api::set_launch_preference(
+            &client,
+            &host,
+            LaunchPreference::OpenAtLogin,
+            checked,
+        )
+        .await;
         if let Err(error) = result {
+            let menu = app.state::<TrayMenu>();
             let _ = menu.autostart.set_checked(!checked);
-            crate::report_surface_error(
-                &app,
-                crate::SurfaceErrorScope::Settings,
-                format!("Open at Login could not be changed: {error}"),
-            );
-        }
-        let client = app.state::<std::sync::Arc<Client>>();
-        if let Ok(preferences) = crate::load_launch_preferences(&app, &client) {
-            let _ = app.emit("gateway://launch-preferences", preferences);
+            show_failure(&app, "Could not change Open at Login", &error.to_string());
+            // Keep open windows in sync with the preference that actually applies.
+            if let Ok(preferences) = desktop_core::ui_api::launch_preferences(&client, &host).await
+            {
+                let _ = app.emit(LAUNCH_PREFERENCES_EVENT, preferences);
+            }
         }
     });
 }
@@ -336,38 +339,126 @@ pub fn set_open_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Keep the status separate from the action the user can take.
-pub fn sync(app: &AppHandle, state: &GatewayState) {
+/// Shows `state` in the tray, on the main thread; the status stays separate
+/// from the action the user can take.
+pub fn sync(app: &AppHandle, state: &AppState) {
     let handle = app.clone();
     let state = state.clone();
-    let _ = app.run_on_main_thread(move || sync_inner(&handle, &state));
+    let _ = app.run_on_main_thread(move || update(&handle, &state));
 }
 
-fn sync_inner(app: &AppHandle, state: &GatewayState) {
-    let status_line = protection_title(state);
+fn update(app: &AppHandle, state: &AppState) {
+    let protection = state.protection();
     if let Some(menu) = app.try_state::<TrayMenu>() {
-        let _ = menu.status.set_text(&status_line);
-        let _ = menu.toggle.set_text(protection_action(state));
-        let _ = menu.toggle.set_enabled(protection_action_enabled(state));
+        let _ = menu.status.set_text(&protection.title);
+        let _ = menu.toggle.set_text(&protection.action.label);
+        let _ = menu.toggle.set_enabled(protection.action.enabled);
         let _ = menu.endpoint.set_enabled(state.proxy_url.is_some());
-        if let Err(error) = sync_profiles(app, state, &menu) {
-            eprintln!("Cannot refresh tray profiles: {error}");
-        }
-        let protected = state.is_protected();
-        if menu.protected_icon.load(Ordering::Relaxed) != protected {
-            if let Err(error) = apply_icon(
-                app,
-                &menu,
-                protected,
-                menu.dark_icon.load(Ordering::Relaxed),
-            ) {
-                eprintln!("Cannot update tray protection state: {error}");
+        // Profiles are unknown until the backend answers.
+        let _ = menu
+            .profiles
+            .set_enabled(protection.phase != ProtectionPhase::Starting);
+        if let Ok(mut shown) = menu.shown.lock() {
+            if let Err(error) = show_profiles(app, &menu.profiles, &mut shown.profiles, state) {
+                tracing::warn!("Cannot refresh tray profiles: {error}");
+            }
+            let agents = (state.backend_instance.clone(), state.agents_revision);
+            if state.backend_instance.is_some() && shown.agents.as_ref() != Some(&agents) {
+                shown.agents = Some(agents);
+                refresh_agents(app);
+            }
+            let icon = (protection.phase == ProtectionPhase::Protected, shown.icon.1);
+            if let Err(error) = show_icon(app, &mut shown.icon, icon) {
+                tracing::warn!("Cannot update tray protection state: {error}");
             }
         }
     }
-    if let Some(tray) = app.tray_by_id("gateway") {
-        let _ = tray.set_tooltip(Some(format!("{APP_NAME} - {status_line}")));
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip(&protection.title)));
     }
+}
+
+/// Lists the profiles, rebuilding the submenu when they changed, and marks
+/// the active one.
+fn show_profiles(
+    app: &AppHandle,
+    submenu: &Submenu<Wry>,
+    listed: &mut Option<Vec<(String, String, CheckMenuItem<Wry>)>>,
+    state: &AppState,
+) -> tauri::Result<()> {
+    let unchanged = listed.as_ref().is_some_and(|items| {
+        let listed = items.iter().map(|(id, name, _)| (id, name));
+        listed.eq(state
+            .profiles
+            .iter()
+            .map(|profile| (&profile.id, &profile.name)))
+    });
+    if !unchanged {
+        while submenu.remove_at(0)?.is_some() {}
+        let mut items = Vec::new();
+        for profile in &state.profiles {
+            let item =
+                CheckMenuItemBuilder::with_id(format!("profile:{}", profile.id), &profile.name)
+                    .build(app)?;
+            submenu.append(&item)?;
+            items.push((profile.id.clone(), profile.name.clone(), item));
+        }
+        let manage = if items.is_empty() {
+            "New Profile…"
+        } else {
+            submenu.append(&PredefinedMenuItem::separator(app)?)?;
+            "Manage Profiles…"
+        };
+        submenu.append(&MenuItemBuilder::with_id("profiles", manage).build(app)?)?;
+        *listed = Some(items);
+    }
+    for ((_, _, item), profile) in listed.iter().flatten().zip(&state.profiles) {
+        let _ = item.set_checked(profile.id == state.active_profile_id);
+        let _ = item
+            .set_enabled(state.status != VerificationStatus::Verifying && profile.credential_saved);
+    }
+    Ok(())
+}
+
+/// Follows the agents the backend reports; they change with its
+/// `agents_revision` and when another backend answers.
+fn refresh_agents(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let client = app.state::<Arc<Client>>().inner().clone();
+        match client.call(rpc::ListAgents) {
+            Ok(agents) => {
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || show_agents(&handle, &agents));
+            }
+            Err(error) => tracing::warn!("Cannot refresh tray agents: {error}"),
+        }
+    });
+}
+
+fn show_agents(app: &AppHandle, agents: &[AgentStatus]) {
+    let Some(menu) = app.try_state::<TrayMenu>() else {
+        return;
+    };
+    for (kind, item) in &menu.agents {
+        let agent = agents.iter().find(|agent| agent.id == kind.id());
+        let _ = item.set_checked(agent.is_some_and(|agent| agent.recorded));
+        let _ = item.set_enabled(
+            agent.is_some_and(|agent| agent.recorded || (agent.installed && agent.error.is_none())),
+        );
+        let suffix = match agent {
+            Some(agent) if agent.attention.is_some() || agent.error.is_some() => {
+                " – Needs Attention"
+            }
+            Some(agent) if agent.installed => "",
+            _ => " – Not Detected",
+        };
+        let _ = item.set_text(format!("{}{suffix}", kind.name()));
+    }
+}
+
+fn tooltip(status: &str) -> String {
+    format!("{PRODUCT_NAME} – {status}")
 }
 
 /// System theme observers call this independently of the application's theme.
@@ -375,291 +466,92 @@ fn sync_inner(app: &AppHandle, state: &GatewayState) {
 pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
-        if let Some(menu) = handle.try_state::<TrayMenu>() {
-            if menu.dark_icon.load(Ordering::Relaxed) != dark {
-                if let Err(error) = apply_icon(
-                    &handle,
-                    &menu,
-                    menu.protected_icon.load(Ordering::Relaxed),
-                    dark,
-                ) {
-                    eprintln!("Cannot update tray system theme: {error}");
-                }
-            }
+        let Some(menu) = handle.try_state::<TrayMenu>() else {
+            return;
+        };
+        let Ok(mut shown) = menu.shown.lock() else {
+            return;
+        };
+        let icon = (shown.icon.0, dark);
+        if let Err(error) = show_icon(&handle, &mut shown.icon, icon) {
+            tracing::warn!("Cannot update tray system theme: {error}");
         }
     })
 }
 
-fn apply_icon(app: &AppHandle, menu: &TrayMenu, protected: bool, dark: bool) -> tauri::Result<()> {
-    if let Some(tray) = app.tray_by_id("gateway") {
-        tray.set_icon_with_as_template(
-            Some(tray_icon(protected, dark)?),
-            cfg!(target_os = "macos"),
-        )?;
-        menu.protected_icon.store(protected, Ordering::Relaxed);
-        menu.dark_icon.store(dark, Ordering::Relaxed);
+/// Shows the `(protected, dark)` icon unless the tray already does.
+fn show_icon(app: &AppHandle, shown: &mut (bool, bool), icon: (bool, bool)) -> tauri::Result<()> {
+    if *shown == icon {
+        return Ok(());
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        tray.set_icon_with_as_template(Some(icon_image(icon)?), cfg!(target_os = "macos"))?;
+        *shown = icon;
     }
     Ok(())
 }
 
-fn tray_icon(protected: bool, dark: bool) -> tauri::Result<tauri::image::Image<'static>> {
-    let image =
-        tauri::image::Image::from_bytes(include_bytes!("../../assets/tray/trayTemplate@2x.png"))?;
-    let mut rgba = image.rgba().to_vec();
-    let foreground = if !cfg!(target_os = "macos") && dark {
-        255
-    } else {
-        0
+/// Black icons are the macOS template and the light-theme icons elsewhere.
+fn icon_image((protected, dark): (bool, bool)) -> tauri::Result<Image<'static>> {
+    let bytes: &'static [u8] = match (protected, dark) {
+        (true, false) => include_bytes!("../../assets/tray/protected.png"),
+        (false, false) => include_bytes!("../../assets/tray/unprotected.png"),
+        (true, true) => include_bytes!("../../assets/tray/protected-dark.png"),
+        (false, true) => include_bytes!("../../assets/tray/unprotected-dark.png"),
     };
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel[..3].fill(foreground);
-        if !protected {
-            pixel[3] = (u16::from(pixel[3]) * 45 / 100) as u8;
-        }
-    }
-    Ok(tauri::image::Image::new_owned(
-        rgba,
-        image.width(),
-        image.height(),
-    ))
+    Image::from_bytes(bytes)
 }
-
-fn protection_title(state: &GatewayState) -> String {
-    if !state.is_protected() {
-        return menu_state(state).into();
-    }
-    let mode = if state.config.require_production_os {
-        "Protected"
-    } else {
-        "Protected (Dev mode)"
-    };
-    let Some(since) = state.protected_since else {
-        return mode.into();
-    };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let minutes = now.saturating_sub(since) / 60;
-    format!("{mode} - {}h {:02}m", minutes / 60, minutes % 60)
-}
-
-#[derive(Default)]
-pub struct MainWindowPresentation {
-    ready: AtomicBool,
-    requested: AtomicBool,
-}
-
-pub fn main_window_ready(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("Only the main window can announce its content is ready".into());
-    }
-    let app = window.app_handle();
-    let presentation = app.state::<MainWindowPresentation>();
-    if !presentation.ready.swap(true, Ordering::SeqCst)
-        && presentation.requested.load(Ordering::SeqCst)
-    {
-        show_window(app);
-    }
-    Ok(())
-}
-
-pub fn show_window(app: &AppHandle) {
-    let presentation = app.state::<MainWindowPresentation>();
-    presentation.requested.store(true, Ordering::SeqCst);
-    if !presentation.ready.load(Ordering::SeqCst) {
-        return;
-    }
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let Some(window) = handle.get_webview_window("main") else {
-            return;
-        };
-        set_dock_visibility(true);
-        let _ = window.show();
-        activate_app();
-        let _ = window.set_focus();
-    });
-}
-
-pub fn hide_window(app: &AppHandle) {
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Some(window) = handle.get_webview_window("main") {
-            let _ = window.hide();
-        }
-        set_dock_visibility(false);
-    });
-}
-
-#[cfg(target_os = "macos")]
-#[allow(deprecated)]
-fn set_dock_visibility(visible: bool) {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-
-    if let Some(marker) = MainThreadMarker::new() {
-        let policy = if visible {
-            NSApplicationActivationPolicy::Regular
-        } else {
-            NSApplicationActivationPolicy::Accessory
-        };
-        NSApplication::sharedApplication(marker).setActivationPolicy(policy);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn set_dock_visibility(_visible: bool) {}
-
-fn should_stop(state: &GatewayState) -> bool {
-    state.should_stop_protection()
-}
-
-fn protection_action_enabled(state: &GatewayState) -> bool {
-    !(state.status == "verifying" && state.configuration_verification)
-        && (should_stop(state) || state.endpoint_error.is_none())
-}
-
-fn protection_action(state: &GatewayState) -> &'static str {
-    if state.reconnecting {
-        return "Cancel reconnection";
-    }
-    if state.status == "verifying" && !state.configuration_verification {
-        "Cancel verification"
-    } else if should_stop(state) {
-        "Stop protection"
-    } else if !active_profile_ready(state) {
-        "Set Up Profile…"
-    } else {
-        "Start protection"
-    }
-}
-
-fn menu_state(state: &GatewayState) -> &'static str {
-    if state.reconnecting {
-        return "Reconnecting - requests paused";
-    }
-    if state.endpoint_error.is_some() {
-        return "Local API unavailable";
-    }
-    if state.status == "stopped" && !active_profile_ready(state) {
-        return "Not protected - profile required";
-    }
-    match state.status.as_str() {
-        "verifying" if state.configuration_verification => "Verifying configuration",
-        "verifying" => "Verifying service",
-        "verified" if state.configuration_verification => "Not protected - configuration verified",
-        "verified" if !state.api_key_saved => "Not protected - API key required",
-        "verified" => "Protected",
-        "blocked" => "Protection blocked - service identity changed",
-        "error" => "Not protected - verification failed",
-        _ => "Not protected",
-    }
-}
-
-fn active_profile_ready(state: &GatewayState) -> bool {
-    state.api_key_saved
-        && state
-            .profiles
-            .iter()
-            .any(|profile| profile.id == state.active_profile_id && profile.credential_saved)
-}
-
-#[cfg(target_os = "macos")]
-#[allow(deprecated)]
-fn activate_app() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
-
-    if let Some(marker) = MainThreadMarker::new() {
-        NSApplication::sharedApplication(marker).activateIgnoringOtherApps(true);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_app() {}
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_state, protection_action, protection_action_enabled, should_stop};
-    use desktop_runtime::contracts::{
-        ConfidentialProfile, GatewayState, ProfileAuth, ServiceProvider,
-    };
-
-    fn state(status: &str, api_key_saved: bool) -> GatewayState {
-        GatewayState {
-            status: status.to_string(),
-            api_key_saved,
-            ..GatewayState::default()
-        }
-    }
+    use super::*;
 
     #[test]
-    fn protection_action_matches_the_runtime_operation() {
-        assert_eq!(
-            menu_state(&GatewayState::default()),
-            "Not protected - profile required"
-        );
-        assert_eq!(menu_state(&state("verified", true)), "Protected");
-        assert_eq!(
-            menu_state(&state("verified", false)),
-            "Not protected - API key required"
-        );
-        assert_eq!(
-            protection_action(&state("verified", true)),
-            "Stop protection"
-        );
-        assert_eq!(
-            protection_action(&state("verifying", false)),
-            "Cancel verification"
-        );
-        assert!(should_stop(&state("verifying", false)));
-        assert!(should_stop(&state("blocked", true)));
-        assert!(!should_stop(&state("error", true)));
-        for status in ["stopped", "error"] {
-            let mut reconnecting = state(status, true);
-            reconnecting.reconnecting = true;
-            assert!(should_stop(&reconnecting));
-            assert_eq!(protection_action(&reconnecting), "Cancel reconnection");
-            reconnecting.configuration_verification = true;
-            assert!(!should_stop(&reconnecting));
+    fn menu_items_route_to_their_actions() {
+        let background = |task: Task| Some(Action::Background(task));
+        for (id, action) in [
+            ("toggle", Some(Action::Toggle)),
+            ("open", Some(Action::Open)),
+            (
+                "settings",
+                Some(Action::Navigate(NavigationTarget::Settings)),
+            ),
+            ("agents", Some(Action::Navigate(NavigationTarget::Agents))),
+            (
+                "profiles",
+                Some(Action::Navigate(NavigationTarget::Profiles)),
+            ),
+            (
+                "stop-all-quit",
+                Some(Action::Navigate(NavigationTarget::ConfirmStopAll)),
+            ),
+            ("autostart", Some(Action::OpenAtLogin)),
+            ("quit", Some(Action::Quit)),
+            ("copy-endpoint", background(Task::CopyEndpoint)),
+            ("copy-key", background(Task::CopyKey)),
+            (
+                "profile:work",
+                background(Task::ActivateProfile("work".into())),
+            ),
+            ("agent:codex", background(Task::ToggleAgent("codex".into()))),
+            ("status", None),
+            ("documentation", None),
+        ] {
+            assert_eq!(Action::of(id), action, "{id}");
         }
-    }
-
-    #[test]
-    fn stopped_state_requires_a_saved_active_credential() {
-        let mut ready = state("stopped", true);
-        ready.active_profile_id = "profile-1".to_string();
-        ready.profiles.push(ConfidentialProfile {
-            credential_ref: None,
-            id: "profile-1".to_string(),
-            name: "Private AI".to_string(),
-            provider: ServiceProvider::Custom,
-            remote_url: "https://private.example.com".to_string(),
-            auth: ProfileAuth::ApiKey,
-            credential_saved: true,
-            verified_at: None,
-        });
-        assert_eq!(menu_state(&ready), "Not protected");
-        assert_eq!(protection_action(&ready), "Start protection");
-
-        ready.status = "verified".into();
-        ready.configuration_verification = true;
-        assert!(!should_stop(&ready));
-        assert_eq!(protection_action(&ready), "Start protection");
-        assert_eq!(menu_state(&ready), "Not protected - configuration verified");
-        assert!(protection_action_enabled(&ready));
-
-        ready.status = "verifying".into();
-        assert!(!should_stop(&ready));
-        assert!(!protection_action_enabled(&ready));
-        assert_eq!(protection_action(&ready), "Start protection");
-
-        ready.status = "stopped".into();
-        ready.configuration_verification = false;
-
-        ready.profiles[0].credential_saved = false;
-        assert_eq!(menu_state(&ready), "Not protected - profile required");
-        assert_eq!(protection_action(&ready), "Set Up Profile…");
+        for (task, failure) in [
+            (Task::CopyEndpoint, "Could not copy the Local API endpoint"),
+            (Task::CopyKey, "Could not copy the Local API key"),
+            (
+                Task::ActivateProfile("work".into()),
+                "Could not switch profiles",
+            ),
+            (
+                Task::ToggleAgent("codex".into()),
+                "Could not change the agent connection",
+            ),
+        ] {
+            assert_eq!(task.failure(), failure);
+        }
     }
 }

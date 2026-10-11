@@ -1,56 +1,45 @@
-import { useState } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { useMutation } from "@tanstack/react-query";
 import { Download, Upload } from "lucide-react";
-import type { DesktopApi } from "../../shared/contracts";
 import { IconButton } from "./controls";
 import { SettingsLink } from "./settings";
-import { showErrorAlert } from "../lib/error-alert";
+import { useConfirm } from "./confirm";
+import { errorMessage } from "../lib/error-message";
+import { desktopApi } from "../lib/environment";
 
-const filters = [{ name: "JSON", extensions: ["json"] }];
+/** The mutation key of an import or export, which keeps the Profiles dialog open. */
+export const PROFILE_TRANSFER = ["profile-transfer"];
 
-export function ProfileTransfer({ api, disabled, onBusy, onMessage }: {
-  api: DesktopApi; disabled: boolean; onBusy(busy: boolean): void; onMessage(message: string, failed: boolean): void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const run = async (importing: boolean) => {
-    if (busy) return;
-    setBusy(true); onBusy(true);
-    try {
-      if (importing) {
-        const path = await open({ title: "Import Profile Configurations", multiple: false, filters });
-        if (!path) return;
-        const backup = await api.readProfileBackup(path);
-        const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");
-        if (!await api.confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", ..." : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return;
-        const result = await api.importProfiles(backup);
-        onMessage(`${result.imported} imported, ${result.skipped} duplicates skipped.`, false);
-      } else {
-        const path = await save({ title: "Export Profiles to a New File (No Keys)", defaultPath: "private-ai-proxy-profiles.json", filters });
-        if (!path) return;
-        await api.exportProfiles(path);
-        onMessage("Profile configurations exported without credentials.", false);
+export function ProfileTransfer({ disabled, onResult }: { disabled: boolean; onResult(message: string, failed: boolean): void }) {
+  const confirm = useConfirm();
+  const transfer = useMutation({
+    mutationKey: PROFILE_TRANSFER,
+    // The save panel is the feedback of an export; an import reports its count.
+    mutationFn: async (importing: boolean): Promise<string | undefined> => {
+      if (!importing) {
+        await desktopApi.saveProfileExport();
+        return undefined;
       }
-    } catch { onMessage(importing ? "Could not import profile configurations. Check the file format and profile limit." : "Could not export profile configurations. Choose a new file name and check write permissions.", true); }
-    finally { setBusy(false); onBusy(false); }
-  };
+      const backup = await desktopApi.selectProfileBackup();
+      if (!backup) return undefined;
+      const names = backup.profiles.slice(0, 5).map((profile) => profile.name).join(", ");
+      if (!await confirm({ title: `Import ${backup.profiles.length} profile configurations?`, message: `${names}${backup.profiles.length > 5 ? ", …" : ""}\nExisting profiles will not be overwritten. Imported profiles need credentials and verification before use.`, confirmLabel: "Import" })) return undefined;
+      const result = await desktopApi.importProfiles(backup);
+      return `${result.imported} imported, ${result.skipped} duplicates skipped.`;
+    },
+    onSuccess: (message) => { if (message) onResult(message, false); },
+    onError: (error, importing) => onResult(`${importing ? "Could not import profile configurations." : "Could not export profile configurations."} ${errorMessage(error)}`, true),
+  });
   return <div className="flex items-center gap-2">
-    <IconButton label="Import profile configurations" disabled={disabled || busy} onClick={() => void run(true)}><Upload /></IconButton>
-    <IconButton label="Export profile configurations" disabled={disabled || busy} onClick={() => void run(false)}><Download /></IconButton>
+    <IconButton label="Import profile configurations" disabled={disabled || transfer.isPending} onClick={() => transfer.mutate(true)}><Upload /></IconButton>
+    <IconButton label="Export profile configurations" disabled={disabled || transfer.isPending} onClick={() => transfer.mutate(false)}><Download /></IconButton>
   </div>;
 }
 
-export function ExportDiagnostics({ api, onMessage }: { api: DesktopApi; onMessage(message: string): void }) {
-  const [busy, setBusy] = useState(false);
-  const run = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const path = await save({ title: "Export Redacted Diagnostics to a New File", defaultPath: "private-ai-proxy-diagnostics.json", filters });
-      if (!path) return;
-      await api.exportDiagnostics(path);
-      onMessage("Diagnostics exported without keys, URLs, local paths or request content.");
-    } catch { await showErrorAlert("Could not export diagnostics", "Choose a new file name and check write permissions.", api); }
-    finally { setBusy(false); }
-  };
-  return <SettingsLink title={busy ? "Exporting diagnostics" : "Export diagnostics"} aria-label="Export diagnostics" disabled={busy} onClick={() => void run()} />;
+/** The save panel is the feedback: an export that completes says nothing more. */
+export function ExportDiagnostics() {
+  const exportDiagnostics = useMutation({
+    mutationFn: () => desktopApi.saveDiagnosticsExport(),
+    meta: { errorTitle: "Could not export diagnostics" },
+  });
+  return <SettingsLink title={exportDiagnostics.isPending ? "Exporting diagnostics" : "Export diagnostics"} disabled={exportDiagnostics.isPending} onClick={() => exportDiagnostics.mutate()} />;
 }

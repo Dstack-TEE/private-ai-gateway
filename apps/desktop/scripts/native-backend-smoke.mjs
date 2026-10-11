@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// Linux native-window/process smoke; renderer assertions run separately.
+// Linux native-window/process smoke; renderer assertions run separately. An
+// optional command, such as a package install, runs while the app and backend
+// run, as the in-app updater installs over them.
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
+import { stringify } from "smol-toml";
 
-const [binaries] = process.argv.slice(2);
+const [binaries, ...update] = process.argv.slice(2);
 assert.equal(process.platform, "linux");
 assert.ok(binaries && path.isAbsolute(binaries), "Supply an absolute installed binary directory");
 const exec = promisify(execFile);
@@ -42,6 +45,27 @@ async function stop(child) {
   }
 }
 
+// The UI or a CLI command can relaunch a detached backend this script never
+// spawned. Stop it through the product first; as a last resort, kill anything
+// still running with this run's isolated home.
+let cleaning;
+const cleanup = () => (cleaning ??= (async () => {
+  await exec(path.join(binaries, "private-ai-proxy"), ["service", "stop", "--yes", "--json"], { env, timeout: 25_000 }).catch(() => {});
+  for (const child of children.reverse()) await stop(child);
+  const marker = `\0PRIVATE_AI_PROXY_HOME=${home}\0`;
+  for (const pid of await readdir("/proc")) {
+    if (!/^\d+$/.test(pid)) continue;
+    const environ = await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "");
+    if (`\0${environ}`.includes(marker)) {
+      try { process.kill(Number(pid), "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  }
+  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+})());
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.once(signal, () => cleanup().finally(() => process.exit(code)));
+}
+
 try {
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -49,8 +73,8 @@ try {
   assert.ok(address && typeof address !== "string");
   await new Promise((resolve) => server.close(resolve));
   const data = path.join(home, ".private-ai-proxy");
-  await mkdir(data, { mode: 0o700 });
-  await writeFile(path.join(data, "local-api.json"), JSON.stringify({ listenAddress: "127.0.0.1", allowNetworkAccess: false, port: address.port }), { mode: 0o600 });
+  await mkdir(path.join(data, "Config"), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(data, "Config", "config.toml"), stringify({ "local-api": { port: address.port } }), { mode: 0o600 });
   const backend = start("private-ai-proxy-service");
   let state;
   for (let count = 0; count < 100; count++) {
@@ -70,6 +94,11 @@ try {
     await delay(100);
   }
   assert.match(windows, /Private AI Proxy/, ui.diagnostic);
+  if (update.length > 0) {
+    await exec(update[0], update.slice(1), { timeout: 120_000 });
+    assert.equal(ui.exitCode, null, `UI exited during the update: ${ui.diagnostic}`);
+    assert.equal((await cli("status")).backend.instanceId, instance);
+  }
   await stop(ui);
   assert.equal((await cli("status")).backend.instanceId, instance);
   ui = start("private-ai-proxy-desktop");
@@ -77,12 +106,11 @@ try {
   assert.equal(ui.exitCode, null);
   assert.equal((await cli("status")).backend.instanceId, instance);
   await cli("settings", "set", "appearance", "dark", "--yes");
-  assert.equal((await cli("settings", "show")).preferences.appearance, "dark");
+  assert.equal((await cli("settings", "show")).settings.appearance, "dark");
   await stop(ui);
   await cli("service", "stop", "--yes");
   assert.equal((await cli("status")).status, "not_running");
   console.log("Native window/process smoke passed: UI termination, same-backend reattachment, CLI mutation, explicit service shutdown");
 } finally {
-  for (const child of children.reverse()) await stop(child);
-  await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await cleanup();
 }

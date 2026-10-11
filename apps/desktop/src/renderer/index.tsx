@@ -1,22 +1,24 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "@tanstack/react-router";
 import { queryClient } from "./lib/query-client";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { AppearanceProvider } from "./components/appearance";
-import { NotificationsProvider } from "./components/notifications";
+import { ConfirmProvider } from "./components/confirm";
 import { installNativeInteractions } from "./lib/native-interactions";
-import { DialogCloseProvider } from "./components/dialog-close";
-import { desktopApi, query } from "./lib/environment";
-import { NativeWindowContent } from "./windows/native";
-import { App } from "./app";
+import { desktopApi, platform, web } from "./lib/environment";
+import { router } from "./router";
 
-function WindowContent({ reset }: { reset: boolean }): React.JSX.Element {
-  return query.has("native-dialog") ? <NativeWindowContent /> : <NotificationsProvider api={desktopApi}><App initialView={reset ? "settings" : "overview"} /></NotificationsProvider>;
-}
+/**
+ * How long the pointer rests before a tooltip shows: about a second for macOS
+ * help tags (AppKit's NSInitialToolTipDelay), and Windows' and GTK's 500 ms.
+ * The web UI keeps showing them at once.
+ */
+const tooltipDelay = platform === "macos" ? 1_000 : platform ? 500 : 0;
 
 export function Renderer(): React.JSX.Element {
-  const [settingsRevision, setSettingsRevision] = useState(0);
-  useEffect(() => desktopApi.onSettingsReset(() => { queryClient.clear(); setSettingsRevision((value) => value + 1); }), []);
-  useEffect(() => installNativeInteractions(desktopApi), []);
-  return <QueryClientProvider client={queryClient}><TooltipProvider><AppearanceProvider key={settingsRevision} api={desktopApi}><DialogCloseProvider api={desktopApi}><WindowContent reset={settingsRevision > 0} /></DialogCloseProvider></AppearanceProvider></TooltipProvider></QueryClientProvider>;
+  // Browsers keep their own context menu, shortcuts and drop behavior.
+  useEffect(() => web ? undefined : installNativeInteractions(desktopApi, platform), []);
+  return <QueryClientProvider client={queryClient}><TooltipProvider delay={tooltipDelay}><ConfirmProvider>
+    <RouterProvider router={router} />
+  </ConfirmProvider></TooltipProvider></QueryClientProvider>;
 }

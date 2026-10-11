@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { access, chmod, constants, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, constants, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { stringify } from "smol-toml";
 
-import { aliases, binaries } from "./package-cli.mjs";
+import { binaries } from "./package-cli.mjs";
+import { aliases } from "./package-linux.mjs";
 
 const [directory, expectedVersion, aliasDirectory = directory] = process.argv.slice(2);
 assert.ok(directory && path.isAbsolute(directory), "Supply an absolute CLI binary directory");
@@ -27,6 +29,8 @@ const version = execFileSync(pap, ["--version"], {
 }).trim();
 assert.equal(version, `private-ai-proxy ${expectedVersion}`);
 for (const alias of aliases) {
+  // A .cmd shim runs only through cmd.exe, which parses its own command line
+  // and has no quoting library; Windows paths cannot contain the `"` it uses.
   const aliasVersion = process.platform === "win32"
     ? execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `""${path.join(aliasDirectory, `${alias}.cmd`)}" --version"`], { encoding: "utf8", timeout: 10_000, windowsVerbatimArguments: true })
     : execFileSync(path.join(aliasDirectory, alias), ["--version"], { encoding: "utf8", timeout: 10_000 });
@@ -44,6 +48,7 @@ const env = {
   ANTHROPIC_API_KEY: "",
 };
 let ownedBackend;
+let startAttempted = false;
 
 const runJson = async (arguments_, timeout = 20_000) => {
   console.log(`CLI lifecycle: ${arguments_.join(" ")}`);
@@ -101,15 +106,13 @@ try {
   const port = await reserveLoopbackPort();
   await mkdir(data, { recursive: true, mode: 0o700 });
   await chmod(data, 0o700);
-  const localApi = path.join(data, "local-api.json");
-  await writeFile(localApi, `${JSON.stringify({
-    listenAddress: "127.0.0.1",
-    allowNetworkAccess: false,
-    port,
-  }, null, 2)}\n`, { mode: 0o600 });
-  await chmod(localApi, 0o600);
+  await mkdir(path.join(data, "Config"), { mode: 0o700 });
+  const config = path.join(data, "Config", "config.toml");
+  await writeFile(config, stringify({ "local-api": { port } }), { mode: 0o600 });
+  await chmod(config, 0o600);
 
   assert.equal((await runJson(["service", "status"])).status, "not_running");
+  startAttempted = true;
   ownedBackend = await runJson(["service", "start"]);
   assert.equal(ownedBackend.version, expectedVersion);
   assert.ok(Number.isInteger(ownedBackend.processId) && ownedBackend.processId > 0);
@@ -122,30 +125,37 @@ try {
   const changed = await runJson(["--yes", "settings", "set", "appearance", "dark"]);
   assert.equal(changed.appearance, "dark");
   const settings = await runJson(["settings", "show"]);
-  assert.equal(settings.preferences.appearance, "dark");
-  assert.equal(settings.localApi.port, port);
-  assert.equal(settings.localApi.listenAddress, "127.0.0.1");
-  assert.equal(settings.localApi.allowNetworkAccess, false);
+  assert.equal(settings.settings.appearance, "dark");
+  assert.equal(settings.settings["local-api"].port, port);
+  assert.equal(settings.settings["local-api"]["listen-address"], "127.0.0.1");
+  assert.equal(settings.settings["local-api"]["allow-network-access"], false);
+  assert.equal(settings.files.config, config);
+  // Written in place: the hand-written table is kept as it was.
+  const saved = await readFile(config, "utf8");
+  assert.ok(saved.includes('appearance = "dark"\n') && saved.includes(`[local-api]\nport = ${port}\n`), saved);
 
   assert.equal((await runJson(["--yes", "service", "stop"])).status, "stopped");
   assert.equal((await waitForNotRunning(10_000)).status, "not_running");
   assert.equal((await runJson(["service", "status"])).status, "not_running");
   ownedBackend = undefined;
+  startAttempted = false;
   console.log(`CLI package: lifecycle passed with three sibling executables; ${version}`);
 } finally {
   let cleanupError;
   try {
-    if (ownedBackend) {
+    if (startAttempted) {
+      // Every backend in this isolated home is test-owned, including one whose
+      // start timed out before reporting it.
       const status = await runJson(["service", "status"]).catch(() => undefined);
-      const stillOwned = status?.backend?.instanceId === ownedBackend.instanceId
-        || (status === undefined && processExists(ownedBackend.processId));
-      if (stillOwned) {
+      const processId = status?.backend?.processId
+        ?? (status === undefined ? ownedBackend?.processId : undefined);
+      if (processId && processExists(processId)) {
         await runJson(["--yes", "service", "stop"]).catch(() => undefined);
-        if (!(await waitForExit(ownedBackend.processId, 5_000))) {
-          process.kill(ownedBackend.processId, "SIGTERM");
-          if (!(await waitForExit(ownedBackend.processId, 5_000))) {
-            process.kill(ownedBackend.processId, "SIGKILL");
-            assert.ok(await waitForExit(ownedBackend.processId, 5_000), "Owned backend did not exit");
+        if (!(await waitForExit(processId, 5_000))) {
+          process.kill(processId, "SIGTERM");
+          if (!(await waitForExit(processId, 5_000))) {
+            process.kill(processId, "SIGKILL");
+            assert.ok(await waitForExit(processId, 5_000), "Owned backend did not exit");
           }
         }
       }

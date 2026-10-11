@@ -1,0 +1,279 @@
+//! Receipt audits: after delivery for every recorded exchange, and on demand
+//! from the standalone control endpoint.
+
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::http::Method;
+use backon::{ExponentialBuilder, Retryable};
+use serde_json::Value;
+
+use super::report::{rewrite_noted, summarize};
+use super::{ProxyState, RecordedExchange, RequestOutcome, ResponseDelivery, TrustedIdentity};
+use crate::checks::{
+    parse_receipt_document, run_response_checks, session_id_from_receipt, UpstreamContext,
+};
+use crate::client::{GetError, HttpResult};
+use crate::transcript::Transcript;
+
+pub(super) fn audit_exchange(
+    state: Arc<ProxyState>,
+    trusted: TrustedIdentity,
+    exchange: RecordedExchange,
+    bearer: Option<String>,
+) {
+    let report_state = state.clone();
+    let report_exchange = exchange.clone();
+    let report = move |verified, detail, rewritten, receipt| {
+        let state = &report_state;
+        let exchange = &report_exchange;
+        if let Some(entry) = state
+            .recorded
+            .lock()
+            .expect("recorded ring poisoned")
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.receipt_id == exchange.receipt_id && entry.at == exchange.at)
+        {
+            entry.verified = verified;
+        }
+        (state.reporter)(RequestOutcome {
+            method: Method::POST,
+            path: exchange.path.clone(),
+            status: exchange.status,
+            streamed: exchange.streamed,
+            receipt_id: Some(exchange.receipt_id.clone()),
+            receipt,
+            verified,
+            detail,
+            context: exchange.context.clone(),
+            rewritten,
+            local_policy_applied: exchange.local_policy_applied,
+        });
+    };
+    match &exchange.delivery {
+        ResponseDelivery::Complete => {}
+        ResponseDelivery::Failed(_) => {
+            report(
+                Some(false),
+                "Response delivery failed before the complete response was received; the receipt does not match the partial response."
+                    .into(),
+                None,
+                None,
+            );
+            return;
+        }
+        ResponseDelivery::Cancelled => {
+            report(
+                None,
+                "Response stream was canceled or protection stopped; no complete response proof was recorded."
+                    .into(),
+                None,
+                None,
+            );
+            return;
+        }
+    }
+    tokio::spawn(async move {
+        // Every delivered response is audited: past the concurrency limit an
+        // audit waits for a slot, holding only the exchange's digests.
+        let audit = async {
+            let _permit = state.audits.acquire().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                verify_exchange(&state, &trusted, &exchange, bearer.as_deref()),
+            )
+            .await
+        };
+        let result = tokio::select! {
+            _ = state.shutdown.cancelled() => {
+                report(
+                    None,
+                    "Response delivered; protection stopped before its receipt was audited.".into(),
+                    None,
+                    None,
+                );
+                return;
+            }
+            result = audit => result,
+        };
+        match result {
+            Ok(Ok((transcript, detail, receipt))) => report(
+                Some(transcript.verified()),
+                format!("Post-delivery receipt audit: {detail}"),
+                Some(rewrite_noted(&transcript)),
+                receipt,
+            ),
+            Ok(Err(error)) => report(
+                None,
+                format!(
+                    "Response delivered; receipt audit could not complete: {error}. Standalone serve can retry with POST /receipts/{}/verify.",
+                    exchange.receipt_id
+                ),
+                None,
+                None,
+            ),
+            Err(_) => report(
+                None,
+                format!(
+                    "Response delivered; receipt audit timed out. Standalone serve can retry with POST /receipts/{}/verify.",
+                    exchange.receipt_id
+                ),
+                None,
+                None,
+            ),
+        }
+    });
+}
+
+pub(super) async fn verify_exchange(
+    state: &ProxyState,
+    trusted: &TrustedIdentity,
+    exchange: &RecordedExchange,
+    bearer: Option<&str>,
+) -> Result<(Transcript, String, Option<String>), String> {
+    if matches!(&exchange.delivery, ResponseDelivery::Cancelled) {
+        return Err(
+            "the client canceled the response stream before its complete bytes were observed"
+                .to_string(),
+        );
+    }
+    let receipt_resp = fetch_receipt_for_audit(state, &exchange.receipt_id, bearer).await?;
+    let receipt = receipt_resp.json().and_then(parse_receipt_document)?;
+    // JSON is UTF-8 (RFC 8259 §8.1), so the checked document keeps its bytes.
+    let document = String::from_utf8(receipt_resp.body).ok();
+
+    let mut transcript = Transcript::default();
+    let (session_resp, no_session_reason) = fetch_session_for_audit(state, &receipt).await;
+    let session_bytes = session_resp.map(|resp| resp.body);
+    run_response_checks(
+        &mut transcript,
+        &receipt,
+        &trusted.identity,
+        Some(&exchange.request),
+        Some(&exchange.response),
+        UpstreamContext {
+            session_bytes: session_bytes.as_deref(),
+            no_session_reason: &no_session_reason,
+            pinned: (!exchange.pinned_sessions.is_empty())
+                .then_some(exchange.pinned_sessions.as_slice()),
+            requires_verified: state.enforce_verified || !exchange.pinned_sessions.is_empty(),
+            serving: &trusted.report.service_capabilities.serving,
+            required_claims: &state.required_claims,
+        },
+    );
+
+    // The claims live in the session document (§8.3), not the receipt.
+    let session = session_bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let mut detail = format!(
+        "receipt {}: {}",
+        exchange.receipt_id,
+        summarize(
+            &transcript,
+            session.as_ref(),
+            &trusted.report.service_capabilities.serving,
+        )
+    );
+    if let ResponseDelivery::Failed(error) = &exchange.delivery {
+        detail.push_str(&format!(
+            " (response truncated at {} bytes: {error})",
+            exchange.response.len
+        ));
+    }
+    Ok((transcript, detail, document))
+}
+
+fn transient_audit_status(status: u16) -> bool {
+    status == 404 || status == 429 || (500..600).contains(&status)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AuditFetchError {
+    #[error("fetch returned HTTP {0}")]
+    Status(u16),
+    #[error("fetch failed: {0}")]
+    Transport(String),
+    /// The body exceeded this many bytes; retrying cannot help.
+    #[error("the document exceeds the {} KiB limit, so it was not checked or saved", .0 / 1024)]
+    TooLarge(usize),
+}
+
+impl From<String> for AuditFetchError {
+    fn from(error: String) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl From<GetError> for AuditFetchError {
+    fn from(error: GetError) -> Self {
+        match error {
+            GetError::Failed(error) => Self::Transport(error),
+            GetError::TooLarge(limit) => Self::TooLarge(limit),
+        }
+    }
+}
+
+/// Fetches a receipt or session, retrying transport failures and statuses
+/// that may clear (not yet published, rate limited, server errors) four
+/// times, 100 ms apart and doubling up to 1 s.
+async fn fetch_audit_artifact<F, Fut, E>(mut fetch: F) -> Result<HttpResult, AuditFetchError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<HttpResult, E>>,
+    E: Into<AuditFetchError>,
+{
+    let attempt = || {
+        let response = fetch();
+        async {
+            match response.await {
+                Ok(response) if (200..300).contains(&response.status) => Ok(response),
+                Ok(response) => Err(AuditFetchError::Status(response.status)),
+                Err(error) => Err(error.into()),
+            }
+        }
+    };
+    attempt
+        .retry(
+            ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(100))
+                .with_max_delay(Duration::from_secs(1))
+                .with_max_times(4),
+        )
+        .when(|error| match error {
+            AuditFetchError::Status(status) => transient_audit_status(*status),
+            AuditFetchError::Transport(_) => true,
+            AuditFetchError::TooLarge(_) => false,
+        })
+        .await
+}
+
+async fn fetch_receipt_for_audit(
+    state: &ProxyState,
+    receipt_id: &str,
+    bearer: Option<&str>,
+) -> Result<HttpResult, String> {
+    fetch_audit_artifact(|| {
+        state
+            .client
+            .fetch_receipt(&state.base_url, receipt_id, bearer)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+async fn fetch_session_for_audit(
+    state: &ProxyState,
+    receipt: &Value,
+) -> (Option<HttpResult>, String) {
+    let Some(session_id) = session_id_from_receipt(receipt) else {
+        return (
+            None,
+            "receipt's upstream.verified carries no session_id".to_string(),
+        );
+    };
+    match fetch_audit_artifact(|| state.client.fetch_session(&state.base_url, &session_id)).await {
+        Ok(response) => (Some(response), String::new()),
+        Err(error) => (None, format!("session {session_id} {error}")),
+    }
+}

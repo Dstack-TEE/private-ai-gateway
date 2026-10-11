@@ -1,18 +1,15 @@
 use super::*;
 
-pub async fn account_details(key: &str) -> Result<AccountLoginDetails, String> {
-    let account = response(
-        client()?
-            .get("https://service.redpill.ai/api/oauth/account")
-            .bearer_auth(key),
-    )
-    .await?;
+pub async fn account_details(key: &str) -> Result<AccountLoginDetails, Error> {
+    let account = response(client()?.get(ACCOUNT_URL).bearer_auth(key)).await?;
     redpill_details(&account).map_err(|_| {
-        "Account: Could not refresh account details. Try again or sign in again.".to_string()
+        Error::account(
+            "Account: Could not refresh account details. Try again or reconnect the account.",
+        )
     })
 }
 
-pub(super) fn amount(value: &Value, field: &str) -> Result<String, String> {
+pub(super) fn amount(value: &Value, field: &str) -> Result<String, Error> {
     let text = string(value, field)?;
     if !text.parse::<f64>().is_ok_and(f64::is_finite) {
         return Err("Invalid balance response".into());
@@ -23,7 +20,7 @@ pub(super) fn amount(value: &Value, field: &str) -> Result<String, String> {
 pub(crate) async fn account_balance(
     provider: &ServiceProvider,
     secret: &str,
-) -> Result<Option<AccountBalance>, String> {
+) -> Result<Option<AccountBalance>, Error> {
     let url = match provider {
         ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
         ServiceProvider::Redpill => "https://service.redpill.ai/api/oauth/balance",
@@ -39,7 +36,7 @@ pub(super) fn parse_account_balance(
     provider: &ServiceProvider,
     status: StatusCode,
     data: &Value,
-) -> Result<Option<AccountBalance>, String> {
+) -> Result<Option<AccountBalance>, Error> {
     if status == StatusCode::UNAUTHORIZED {
         return Ok(None);
     }
@@ -94,34 +91,4 @@ pub(super) fn parse_account_balance(
             },
         })),
     }
-}
-
-pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Result<String, String> {
-    let slug = validated_scope_slug(scope_slug)?;
-    match provider {
-        ServiceProvider::Phala => Ok(format!("https://cloud.phala.com/{slug}/billing")),
-        ServiceProvider::Redpill => Ok(format!("https://redpill.ai/{slug}/credits")),
-        ServiceProvider::Custom => Err("Billing is only available for Phala and RedPill".into()),
-    }
-}
-
-pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
-    Ok(format!(
-        "https://redpill.ai/{}",
-        validated_scope_slug(organization_slug)?
-    ))
-}
-
-pub(super) fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
-    slug.filter(|slug| {
-        !slug.is_empty()
-            && slug.len() <= 255
-            && slug.split('-').all(|part| {
-                !part.is_empty()
-                    && part
-                        .bytes()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            })
-    })
-    .ok_or("Refresh account details or sign in again to open billing.".into())
 }

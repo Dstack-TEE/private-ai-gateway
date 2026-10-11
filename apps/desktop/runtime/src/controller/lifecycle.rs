@@ -1,41 +1,55 @@
 use super::*;
-use crate::protocol::ShutdownMode;
+use desktop_core::protocol::ShutdownMode;
 
 impl DesktopRuntime {
-    pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
-        let operation = self
-            .lifecycle
-            .try_lock()
-            .map_err(|_| "A configuration change is in progress")?;
-        if self.exiting.load(Ordering::Acquire) {
-            return Err("The app is closing".to_string());
+    pub(super) fn configuration_change(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, Error> {
+        let operation = self.lifecycle.try_lock().map_err(|_| Error::busy())?;
+        if self.closing() {
+            return Err(Error::closing());
         }
         Ok(operation)
     }
 
-    pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), String> {
+    /// Whether protection runs, or would run but for a pending reconnect, so
+    /// that a change of the service configuration must restart it.
+    pub(super) fn restart_needed(&self, state: &AppState) -> Result<bool, Error> {
+        Ok(state.session_active
+            || (self.manager.is_running()? && !state.configuration_verification))
+    }
+
+    /// Stops the verifier for a configuration change that restarts it
+    /// itself, without the automatic reconnect.
+    pub(super) fn pause_protection(&self) -> Result<(), Error> {
+        self.stop_with_reconnect(true)?;
+        self.manager.cancel_reconnection();
+        Ok(())
+    }
+
+    pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), Error> {
         let Ok(_operation) = self.lifecycle.try_lock() else {
             return Ok(());
         };
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return Ok(());
         }
-        let state = self.manager.snapshot()?;
+        let state = self.state();
         if state.is_protected() && self.proxy.session().verified {
             self.recovery.reset_retry();
         }
         let retry = crate::recovery::should_retry(&state)
-            || (state.reconnecting && state.status == "stopped" && self.recovery.pending());
+            || (state.reconnecting
+                && state.status == VerificationStatus::Stopped
+                && self.recovery.pending());
         if !retry && !self.recovery.needs_check() {
             return Ok(());
         }
-        if state.status == "verifying" && self.recovery.online() {
+        if state.status == VerificationStatus::Verifying && self.recovery.online() {
             return Ok(());
         }
         self.recovery.clear_request();
         if !retry
             && !crate::recovery::should_recover(
-                &state.status,
+                state.status,
                 state.configuration_verification,
                 self.recovery.pending(),
             )
@@ -44,12 +58,7 @@ impl DesktopRuntime {
         }
         let remote = url::Url::parse(&state.config.remote_url)
             .map_err(|_| "The active service URL is invalid")?;
-        let local_service = match remote.host() {
-            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            None => false,
-        };
+        let local_service = settings_config::is_loopback(&remote);
         if local_service && !retry {
             return Ok(());
         }
@@ -57,30 +66,20 @@ impl DesktopRuntime {
             return Ok(());
         }
         self.recovery.clear_wait();
-        let paused = (|| {
-            let _guard = self
-                .agent_policy
-                .lock()
-                .map_err(|_| "Agent state unavailable")?;
-            let result = self.manager.stop_with_reconnect(true);
-            self.proxy.set_api_key(None);
-            self.publish_agent_tokens(TokenSet::default())?;
-            result
-        })();
-        if let Err(error) = paused {
+        if let Err(error) = self.stop_with_reconnect(true) {
             self.manager.cancel_reconnection();
             self.recovery.cancel();
             return Err(error);
         }
         if !local_service && !self.recovery.online() {
             self.recovery.wait();
-            self.manager.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.".into());
+            self.report_error("Network unavailable. Connect to a network; protection will resume automatically after verification.");
             return Ok(());
         }
         let resumed = (|| {
             if state.endpoint_error.is_some() {
-                let resolved = local_api::resolve(state.local_api)?;
-                self.restore_endpoint(resolved.clone())?;
+                let resolved = settings_config::resolve_local_api(state.local_api)?;
+                self.restore_endpoint(&resolved)?;
                 self.manager
                     .set_endpoint(resolved.config, Ok(resolved.endpoint));
             }
@@ -88,57 +87,44 @@ impl DesktopRuntime {
         })();
         if let Err(error) = resumed {
             self.recovery.wait();
-            return Err(format!(
-                "Could not reconnect; retrying automatically: {error}"
-            ));
+            return Err(format!("Could not reconnect; retrying automatically: {error}").into());
         }
         Ok(())
     }
 
     /// Called only by the server's blocking startup worker, after IPC is bound.
-    pub fn start_on_launch(self: &Arc<Self>) -> Result<(), String> {
+    pub fn start_on_launch(self: &Arc<Self>) -> Result<(), Error> {
         let _operation = self.lifecycle.blocking_lock();
-        if self.exiting.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let state = self.manager.snapshot()?;
-        if self.manager.is_running()? {
+        if self.closing() || self.manager.is_running()? {
             return Ok(());
         }
         self.recovery.cancel();
-        self.start_inner(state.config).map(|_| ())
+        self.start_inner(self.state().config).map(|_| ())
     }
 
-    pub fn start(self: &Arc<Self>, config: StartGatewayConfig) -> Result<GatewayState, String> {
+    pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
         self.start_inner(config)
     }
 
-    pub(super) fn start_inner(
-        self: &Arc<Self>,
-        config: StartGatewayConfig,
-    ) -> Result<GatewayState, String> {
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
-        let config = service_config::resolve_runtime_config(config)?;
-        let state = self.manager.snapshot()?;
+    pub(super) fn start_inner(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
+        let _guard = self.lock_agents()?;
+        let config = settings_config::resolve_runtime_config(config)?;
+        let state = self.state();
         if config.remote_url != state.config.remote_url {
-            return Err("Select or verify the Confidential AI profile before starting".to_string());
+            return Err(Error::invalid_state(
+                "Select or verify the Confidential AI profile before starting",
+            ));
         }
-        let profile = state
-            .profiles
-            .iter()
-            .find(|profile| profile.id == state.active_profile_id)
-            .ok_or_else(|| "Create a Confidential AI profile before starting".to_string())?;
-        let key = self
-            .load_profile_key(&profile.id)?
-            .ok_or_else(|| "Add a credential to the active Confidential AI profile".to_string())?;
+        let profile = find_profile(&state, &state.active_profile_id).ok_or_else(|| {
+            Error::invalid_state("Create a Confidential AI profile before starting")
+        })?;
+        let key = self.load_profile_key(&profile.id)?.ok_or_else(|| {
+            Error::invalid_state("Add a credential to the active Confidential AI profile")
+        })?;
         self.proxy.set_api_key(Some(key));
         self.manager.set_api_key_saved(true);
-        self.codex_sync.reset()?;
         match self.manager.clone().start(config) {
             Ok(state) => Ok(state),
             Err(error) => {
@@ -148,48 +134,77 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn stop(&self) -> Result<GatewayState, String> {
+    pub fn set_require_production_os(&self, required: bool) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
-        self.stop_inner()
+        self.stop_with_reconnect(false)?;
+        self.update_config(|saved| {
+            saved.require_production_os = required;
+            Ok(())
+        })?;
+        self.publish_profiles()?;
+        Ok(self.state())
     }
 
-    pub(super) fn stop_inner(&self) -> Result<GatewayState, String> {
+    pub fn stop(&self) -> Result<AppState, Error> {
+        let _operation = self.configuration_change()?;
+        self.recovery.cancel();
         self.stop_with_reconnect(false)
     }
 
-    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<GatewayState, String> {
-        let _guard = self
-            .agent_policy
-            .lock()
-            .map_err(|_| "Agent state unavailable")?;
-        let result = self.manager.stop_with_reconnect(reconnecting);
-        self.proxy.set_api_key(None);
-        if self.instance.is_none() {
-            return result;
-        }
-        self.proxy
-            .set_tokens(with_client_token(TokenSet::default(), &self.credentials)?);
-        let failures = self.current_projector()?.reconcile(None)?;
-        if !failures.is_empty() {
-            return Err(agent_failures(failures));
-        }
-        result
+    /// Stops the verifier. Only a stop that ends the session (the user stopped
+    /// protection or quit) restores the agents' own configuration and
+    /// withdraws their tokens. A restart keeps them pointed at the Local API,
+    /// which refuses them until protection is verified again.
+    pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, Error> {
+        self.stop_verifier(reconnecting, !reconnecting)
     }
 
-    pub async fn shutdown(&self, mode: ShutdownMode) -> Result<(), String> {
+    pub(super) fn stop_verifier(
+        &self,
+        reconnecting: bool,
+        restore_agents: bool,
+    ) -> Result<AppState, Error> {
+        let _guard = self.lock_agents()?;
+        let result = self.manager.stop_with_reconnect(reconnecting);
+        self.proxy.set_api_key(None);
+        if self.instance.is_some() && restore_agents {
+            self.withdraw_agent_tokens()?;
+            if self.agent_configuration {
+                all_applied(self.current_projector()?.reconcile(None)?)?;
+            }
+        }
+        Ok(result?)
+    }
+
+    /// Stops protection, the Local API and the web UI. A `refusable` shutdown
+    /// (a client's request) fails before stopping anything when the agent
+    /// configurations cannot be restored; any other one continues.
+    pub async fn shutdown(&self, mode: ShutdownMode, refusable: bool) -> Result<(), Error> {
         // Shutdown waits for a configuration transaction to commit or roll back.
-        // Cancelling that future midway could split credential and config state.
+        // Cancelling that future midway could split credential and config state;
+        // the server's shutdown watchdog bounds the wait.
+        tracing::info!("Shutdown: waiting for configuration changes to finish");
         let _operation = self.lifecycle.lock().await;
-        if self.exiting.load(Ordering::Acquire) {
+        if self.closing() {
             return Ok(());
         }
         self.recovery.cancel();
-        let preserve_session =
-            mode == ShutdownMode::UpdateRestart && self.manager.snapshot()?.session_active;
-        self.stop_with_reconnect(preserve_session)?;
+        let preserve_session = mode == ShutdownMode::UpdateRestart && self.state().session_active;
+        tracing::info!("Shutdown: stopping protection");
+        let restored = self.stop_with_reconnect(preserve_session);
+        // Outside the Mac App Store, a client's shutdown that ends the session
+        // never leaves agents pointing at a stopped Local API: a failed
+        // restore keeps the backend running. An update restart keeps them
+        // pointed at it for the updated backend to resume. A signal or the
+        // owning app's exit stops it regardless.
+        if refusable && !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+            restored.as_ref().map_err(Clone::clone)?;
+        }
+        tracing::info!("Shutdown: stopping the Local API and the web UI");
         self.endpoint.stop().await?;
+        self.web_ui.stop().await;
         self.exiting.store(true, Ordering::Release);
-        Ok(())
+        restored.map(|_| ())
     }
 }

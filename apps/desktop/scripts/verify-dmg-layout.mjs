@@ -9,7 +9,7 @@ assert.equal(process.platform, "darwin", "DMG layout verification requires Finde
 const [dmg] = process.argv.slice(2);
 assert.ok(dmg, "Supply the built DMG path");
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const config = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.brand.conf.json"), "utf8"));
+const config = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
 const layout = config.bundle.macOS.dmg;
 const mount = await mkdtemp(path.join(tmpdir(), "pap-dmg-layout-"));
 let mounted = false;

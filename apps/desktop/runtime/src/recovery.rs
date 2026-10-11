@@ -1,4 +1,5 @@
-use crate::contracts::GatewayState;
+use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
+use desktop_core::contracts::{AppState, VerificationStatus};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -10,8 +11,8 @@ pub struct Recovery {
     pub available: Arc<AtomicBool>,
     requested: Arc<AtomicBool>,
     pending: AtomicBool,
-    retry: Mutex<Retry>,
-    agent_retry: Mutex<Option<Instant>>,
+    retry: Mutex<Backoff>,
+    agent_retry: Mutex<Backoff>,
     watcher: Mutex<Option<netwatcher::WatchHandle>>,
 }
 
@@ -22,8 +23,8 @@ impl Default for Recovery {
             available: Arc::new(AtomicBool::new(true)),
             requested: Arc::new(AtomicBool::new(false)),
             pending: AtomicBool::new(false),
-            retry: Mutex::new(Retry::default()),
-            agent_retry: Mutex::new(None),
+            retry: Mutex::new(Backoff::default()),
+            agent_retry: Mutex::new(Backoff::default()),
             watcher: Mutex::new(None),
         }
     }
@@ -61,17 +62,21 @@ impl Recovery {
     }
     pub fn reset_retry(&self) {
         if let Ok(mut retry) = self.retry.lock() {
-            *retry = Retry::default();
+            *retry = Backoff::default();
         }
     }
     pub fn agents_ready(&self) -> bool {
         self.agent_retry
             .lock()
-            .is_ok_and(|next| next.is_none_or(|next| Instant::now() >= next))
+            .is_ok_and(|retry| retry.next.is_none_or(|next| Instant::now() >= next))
     }
     pub fn agents_finished(&self, failed: bool) {
-        if let Ok(mut next) = self.agent_retry.lock() {
-            *next = failed.then(|| Instant::now() + Duration::from_secs(30));
+        if let Ok(mut retry) = self.agent_retry.lock() {
+            if failed {
+                retry.schedule(Instant::now());
+            } else {
+                *retry = Backoff::default();
+            }
         }
     }
     pub fn request(&self) {
@@ -98,41 +103,71 @@ impl Recovery {
     }
 }
 
-#[derive(Default)]
-struct Retry {
+/// Retries wait 3 s after a failure, doubling up to 30 s, plus random jitter
+/// of up to the same length, so installations recovering from one provider
+/// outage do not retry in lockstep.
+struct Backoff {
+    delays: ExponentialBackoff,
     next: Option<Instant>,
-    delay: u64,
 }
 
-impl Retry {
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            delays: ExponentialBuilder::default()
+                .with_min_delay(Duration::from_secs(3))
+                .with_max_delay(Duration::from_secs(30))
+                .with_jitter()
+                .without_max_times()
+                .build(),
+            next: None,
+        }
+    }
+}
+
+impl Backoff {
+    fn schedule(&mut self, now: Instant) {
+        self.next = self.delays.next().map(|delay| now + delay);
+    }
+
     fn due(&mut self, now: Instant) -> bool {
         let Some(next) = self.next else {
-            self.delay = self.delay.max(3);
-            self.next = Some(now + Duration::from_secs(self.delay));
+            self.schedule(now);
             return false;
         };
         if now < next {
             return false;
         }
-        self.delay = (self.delay * 2).min(30);
         // The next failure starts its own delay, even after a long verification.
         self.next = None;
         true
     }
 }
 
-pub fn connection_intended(state: &GatewayState) -> bool {
-    state.session_active && !state.configuration_verification && state.status != "blocked"
+pub fn connection_intended(state: &AppState) -> bool {
+    state.session_active
+        && !state.configuration_verification
+        && state.status != VerificationStatus::Blocked
 }
 
-pub fn should_retry(state: &GatewayState) -> bool {
+pub fn should_retry(state: &AppState) -> bool {
     connection_intended(state)
-        && (matches!(state.status.as_str(), "error" | "stopped") || state.endpoint_error.is_some())
+        && (matches!(
+            state.status,
+            VerificationStatus::Error | VerificationStatus::Stopped
+        ) || state.endpoint_error.is_some())
 }
 
-pub fn should_recover(status: &str, configuration_verification: bool, pending: bool) -> bool {
+pub fn should_recover(
+    status: VerificationStatus,
+    configuration_verification: bool,
+    pending: bool,
+) -> bool {
     !configuration_verification
-        && (matches!(status, "verified" | "verifying") || (pending && status == "stopped"))
+        && (matches!(
+            status,
+            VerificationStatus::Verified | VerificationStatus::Verifying
+        ) || (pending && status == VerificationStatus::Stopped))
 }
 
 #[cfg(test)]
@@ -140,20 +175,16 @@ mod tests {
     use super::*;
     #[test]
     fn retries_back_off_without_retrying_stop_or_configuration_verification() {
-        let now = Instant::now();
-        let mut retry = Retry::default();
-        assert!(!retry.due(now));
-        assert!(!retry.due(now + Duration::from_secs(2)));
-        assert!(retry.due(now + Duration::from_secs(3)));
-        let mut failed_at = now + Duration::from_secs(100);
-        for delay in [6, 12, 24, 30, 30] {
+        let mut retry = Backoff::default();
+        let mut failed_at = Instant::now();
+        for delay in [3, 6, 12, 24, 30, 30] {
             assert!(!retry.due(failed_at));
-            assert!(!retry.due(failed_at + Duration::from_secs(delay - 1)));
-            assert!(retry.due(failed_at + Duration::from_secs(delay)));
-            failed_at += Duration::from_secs(delay + 45);
+            assert!(!retry.due(failed_at + Duration::from_secs(delay) - Duration::from_millis(1)));
+            assert!(retry.due(failed_at + Duration::from_secs(2 * delay)));
+            failed_at += Duration::from_secs(2 * delay + 45);
         }
-        let mut state = GatewayState {
-            status: "error".into(),
+        let mut state = AppState {
+            status: VerificationStatus::Error,
             session_active: true,
             api_key_saved: true,
             ..Default::default()
@@ -162,23 +193,23 @@ mod tests {
         state.configuration_verification = true;
         assert!(!should_retry(&state));
         state.configuration_verification = false;
-        state.status = "blocked".into();
+        state.status = VerificationStatus::Blocked;
         assert!(!should_retry(&state));
-        state.status = "error".into();
+        state.status = VerificationStatus::Error;
         state.session_active = false;
         assert!(!should_retry(&state));
     }
 
     #[test]
     fn address_changes_do_not_override_stop_or_security_block() {
-        assert!(should_recover("verified", false, false));
-        assert!(should_recover("stopped", false, true));
-        assert!(should_recover("verifying", false, false));
-        for status in ["blocked", "error"] {
+        assert!(should_recover(VerificationStatus::Verified, false, false));
+        assert!(should_recover(VerificationStatus::Stopped, false, true));
+        assert!(should_recover(VerificationStatus::Verifying, false, false));
+        for status in [VerificationStatus::Blocked, VerificationStatus::Error] {
             assert!(!should_recover(status, false, true));
         }
-        assert!(!should_recover("stopped", false, false));
-        assert!(!should_recover("verified", true, true));
+        assert!(!should_recover(VerificationStatus::Stopped, false, false));
+        assert!(!should_recover(VerificationStatus::Verified, true, true));
         let state = Recovery::default();
         state.wait();
         state.cancel();

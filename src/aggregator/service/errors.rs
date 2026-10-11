@@ -55,7 +55,7 @@ pub enum UpstreamVerificationError {
     NoEligibleAttestedRoute(String),
     /// The request pins one or more attested session ids, but none matches the
     /// route's current verified channel bindings. No prompt was forwarded.
-    #[error("none of the requested attested sessions is available for model {0}")]
+    #[error("none of the requested attested sessions is available for model {0}; pinned sessions may have been superseded by re-verification, so re-list /v1/aci/sessions and retry")]
     NoEligibleAttestedSession(String),
 }
 

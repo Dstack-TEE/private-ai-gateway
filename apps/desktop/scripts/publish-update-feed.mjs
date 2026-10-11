@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
-import { publishedRelease, shouldAdvance } from "./release-channel.mjs";
+import { feedTag, publishedRelease, shouldAdvance } from "./release-channel.mjs";
 import { manifestTargets } from "./release-artifacts.mjs";
 import { updateFeeds } from "./update-feeds.mjs";
 
@@ -27,29 +27,38 @@ for (const platform of selectedTargets) {
   await request(entry.url, { method: "HEAD" });
 }
 
-let feed;
-try {
-  feed = JSON.parse(gh("release", "view", release.feedTag, "--json", "assets"));
-} catch (error) {
-  if (!/release not found|HTTP 404/i.test(String(error.stderr ?? ""))) throw error;
+// Stable releases also advance the beta feed so beta users receive them.
+for (const channel of release.channel === "stable" ? ["stable", "beta"] : ["beta"]) {
+  await advance(channel);
 }
-const pending = [];
-for (const [name, candidate] of updateFeeds(manifest, selectedTargets)) {
-  let current;
-  if (feed?.assets.some((asset) => asset.name === name)) {
-    current = await (await request(`https://github.com/${repo}/releases/download/${release.feedTag}/${name}`)).json();
-    if (current.channel !== release.channel) throw new Error("Existing feed belongs to another channel");
+
+async function advance(channel) {
+  const feedRelease = feedTag(channel);
+  let feed;
+  try {
+    feed = JSON.parse(gh("release", "view", feedRelease, "--json", "assets"));
+  } catch (error) {
+    if (!/release not found|HTTP 404/i.test(String(error.stderr ?? ""))) throw error;
   }
-  if (shouldAdvance(release.version, current?.version, release.channel)) {
-    pending.push([name, candidate]);
+  const pending = [];
+  for (const [name, candidate] of updateFeeds(manifest, selectedTargets, channel)) {
+    let current;
+    if (feed?.assets.some((asset) => asset.name === name)) {
+      current = await (await request(`https://github.com/${repo}/releases/download/${feedRelease}/${name}`)).json();
+    }
+    if (shouldAdvance(release.version, current?.version, channel)) {
+      pending.push([name, candidate]);
+    }
   }
-}
-if (pending.length) {
-  const title = `Private AI Proxy ${release.channel} update feed`;
+  if (!pending.length) {
+    console.log(`Keeping newer or equal ${channel} feed`);
+    return;
+  }
+  const title = `Private AI Proxy ${channel} update feed`;
   const notes = "Signed Private AI Proxy update manifests. This release is maintained by automation.";
-  const releaseFlags = [`--prerelease=${release.prerelease}`, "--latest=false"];
-  if (feed) gh("release", "edit", release.feedTag, "--title", title, "--notes", notes, ...releaseFlags);
-  else gh("release", "create", release.feedTag, "--target", process.env.GITHUB_SHA, "--title", title, "--notes", notes, ...releaseFlags);
+  const releaseFlags = [`--prerelease=${channel === "beta"}`, "--latest=false"];
+  if (feed) gh("release", "edit", feedRelease, "--title", title, "--notes", notes, ...releaseFlags);
+  else gh("release", "create", feedRelease, "--target", process.env.GITHUB_SHA, "--title", title, "--notes", notes, ...releaseFlags);
   const directory = await mkdtemp(path.resolve(".update-feed-"));
   try {
     const files = [];
@@ -58,11 +67,9 @@ if (pending.length) {
       await writeFile(file, `${JSON.stringify(candidate, null, 2)}\n`);
       files.push(file);
     }
-    gh("release", "upload", release.feedTag, ...files, "--clobber");
-    console.log(`Advanced ${release.channel} to ${release.version}`);
+    gh("release", "upload", feedRelease, ...files, "--clobber");
+    console.log(`Advanced ${channel} feed to ${release.version}`);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-} else {
-  console.log(`Keeping newer or equal ${release.channel} feeds`);
 }

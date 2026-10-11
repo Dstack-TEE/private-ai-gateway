@@ -1,4 +1,9 @@
 use super::*;
+use std::sync::Arc;
+
+use axum::{http::HeaderMap, routing::get, Router};
+use tokio::net::TcpListener;
+use tokio_util::task::AbortOnDropHandle;
 
 #[test]
 fn account_presentation_uses_clerk_identity_and_restricts_avatar_sources() {
@@ -133,7 +138,7 @@ async fn failed_authorization_is_terminal_and_repeatable() {
     })
     .await
     .unwrap();
-    assert_eq!(error, "Authorization was declined");
+    assert_eq!(error.to_string(), "Authorization was declined");
     assert_eq!(pending.poll("login-test").await.unwrap_err(), error);
     assert!(!pending.is_active());
     pending.cancel().await.unwrap();
@@ -165,7 +170,10 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
     };
     for selection in [None, Some(999)] {
         let result = authorization.issue(&profile, selection).await;
-        assert_eq!(result.err().unwrap(), "Choose a workspace before saving");
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Choose a workspace before saving"
+        );
     }
 }
 
@@ -188,8 +196,15 @@ fn workspace_and_balance_responses_are_validated() {
     );
 }
 
-#[tokio::test]
-async fn phala_polling_uses_the_device_authorization_contract() {
+/// A Phala device authorization mock whose token endpoint answers `errors`
+/// in order (`detail.error`, as Phala nests them), then issues a key.
+async fn phala_mock(
+    errors: &'static [&'static str],
+) -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    AbortOnDropHandle<std::io::Result<()>>,
+) {
     use axum::{routing::post, Json};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
@@ -202,16 +217,15 @@ async fn phala_polling_uses_the_device_authorization_contract() {
                 body["grant_type"],
                 "urn:ietf:params:oauth:grant-type:device_code"
             );
-            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                (
+            match errors.get(calls.fetch_add(1, Ordering::SeqCst)) {
+                Some(error) => (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"detail":{"error":"authorization_pending"}})),
-                )
-            } else {
-                (
+                    Json(json!({"detail":{"error":error}})),
+                ),
+                None => (
                     StatusCode::OK,
                     Json(json!({"access_token":"sk-test-credential"})),
-                )
+                ),
             }
         }
     });
@@ -229,14 +243,38 @@ async fn phala_polling_uses_the_device_authorization_contract() {
     let server = AbortOnDropHandle::new(tokio::spawn(
         async move { axum::serve(listener, app).await },
     ));
+    (base, calls, server)
+}
+
+#[tokio::test]
+async fn phala_polling_uses_the_device_authorization_contract() {
+    let (base, calls, _server) = phala_mock(&["authorization_pending"]).await;
     let credential = phala_at(client().unwrap(), "test-device".into(), 0, &base)
         .await
         .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert!(
         matches!(credential.auth, ProfileAuth::OAuth { ref account_id, .. } if account_id == "alice")
     );
-    server.abort();
+}
+
+// The paused clock skips the polling sleeps. Polling ends before the metadata
+// request and the client has no timeouts, so no timer can fire during I/O.
+#[tokio::test(start_paused = true)]
+async fn phala_slow_down_adds_five_seconds_to_later_polls() {
+    let (base, calls, _server) = phala_mock(&["slow_down", "access_denied"]).await;
+    let started = Instant::now();
+    let error = phala_at(Client::new(), "test-device".into(), 0, &base)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error,
+        crate::Error::account("Account: Authorization was declined.")
+    );
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // RFC 8628 §3.5.
+    assert!(started.elapsed() >= Duration::from_secs(5));
 }
 
 #[test]
@@ -245,77 +283,10 @@ fn structured_account_errors_survive_the_management_boundary_without_raw_details
         StatusCode::FORBIDDEN,
         &json!({"detail":{"error":"device_disabled","internal":"secret-do-not-show"}}),
     );
-    let public = crate::protocol::RpcError::operation(&error);
+    let public = desktop_core::protocol::Error::from(error);
+    assert_eq!(public.code, desktop_core::protocol::ErrorCode::AccountError);
     assert!(public.message.contains("disabled"));
     assert!(!public.message.contains("secret"));
-}
-
-#[tokio::test]
-async fn pasted_callback_is_bound_to_session_and_consumed_once() {
-    let profile = ConfidentialProfileInput {
-        id: "test".into(),
-        name: "Test".into(),
-        provider: ServiceProvider::Redpill,
-        remote_url: "https://tee.redpill.ai".into(),
-    };
-    let mut pending = PendingLogin::new(
-        LoginPresentation {
-            id: "login".into(),
-            url: "https://clerk.redpill.ai".into(),
-            user_code: None,
-        },
-        profile,
-        tokio::spawn(std::future::pending()),
-    );
-    let (sender, receiver) = oneshot::channel();
-    pending.callback = Some(Arc::new(CallbackState {
-        expected: "expected".into(),
-        sender: Mutex::new(Some(sender)),
-    }));
-    for url in [
-        "https://attacker.test/oauth/callback?state=expected&code=secret",
-        "http://127.0.0.1:4181/oauth/callback?state=wrong&code=secret",
-        "http://127.0.0.1:4181/other?state=expected&code=secret",
-        "http://127.0.0.1:4181/oauth/callback?state=expected&state=expected&code=secret",
-    ] {
-        assert!(pending.complete_callback("login", url).await.is_err());
-    }
-    let url = "http://127.0.0.1:4181/oauth/callback?state=expected&code=secret";
-    assert!(pending.complete_callback("other-login", url).await.is_err());
-    pending.complete_callback("login", url).await.unwrap();
-    assert_eq!(receiver.await.unwrap().unwrap(), "secret");
-    assert!(pending.complete_callback("login", url).await.is_err());
-    assert!(!callback_page(true).contains("secret"));
-    assert!(callback_page(true).contains(&account_return_url()));
-    assert!(!callback_page(false).contains(&account_return_url()));
-    let return_url = Url::parse(&account_return_url()).unwrap();
-    assert!(return_url.query().is_none() && return_url.fragment().is_none());
-}
-
-#[test]
-fn callback_binds_host_state_and_issuer_and_rejects_duplicates() {
-    let mut headers = HeaderMap::new();
-    headers.insert("host", "127.0.0.1:4181".parse().unwrap());
-    let valid: Uri =
-        "/oauth/callback?state=expected&code=one-use&iss=https%3A%2F%2Fclerk.redpill.ai"
-            .parse()
-            .unwrap();
-    assert_eq!(
-        callback_code(&valid, &headers, "expected").unwrap(),
-        "one-use"
-    );
-    for query in [
-        "state=wrong&code=x",
-        "state=expected&state=other&code=x",
-        "state=expected&code=x&code=y",
-        "state=expected&code=x&iss=https://attacker.invalid",
-        "state=expected&code=x&iss=https://clerk.redpill.ai&iss=https://attacker.invalid",
-    ] {
-        let uri = format!("/oauth/callback?{query}").parse().unwrap();
-        assert!(callback_code(&uri, &headers, "expected").is_err());
-    }
-    headers.insert("host", "attacker.invalid:4181".parse().unwrap());
-    assert!(callback_code(&valid, &headers, "expected").is_err());
 }
 
 #[test]
@@ -332,9 +303,178 @@ fn authorization_urls_cannot_redirect_credentials_to_another_origin() {
 }
 
 #[test]
-fn unsupported_pkce_discovery_fails_closed() {
-    let mut discovery = json!({"issuer":ISSUER,"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]});
+fn discovery_without_device_authorization_fails_closed() {
+    let mut discovery = json!({"issuer":ISSUER,"grant_types_supported":["authorization_code","urn:ietf:params:oauth:grant-type:device_code"],"token_endpoint_auth_methods_supported":["none"]});
     assert!(validate_discovery(&discovery).is_ok());
-    discovery["code_challenge_methods_supported"] = json!(["plain"]);
+    discovery["grant_types_supported"] = json!(["authorization_code"]);
     assert!(validate_discovery(&discovery).is_err());
+}
+
+/// A Clerk stand-in: device authorization, then one pending poll before the
+/// token, or the token endpoint's `rejection` on every poll.
+async fn device_server(rejection: Option<&'static str>) -> (String, AbortOnDropHandle<()>) {
+    use axum::{routing::post, Form, Json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    type Fields = Form<std::collections::HashMap<String, String>>;
+    let polls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/oauth/device_authorization",
+            post(|Form(form): Fields| async move {
+                assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
+                assert_eq!(form["scope"], "openid profile user:org:read");
+                Json(json!({
+                    "device_code": "device-secret", "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://accounts.redpill.ai/device",
+                    "verification_uri_complete": "https://accounts.redpill.ai/device?user_code=ABCD-EFGH",
+                    "expires_in": 600, "interval": 1
+                }))
+            }),
+        )
+        .route(
+            "/oauth/token",
+            post(move |Form(form): Fields| {
+                let poll = polls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    assert_eq!(form["grant_type"], "urn:ietf:params:oauth:grant-type:device_code");
+                    assert_eq!(form["client_id"], REDPILL_CLIENT_ID);
+                    assert_eq!(form["device_code"], "device-secret");
+                    let error = rejection.or((poll == 0).then_some("authorization_pending"));
+                    match error {
+                        Some(error) => (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": error, "error_description": "secret-detail"})),
+                        ),
+                        None => (
+                            StatusCode::OK,
+                            Json(json!({"access_token": "clerk-access", "token_type": "Bearer", "expires_in": 60})),
+                        ),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/oauth/userinfo",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer clerk-access");
+                Json(json!({"sub": "user_alice"}))
+            }),
+        )
+        .route(
+            "/api/oauth/account",
+            get(|| async {
+                Json(json!({
+                    "user_id": "user_alice", "user_name": "Alice",
+                    "organization_id": "org_test", "organization_slug": "research", "organization_name": "Research",
+                    "workspaces": [{"id": 7, "name": "Default", "is_default": true}]
+                }))
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    (base, server)
+}
+
+fn device_client(base: &str) -> RedpillClient {
+    redpill_client(
+        DeviceAuthorizationUrl::new(format!("{base}/oauth/device_authorization")).unwrap(),
+        TokenUrl::new(format!("{base}/oauth/token")).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn redpill_device_flow_polls_until_the_user_approves() {
+    let (base, _server) = device_server(None).await;
+    let client = client().unwrap();
+    let oauth = device_client(&base);
+    let device = device_authorization(&client, &oauth).await.unwrap();
+    assert_eq!(device.user_code().secret(), "ABCD-EFGH");
+    let authorization = redpill(
+        &client,
+        &oauth,
+        &device,
+        &format!("{base}/oauth/userinfo"),
+        &format!("{base}/api/oauth/account"),
+    )
+    .await
+    .unwrap();
+    let Authorization::Redpill {
+        access_token,
+        details,
+    } = authorization
+    else {
+        panic!("Expected a RedPill authorization")
+    };
+    assert_eq!(access_token, "clerk-access");
+    assert_eq!(details.workspaces[0].id, 7);
+}
+
+#[tokio::test]
+async fn redpill_device_errors_never_echo_the_response() {
+    for (rejection, message) in [
+        ("access_denied", "Account: Authorization was declined."),
+        ("invalid_grant", "Account: Service rejected the request"),
+    ] {
+        let (base, _server) = device_server(Some(rejection)).await;
+        let client = client().unwrap();
+        let oauth = device_client(&base);
+        let device = device_authorization(&client, &oauth).await.unwrap();
+        let error = redpill(&client, &oauth, &device, &base, &base)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.starts_with(message), "{error}");
+        assert!(!error.contains("secret"));
+    }
+}
+
+#[test]
+fn account_errors_name_what_the_user_can_do() {
+    let cases = [
+        ("org_required", "Select an organization on the connection page and try again."),
+        ("keys_permission_required", "Your organization must grant key-management permission before you can connect."),
+        ("organization_permission_required", "Your organization must grant key-management permission before you can connect."),
+        ("rate_limited", "Balance refresh is temporarily limited. Try again in a minute."),
+        ("balance_unavailable", "Balance is temporarily unavailable. Try refreshing later."),
+        ("billing_permission_required", "Your account does not have permission to view this balance."),
+        ("account_mapping_conflict", "Account setup conflicts with an existing account. Contact RedPill support."),
+        ("account_setup_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("account_service_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("organization_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("authorization_unavailable", "Account setup is temporarily unavailable. Retry connecting."),
+        ("device_disabled", "This device key was disabled. Manage it in RedPill Keys before reconnecting."),
+        ("device_migration_required", "This device credential needs repair in RedPill Keys."),
+        ("device_credential_mismatch", "This device credential needs repair in RedPill Keys."),
+        ("invalid_authorization", "Your authorization is no longer valid. Reconnect the account."),
+        ("invalid_identity", "Your authorization is no longer valid. Reconnect the account."),
+        ("credentials_required", "Your authorization is no longer valid. Reconnect the account."),
+        ("device_unavailable", "Your authorization is no longer valid. Reconnect the account."),
+        ("key_store_unavailable", "The credential service is unavailable. Retry saving; your previous credential is unchanged."),
+        ("account_unavailable", "This account is unavailable. Contact your organization administrator."),
+        ("not_available", "Account connection is not enabled on this service."),
+        ("access_denied", "Authorization was declined."),
+        ("expired_token", "Authorization expired; reconnect the account."),
+        ("unknown_code", "Service rejected the request (HTTP 400). Retry or contact support."),
+    ];
+    for (code, message) in cases {
+        for data in [
+            json!({ "error": code }),
+            json!({ "detail": { "error": code } }),
+        ] {
+            let error = account_error(StatusCode::BAD_REQUEST, &data);
+            assert_eq!(
+                desktop_core::protocol::Error::from(error),
+                desktop_core::protocol::Error::account(format!("Account: {message}")),
+                "{data}"
+            );
+        }
+    }
+    assert_eq!(
+        account_error(StatusCode::BAD_GATEWAY, &json!({})).to_string(),
+        "Account: Service rejected the request (HTTP 502). Retry or contact support."
+    );
 }

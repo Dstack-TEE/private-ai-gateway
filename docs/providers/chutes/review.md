@@ -1,6 +1,14 @@
 # Chutes E2EE Review
 
 Date: 2026-05-18 UTC.
+
+> [!NOTE]
+> This is a dated admissions audit. It records the evidence and decision from
+> the date above, plus later status notes that carry their own dates. Source
+> paths refer to the repository layout at the time. Use
+> [verification.md](verification.md) for the adapter algorithm, claims, and
+> limitations.
+
 Provider endpoint: `https://api.chutes.ai`.
 Trust boundary: verified Chutes model instance reached through Chutes E2EE
 transport.
@@ -10,8 +18,7 @@ Source reports:
 - [upstream-verification-lifecycle.md](../../upstream-verification-lifecycle.md)
 - Chutes catalog and E2EE throughput probes captured during the provider audit.
 
-> **How the gateway verifies this provider:** see [verification.md](verification.md).
-> Status (2026-06 soundness pass): Chutes verification confirmed sound — DCAP quote
+> **Status (2026-06 soundness pass):** Chutes verification confirmed sound — DCAP quote
 > signature verification plus `report_data ↔ SHA256(nonce ‖ e2e_pubkey)`; no change
 > required.
 
@@ -39,8 +46,8 @@ Passed:
 - E2EE public-key material is bound to the attestation evidence.
 - Private AI Gateway enforces the E2EE public-key digest before invoking Chutes.
 - Nonces are treated as single-use local session material.
-- Cold evidence verification is kept off the normal request path by prewarming
-  and background refresh.
+- Background verification and session refresh keep cold evidence verification
+  off the normal request path while the caches remain warm.
 - Streaming responses are decrypted before normal ACI receipt hashing.
 - Chutes catalog lookup now requires an exact model-name match, or a UUID-like
   `chute_id` supplied directly. It no longer falls back to the first returned
@@ -121,7 +128,7 @@ Observed discovery behavior:
 - Polling too aggressively caused 429s on busy chutes.
 
 This makes the high-throughput path provider-limited. The current Private AI Gateway
-implementation can prewarm and refresh a nonce pool, but it cannot turn a
+implementation can refresh a nonce pool, but it cannot turn a
 five-instance discovery window into full-fleet load balancing.
 
 ## Privacy Boundary
@@ -137,7 +144,7 @@ provides a separate attested TLS binding or equivalent router proof.
 
 The Chutes adapter must:
 
-- run provider-owned verification during prewarm or refresh
+- run provider-owned verification during background refresh
 - record only E2EE key digests that passed verification
 - pop only non-expired, locally unused invocation nonces
 - match every nonce to a verified key digest before invocation
@@ -158,6 +165,9 @@ Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
   reviewed reproducible build): **TODO** — `MR_TD`/RTMRs are not pinned to a reviewed
   reproducible OS/firmware build.
 - **TCB status / freshness**: done — the bridge requires `UpToDate`.
+  _Update (2026-06-12): the bridge no longer rejects a stale TCB. It records the
+  status, and the session layer refutes `tcb_up_to_date` for any status other
+  than `UpToDate`; see [verification.md](verification.md)._
 
 ## Open Questions
 

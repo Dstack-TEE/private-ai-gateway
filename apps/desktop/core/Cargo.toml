@@ -1,0 +1,58 @@
+[package]
+name = "private-ai-proxy-core"
+version.workspace = true
+description = "Private AI Proxy client side: contracts, the management API and its client, the local endpoint, the settings file and paths"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.98"
+
+[features]
+default = []
+mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
+# The HTTP serving loop the backend's listeners share.
+server = ["dep:axum", "dep:tower-service", "hyper/server", "hyper-util/server-graceful"]
+
+[lib]
+name = "desktop_core"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+if-addrs = "0.15"
+indexmap = { version = "2", features = ["serde"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+schemars = { version = "1", features = ["indexmap2"] }
+semver = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_ignored = "0.1"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+shlex = "2"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+toml_edit = { version = "0.25", features = ["serde"] }
+tower-service = { version = "0.3", optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+ts-rs = "12"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+socket2 = { version = "0.6", features = ["all"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+backon = { version = "1", default-features = false, features = ["std", "std-blocking-sleep"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

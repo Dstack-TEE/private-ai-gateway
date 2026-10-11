@@ -105,11 +105,11 @@ release.
 
 | Claim | Result |
 | --- | --- |
-| TEE attested | Asserted from a verified TDX or SEV-SNP report bound to the inference SPKI. |
-| Platform TCB current | TDX must be `UpToDate`. SEV-SNP must meet the embedded minimum; its absolute freshness remains unknown. |
-| Serving software known good | Unknown by default; asserted when the uniquely measured workload matches an optional operator pin. |
-| OS known good | Asserted only for a matched `prod` or `gpu_prod` registry entry. |
-| GPU attested | Asserted after NRAS verification and an exact GPU nonce match against CPU `report_data`. |
+| TEE attested | Asserted as hardware-proven from a verified TDX or SEV-SNP report bound to the inference SPKI. |
+| Platform TCB current | TDX must be `UpToDate`, so the claim is asserted as hardware-proven. SEV-SNP must meet the embedded minimum; its absolute freshness remains unknown. |
+| Serving software known good | Unknown by default; asserted as verifier-derived when the uniquely measured workload matches an optional operator pin. |
+| OS known good | Asserted as verifier-derived only for a matched `prod` or `gpu_prod` registry entry. |
+| GPU attested | Asserted as verifier-derived after NRAS verification and an exact GPU nonce match against CPU `report_data`. |
 | Model weights provenance | Unknown. The measured compose names the model and pins container images, but does not hash downloaded model weights into the launch measurement. |
 
 The session scope is `router`: one SecretVM TLS origin can route multiple models
@@ -137,10 +137,8 @@ behind the same attested workload and SPKI.
 - A registry or verifier upgrade changes the verification trust root. Upgrade
   `secretvm-verify` and `uv.lock` deliberately, then rerun the live and hermetic
   tests.
-- Workloads that extend TDX RTMR3 with a docker-files archive are not currently
-  accepted because SecretAI does not expose that archive digest as evidence.
-  Such workloads fail closed until the evidence contract and workload identity
-  include the additional measured input.
+- Workloads that extend TDX RTMR3 with a docker-files archive fail closed,
+  because SecretAI does not expose that archive digest as evidence.
 
 ## Test the adapter
 

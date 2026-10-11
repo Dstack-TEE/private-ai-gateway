@@ -4,62 +4,45 @@ mod http;
 mod phala;
 mod redpill;
 pub(crate) use billing::account_balance;
+pub use billing::account_details;
 #[cfg(test)]
 use billing::*;
-pub use billing::{account_details, organization_url, top_up_url};
 use http::*;
 use phala::*;
-pub use redpill::account_return_url;
 pub(crate) use redpill::transition_credential;
 use redpill::*;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode, Uri},
-    response::Html,
-    routing::get,
-    Router,
-};
-use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-    Engine,
-};
-use rand::RngCore;
+use axum::http::StatusCode;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::{
-    net::TcpListener,
-    sync::{oneshot, Mutex},
     task::JoinHandle,
     time::{timeout, Instant},
 };
-use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 use uuid::Uuid;
 
-use crate::contracts::{
+use crate::Error;
+
+use desktop_core::account::LoginPresentation;
+#[cfg(test)]
+use desktop_core::account::{organization_url, top_up_url};
+use desktop_core::contracts::{
     AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
     ConfidentialProfileInput, ProfileAuth, ServiceProvider,
 };
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
 const ISSUER: &str = "https://clerk.redpill.ai";
-const CALLBACK: &str = "http://127.0.0.1:4181/oauth/callback";
+/// Where Clerk's device authorization sends the user to enter the code.
+const VERIFICATION_ORIGIN: &str = "https://accounts.redpill.ai";
 const KEY_URL: &str = "https://service.redpill.ai/api/oauth/key";
+const ACCOUNT_URL: &str = "https://service.redpill.ai/api/oauth/account";
 const PHALA_API: &str = "https://cloud-api.phala.com";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(900);
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginPresentation {
-    pub id: String,
-    pub url: String,
-    pub user_code: Option<String>,
-}
 
 #[derive(Clone)]
 pub(crate) struct Credential {
@@ -90,7 +73,7 @@ impl Authorization {
         &self,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
-    ) -> Result<Credential, String> {
+    ) -> Result<Credential, Error> {
         match self {
             Self::Inference(key) => {
                 if profile.provider == ServiceProvider::Redpill {
@@ -101,7 +84,7 @@ impl Authorization {
                         _ => None,
                     };
                     if saved != workspace_id {
-                        return Err("Sign in again to change workspace".into());
+                        return Err("Reconnect RedPill to change workspace".into());
                     }
                 }
                 Ok(key.clone())
@@ -121,7 +104,7 @@ impl Authorization {
                 }
                 let organization = string(&result, "account_name")?;
                 Ok(Credential {
-                    key: desktop_gateway::secrets::validate_api_key(&string(&result, "api_key")?)?,
+                    key: desktop_core::config::validate_api_key(&string(&result, "api_key")?)?,
                     auth: ProfileAuth::OAuth {
                         account_id: string(&result, "account_id")?,
                         account_name: match &details.auth {
@@ -165,9 +148,9 @@ impl Authorization {
 }
 
 enum LoginState {
-    Authorizing(JoinHandle<Result<Authorization, String>>),
+    Authorizing(JoinHandle<Result<Authorization, Error>>),
     Authorized(Box<Authorization>),
-    Failed(String),
+    Failed(Error),
 }
 
 impl Drop for LoginState {
@@ -184,14 +167,13 @@ pub(crate) struct PendingLogin {
     state: LoginState,
     deadline: Instant,
     saved: bool,
-    callback: Option<Arc<CallbackState>>,
 }
 
 impl PendingLogin {
     pub(crate) fn new(
         presentation: LoginPresentation,
         profile: ConfidentialProfileInput,
-        worker: JoinHandle<Result<Authorization, String>>,
+        worker: JoinHandle<Result<Authorization, Error>>,
     ) -> Self {
         Self {
             presentation,
@@ -199,7 +181,6 @@ impl PendingLogin {
             state: LoginState::Authorizing(worker),
             deadline: Instant::now() + LOGIN_TIMEOUT,
             saved: false,
-            callback: None,
         }
     }
 
@@ -207,17 +188,17 @@ impl PendingLogin {
         self.deadline > Instant::now() && !matches!(self.state, LoginState::Failed(_))
     }
 
-    fn validate(&self, id: &str) -> Result<(), String> {
+    fn validate(&self, id: &str) -> Result<(), Error> {
         if self.presentation.id != id {
-            return Err("Account login is no longer active".into());
+            return Err("Account connection is no longer active".into());
         }
         if self.deadline <= Instant::now() {
-            return Err("Account authorization expired; sign in again".into());
+            return Err("Account authorization expired; reconnect the account".into());
         }
         Ok(())
     }
 
-    async fn resolve(&mut self) -> Result<Option<&mut Authorization>, String> {
+    async fn resolve(&mut self) -> Result<Option<&mut Authorization>, Error> {
         if let LoginState::Authorizing(task) = &mut self.state {
             if !task.is_finished() {
                 return Ok(None);
@@ -225,7 +206,7 @@ impl PendingLogin {
             self.state = match task.await {
                 Ok(Ok(authorization)) => LoginState::Authorized(Box::new(authorization)),
                 Ok(Err(error)) => LoginState::Failed(error),
-                Err(_) => LoginState::Failed("Account login stopped".into()),
+                Err(_) => LoginState::Failed("Account connection stopped".into()),
             };
         }
         match &mut self.state {
@@ -235,7 +216,7 @@ impl PendingLogin {
         }
     }
 
-    pub async fn poll(&mut self, id: &str) -> Result<Option<AccountLoginDetails>, String> {
+    pub async fn poll(&mut self, id: &str) -> Result<Option<AccountLoginDetails>, Error> {
         self.validate(id)?;
         Ok(self
             .resolve()
@@ -248,16 +229,16 @@ impl PendingLogin {
         id: &str,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
-    ) -> Result<Credential, String> {
+    ) -> Result<Credential, Error> {
         self.validate(id)?;
-        let candidate = crate::service_config::resolve_profile(profile.clone(), None)?;
+        let candidate = desktop_core::config::resolve_profile(profile.clone(), None)?;
         if candidate.id != self.profile.id
             || candidate.provider != self.profile.provider
             || candidate.remote_url != self.profile.remote_url
         {
-            return Err("Sign in again for the selected provider".into());
+            return Err("Reconnect the selected provider".into());
         }
-        let authorization = self.resolve().await?.ok_or("Finish signing in first")?;
+        let authorization = self.resolve().await?.ok_or("Finish connecting first")?;
         let credential = authorization.issue(profile, workspace_id).await?;
         // Save retries reuse this authorization’s issued key.
         *authorization = Authorization::Inference(credential.clone());
@@ -267,48 +248,16 @@ impl PendingLogin {
     pub async fn balance_credential(
         &mut self,
         id: &str,
-    ) -> Result<(ServiceProvider, String), String> {
+    ) -> Result<(ServiceProvider, String), Error> {
         self.validate(id)?;
         let provider = self.profile.provider;
         let secret = self
             .resolve()
             .await?
-            .ok_or("Finish signing in first")?
+            .ok_or("Finish connecting first")?
             .balance_secret()
             .to_owned();
         Ok((provider, secret))
-    }
-
-    pub async fn complete_callback(&self, id: &str, value: &str) -> Result<(), String> {
-        self.validate(id)?;
-        let state = self
-            .callback
-            .as_ref()
-            .ok_or("Account: This provider uses a device code, not a callback link.")?;
-        if value.len() > 16384 {
-            return Err("Account: Callback link is too long.".into());
-        }
-        let url =
-            Url::parse(value.trim()).map_err(|_| "Account: Paste the complete callback URL.")?;
-        if url.scheme() != "http"
-            || url.host_str() != Some("127.0.0.1")
-            || url.port() != Some(4181)
-            || url.path() != "/oauth/callback"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err("Account: This callback URL does not match the current sign-in.".into());
-        }
-        let uri: Uri = format!("{}?{}", url.path(), url.query().unwrap_or_default())
-            .parse()
-            .map_err(|_| "Account: Invalid callback URL.")?;
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "127.0.0.1:4181".parse().expect("constant host"));
-        state
-            .accept(&uri, &headers)
-            .await
-            .map_err(|_| "Account: This callback is invalid or has already been used.".into())
     }
 
     pub fn profile_id(&self) -> &str {
@@ -327,7 +276,7 @@ impl PendingLogin {
         self.saved = true;
     }
 
-    pub async fn cancel(&mut self) -> Result<(), String> {
+    pub async fn cancel(&mut self) -> Result<(), Error> {
         let provider = self.profile.provider;
         if self.saved || provider != ServiceProvider::Redpill {
             return Ok(());
@@ -340,7 +289,7 @@ impl PendingLogin {
             {
                 // Pending credentials also expire server-side. Offline cleanup
                 // must not trap the user in an editor or prevent a fresh login.
-                eprintln!("Pending authorization cleanup deferred to server expiry");
+                tracing::info!("Pending authorization cleanup deferred to server expiry");
             }
         }
         Ok(())
@@ -353,15 +302,18 @@ pub(crate) enum CredentialTransition {
     Unavailable,
 }
 
-pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, String> {
-    profile.remote_url = crate::service_config::resolve_profile(profile.clone(), None)?.remote_url;
+pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<PendingLogin, Error> {
+    profile.remote_url = desktop_core::config::resolve_profile(profile.clone(), None)?.remote_url;
     let client = client()?;
     let id = Uuid::new_v4().to_string();
-    let (url, user_code, worker, callback_state) = match profile.provider {
+    let (url, user_code, worker) = match profile.provider {
         ServiceProvider::Phala => {
             let data = response(
                 client
-                    .post(format!("{PHALA_API}/api/v1/auth/device/code"))
+                    .post(desktop_core::endpoint(
+                        PHALA_API,
+                        &["api", "v1", "auth", "device", "code"],
+                    )?)
                     .json(&json!({"client_id":"private-ai-proxy", "scope":"redpill:api-key"})),
             )
             .await?;
@@ -381,65 +333,54 @@ pub(crate) async fn begin(mut profile: ConfidentialProfileInput) -> Result<Pendi
                     phala(client, device, interval),
                 )
                 .await
-                .map_err(|_| "Authorization expired; sign in again".to_string())?
+                .map_err(|_| "Authorization expired; reconnect the account".to_string())?
                 .map(Authorization::Inference)
             });
-            (url, Some(code), worker, None)
+            (url, Some(code), worker)
         }
         ServiceProvider::Redpill => {
-            let discovery =
-                response(client.get(format!("{ISSUER}/.well-known/openid-configuration"))).await?;
+            let discovery = response(client.get(desktop_core::endpoint(
+                ISSUER,
+                &[".well-known", "openid-configuration"],
+            )?))
+            .await?;
             validate_discovery(&discovery)?;
-            let listener = TcpListener::bind("127.0.0.1:4181")
-                .await
-                .map_err(|_| "Login port 4181 is in use; close the other login and retry")?;
-            let verifier = random_secret();
-            let state = random_secret();
-            let mut url = trusted_url(&string(&discovery, "authorization_endpoint")?, ISSUER)?;
-            url.query_pairs_mut().extend_pairs([
-                ("client_id", REDPILL_CLIENT_ID),
-                ("response_type", "code"),
-                ("response_mode", "query"),
-                ("redirect_uri", CALLBACK),
-                ("scope", "openid profile user:org:read"),
-                ("state", &state),
-                ("code_challenge_method", "S256"),
-                (
-                    "code_challenge",
-                    &URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
-                ),
-            ]);
-            let token_url = trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?;
-            let (sender, receiver) = oneshot::channel();
-            let callback = Arc::new(CallbackState {
-                expected: state,
-                sender: Mutex::new(Some(sender)),
-            });
-            let worker_callback = callback.clone();
+            let oauth = redpill_client(
+                DeviceAuthorizationUrl::from_url(trusted_url(
+                    &string(&discovery, "device_authorization_endpoint")?,
+                    ISSUER,
+                )?),
+                TokenUrl::from_url(trusted_url(&string(&discovery, "token_endpoint")?, ISSUER)?),
+            );
+            let userinfo = desktop_core::endpoint(ISSUER, &["oauth", "userinfo"])?;
+            let device = device_authorization(&client, &oauth).await?;
+            let url = trusted_url(
+                device
+                    .verification_uri_complete()
+                    .map(|url| url.secret().as_str())
+                    .unwrap_or(device.verification_uri().as_str()),
+                VERIFICATION_ORIGIN,
+            )?
+            .to_string();
+            let code = device.user_code().secret().clone();
             let worker = tokio::spawn(async move {
-                timeout(
-                    LOGIN_TIMEOUT,
-                    redpill(
-                        client,
-                        listener,
-                        worker_callback,
-                        receiver,
-                        verifier,
-                        token_url,
-                    ),
-                )
+                timeout(LOGIN_TIMEOUT, async move {
+                    redpill(&client, &oauth, &device, userinfo.as_str(), ACCOUNT_URL).await
+                })
                 .await
-                .map_err(|_| "Authorization expired; sign in again".to_string())?
+                .map_err(|_| "Authorization expired; reconnect the account".to_string())?
             });
-            (url.to_string(), None, worker, Some(callback))
+            (url, Some(code), worker)
         }
         ServiceProvider::Custom => {
-            return Err("Account login is only available for Phala and RedPill".into())
+            return Err("Account connection is only available for Phala and RedPill".into())
         }
     };
-    let mut pending = PendingLogin::new(LoginPresentation { id, url, user_code }, profile, worker);
-    pending.callback = callback_state;
-    Ok(pending)
+    Ok(PendingLogin::new(
+        LoginPresentation { id, url, user_code },
+        profile,
+        worker,
+    ))
 }
 
 #[cfg(test)]
