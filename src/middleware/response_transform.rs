@@ -8,6 +8,7 @@
 //!
 //! Cost injection is a separate metering pass.
 
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -974,8 +975,8 @@ pub(super) fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// The cache counters of a Chat usage object: tokens read from cache, under
-/// either name an upstream uses, and tokens written to it.
+/// The cache counters of a Chat usage object: tokens read from and written
+/// to the cache, each under either name an upstream uses.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
     // Read as the control plane reads a counter: a numeric string counts, and
     // anything unreadable, negative included, is absent rather than zero, so
@@ -994,10 +995,14 @@ pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
                 .and_then(|details| details.get("cached_tokens")),
         )
     });
-    (
-        cache_read,
-        counter(usage.get("cache_creation_input_tokens")),
-    )
+    let cache_creation = counter(usage.get("cache_creation_input_tokens")).or_else(|| {
+        counter(
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens")),
+        )
+    });
+    (cache_read, cache_creation)
 }
 
 /// Anthropic usage for a Chat usage object.
@@ -1063,7 +1068,8 @@ pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -
 }
 
 /// How a Chat choice ended, read once for every surface the bridges serve.
-/// The OpenAI vocabulary is mapped explicitly and anything else — none, or a
+/// The OpenAI vocabulary (in any case, with the `max_tokens` some upstreams
+/// say for `length`) is mapped explicitly and anything else — none, or a
 /// vendor's own reason — ends the turn normally, as LiteLLM maps it. Failure
 /// is reported by an `error` payload, not guessed from a reason's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1077,8 +1083,8 @@ pub(super) enum ChatFinish {
 
 impl ChatFinish {
     pub(super) fn parse(reason: Option<&str>) -> Self {
-        match reason {
-            Some("length") => Self::Length,
+        match reason.map(str::to_ascii_lowercase).as_deref() {
+            Some("length" | "max_tokens") => Self::Length,
             Some("content_filter") => Self::ContentFilter,
             _ => Self::Stop,
         }
@@ -1252,7 +1258,7 @@ pub fn responses_echo(params: &Value) -> Value {
 }
 
 /// Rebuild a chat completion as the Responses object answering the client:
-/// the first choice's reasoning, text (or refusal) and tool calls become
+/// the first choice's reasoning, text and refusal, and tool calls become
 /// output items in that order, `finish_reason` becomes `status`, and the
 /// usage buckets take their Responses names. `echo` supplies the request
 /// fields the object repeats; `id` is the gateway's id for the response.
@@ -1282,35 +1288,44 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         .cloned()
         .or_else(|| message.is_none().then(malformed_response_error));
     let message = message.unwrap_or(&Value::Null);
-    if let Some(text) = reasoning_text(message) {
+    let reasoning = reasoning_text(message);
+    if let Some(text) = reasoning {
         output.push(reasoning_item(
             &item_id("rs", id, output.len()),
             text,
             "completed",
         ));
     }
-    let text = message.get("content").and_then(Value::as_str).unwrap_or("");
-    let refusal = message
-        .get("refusal")
-        .and_then(Value::as_str)
-        .filter(|refusal| !refusal.is_empty());
+    let text = chat_text(message.get("content"));
+    let refusal = chat_text(message.get("refusal"));
     let tool_calls = message
         .get("tool_calls")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let part = match refusal {
-        Some(refusal) => Some(refusal_part(refusal)),
-        // A turn with neither text nor tool calls is still an (empty) message.
-        None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
-        None => None,
-    };
-    if let Some(part) = part.filter(|_| !message.is_null()) {
+    let mut parts = Vec::new();
+    // A turn with nothing else to say is still an (empty) message.
+    if !text.is_empty() || (refusal.is_empty() && tool_calls.is_empty() && reasoning.is_none()) {
+        parts.push(output_text_part(
+            &text,
+            responses_annotations(message.get("annotations")),
+        ));
+    }
+    if !refusal.is_empty() {
+        parts.push(refusal_part(&refusal));
+    }
+    if !parts.is_empty() && !message.is_null() {
         output.push(message_item(
             &item_id("msg", id, output.len()),
-            part,
+            parts,
             "completed",
         ));
+    }
+    // The turn was cut off in its last text, unless calls followed it.
+    if finish.truncated() && tool_calls.is_empty() {
+        if let Some(item) = output.last_mut() {
+            item["status"] = json!("incomplete");
+        }
     }
     let calls = chat_tool_calls(tool_calls, id);
     if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
@@ -1338,10 +1353,7 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Valu
         echo,
         ResponsesHead {
             id,
-            created_at: response
-                .get("created")
-                .and_then(Value::as_u64)
-                .unwrap_or_else(now_secs),
+            created_at: chat_created(&response),
             model: response.get("model").cloned().unwrap_or(Value::Null),
             status,
             incomplete_details,
@@ -1390,8 +1402,8 @@ pub(super) fn synthesized_call_id(response_id: &str, index: usize) -> String {
     format!("call_{response_id}_{index}")
 }
 
-/// A Chat tool call as the Responses item the client declared: a custom tool
-/// call, a tool search, or a function call restored to its namespace.
+/// A Chat tool call as the Responses item the client declared: a tool search,
+/// or a function or custom tool call restored to its namespace.
 pub(super) fn responses_call_item(
     tool_map: &ResponsesToolMap,
     call_id: &str,
@@ -1399,9 +1411,6 @@ pub(super) fn responses_call_item(
     value: &str,
     status: &str,
 ) -> Value {
-    if tool_map.is_custom(name) {
-        return custom_tool_call_item(call_id, name, value, status);
-    }
     if tool_map.is_tool_search(name) {
         // Codex runs the search it asked for, as CC-Switch restores the call.
         let arguments = serde_json::from_str::<Value>(value)
@@ -1418,13 +1427,23 @@ pub(super) fn responses_call_item(
         });
     }
     let namespace = tool_map.namespace(name);
-    function_call_item(
-        call_id,
-        namespace.map_or(name, |tool| tool.name.as_str()),
-        namespace.map(|tool| tool.namespace.as_str()),
-        value,
-        status,
-    )
+    let (kind, prefix, key) = if tool_map.is_custom(name) {
+        ("custom_tool_call", "ctc", "input")
+    } else {
+        ("function_call", "fc", "arguments")
+    };
+    let mut item = json!({
+        "id": format!("{prefix}_{call_id}"),
+        "type": kind,
+        "call_id": call_id,
+        "name": namespace.map_or(name, |tool| tool.name.as_str()),
+        key: value,
+        "status": status,
+    });
+    if let Some(tool) = namespace {
+        item["namespace"] = json!(tool.namespace);
+    }
+    item
 }
 
 /// What the client runs for a Chat tool call: a custom tool's raw input or a
@@ -1490,6 +1509,27 @@ pub(super) fn item_id(kind: &str, response_id: &str, output_index: usize) -> Str
     format!("{kind}_{response_id}_{output_index}")
 }
 
+/// The text of a Chat message's or delta's content or refusal. Some upstreams
+/// send it as parts; their text is the answer.
+pub(super) fn chat_text(value: Option<&Value>) -> Cow<'_, str> {
+    match value {
+        Some(Value::String(text)) => Cow::Borrowed(text),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => Cow::Borrowed(""),
+    }
+}
+
+/// When a Chat response was created, or now when it does not say.
+pub(super) fn chat_created(response: &Value) -> u64 {
+    response
+        .get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(now_secs)
+}
+
 /// The reasoning a chat message or delta carries, under either wire spelling.
 pub(super) fn reasoning_text(message: &Value) -> Option<&str> {
     ["reasoning_content", "reasoning"]
@@ -1514,54 +1554,38 @@ pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
     })
 }
 
-pub(super) fn message_item(id: &str, part: Value, status: &str) -> Value {
+pub(super) fn message_item(id: &str, content: Vec<Value>, status: &str) -> Value {
     json!({
         "id": id,
         "type": "message",
         "role": "assistant",
         "status": status,
-        "content": [part],
+        "content": content,
     })
 }
 
-pub(super) fn output_text_part(text: &str) -> Value {
-    json!({ "type": "output_text", "text": text, "annotations": [] })
+pub(super) fn output_text_part(text: &str, annotations: Vec<Value>) -> Value {
+    json!({ "type": "output_text", "text": text, "annotations": annotations })
+}
+
+/// The Responses annotations for a Chat message's or delta's citations: a
+/// `url_citation` keeps its fields, flattened, as relaykit carries them.
+pub(super) fn responses_annotations(annotations: Option<&Value>) -> Vec<Value> {
+    annotations
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|annotation| annotation["type"] == "url_citation")
+        .filter_map(|annotation| {
+            let mut citation = annotation.get("url_citation")?.as_object()?.clone();
+            citation.insert("type".into(), json!("url_citation"));
+            Some(Value::Object(citation))
+        })
+        .collect()
 }
 
 pub(super) fn refusal_part(refusal: &str) -> Value {
     json!({ "type": "refusal", "refusal": refusal })
-}
-
-fn function_call_item(
-    call_id: &str,
-    name: &str,
-    namespace: Option<&str>,
-    arguments: &str,
-    status: &str,
-) -> Value {
-    let mut item = json!({
-        "id": format!("fc_{call_id}"),
-        "type": "function_call",
-        "call_id": call_id,
-        "name": name,
-        "arguments": arguments,
-        "status": status,
-    });
-    if let Some(namespace) = namespace {
-        item["namespace"] = json!(namespace);
-    }
-    item
-}
-
-fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
-    json!({
-        "id": format!("ctc_{call_id}"),
-        "type": "custom_tool_call",
-        "call_id": call_id,
-        "name": name,
-        "input": input,
-        "status": status,
-    })
 }
 
 /// The input inside the wrapper we advertised upstream, when the model
@@ -1667,15 +1691,7 @@ fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransf
         content.push(thinking_block(thinking));
     }
     for key in ["content", "refusal"] {
-        let text = match message.get(key) {
-            Some(Value::String(text)) => text.clone(),
-            // Some upstreams send content as parts; their text is the answer.
-            Some(Value::Array(parts)) => parts
-                .iter()
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .collect(),
-            _ => String::new(),
-        };
+        let text = chat_text(message.get(key));
         if !text.is_empty() {
             content.push(json!({ "type": "text", "text": text }));
         }

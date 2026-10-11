@@ -12,6 +12,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -1223,7 +1224,7 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
     }
 
     let mut chat = Map::new();
-    chat.insert("messages".into(), Value::Array(messages));
+    chat.insert("messages".into(), chat_messages(messages)?);
     for key in [
         "model",
         "max_tokens",
@@ -1257,14 +1258,6 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
     }
     if !tools.is_empty() {
         chat.insert("tools".into(), Value::Array(tools));
-    }
-    if let Some(user) = request
-        .get("metadata")
-        .and_then(|metadata| metadata.get("user_id"))
-        .and_then(Value::as_str)
-        .filter(|user| !user.is_empty())
-    {
-        chat.insert("user".into(), json!(user));
     }
     if let Some(format) = request
         .get("output_config")
@@ -1375,9 +1368,11 @@ fn push_messages_turn(turn: &Value, messages: &mut Vec<Value>) -> Result<(), Tra
         .filter(|role| matches!(*role, "user" | "assistant"))
         .ok_or_else(|| TransformError::invalid_request("message role must be user or assistant"))?;
     match turn.get("content") {
-        Some(Value::String(text)) => messages.push(json!({ "role": role, "content": text })),
+        Some(Value::String(text)) => {
+            push_message(messages, json!({ "role": role, "content": text }))
+        }
         Some(Value::Array(blocks)) if role == "user" => push_user_turn(blocks, messages)?,
-        Some(Value::Array(blocks)) => messages.push(assistant_turn(blocks)?),
+        Some(Value::Array(blocks)) => push_message(messages, assistant_turn(blocks)?),
         _ => {
             return Err(TransformError::invalid_request(
                 "message content must be a string or an array",
@@ -1389,12 +1384,12 @@ fn push_messages_turn(turn: &Value, messages: &mut Vec<Value>) -> Result<(), Tra
 
 /// A user turn's tool results become `tool` messages ahead of the rest of the
 /// turn, because Chat requires them to answer the assistant turn directly.
-/// Chat tool messages carry text only, so images a tool returned lead the
-/// user message that follows, where the model reads them as the results.
+/// Chat tool messages carry text only, so images and documents a tool
+/// returned lead the user message that follows, where the model reads them as
+/// the results.
 fn push_user_turn(blocks: &[Value], messages: &mut Vec<Value>) -> Result<(), TransformError> {
     let mut content = Vec::new();
     let mut parts = Vec::new();
-    let mut answered_tools = false;
     for block in blocks {
         match block_type(block)? {
             "text" => parts.push(json!({ "type": "text", "text": block_text(block)? })),
@@ -1402,16 +1397,40 @@ fn push_user_turn(blocks: &[Value], messages: &mut Vec<Value>) -> Result<(), Tra
             "document" => parts.extend(document_parts(block)),
             "tool_result" => {
                 messages.push(tool_result_message(block, &mut content)?);
-                answered_tools = true;
             }
             _ => {}
         }
     }
     content.append(&mut parts);
-    if !content.is_empty() || !answered_tools {
-        messages.push(json!({ "role": "user", "content": chat_content(content) }));
-    }
+    push_message(
+        messages,
+        json!({ "role": "user", "content": chat_content(content) }),
+    );
     Ok(())
+}
+
+/// The converted conversation, which Chat requires to hold a message: one the
+/// bridge found nothing to read in would only be rejected by every upstream.
+fn chat_messages(messages: Vec<Value>) -> Result<Value, TransformError> {
+    if messages.is_empty() {
+        return Err(TransformError::invalid_request(
+            "request has no content a Chat upstream can read",
+        ));
+    }
+    Ok(Value::Array(messages))
+}
+
+/// Append a Chat message unless it carries nothing — no content, tool calls
+/// or reasoning — as relaykit leaves such messages out.
+fn push_message(messages: &mut Vec<Value>, message: Value) {
+    let empty = match &message["content"] {
+        Value::String(text) => text.is_empty(),
+        Value::Array(parts) => parts.is_empty(),
+        _ => true,
+    };
+    if !empty || message.get("tool_calls").is_some() || message.get("reasoning_content").is_some() {
+        messages.push(message);
+    }
 }
 
 /// An assistant turn is one Chat message: its text, its tool calls, and its
@@ -1511,7 +1530,10 @@ fn document_parts(block: &Value) -> Vec<Value> {
     ) {
         (Some("base64"), Some(PDF_MIME), Some(data)) => json!({
             "type": "file",
-            "file": { "file_data": format!("data:{PDF_MIME};base64,{data}") },
+            "file": {
+                "filename": "document.pdf",
+                "file_data": format!("data:{PDF_MIME};base64,{data}"),
+            },
         }),
         (Some("text"), Some(TXT_MIME) | None, Some(data)) => {
             json!({ "type": "text", "text": data })
@@ -1527,24 +1549,47 @@ fn document_parts(block: &Value) -> Vec<Value> {
     parts
 }
 
-/// Where a tool's images went, for a model reading the Chat tool message.
-const TOOL_IMAGES_NOTE: &str = "[The tool returned images; they follow in the next user message.]";
-
-/// The `tool` message answering one tool call. Images the tool returned go to
-/// `images` for the user message that follows; a note keeps them attached.
-fn tool_result_message(block: &Value, images: &mut Vec<Value>) -> Result<Value, TransformError> {
+/// The `tool` message answering one tool call, as relaykit maps it. Chat
+/// tool messages carry text only: text blocks stay, joined by newlines, and
+/// images and documents go to `media` for the user message that follows, with
+/// a label standing in when there is no text. Content holding any other block
+/// is kept whole, as its JSON, so nothing the tool returned is lost.
+fn tool_result_message(block: &Value, media: &mut Vec<Value>) -> Result<Value, TransformError> {
     let tool_use_id = required_string(block, "tool_use_id", "tool_result block")?;
-    let images_before = images.len();
-    let mut texts = Vec::new();
-    match block.get("content") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(text)) => texts.push(text.as_str()),
+    let content = match block.get("content") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
         Some(Value::Array(blocks)) => {
+            let mut texts = Vec::new();
+            let mut labels = Vec::new();
+            let mut tool_media = Vec::new();
+            let mut whole = false;
             for content in blocks {
-                match block_type(content)? {
-                    "text" => texts.push(block_text(content)?),
-                    "image" => images.extend(image_part(content)?),
-                    _ => {}
+                let kind = block_type(content)?;
+                let parts = match kind {
+                    "text" => {
+                        texts.push(block_text(content)?);
+                        continue;
+                    }
+                    "image" => image_part(content)?.into_iter().collect(),
+                    "document" => document_parts(content),
+                    _ => Vec::new(),
+                };
+                whole |= parts.is_empty();
+                tool_media.extend(parts);
+                let label = format!("[{kind}]");
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            if whole || (texts.is_empty() && tool_media.is_empty()) {
+                Value::Array(blocks.clone()).to_string()
+            } else {
+                media.append(&mut tool_media);
+                if texts.is_empty() {
+                    labels.join(" ")
+                } else {
+                    texts.join("\n")
                 }
             }
         }
@@ -1553,11 +1598,8 @@ fn tool_result_message(block: &Value, images: &mut Vec<Value>) -> Result<Value, 
                 "tool_result content must be a string or an array",
             ))
         }
-    }
-    if images.len() > images_before {
-        texts.push(TOOL_IMAGES_NOTE);
-    }
-    Ok(json!({ "role": "tool", "tool_call_id": tool_use_id, "content": join_text(texts) }))
+    };
+    Ok(json!({ "role": "tool", "tool_call_id": tool_use_id, "content": content }))
 }
 
 /// Client tools become Chat functions. Anthropic's typed tools run on its
@@ -1766,7 +1808,7 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
     }
 
     let effective_tools = effective_responses_tools(params)?;
-    let (chat_tools, tool_map, function_names) = chat_tools(&effective_tools)?;
+    let (mut chat_tools, _) = chat_tools(&effective_tools)?;
 
     let mut messages = Vec::new();
     let mut input_state = ResponsesInputState::default();
@@ -1793,7 +1835,7 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
     }
 
     let mut chat = Map::new();
-    chat.insert("messages".into(), Value::Array(messages));
+    chat.insert("messages".into(), chat_messages(messages)?);
     for (key, chat_key) in [
         ("model", "model"),
         // Gateway-local routing metadata. Provider configs omit it before the
@@ -1812,10 +1854,12 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
             chat.insert(chat_key.into(), value.clone());
         }
     }
-    if let Some(choice) = input.get("tool_choice") {
-        if let Some(choice) = chat_tool_choice(choice, &function_names, &tool_map)? {
-            chat.insert("tool_choice".into(), choice);
-        }
+    let tool_choice = input
+        .get("tool_choice")
+        .map(|choice| chat_tool_choice(choice, &mut chat_tools))
+        .transpose()?;
+    if let Some(choice) = tool_choice.flatten() {
+        chat.insert("tool_choice".into(), choice);
     }
     // Hosted tools are omitted, so there may be no tools left for Chat's
     // tool controls to govern.
@@ -1970,7 +2014,7 @@ fn push_input_item(
             } else {
                 state.pending_reasoning = None;
             }
-            messages.push(message);
+            push_message(messages, message);
         }
         Some("function_call") => {
             let call_id = required_string(item, "call_id", "function_call")?;
@@ -1993,14 +2037,14 @@ fn push_input_item(
         }
         Some("custom_tool_call") => {
             let call_id = required_string(item, "call_id", "custom_tool_call")?;
-            let name = required_string(item, "name", "custom_tool_call")?;
+            let name = response_call_name(item, "custom_tool_call")?;
             let input = item.get("input").and_then(Value::as_str).ok_or_else(|| {
                 TransformError::invalid_request("custom_tool_call requires a string input")
             })?;
             let arguments = json!({ "input": input }).to_string();
             push_chat_call(
                 call_id,
-                name,
+                &name,
                 &arguments,
                 ResponsesCallKind::Custom,
                 messages,
@@ -2161,39 +2205,7 @@ fn chat_message_content(role: &str, content: Option<&Value>) -> Result<Value, Tr
             "input_text" | "output_text" | "text" => {
                 out.push(json!({ "type": "text", "text": str_or_empty(part.get("text")) }));
             }
-            // Chat has no counterpart for image file ids or file URLs.
-            "input_image" => {
-                if let Some(url) = part.get("image_url").and_then(Value::as_str) {
-                    let mut image_url = json!({ "url": url });
-                    if let Some(detail) = part.get("detail") {
-                        image_url["detail"] = detail.clone();
-                    }
-                    out.push(json!({ "type": "image_url", "image_url": image_url }));
-                }
-            }
-            "input_file" => {
-                if part.get("file_url").is_some_and(|value| !value.is_null()) {
-                    continue;
-                }
-                let file_id = optional_non_empty_string(part, "file_id", "input_file")?;
-                let file_data = optional_non_empty_string(part, "file_data", "input_file")?;
-                if file_id.is_some() == file_data.is_some() {
-                    return Err(TransformError::invalid_request(
-                        "input_file requires exactly one of file_id or file_data",
-                    ));
-                }
-                let mut file = Map::new();
-                if let Some(file_id) = file_id {
-                    file.insert("file_id".into(), json!(file_id));
-                }
-                if let Some(file_data) = file_data {
-                    file.insert("file_data".into(), json!(file_data));
-                }
-                if let Some(filename) = optional_non_empty_string(part, "filename", "input_file")? {
-                    file.insert("filename".into(), json!(filename));
-                }
-                out.push(json!({ "type": "file", "file": file }));
-            }
+            "input_image" | "input_file" => out.extend(chat_media_part(part)?),
             _ => {}
         }
     }
@@ -2205,15 +2217,80 @@ fn chat_message_content(role: &str, content: Option<&Value>) -> Result<Value, Tr
     })
 }
 
-/// A tool output's text; images it returned go to `media`, with a note that
-/// keeps them attached to this output.
+/// The Chat part for a Responses image or file, as relaykit maps them, with
+/// an image's `detail`, which Chat shares. A file becomes a Chat file part when Chat can
+/// carry it — an uploaded `file_id`, or PDF data — and its text when it is a
+/// text file; Chat has no counterpart for image file ids, file URLs or other
+/// file types.
+fn chat_media_part(part: &Value) -> Result<Option<Value>, TransformError> {
+    if part.get("type").and_then(Value::as_str) == Some("input_image") {
+        return Ok(part.get("image_url").and_then(Value::as_str).map(|url| {
+            let mut image_url = json!({ "url": url });
+            if let Some(detail) = part.get("detail").filter(|detail| detail.is_string()) {
+                image_url["detail"] = detail.clone();
+            }
+            json!({ "type": "image_url", "image_url": image_url })
+        }));
+    }
+    if part.get("file_url").is_some_and(|value| !value.is_null()) {
+        return Ok(None);
+    }
+    let file_id = optional_non_empty_string(part, "file_id", "input_file")?;
+    let file_data = optional_non_empty_string(part, "file_data", "input_file")?;
+    let filename = optional_non_empty_string(part, "filename", "input_file")?;
+    let mut file = match (file_id, file_data) {
+        (Some(file_id), None) => json!({ "file_id": file_id }),
+        (None, Some(data)) => match data_url(data) {
+            Some((PDF_MIME, _)) => json!({ "file_data": data }),
+            Some((media_type, encoded)) if is_text_media_type(media_type) => {
+                let text = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                return Ok(text.map(|text| json!({ "type": "text", "text": text })));
+            }
+            Some(_) => return Ok(None),
+            None => json!({ "file_data": data }),
+        },
+        _ => {
+            return Err(TransformError::invalid_request(
+                "input_file requires exactly one of file_id or file_data",
+            ))
+        }
+    };
+    if let Some(filename) = filename {
+        file["filename"] = json!(filename);
+    } else if file.get("file_data").is_some() {
+        file["filename"] = json!("document.pdf");
+    }
+    Ok(Some(json!({ "type": "file", "file": file })))
+}
+
+/// The media type and base64 payload of a `data:` URL.
+fn data_url(url: &str) -> Option<(&str, &str)> {
+    let (header, data) = url.strip_prefix("data:")?.split_once(',')?;
+    let media_type = header.strip_suffix(";base64")?;
+    Some((
+        media_type.split(';').next().unwrap_or_default().trim(),
+        data,
+    ))
+}
+
+fn is_text_media_type(media_type: &str) -> bool {
+    media_type.starts_with("text/") || matches!(media_type, "application/json" | "application/xml")
+}
+
+/// A tool output's text, as relaykit maps it. Chat tool messages carry text
+/// only, so images and files the output returned go to `media`, for the user
+/// message that follows the outputs; a label stands in when there is no text.
+/// An output of any other shape is the tool's verbatim JSON, media and all.
 fn tool_output_text(
     output: Option<&Value>,
     media: &mut Vec<Value>,
 ) -> Result<String, TransformError> {
     let parts = match output {
         Some(Value::String(text)) => return Ok(text.clone()),
-        Some(Value::Array(parts)) => parts,
+        Some(Value::Array(parts)) if !parts.is_empty() => parts,
         Some(other) => return Ok(other.to_string()),
         None => {
             return Err(TransformError::invalid_request(
@@ -2221,18 +2298,30 @@ fn tool_output_text(
             ))
         }
     };
-    let mut text = text_parts(parts, "tool output content")?;
-    media.extend(parts.iter().filter_map(|part| {
-        let url = part
-            .get("image_url")
-            .and_then(Value::as_str)
-            .filter(|_| part.get("type").and_then(Value::as_str) == Some("input_image"))?;
-        Some(json!({ "type": "image_url", "image_url": { "url": url } }))
-    }));
-    if !media.is_empty() {
-        text = join_text([text.as_str(), TOOL_IMAGES_NOTE]);
+    let mut texts = Vec::new();
+    let mut labels = Vec::new();
+    let mut output_media = Vec::new();
+    for part in parts {
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => {
+                texts.extend(part.get("text").and_then(Value::as_str));
+            }
+            Some(kind @ ("input_image" | "input_file")) => {
+                output_media.extend(chat_media_part(part)?);
+                let label = format!("[{}]", kind.trim_start_matches("input_"));
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            _ => return Ok(Value::Array(parts.clone()).to_string()),
+        }
     }
-    Ok(text)
+    media.append(&mut output_media);
+    Ok(if texts.is_empty() {
+        labels.join(" ")
+    } else {
+        texts.join("\n")
+    })
 }
 
 /// The text of parts that Chat can only carry as text.
@@ -2306,7 +2395,7 @@ impl ResponsesToolMap {
     pub(super) fn from_echo(echo: &Value) -> Self {
         let tools = echo.get("tools").and_then(Value::as_array);
         chat_tools(tools.map_or(&[][..], Vec::as_slice))
-            .map(|(_, map, _)| map)
+            .map(|(_, map)| map)
             .unwrap_or_default()
     }
 
@@ -2320,12 +2409,6 @@ impl ResponsesToolMap {
 
     pub(super) fn is_tool_search(&self, name: &str) -> bool {
         self.tool_search && name == TOOL_SEARCH_PROXY_NAME
-    }
-
-    fn has_namespace(&self, namespace: &str) -> bool {
-        self.namespaces
-            .values()
-            .any(|tool| tool.namespace == namespace)
     }
 }
 
@@ -2366,9 +2449,7 @@ pub(super) fn effective_responses_tools(params: &Value) -> Result<Vec<Value>, Tr
 /// already declared keeps its first declaration, in both, as CC-Switch keeps
 /// it: Codex re-declares the groups each tool search loaded, and two searches
 /// may load the same one.
-fn chat_tools(
-    tools: &[Value],
-) -> Result<(Vec<Value>, ResponsesToolMap, HashSet<String>), TransformError> {
+fn chat_tools(tools: &[Value]) -> Result<(Vec<Value>, ResponsesToolMap), TransformError> {
     let mut tool_map = ResponsesToolMap::default();
     let mut translated = Vec::new();
     let mut function_names = HashSet::new();
@@ -2386,23 +2467,8 @@ fn chat_tools(
                 declare(tool, name, None);
             }
             Some("custom") => {
-                // A grammar-constrained tool still takes its input as text.
                 let name = required_string(tool, "name", "custom tool")?;
-                let declared = declare(
-                    tool,
-                    name,
-                    Some(json!({
-                        "type": "object",
-                        "properties": {
-                            "input": {
-                                "type": "string",
-                                "description": "The raw input for this tool, passed through verbatim."
-                            }
-                        },
-                        "required": ["input"]
-                    })),
-                );
-                if declared {
+                if declare_custom(&mut declare, tool, name) {
                     tool_map.custom.insert(name.to_string());
                 }
             }
@@ -2412,13 +2478,36 @@ fn chat_tools(
                     TransformError::invalid_request("namespace tool requires a tools array")
                 })?;
                 for child in children {
-                    let child_type = child.get("type").and_then(Value::as_str);
-                    if child_type != Some("function") {
-                        continue;
-                    }
-                    let name = required_string(child, "name", "namespace function tool")?;
+                    let custom = match child.get("type").and_then(Value::as_str) {
+                        Some("function") => false,
+                        Some("custom") => true,
+                        _ => continue,
+                    };
+                    let name = required_string(child, "name", "namespace tool")?;
                     let flat = flatten_namespace_tool_name(namespace, name);
-                    if declare(child, &flat, None) {
+                    // The namespace's description introduces each of its tools.
+                    let mut child = child.clone();
+                    let description = join_text([
+                        tool.get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                        child
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    ]);
+                    if !description.is_empty() {
+                        child["description"] = json!(description);
+                    }
+                    let declared = if custom {
+                        declare_custom(&mut declare, &child, &flat)
+                    } else {
+                        declare(&child, &flat, None)
+                    };
+                    if declared {
+                        if custom {
+                            tool_map.custom.insert(flat.clone());
+                        }
                         tool_map.namespaces.insert(
                             flat,
                             NamespacedTool {
@@ -2460,7 +2549,67 @@ fn chat_tools(
             _ => {}
         }
     }
-    Ok((translated, tool_map, function_names))
+    Ok((translated, tool_map))
+}
+
+/// Declare a custom tool as the Chat function standing in for it: its input
+/// is the one string argument the function takes.
+fn declare_custom(
+    declare: &mut impl FnMut(&Value, &str, Option<Value>) -> bool,
+    tool: &Value,
+    name: &str,
+) -> bool {
+    declare(
+        &json!({ "description": custom_tool_description(tool) }),
+        name,
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "The raw input for this tool, passed through verbatim."
+                }
+            },
+            "required": ["input"],
+            "additionalProperties": false
+        })),
+    )
+}
+
+/// What a model offered a custom tool as a Chat function needs to know, as
+/// relaykit tells it: the tool's description, that its input is freeform
+/// text, and the grammar that text must match (Codex's `apply_patch` states
+/// its patch format this way).
+fn custom_tool_description(tool: &Value) -> String {
+    let format = tool.get("format");
+    let field = |key| {
+        format
+            .and_then(|format| format.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+    };
+    let grammar = match (field("type"), field("syntax"), field("definition")) {
+        (_, _, "") => String::new(),
+        ("grammar", "lark", definition) => {
+            format!("The input must match this Lark grammar:\n{definition}")
+        }
+        ("grammar", "regex", definition) => {
+            format!("The input must match this regular expression:\n{definition}")
+        }
+        ("grammar", syntax, definition) => {
+            format!("The input must match this {syntax} grammar:\n{definition}")
+        }
+        _ => String::new(),
+    };
+    join_text([
+        tool.get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim(),
+        r#"This tool takes freeform text. Put the complete raw text in the "input" argument."#,
+        &grammar,
+    ])
 }
 
 /// A Chat function for a Responses tool declaration.
@@ -2498,59 +2647,67 @@ fn flatten_namespace_tool_name(namespace: &str, name: &str) -> String {
     format!("{}{}", &full[..end], suffix)
 }
 
-/// Chat `tool_choice` for a Responses one. A choice Chat cannot express — a
-/// namespace, or a tool the bridge omitted — is left to the model.
+/// Chat `tool_choice` for a Responses one: a mode, or a declared tool by
+/// name. `allowed_tools` is a restriction, so it narrows `tools` to the ones
+/// it allows and keeps its mode; one requiring a call none of them can make
+/// is refused. Any other choice Chat cannot express — a hosted tool, a tool
+/// the bridge left out — is left to the model, as relaykit leaves it.
 fn chat_tool_choice(
     choice: &Value,
-    function_names: &HashSet<String>,
-    tool_map: &ResponsesToolMap,
+    tools: &mut Vec<Value>,
 ) -> Result<Option<Value>, TransformError> {
-    match choice {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none" | "required") => {
-            Ok((!function_names.is_empty()).then(|| json!(choice)))
+    let tool_name = |tool: &Value| tool["function"]["name"].as_str().map(str::to_string);
+    if choice.get("type").and_then(Value::as_str) == Some("allowed_tools") {
+        let allowed: HashSet<String> = choice
+            .get("tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(chat_tool_name)
+            .collect();
+        tools.retain(|tool| tool_name(tool).is_some_and(|name| allowed.contains(&name)));
+        if tools.is_empty() && choice.get("mode") == Some(&json!("required")) {
+            return Err(TransformError::invalid_request(
+                "allowed_tools requires a call, but none of its tools is available on this route",
+            ));
         }
-        Value::Object(object)
-            if matches!(
-                object.get("type").and_then(Value::as_str),
-                Some("function" | "custom")
-            ) =>
-        {
-            let item_type = object
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let mut name = required_string(choice, "name", "tool_choice")?.to_string();
-            if item_type == "function" {
-                if let Some(namespace) = object.get("namespace").and_then(Value::as_str) {
-                    name = flatten_namespace_tool_name(namespace, &name);
-                }
-            } else if !tool_map.is_custom(&name) {
-                return Err(TransformError::invalid_request(format!(
-                    "tool_choice references unknown custom tool {name}"
-                )));
-            }
-            if !function_names.contains(&name) {
-                return Ok(None);
-            }
-            Ok(Some(json!({
-                "type": "function",
-                "function": { "name": name },
-            })))
+    }
+    if tools.is_empty() {
+        return Ok(None);
+    }
+    let mode = match choice {
+        Value::String(mode) => Some(mode.as_str()),
+        _ if choice.get("type").and_then(Value::as_str) == Some("allowed_tools") => {
+            choice.get("mode").and_then(Value::as_str)
         }
-        Value::Object(object)
-            if object.get("type").and_then(Value::as_str) == Some("namespace") =>
-        {
-            let namespace = required_string(choice, "name", "namespace tool_choice")?;
-            if !tool_map.has_namespace(namespace) {
-                return Err(TransformError::invalid_request(format!(
-                    "tool_choice references unknown namespace {namespace}"
-                )));
-            }
-            Ok(None)
+        _ => None,
+    };
+    if let Some(mode) = mode {
+        return Ok(matches!(mode, "auto" | "none" | "required").then(|| json!(mode)));
+    }
+    Ok(chat_tool_name(choice)
+        .filter(|name| {
+            tools
+                .iter()
+                .any(|tool| tool_name(tool).as_deref() == Some(name.as_str()))
+        })
+        .map(|name| json!({ "type": "function", "function": { "name": name } })))
+}
+
+/// The Chat function a Responses tool reference names: a function, in its
+/// namespace, a custom tool, or the tool search.
+fn chat_tool_name(reference: &Value) -> Option<String> {
+    let name = reference.get("name").and_then(Value::as_str);
+    match (
+        reference.get("type").and_then(Value::as_str),
+        reference.get("namespace").and_then(Value::as_str),
+    ) {
+        (Some("tool_search"), _) => Some(TOOL_SEARCH_PROXY_NAME.to_string()),
+        (Some("function" | "custom"), Some(namespace)) => {
+            Some(flatten_namespace_tool_name(namespace, name?))
         }
-        _ => Err(TransformError::invalid_request(
-            "tool_choice must be auto, none, required, or a named function or custom tool",
-        )),
+        (Some("function" | "custom"), None) => name.map(str::to_string),
+        _ => None,
     }
 }
 
@@ -3056,7 +3213,11 @@ mod tests {
                             "cache_control": { "type": "ephemeral" },
                             "content": [
                                 { "type": "text", "text": "failed" },
-                                { "type": "image", "source": { "type": "url", "url": "https://x/a.png" } }
+                                { "type": "image", "source": { "type": "url", "url": "https://x/a.png" } },
+                                {
+                                    "type": "document",
+                                    "source": { "type": "base64", "media_type": "application/pdf", "data": "UERG" }
+                                }
                             ]
                         }
                     ]
@@ -3097,14 +3258,18 @@ mod tests {
                         "function": { "name": "lookup", "arguments": "{\"q\":\"x\"}" }
                     }]
                 },
-                {
-                    "role": "tool", "tool_call_id": "call_1",
-                    "content": "failed\n\n[The tool returned images; they follow in the next user message.]"
-                },
+                { "role": "tool", "tool_call_id": "call_1", "content": "failed" },
                 {
                     "role": "user",
                     "content": [
                         { "type": "image_url", "image_url": { "url": "https://x/a.png" } },
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "document.pdf",
+                                "file_data": "data:application/pdf;base64,UERG"
+                            }
+                        },
                         { "type": "text", "text": "continue" }
                     ]
                 }
@@ -3113,7 +3278,8 @@ mod tests {
         assert_eq!(body["tool_choice"], "required");
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["tools"][0]["function"]["strict"], true);
-        assert_eq!(body["user"], "user-1");
+        // The client's account id stays with the gateway, as relaykit keeps it.
+        assert!(body.get("user").is_none());
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
         for dropped in [
             "cache_control",

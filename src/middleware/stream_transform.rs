@@ -8,7 +8,8 @@
 //! when the client opts out. Cost injection, TTFT, and outcome are a separate
 //! metering pass downstream (`sse`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
@@ -22,12 +23,12 @@ use crate::aggregator::service::{ServiceError, ServiceResponseStream};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
-    self, function_call_arguments, i64_field, item_id, malformed_response_error, message_item,
-    messages_usage, normalize_reasoning_usage_value, now_millis, now_secs, output_text_part,
-    reasoning_item, reasoning_text, refusal_part, responses_call_item, responses_call_value,
-    responses_object, responses_usage, synthesized_call_id, thinking_block,
-    transform_finish_reason, unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity,
-    ResponsesHead,
+    self, chat_created, chat_text, function_call_arguments, i64_field, item_id,
+    malformed_response_error, message_item, messages_usage, normalize_reasoning_usage_value,
+    now_millis, now_secs, output_text_part, reasoning_item, reasoning_text, refusal_part,
+    responses_annotations, responses_call_item, responses_call_value, responses_object,
+    responses_usage, synthesized_call_id, thinking_block, transform_finish_reason,
+    unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity, ResponsesHead,
 };
 use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
@@ -475,8 +476,9 @@ struct ChatChunk<'a> {
     usage: Option<&'a Value>,
     error: Option<&'a Value>,
     reasoning: &'a str,
-    content: &'a str,
-    refusal: &'a str,
+    content: Cow<'a, str>,
+    refusal: Cow<'a, str>,
+    annotations: Vec<Value>,
     tool_calls: Vec<ToolCallDelta<'a>>,
     finish_reason: Option<&'a str>,
 }
@@ -524,8 +526,9 @@ fn parse_chat_chunk(chunk: &Value) -> ChatChunk<'_> {
             .and_then(|choice| choice.get("delta"))
             .and_then(reasoning_text)
             .unwrap_or(""),
-        content: stream_str(delta, "content"),
-        refusal: stream_str(delta, "refusal"),
+        content: chat_text(delta.and_then(|delta| delta.get("content"))),
+        refusal: chat_text(delta.and_then(|delta| delta.get("refusal"))),
+        annotations: responses_annotations(delta.and_then(|delta| delta.get("annotations"))),
         tool_calls,
         finish_reason: choice
             .and_then(|choice| choice.get("finish_reason"))
@@ -571,7 +574,10 @@ trait ChatEvents {
     fn usage(&mut self, _usage: &Value) {}
     fn open_text(&mut self, kind: TextKind, out: &mut String);
     fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String);
-    fn close_text(&mut self, kind: TextKind, text: &str, out: &mut String);
+    /// A citation in the open text, in Responses form.
+    fn annotation(&mut self, _annotation: Value, _out: &mut String) {}
+    /// `finished`: false for text the upstream was cut off in.
+    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut String);
     /// Write one complete tool call; false when the surface leaves it out.
     /// `truncated`: the upstream was cut off, so the call may be unfinished.
     fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool;
@@ -593,9 +599,15 @@ struct ChatStream<E> {
     open: Option<TextKind>,
     /// The open text block's text so far.
     text: String,
-    calls: BTreeMap<usize, ToolCall>,
+    /// Whether a tool call followed the open text, which therefore ended.
+    called_after_text: bool,
+    /// Keyed by the upstream's index, then by the order of the calls sent
+    /// under it.
+    calls: BTreeMap<(usize, usize), ToolCall>,
+    /// The call each upstream index currently continues.
+    bound: HashMap<usize, (usize, usize)>,
     /// The call an index-less, id-less delta continues.
-    last_call: Option<usize>,
+    last_call: Option<(usize, usize)>,
     finish_reason: Option<String>,
     usage: Option<Value>,
     error: Option<Value>,
@@ -610,7 +622,9 @@ impl<E: ChatEvents> ChatStream<E> {
             terminated: false,
             open: None,
             text: String::new(),
+            called_after_text: false,
             calls: BTreeMap::new(),
+            bound: HashMap::new(),
             last_call: None,
             finish_reason: None,
             usage: None,
@@ -674,13 +688,20 @@ impl<E: ChatEvents> ChatStream<E> {
             self.error = Some(error.clone());
         }
         self.answered |= chunk.has_choice;
+        let mut annotations = chunk.annotations.into_iter();
         for (kind, text) in [
             (TextKind::Reasoning, chunk.reasoning),
-            (TextKind::Text, chunk.content),
-            (TextKind::Refusal, chunk.refusal),
+            (TextKind::Text, &*chunk.content),
+            (TextKind::Refusal, &*chunk.refusal),
         ] {
             if !text.is_empty() {
                 self.text(kind, text, out);
+            }
+            // Citations belong to the text, before a refusal closes it.
+            if self.open == Some(TextKind::Text) {
+                for annotation in annotations.by_ref() {
+                    self.events.annotation(annotation, out);
+                }
             }
         }
         for delta in &chunk.tool_calls {
@@ -693,39 +714,65 @@ impl<E: ChatEvents> ChatStream<E> {
 
     fn text(&mut self, kind: TextKind, delta: &str, out: &mut String) {
         if self.open != Some(kind) {
-            self.close_text(out);
+            self.close_text(true, out);
             self.open = Some(kind);
             self.events.open_text(kind, out);
         }
+        self.called_after_text = false;
         self.text.push_str(delta);
         self.events.text_delta(kind, delta, out);
     }
 
-    fn close_text(&mut self, out: &mut String) {
+    fn close_text(&mut self, finished: bool, out: &mut String) {
         if let Some(kind) = self.open.take() {
-            self.events.close_text(kind, &self.text, out);
+            self.events.close_text(kind, &self.text, finished, out);
             self.text.clear();
         }
     }
 
     /// Identity fields may arrive late or repeat; the first non-empty value
-    /// stands, as there is no telling fragments from restatements.
+    /// stands, as there is no telling fragments from restatements. Another id
+    /// at an index already in use starts another call, as relaykit reads it.
     fn tool_delta(&mut self, delta: &ToolCallDelta<'_>) {
-        let slot = match (delta.index, delta.id) {
-            (Some(index), _) => index,
+        let known = self
+            .calls
+            .iter()
+            .find(|(_, call)| !delta.id.is_empty() && call.id == delta.id)
+            .map(|(slot, _)| *slot);
+        let slot = match (known, delta.index) {
+            (Some(slot), _) => slot,
+            (None, Some(index)) => {
+                let current = self.bound.get(&index).copied().unwrap_or((index, 0));
+                match self.calls.get(&current) {
+                    Some(call) if !delta.id.is_empty() && !call.id.is_empty() => {
+                        let last = self
+                            .calls
+                            .range((index, 0)..=(index, usize::MAX))
+                            .next_back();
+                        (index, last.map_or(0, |(&(_, n), _)| n + 1))
+                    }
+                    _ => current,
+                }
+            }
             // A continuation with no call to continue has nowhere to go.
-            (None, "") => match self.last_call {
+            (None, None) if delta.id.is_empty() => match self.last_call {
                 Some(slot) => slot,
                 None => return,
             },
-            (None, id) => self
-                .calls
-                .iter()
-                .find(|(_, call)| call.id == id)
-                .map(|(slot, _)| *slot)
-                .unwrap_or_else(|| self.calls.keys().next_back().map_or(0, |last| last + 1)),
+            (None, None) => {
+                let next = self
+                    .calls
+                    .keys()
+                    .next_back()
+                    .map_or(0, |(last, _)| last + 1);
+                (next, 0)
+            }
         };
+        if let Some(index) = delta.index {
+            self.bound.insert(index, slot);
+        }
         self.last_call = Some(slot);
+        self.called_after_text = true;
         let call = self.calls.entry(slot).or_default();
         for (field, value) in [(&mut call.id, delta.id), (&mut call.name, delta.name)] {
             if field.is_empty() {
@@ -744,8 +791,9 @@ impl<E: ChatEvents> ChatStream<E> {
             return Err(());
         }
         self.terminated = true;
-        self.close_text(out);
         let finish = ChatFinish::parse(self.finish_reason.as_deref());
+        // Text the turn was cut off in is unfinished, unless calls followed it.
+        self.close_text(!finish.truncated() || self.called_after_text, out);
         let outcome = if let Some(error) = &self.error {
             Outcome::Failed(Failure::Upstream(error))
         } else if !self.answered {
@@ -753,14 +801,14 @@ impl<E: ChatEvents> ChatStream<E> {
         } else {
             let mut named = 0;
             let mut tool_use = false;
-            for (slot, call) in &self.calls {
+            for (position, call) in self.calls.values().enumerate() {
                 let name = call.name.trim();
                 if name.is_empty() {
                     continue;
                 }
                 named += 1;
                 let id = match call.id.trim() {
-                    "" => synthesized_call_id(&self.response_id, *slot),
+                    "" => synthesized_call_id(&self.response_id, position),
                     id => id.to_string(),
                 };
                 let call = ChatToolCall {
@@ -879,7 +927,7 @@ impl ChatEvents for MessagesEvents {
         );
     }
 
-    fn close_text(&mut self, _kind: TextKind, _text: &str, out: &mut String) {
+    fn close_text(&mut self, _kind: TextKind, _text: &str, _finished: bool, out: &mut String) {
         self.block_stop(out);
     }
 
@@ -954,6 +1002,8 @@ struct ResponsesEvents {
     output: Vec<Value>,
     /// The item being streamed; items are added and done one at a time.
     active: Option<ActiveItem>,
+    /// The open text's citations.
+    annotations: Vec<Value>,
 }
 
 struct ActiveItem {
@@ -978,6 +1028,7 @@ impl ResponsesEvents {
             created_at: 0,
             output: Vec::new(),
             active: None,
+            annotations: Vec::new(),
         }
     }
 
@@ -1043,27 +1094,29 @@ impl ResponsesEvents {
         );
     }
 
-    fn text_item(&self, kind: TextKind, output_index: usize, text: &str, status: &str) -> Value {
+    fn text_item(&self, kind: TextKind, output_index: usize, part: Value, status: &str) -> Value {
         let request_id = &self.identity.request_id;
         match kind {
-            TextKind::Reasoning => {
-                reasoning_item(&item_id("rs", request_id, output_index), text, status)
-            }
+            TextKind::Reasoning => reasoning_item(
+                &item_id("rs", request_id, output_index),
+                part["text"].as_str().unwrap_or_default(),
+                status,
+            ),
             TextKind::Text | TextKind::Refusal => message_item(
                 &item_id("msg", request_id, output_index),
-                text_part(kind, text),
+                vec![part],
                 status,
             ),
         }
     }
-}
 
-/// The content part a text item streams into, alike for every kind.
-fn text_part(kind: TextKind, text: &str) -> Value {
-    match kind {
-        TextKind::Reasoning => json!({ "type": "reasoning_text", "text": text }),
-        TextKind::Text => output_text_part(text),
-        TextKind::Refusal => refusal_part(text),
+    /// The content part a text item streams into, alike for every kind.
+    fn text_part(&self, kind: TextKind, text: &str) -> Value {
+        match kind {
+            TextKind::Reasoning => json!({ "type": "reasoning_text", "text": text }),
+            TextKind::Text => output_text_part(text, self.annotations.clone()),
+            TextKind::Refusal => refusal_part(text),
+        }
     }
 }
 
@@ -1079,10 +1132,7 @@ fn text_event(kind: TextKind, suffix: &str) -> String {
 impl ChatEvents for ResponsesEvents {
     fn start(&mut self, chunk: &Value, _fallback_id: &str, out: &mut String) {
         self.model = chunk.get("model").cloned().unwrap_or(Value::Null);
-        self.created_at = chunk
-            .get("created")
-            .and_then(Value::as_u64)
-            .unwrap_or_else(now_secs);
+        self.created_at = chat_created(chunk);
         for kind in ["response.created", "response.in_progress"] {
             let response = self.response("in_progress", Value::Null, Value::Null, None);
             self.emit(kind, json!({ "response": response }), out);
@@ -1094,7 +1144,9 @@ impl ChatEvents for ResponsesEvents {
     }
 
     fn open_text(&mut self, kind: TextKind, out: &mut String) {
-        let item = self.text_item(kind, self.output.len(), "", "in_progress");
+        self.annotations.clear();
+        let part = self.text_part(kind, "");
+        let item = self.text_item(kind, self.output.len(), part, "in_progress");
         self.add_item(item, out);
         let (output_index, item_id) = self.active();
         self.emit(
@@ -1103,7 +1155,7 @@ impl ChatEvents for ResponsesEvents {
                 "item_id": item_id,
                 "output_index": output_index,
                 "content_index": 0,
-                "part": text_part(kind, ""),
+                "part": self.text_part(kind, ""),
             }),
             out,
         );
@@ -1118,7 +1170,23 @@ impl ChatEvents for ResponsesEvents {
         self.emit(&text_event(kind, "delta"), body, out);
     }
 
-    fn close_text(&mut self, kind: TextKind, text: &str, out: &mut String) {
+    fn annotation(&mut self, annotation: Value, out: &mut String) {
+        let (output_index, item_id) = self.active();
+        self.emit(
+            "response.output_text.annotation.added",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": 0,
+                "annotation_index": self.annotations.len(),
+                "annotation": annotation,
+            }),
+            out,
+        );
+        self.annotations.push(annotation);
+    }
+
+    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut String) {
         let (output_index, item_id) = self.active();
         let mut body =
             json!({ "item_id": item_id, "output_index": output_index, "content_index": 0 });
@@ -1137,11 +1205,12 @@ impl ChatEvents for ResponsesEvents {
                 "item_id": item_id,
                 "output_index": output_index,
                 "content_index": 0,
-                "part": text_part(kind, text),
+                "part": self.text_part(kind, text),
             }),
             out,
         );
-        let item = self.text_item(kind, output_index, text, "completed");
+        let status = if finished { "completed" } else { "incomplete" };
+        let item = self.text_item(kind, output_index, self.text_part(kind, text), status);
         self.done_item(item, out);
     }
 
@@ -2110,6 +2179,35 @@ mod tests {
             assert!(error.is_none(), "{wire}");
             assert_eq!(out.last().unwrap()["type"], terminal, "{wire}");
         }
+        // Text the limit cut off is unfinished, though a call came before it;
+        // citations stay with their text when a refusal follows in one delta.
+        let call = tool_event(
+            json!({ "index": 0, "id": "c", "function": { "name": "f", "arguments": "{}" } }),
+        );
+        let citation = json!({
+            "type": "url_citation",
+            "url_citation": { "start_index": 0, "end_index": 7, "url": "https://x", "title": "x" }
+        });
+        let cited = chat_event(
+            json!({ "content": "partial", "refusal": "no", "annotations": [citation] }),
+            None,
+        );
+        let events = json!({ "events": [&call, cited, &length, "data: [DONE]"] });
+        let (out, _, wire) = replay_responses_fixture(&events).await;
+        let output = &out.last().unwrap()["response"]["output"];
+        assert_eq!(output[0]["status"], "completed", "{wire}");
+        assert_eq!(
+            output[0]["content"][0]["annotations"][0]["url"],
+            "https://x"
+        );
+        assert_eq!(output[1]["content"][0]["type"], "refusal");
+        assert_eq!(output[1]["status"], "incomplete", "{wire}");
+        assert_eq!(output[2]["type"], "function_call");
+        // Text that resumed after a call is the text the limit cut off.
+        let events = json!({ "events": [&text, &call, &text, &length, "data: [DONE]"] });
+        let (out, _, wire) = replay_responses_fixture(&events).await;
+        let output = &out.last().unwrap()["response"]["output"];
+        assert_eq!(output[0]["status"], "incomplete", "{wire}");
     }
 
     #[test]
@@ -2466,8 +2564,8 @@ mod tests {
             json!({ "index": 1, "id": "call_2", "function": { "name": "g", "arguments": "{}" } }),
         );
         for odd in [
-            // A changed identity: the first one stands.
-            tool_event(json!({ "index": 0, "id": "call_9", "function": { "name": "h" } })),
+            // A restated identity: the first one stands.
+            tool_event(json!({ "index": 0, "id": "call_1", "function": { "name": "h" } })),
             // An interleaved fragment of an earlier call joins it.
             tool_event(json!({ "index": 0, "function": { "arguments": " " } })),
             // Fields of an unexpected shape read as absent.
@@ -2492,6 +2590,48 @@ mod tests {
                 .collect();
             assert_eq!(names, [&json!("f"), &json!("g")], "{odd}");
             assert_eq!(out.last().unwrap()["type"], "message_stop", "{odd}");
+        }
+        // Another id at an index in use is another call; a known id continues
+        // its own call, and the id-less fragments after it at that index.
+        let fragment = |index: u64, id: &str, name: &str, arguments: &str| {
+            let mut call =
+                json!({ "index": index, "function": { "name": name, "arguments": arguments } });
+            if !id.is_empty() {
+                call["id"] = json!(id);
+            }
+            tool_event(call)
+        };
+        for b_index in [0, 1] {
+            let events = [
+                fragment(0, "call_1", "f", "{\"x\":"),
+                fragment(b_index, "call_9", "h", "{}"),
+                fragment(b_index, "call_1", "", "1"),
+                fragment(b_index, "", "", "}"),
+                chat_event(json!({}), Some("tool_calls")),
+                "data: [DONE]".to_string(),
+            ];
+            let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+            let out = run(messages_transform(), &refs);
+            let calls: Vec<(&Value, String)> = out
+                .iter()
+                .filter(|event| event["type"] == "content_block_start")
+                .map(|start| {
+                    let input = out
+                        .iter()
+                        .filter(|event| event["index"] == start["index"])
+                        .filter_map(|event| event["delta"]["partial_json"].as_str())
+                        .collect();
+                    (&start["content_block"]["id"], input)
+                })
+                .collect();
+            assert_eq!(
+                calls,
+                [
+                    (&json!("call_1"), r#"{"x":1}"#.to_string()),
+                    (&json!("call_9"), "{}".to_string())
+                ],
+                "B at index {b_index}"
+            );
         }
         // Only a payload that is not JSON fails: the stream itself is corrupt.
         let mut state = StreamState::default();

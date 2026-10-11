@@ -1177,6 +1177,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                 "type": "function",
                 "function": {
                     "name": "mcp__example___lookup",
+                    "description": "Optional plugin tools",
                     "parameters": { "type": "object" }
                 }
             },
@@ -1184,7 +1185,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                 "type": "function",
                 "function": {
                     "name": "shell",
-                    "description": "Run shell input",
+                    "description": "Run shell input\n\nThis tool takes freeform text. Put the complete raw text in the \"input\" argument.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1193,7 +1194,8 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                                 "description": "The raw input for this tool, passed through verbatim."
                             }
                         },
-                        "required": ["input"]
+                        "required": ["input"],
+                        "additionalProperties": false
                     }
                 }
             }
