@@ -230,7 +230,6 @@ pub async fn run(
 
     let consult = control
         .consult_pre(
-            &request_id,
             model,
             api_key_hash.as_deref(),
             provider,
@@ -1378,9 +1377,6 @@ impl Meter {
             error_message: None,
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
-            // Every report built from the template is the walk's terminal one
-            // unless it says otherwise (`failed_attempts` does).
-            is_final: true,
         }
     }
 
@@ -1437,9 +1433,6 @@ impl Meter {
                 is_streaming: Some(is_streaming),
                 attempt_index: Some(index as u32),
                 selected_route_id: Some(attempt.route_id.clone()),
-                // The walk went on past this attempt; its terminal report
-                // follows separately.
-                is_final: false,
                 ..self.base()
             });
         }

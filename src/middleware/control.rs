@@ -131,12 +131,11 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ requestId, apiKeyHash?, model?, provider?, tee?, request? }` -> decision.
+    /// `{ apiKeyHash?, model?, provider? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub(super) async fn consult_pre(
         &self,
-        request_id: &str,
         model: Option<&str>,
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
@@ -146,8 +145,6 @@ impl ControlClient {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Body<'a> {
-            // The same id every post report carries.
-            request_id: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             api_key_hash: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,7 +167,6 @@ impl ControlClient {
         }
 
         let body = Body {
-            request_id,
             api_key_hash,
             model,
             provider,
@@ -312,9 +308,7 @@ mod tests {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client
-            .consult_pre("req", Some("m"), None, None, false, None)
-            .await;
+        let consult = client.consult_pre(Some("m"), None, None, false, None).await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(

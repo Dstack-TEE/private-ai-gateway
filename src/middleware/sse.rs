@@ -174,9 +174,6 @@ impl StreamReport {
             error_message: error_class,
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
-            // The settle is the walk's terminal report: the stream was the
-            // attempt that served the request.
-            is_final: true,
         };
         let control = self.control.clone();
         // Fire-and-forget. Guard against being called from a drop that runs

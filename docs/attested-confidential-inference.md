@@ -69,7 +69,7 @@ against the code:
 | Destination | Contents | Defined in |
 | --- | --- | --- |
 | Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, message, image and tool counts, input-character and tools-schema lengths, the declared output cap, the streaming flag, the request surface, the request id, and the session key (`prefixHash`, with `sessionKind`) — counts and one keyed digest, never content | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
-| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, the session key (`prefixHash`, `sessionKind`), and `final`, which marks the report that ends the request's failover walk | `PostReport` in `src/middleware/types.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the session key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make this checkable:

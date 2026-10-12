@@ -453,13 +453,6 @@ pub struct PostReport {
     /// Echo of how that key was obtained (see `SessionKind`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_kind: Option<SessionKind>,
-    /// Whether this report ends the request's failover walk: true on the
-    /// attempt that served it or on the last failed one, false on every
-    /// earlier attempt's report. A downstream-finalizer failure reported after
-    /// a stream has already settled is also marked final, so a consumer must
-    /// treat repeated final reports idempotently.
-    #[serde(rename = "final")]
-    pub is_final: bool,
 }
 
 #[cfg(test)]

@@ -3459,8 +3459,6 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
     assert_eq!(response.status().as_u16(), 200);
 
     let pre = pres.lock().unwrap().first().cloned().unwrap();
-    // The pre carries the same id as every post report.
-    assert_eq!(pre["requestId"], json!("req-1"));
     let features = &pre["request"];
     assert!(
         features["estimatedPromptTokens"].is_u64(),
@@ -3491,11 +3489,10 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
     assert_eq!(features["sessionKind"], json!("inferred"));
 
     // The post report echoes the key and its kind — billing keys cache
-    // affinity on them — and, as the one attempt, ends the walk.
+    // affinity on them.
     let report = wait_for_post(&posts, |r| r["selectedRouteId"].is_string()).await;
     assert_eq!(report["prefixHash"].as_str(), Some(hash.as_str()));
     assert_eq!(report["sessionKind"], json!("inferred"));
-    assert_eq!(report["final"], json!(true));
 }
 
 #[tokio::test]
@@ -3540,80 +3537,6 @@ async fn client_named_session_is_explicit_and_outranks_the_opening() {
     );
     let report = wait_for_post(&posts, |r| r["sessionKind"] == json!("explicit")).await;
     assert_eq!(report["prefixHash"], pres[0]["request"]["prefixHash"]);
-}
-
-#[tokio::test]
-async fn final_marks_only_the_report_that_ends_the_walk() {
-    // Attempt 0 times out, attempt 1 serves the stream: the failed attempt's
-    // report is not the end of the request, so only the serving attempt's
-    // settle carries `final`.
-    let (control_url, posts) = spawn_control_capturing(
-        200,
-        json!({
-            "allow": true,
-            "candidates": [
-                { "routeId": "a:gpt-test", "format": "openai" },
-                { "routeId": "b:gpt-test", "format": "openai" }
-            ]
-        }),
-    )
-    .await;
-    let mw = middleware(control_url);
-    let service = build_service_with_backend(Arc::new(FailoverScriptedUpstream {
-        calls: std::sync::atomic::AtomicUsize::new(0),
-    }));
-    let mut input = chat_input();
-    input.stream = true;
-    input.params["stream"] = json!(true);
-
-    let response = mw.handle_completion(&service, input).await;
-    assert_eq!(response.status().as_u16(), 200);
-    // Drain the stream so the meter settles.
-    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-
-    let settled = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
-    assert_eq!(settled["selectedRouteId"], json!("b:gpt-test"));
-    assert_eq!(settled["final"], json!(true));
-    let failed = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(0)).await;
-    assert_eq!(failed["status"], json!(504));
-    assert_eq!(failed["final"], json!(false));
-}
-
-#[tokio::test]
-async fn final_lands_on_the_last_failed_attempt_when_nothing_serves() {
-    let (control_url, posts) = spawn_control_capturing(
-        200,
-        json!({
-            "allow": true,
-            "candidates": [
-                { "routeId": "openai:a", "format": "openai" },
-                { "routeId": "openai:b", "format": "openai" }
-            ]
-        }),
-    )
-    .await;
-    let mw = middleware(control_url);
-    // Retryable but not a capacity signal: a single pass over both candidates.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
-    let (status, _, _) = response_parts(mw.handle_completion(&service, chat_input()).await).await;
-    assert_eq!(status, 503);
-
-    wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
-    // Reports are fire-and-forget and may land in either order.
-    let mut finals: Vec<(i64, bool)> = posts
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r["status"].as_i64() == Some(503))
-        .map(|r| {
-            (
-                r["attemptIndex"].as_i64().unwrap(),
-                r["final"].as_bool().unwrap(),
-            )
-        })
-        .collect();
-    finals.sort();
-    assert_eq!(finals, vec![(0, false), (1, true)]);
 }
 
 #[tokio::test]

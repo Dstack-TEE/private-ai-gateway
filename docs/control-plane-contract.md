@@ -31,7 +31,6 @@ The request uses camelCase:
 
 ```json
 {
-  "requestId": "req_0123...",
   "apiKeyHash": "3f2c...",
   "model": "public-model-id",
   "provider": {
@@ -63,7 +62,6 @@ The request uses camelCase:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `requestId` | Always | The same id every usage report for this request carries. |
 | `apiKeyHash` | No | Lowercase SHA-256 hex of the client's bearer token. Omitted for anonymous requests. |
 | `model` | No at the wire level | Public model ID from the client body. A control plane should reject a missing model for model inference. |
 | `provider` | No | Original client provider-routing object, forwarded without schema reduction. The control plane should validate all policy fields it supports. |
@@ -251,7 +249,6 @@ gateway failures. The JSON shape is camelCase:
   "requestModel": "public-model-id",
   "prefixHash": "0123456789abcdef0123456789abcdef",
   "sessionKind": "inferred",
-  "final": true,
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 8,
@@ -281,7 +278,6 @@ The stable fields are:
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
-| `final` | Always | `true` on the report that ends the request's failover walk — the attempt that served it, or the last failed attempt when none did — and `false` on every earlier attempt's report. A downstream-finalizer failure reported after a stream has settled is also `final`, so consumers must treat repeated final reports idempotently. |
 | `usage` | Always, nullable | Raw provider usage before client cost injection. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
 | `ttftMs` | Optional | Time to first token for a streaming attempt. |
