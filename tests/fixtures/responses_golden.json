@@ -21,7 +21,6 @@
         "temperature": 0.2,
         "top_p": 0.9,
         "stream": true,
-        "parallel_tool_calls": false,
         "user": "user-1",
         "prompt_cache_key": "cache-1",
         "provider": { "aci_verified": true }
@@ -170,14 +169,23 @@
         "reasoning": { "effort": "high" }
       },
       "output": {
-        "model": "gpt-test",
         "messages": [
-          { "role": "system", "content": "Act as a coding agent." },
-          { "role": "developer", "content": "Follow repository rules." },
-          { "role": "user", "content": "Inspect the project." }
+          {
+            "role": "system",
+            "content": "Act as a coding agent."
+          },
+          {
+            "role": "developer",
+            "content": "Follow repository rules."
+          },
+          {
+            "role": "user",
+            "content": "Inspect the project."
+          }
         ],
+        "model": "gpt-test",
         "stream": true,
-        "parallel_tool_calls": true,
+        "tool_choice": "auto",
         "tools": [
           {
             "type": "function",
@@ -186,8 +194,14 @@
               "description": "Run a command",
               "parameters": {
                 "type": "object",
-                "properties": { "cmd": { "type": "string" } },
-                "required": ["cmd"]
+                "properties": {
+                  "cmd": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
               },
               "strict": false
             }
@@ -196,11 +210,14 @@
             "type": "function",
             "function": {
               "name": "mcp__example___lookup",
-              "parameters": { "type": "object" }
+              "description": "Optional plugin tools",
+              "parameters": {
+                "type": "object"
+              }
             }
           }
         ],
-        "tool_choice": "auto",
+        "parallel_tool_calls": true,
         "verbosity": "medium",
         "reasoning_effort": "high"
       }
@@ -239,7 +256,7 @@
       "error": true
     },
     {
-      "name": "namespace_non_function_child_rejected",
+      "name": "namespace_custom_child",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -249,10 +266,40 @@
           "tools": [{ "type": "custom", "name": "shell" }]
         }]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "model": "gpt-test",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "tools__shell",
+              "description": "This tool takes freeform text. Put the complete raw text in the \"input\" argument.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The raw input for this tool, passed through verbatim."
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ]
+      }
     },
     {
-      "name": "unknown_namespace_tool_choice_rejected",
+      "name": "unknown_namespace_tool_choice_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -263,10 +310,26 @@
         }],
         "tool_choice": { "type": "namespace", "name": "missing" }
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "model": "gpt-test",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "crm__lookup"
+            }
+          }
+        ]
+      }
     },
     {
-      "name": "namespace_tool_choice_rejected",
+      "name": "namespace_tool_choice_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -276,6 +339,120 @@
           "tools": [{ "type": "function", "name": "lookup" }]
         }],
         "tool_choice": { "type": "namespace", "name": "crm" }
+      },
+      "output": {"messages": [{"role": "user", "content": "hello"}], "model": "gpt-test", "tools": [{"type": "function", "function": {"name": "crm__lookup"}}]}
+    },
+    {
+      "name": "allowed_tools_narrow_the_tools",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [
+          {
+            "type": "function",
+            "name": "read",
+            "parameters": {
+              "type": "object"
+            }
+          },
+          {
+            "type": "function",
+            "name": "delete",
+            "parameters": {
+              "type": "object"
+            }
+          },
+          {
+            "type": "custom",
+            "name": "patch"
+          },
+          {
+            "type": "web_search"
+          }
+        ],
+        "tool_choice": {
+          "type": "allowed_tools",
+          "mode": "required",
+          "tools": [
+            {
+              "type": "function",
+              "name": "read"
+            },
+            {
+              "type": "custom",
+              "name": "patch"
+            },
+            {
+              "type": "web_search"
+            }
+          ]
+        }
+      },
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "model": "gpt-test",
+        "tool_choice": "required",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "read",
+              "parameters": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "patch",
+              "description": "This tool takes freeform text. Put the complete raw text in the \"input\" argument.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The raw input for this tool, passed through verbatim."
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "allowed_tools_requiring_a_hosted_tool_rejected",
+      "input": {
+        "model": "gpt-test",
+        "input": "hello",
+        "tools": [
+          {
+            "type": "function",
+            "name": "read"
+          },
+          {
+            "type": "web_search"
+          }
+        ],
+        "tool_choice": {
+          "type": "allowed_tools",
+          "mode": "required",
+          "tools": [
+            {
+              "type": "web_search"
+            }
+          ]
+        }
       },
       "error": true
     },
@@ -292,37 +469,59 @@
         "tool_choice": { "type": "custom", "name": "shell" }
       },
       "output": {
-        "model": "gpt-test",
         "messages": [
-          { "role": "user", "content": "inspect" },
+          {
+            "role": "user",
+            "content": "inspect"
+          },
           {
             "role": "assistant",
-            "tool_calls": [{
-              "id": "call_shell",
-              "type": "function",
-              "function": { "name": "shell", "arguments": "{\"input\":\"pwd\"}" }
-            }]
+            "tool_calls": [
+              {
+                "id": "call_shell",
+                "type": "function",
+                "function": {
+                  "name": "shell",
+                  "arguments": "{\"input\":\"pwd\"}"
+                }
+              }
+            ]
           },
-          { "role": "tool", "tool_call_id": "call_shell", "content": "/workspace" }
+          {
+            "role": "tool",
+            "tool_call_id": "call_shell",
+            "content": "/workspace"
+          }
         ],
-        "tools": [{
+        "model": "gpt-test",
+        "tool_choice": {
           "type": "function",
           "function": {
-            "name": "shell",
-            "description": "Run shell input",
-            "parameters": {
-              "type": "object",
-              "properties": {
-                "input": {
-                  "type": "string",
-                  "description": "The raw input for this tool, passed through verbatim."
-                }
-              },
-              "required": ["input"]
+            "name": "shell"
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "shell",
+              "description": "Run shell input\n\nThis tool takes freeform text. Put the complete raw text in the \"input\" argument.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The raw input for this tool, passed through verbatim."
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
             }
           }
-        }],
-        "tool_choice": { "type": "function", "function": { "name": "shell" } }
+        ]
       }
     },
     {
@@ -345,7 +544,7 @@
       "error": true
     },
     {
-      "name": "non_text_tool_output_rejected",
+      "name": "non_text_tool_output_dropped",
       "input": {
         "model": "gpt-test",
         "input": [
@@ -353,22 +552,75 @@
           { "type": "function_call_output", "call_id": "call_1", "output": [{ "type": "input_image", "image_url": "https://example.com/a.png" }] }
         ]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "inspect",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "[image]"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "https://example.com/a.png"
+                }
+              }
+            ]
+          }
+        ],
+        "model": "gpt-test"
+      }
     },
     {
-      "name": "assistant_refusal_history_rejected",
+      "name": "assistant_refusal_history_dropped",
       "input": {
         "model": "gpt-test",
-        "input": [{
-          "type": "message",
-          "role": "assistant",
-          "content": [{ "type": "refusal", "refusal": "cannot comply" }]
-        }]
+        "input": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "refusal",
+                "refusal": "cannot comply"
+              }
+            ]
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": "try again"
+          }
+        ]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "try again"
+          }
+        ],
+        "model": "gpt-test"
+      }
     },
     {
-      "name": "custom_tool_grammar_rejected",
+      "name": "custom_tool_grammar_dropped",
       "input": {
         "model": "gpt-test",
         "input": "hello",
@@ -378,7 +630,37 @@
           "format": { "type": "grammar", "syntax": "lark", "definition": "start: /.+/" }
         }]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "model": "gpt-test",
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "sql",
+              "description": "This tool takes freeform text. Put the complete raw text in the \"input\" argument.\n\nThe input must match this Lark grammar:\nstart: /.+/",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string",
+                    "description": "The raw input for this tool, passed through verbatim."
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ]
+      }
     },
     {
       "name": "invalid_message_role_rejected",
@@ -392,24 +674,55 @@
       "name": "file_inputs",
       "input": {
         "model": "gpt-test",
-        "input": [{
-          "type": "message",
-          "role": "user",
-          "content": [
-            { "type": "input_file", "file_id": "file_1" },
-            { "type": "input_file", "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" }
-          ]
-        }]
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_file",
+                "file_id": "file_1"
+              },
+              {
+                "type": "input_file",
+                "filename": "notes.txt",
+                "file_data": "data:text/plain;base64,aGk="
+              },
+              {
+                "type": "input_image",
+                "image_url": "https://x/a.png",
+                "detail": "high"
+              }
+            ]
+          }
+        ]
       },
       "output": {
-        "model": "gpt-test",
-        "messages": [{
-          "role": "user",
-          "content": [
-            { "type": "file", "file": { "file_id": "file_1" } },
-            { "type": "file", "file": { "filename": "notes.txt", "file_data": "data:text/plain;base64,aGk=" } }
-          ]
-        }]
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "file",
+                "file": {
+                  "file_id": "file_1"
+                }
+              },
+              {
+                "type": "text",
+                "text": "hi"
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "https://x/a.png",
+                  "detail": "high"
+                }
+              }
+            ]
+          }
+        ],
+        "model": "gpt-test"
       }
     },
     {
@@ -425,33 +738,101 @@
       "error": true
     },
     {
-      "name": "file_url_rejected",
+      "name": "file_url_dropped",
       "input": {
         "model": "gpt-test",
-        "input": [{
-          "type": "message",
-          "role": "user",
-          "content": [{ "type": "input_file", "file_url": "https://example.com/file.pdf" }]
-        }]
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "read this"
+              },
+              {
+                "type": "input_file",
+                "file_url": "https://example.com/file.pdf"
+              }
+            ]
+          }
+        ]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "read this"
+              }
+            ]
+          }
+        ],
+        "model": "gpt-test"
+      }
     },
     {
-      "name": "unsupported_input_item_rejected",
-      "input": { "model": "gpt-test", "input": [{ "type": "computer_call" }] },
-      "error": true
-    },
-    {
-      "name": "image_file_id_rejected",
+      "name": "unsupported_input_item_dropped",
       "input": {
         "model": "gpt-test",
-        "input": [{
-          "type": "message",
-          "role": "user",
-          "content": [{ "type": "input_image", "file_id": "file_1" }]
-        }]
+        "input": [
+          {
+            "type": "computer_call"
+          },
+          {
+            "type": "message",
+            "role": "user",
+            "content": "hello"
+          }
+        ]
       },
-      "error": true
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ],
+        "model": "gpt-test"
+      }
+    },
+    {
+      "name": "image_file_id_dropped",
+      "input": {
+        "model": "gpt-test",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "read this"
+              },
+              {
+                "type": "input_image",
+                "file_id": "file_1"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "read this"
+              }
+            ]
+          }
+        ],
+        "model": "gpt-test"
+      }
     }
   ],
   "responses": [
@@ -471,7 +852,7 @@
         }
       },
       "output": {
-        "id": "chatcmpl_1",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -480,7 +861,7 @@
         "instructions": "Be concise.",
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_1_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
@@ -526,7 +907,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_2",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -568,7 +949,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_3",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "completed",
@@ -577,14 +958,70 @@
         "reasoning": { "effort": "high" },
         "store": false,
         "output": [
-          { "id": "rs_chatcmpl_3_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think" }], "status": "completed" },
-          { "id": "msg_chatcmpl_3_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer", "annotations": [] }] }
+          { "id": "rs_resp_fixture_0", "type": "reasoning", "summary": [], "content": [{ "type": "reasoning_text", "text": "think" }], "status": "completed" },
+          { "id": "msg_resp_fixture_1", "type": "message", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "answer", "annotations": [] }] }
         ],
         "usage": {
           "input_tokens": 0,
           "input_tokens_details": { "cached_tokens": 0 },
           "output_tokens": 0,
           "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "reasoning_cut_off",
+      "echo": {
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_6",
+        "model": "gpt-test",
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "reasoning_content": "thin",
+              "content": null
+            },
+            "finish_reason": "length"
+          }
+        ]
+      },
+      "output": {
+        "id": "resp_fixture",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "incomplete",
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        },
+        "error": null,
+        "store": false,
+        "output": [
+          {
+            "id": "rs_resp_fixture_0",
+            "type": "reasoning",
+            "summary": [],
+            "content": [
+              {
+                "type": "reasoning_text",
+                "text": "thin"
+              }
+            ],
+            "status": "incomplete"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
           "total_tokens": 0
         }
       }
@@ -612,18 +1049,17 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_bad_args",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "failed",
+        "status": "completed",
         "incomplete_details": null,
-        "error": {
-          "code": "server_error",
-          "message": "The upstream provider returned invalid tool-call arguments"
-        },
+        "error": null,
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
-        "output": [],
+        "output": [
+          { "id": "fc_call_bad", "type": "function_call", "call_id": "call_bad", "name": "lookup", "arguments": "{\"x\":", "status": "completed" }
+        ],
         "usage": {
           "input_tokens": 0,
           "input_tokens_details": { "cached_tokens": 0 },
@@ -656,14 +1092,14 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_bad_tool",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "failed",
         "incomplete_details": null,
         "error": {
           "code": "server_error",
-          "message": "The upstream provider returned a tool call without a valid id or name"
+          "message": "The upstream provider returned tool calls without a name"
         },
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
@@ -701,7 +1137,7 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_4",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "incomplete",
@@ -711,11 +1147,18 @@
         "tools": [{ "type": "function", "name": "lookup" }],
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_4_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
           "content": [{ "type": "output_text", "text": "partial", "annotations": [] }]
+        }, {
+          "id": "fc_call_truncated",
+          "type": "function_call",
+          "call_id": "call_truncated",
+          "name": "lookup",
+          "arguments": "",
+          "status": "incomplete"
         }],
         "usage": {
           "input_tokens": 0,
@@ -737,18 +1180,15 @@
         }]
       },
       "output": {
-        "id": "chatcmpl_missing_finish",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
-        "status": "failed",
+        "status": "completed",
         "incomplete_details": null,
-        "error": {
-          "code": "server_error",
-          "message": "The upstream provider ended without a valid finish reason"
-        },
+        "error": null,
         "store": false,
         "output": [{
-          "id": "msg_chatcmpl_missing_finish_0",
+          "id": "msg_resp_fixture_0",
           "type": "message",
           "role": "assistant",
           "status": "completed",
@@ -772,7 +1212,7 @@
         "error": { "code": "server_error", "message": "upstream failed" }
       },
       "output": {
-        "id": "chatcmpl_5",
+        "id": "resp_fixture",
         "object": "response",
         "model": "gpt-test",
         "status": "failed",
@@ -785,6 +1225,95 @@
           "input_tokens_details": { "cached_tokens": 0 },
           "output_tokens": 0,
           "output_tokens_details": { "reasoning_tokens": 0 },
+          "total_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "parts_refusal_and_citation_cut_off",
+      "echo": {
+        "store": false
+      },
+      "input": {
+        "id": "chatcmpl_5",
+        "model": "gpt-test",
+        "choices": [
+          {
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "see "
+                },
+                {
+                  "type": "text",
+                  "text": "docs"
+                }
+              ],
+              "refusal": "no more",
+              "annotations": [
+                {
+                  "type": "url_citation",
+                  "url_citation": {
+                    "start_index": 4,
+                    "end_index": 8,
+                    "url": "https://example.com",
+                    "title": "Example"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "LENGTH"
+          }
+        ]
+      },
+      "output": {
+        "id": "resp_fixture",
+        "object": "response",
+        "model": "gpt-test",
+        "status": "incomplete",
+        "incomplete_details": {
+          "reason": "max_output_tokens"
+        },
+        "error": null,
+        "store": false,
+        "output": [
+          {
+            "id": "msg_resp_fixture_0",
+            "type": "message",
+            "role": "assistant",
+            "status": "incomplete",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "see docs",
+                "annotations": [
+                  {
+                    "type": "url_citation",
+                    "start_index": 4,
+                    "end_index": 8,
+                    "url": "https://example.com",
+                    "title": "Example"
+                  }
+                ]
+              },
+              {
+                "type": "refusal",
+                "refusal": "no more"
+              }
+            ]
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
           "total_tokens": 0
         }
       }
