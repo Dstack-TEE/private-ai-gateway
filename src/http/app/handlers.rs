@@ -801,6 +801,10 @@ pub(super) async fn openai_completion_endpoint(
             user_model: context.user_model,
             stream,
             tee_only,
+            session_header: headers
+                .get("x-session-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
         };
         return middleware.handle_completion(&state.service, input).await;
     }

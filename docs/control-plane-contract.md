@@ -31,6 +31,7 @@ The request uses camelCase:
 
 ```json
 {
+  "requestId": "req_0123...",
   "apiKeyHash": "3f2c...",
   "model": "public-model-id",
   "provider": {
@@ -38,12 +39,23 @@ The request uses camelCase:
     "aci_verified": true
   },
   "request": {
+    "surface": "chat",
+    "requestBytes": 2048,
+    "messagesCount": 3,
+    "inputChars": 640,
+    "imageCount": 1,
+    "toolsCount": 2,
+    "toolsBytes": 410,
+    "toolChoice": "auto",
+    "maxOutputTokens": 4096,
+    "stream": true,
     "estimatedPromptTokens": 128,
     "hasTools": true,
     "inputModalities": ["image", "text"],
     "reasoning": "enabled",
     "responseFormat": "json_schema",
-    "prefixHash": "0123456789abcdef0123456789abcdef"
+    "prefixHash": "0123456789abcdef0123456789abcdef",
+    "sessionKind": "inferred"
   },
   "tee": true
 }
@@ -51,6 +63,7 @@ The request uses camelCase:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
+| `requestId` | Always | The same id every usage report for this request carries. |
 | `apiKeyHash` | No | Lowercase SHA-256 hex of the client's bearer token. Omitted for anonymous requests. |
 | `model` | No at the wire level | Public model ID from the client body. A control plane should reject a missing model for model inference. |
 | `provider` | No | Original client provider-routing object, forwarded without schema reduction. The control plane should validate all policy fields it supports. |
@@ -66,16 +79,27 @@ list of what the control plane receives, see
 
 | Field | Contract |
 | --- | --- |
+| `surface` | `chat`, `messages`, or `completions`: the request surface after the gateway's own bridges ran, so a Responses body bridged to chat reports `chat`. |
+| `requestBytes` | Bytes of the client body as received, before any bridge. |
+| `messagesCount` | Entries in `messages[]` (chat, Messages) or items in an array `prompt` (completions). A string prompt counts zero; Anthropic's top-level `system` is not a message. Clamped to 65535. |
+| `inputChars` | UTF-16 code units of message text: string content, text parts, and each tool call's argument string. Tool schemas and `json_schema` are excluded. Clamped to 2^32 − 1. |
+| `imageCount` | Image parts, including those inside tool results. Clamped to 65535. |
+| `toolsCount` | Length of the `tools` array only; legacy `functions` are not counted here. Clamped to 65535. |
+| `toolsBytes` | UTF-16 length of the `tools` array serialized as JSON. Clamped to 2^32 − 1. |
+| `toolChoice` | `auto`, `none`, `required`, `named` (an object naming a tool), or the empty string when absent or unrecognized. |
+| `maxOutputTokens` | The declared output cap: `max_completion_tokens` when it is a non-negative integer, else `max_tokens`; `0` when neither is declared. Clamped to 2^32 − 1. |
+| `stream` | Whether the client asked for a streamed response. |
 | `estimatedPromptTokens` | Low-biased heuristic for one inference context. It is not a tokenizer result or a guaranteed bound. For batched legacy completions, this is the largest item rather than the sum. A control plane may use it to order candidates but must not use it to remove the final candidate. |
 | `hasTools` | `true` when the request contains current `tools` or legacy `functions`. |
 | `inputModalities` | Deduplicated, stably ordered values from `text`, `image`, `file`, `audio`, and `video`. |
 | `reasoning` | Client intent: `enabled`, `disabled`, or `unspecified`. Response-visibility controls do not change this value. |
 | `responseFormat` | `text`, `json_object`, or `json_schema`. A missing response format becomes `text`. |
-| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. It is HMAC-SHA256 under a key the gateway derives from dstack KMS, so it reveals only whether two prefixes are equal. It does not prove prompt contents or request authenticity. |
+| `prefixHash` | Optional 32-character lowercase hex session key for cache-affinity routing. It is HMAC-SHA256, under a key the gateway derives from dstack KMS, of either a client-named session identifier (body `session_id`, then the `x-session-id` header, then body `prompt_cache_key`; 1–256 UTF-16 units) or, failing one, the conversation's opening: the first system/developer message and the first other message (the array `prompt` for completions), cut at 16 KiB of UTF-16 units. The opening does not change as turns are appended, so the key is stable from the first turn. Absent when the body has no conversation to key or the caller pinned `provider.order`. The control plane can only test two keys for equality; it cannot recover or verify a session identifier or an opening from the hash. The field name predates the session semantics. |
+| `sessionKind` | `explicit` when `prefixHash` hashes a client-named identifier, `inferred` when it hashes the opening; absent with `prefixHash`. |
 
 Treat these fields as routing hints. They are counts, booleans, closed enums,
 and one digest. They carry no prompt text, but they do describe the request,
-and `prefixHash` links requests that share a prefix.
+and `prefixHash` links requests that share a session or an opening.
 
 An allow response:
 
@@ -226,6 +250,8 @@ gateway failures. The JSON shape is camelCase:
   "selectedRouteId": "provider-a:public-model-id",
   "requestModel": "public-model-id",
   "prefixHash": "0123456789abcdef0123456789abcdef",
+  "sessionKind": "inferred",
+  "final": true,
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 8,
@@ -254,6 +280,8 @@ The stable fields are:
 | `selectedRouteId` | Always, nullable | Route for an attempt. `null` identifies a request-level summary. |
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
+| `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
+| `final` | Always | `true` on the report that ends the request's failover walk — the attempt that served it, or the last failed attempt when none did — and `false` on every earlier attempt's report. A downstream-finalizer failure reported after a stream has settled is also `final`, so consumers must treat repeated final reports idempotently. |
 | `usage` | Always, nullable | Raw provider usage before client cost injection. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
 | `ttftMs` | Optional | Time to first token for a streaming attempt. |

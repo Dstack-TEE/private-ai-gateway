@@ -33,7 +33,7 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
-use super::request_features::{self, PrefixHashKey};
+use super::request_features::{self, PrefixHashKey, SessionKind};
 use super::request_transform::{
     build_candidates, messages_reasoning, responses_to_chat_params, validate_responses_request,
     Endpoint, ResponsesCandidateInput, TransformError,
@@ -70,6 +70,9 @@ pub struct CompletionInput {
     /// so the control plane 404s a non-TEE model before any forward. Attested
     /// serving itself is enforced via `aci_required` (forced true alongside this).
     pub tee_only: bool,
+    /// The `x-session-id` request header, when the client sent one: a
+    /// session the client names outranks the one inferred from the body.
+    pub session_header: Option<String>,
 }
 
 /// What response finalization needs to answer a request the gateway itself
@@ -112,6 +115,7 @@ pub async fn run(
         user_model,
         stream,
         tee_only,
+        session_header,
     } = input;
 
     // What the client is told about who served the request. Built before
@@ -209,11 +213,16 @@ pub async fn run(
     // never leaves this process. Computed before the consult (its whole point
     // is to inform it) and echoed on the post report via the meters below.
     let request_features = if send_request_features {
+        let explicit_session =
+            request_features::explicit_session(&params, session_header.as_deref());
         request_features::extract(
             endpoint,
             &params,
             reasoning_requirements.as_ref(),
             prefix_hash_key,
+            received_body.len(),
+            stream,
+            explicit_session.as_deref(),
         )
     } else {
         None
@@ -221,6 +230,7 @@ pub async fn run(
 
     let consult = control
         .consult_pre(
+            &request_id,
             model,
             api_key_hash.as_deref(),
             provider,
@@ -241,6 +251,9 @@ pub async fn run(
         prefix_hash: request_features
             .as_ref()
             .and_then(|features| features.prefix_hash.clone()),
+        session_kind: request_features
+            .as_ref()
+            .and_then(|features| features.session_kind),
         started,
         is_streaming: stream,
         armed: None,
@@ -915,8 +928,9 @@ struct Meter {
     tenant: TenantIdentity,
     virtual_key_id: Option<i64>,
     /// Echoed on every report so billing can key cache affinity; see
-    /// `PostReport::prefix_hash`.
+    /// `PostReport::prefix_hash` and `PostReport::session_kind`.
     prefix_hash: Option<String>,
+    session_kind: Option<SessionKind>,
     started: Instant,
     is_streaming: bool,
     /// Present only between arming the forward and reporting its outcome.
@@ -1337,6 +1351,7 @@ impl Meter {
             attempt_index,
             upstream_status,
             prefix_hash: self.prefix_hash.clone(),
+            session_kind: self.session_kind,
             started: self.started,
             downstream_abort,
             settled,
@@ -1362,6 +1377,10 @@ impl Meter {
             error_source: None,
             error_message: None,
             prefix_hash: self.prefix_hash.clone(),
+            session_kind: self.session_kind,
+            // Every report built from the template is the walk's terminal one
+            // unless it says otherwise (`failed_attempts` does).
+            is_final: true,
         }
     }
 
@@ -1418,6 +1437,9 @@ impl Meter {
                 is_streaming: Some(is_streaming),
                 attempt_index: Some(index as u32),
                 selected_route_id: Some(attempt.route_id.clone()),
+                // The walk went on past this attempt; its terminal report
+                // follows separately.
+                is_final: false,
                 ..self.base()
             });
         }

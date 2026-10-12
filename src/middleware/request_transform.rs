@@ -1848,7 +1848,10 @@ pub fn responses_to_chat_params(params: &Value) -> Result<Value, TransformError>
         ("top_p", "top_p"),
         ("stream", "stream"),
         ("user", "user"),
+        // Session hints for cache affinity, read by the gateway after the
+        // bridge; the provider configs drop them before the upstream call.
         ("prompt_cache_key", "prompt_cache_key"),
+        ("session_id", "session_id"),
     ] {
         if let Some(value) = input.get(key) {
             chat.insert(chat_key.into(), value.clone());

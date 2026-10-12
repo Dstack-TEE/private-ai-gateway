@@ -634,6 +634,7 @@ fn chat_input() -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream: false,
         tee_only: false,
+        session_header: None,
     }
 }
 
@@ -665,6 +666,7 @@ fn systemone_input() -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream: false,
         tee_only: false,
+        session_header: None,
     }
 }
 
@@ -690,6 +692,7 @@ fn responses_input(stream: bool) -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream,
         tee_only: false,
+        session_header: None,
     }
 }
 
@@ -2106,6 +2109,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2920,6 +2924,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2986,6 +2991,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: settled.clone(),
@@ -3446,14 +3452,15 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
         br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
     );
 
-    // Long enough to fill the 4KB prefix cap — sub-cap conversations emit no
-    // affinity hash on purpose (worthless to key, and dictionary-guessable).
     let mut input = chat_input();
     input.params["messages"][0]["content"] = json!("s".repeat(5000));
+    let received_len = input.received_body.len() as u64;
     let response = mw.handle_completion(&service, input).await;
     assert_eq!(response.status().as_u16(), 200);
 
     let pre = pres.lock().unwrap().first().cloned().unwrap();
+    // The pre carries the same id as every post report.
+    assert_eq!(pre["requestId"], json!("req-1"));
     let features = &pre["request"];
     assert!(
         features["estimatedPromptTokens"].is_u64(),
@@ -3462,15 +3469,151 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
     assert_eq!(features["reasoning"], json!("unspecified"));
     assert_eq!(features["responseFormat"], json!("text"));
     assert_eq!(features["inputModalities"], json!(["text"]));
+    // Request-shape counts: one message of 5000 ASCII chars, no tools, no
+    // image, no declared output cap, not streamed, on the chat surface.
+    assert_eq!(features["surface"], json!("chat"));
+    assert_eq!(features["messagesCount"], json!(1));
+    assert_eq!(features["inputChars"], json!(5000));
+    assert_eq!(features["imageCount"], json!(0));
+    assert_eq!(features["toolsCount"], json!(0));
+    assert_eq!(features["toolsBytes"], json!(0));
+    assert_eq!(features["toolChoice"], json!(""));
+    assert_eq!(features["maxOutputTokens"], json!(0));
+    assert_eq!(features["stream"], json!(false));
+    // The received body, not the parsed params the test rewrote above.
+    assert_eq!(features["requestBytes"], json!(received_len));
     let hash = features["prefixHash"]
         .as_str()
-        .expect("prefix hash")
+        .expect("session key")
         .to_string();
     assert_eq!(hash.len(), 32);
+    // No client-named session: the key is inferred from the opening.
+    assert_eq!(features["sessionKind"], json!("inferred"));
 
-    // The post report echoes the hash — billing keys cache affinity on it.
+    // The post report echoes the key and its kind — billing keys cache
+    // affinity on them — and, as the one attempt, ends the walk.
     let report = wait_for_post(&posts, |r| r["selectedRouteId"].is_string()).await;
     assert_eq!(report["prefixHash"].as_str(), Some(hash.as_str()));
+    assert_eq!(report["sessionKind"], json!("inferred"));
+    assert_eq!(report["final"], json!(true));
+}
+
+#[tokio::test]
+async fn client_named_session_is_explicit_and_outranks_the_opening() {
+    let (control_url, pres, posts) = spawn_control_capturing_pre(json!({
+        "allow": true,
+        "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],
+        "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+    }))
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream(
+        200,
+        br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+    );
+
+    // Same body twice: once with the header, once without. The header names
+    // the session, so the two keys differ although the opening is identical.
+    let mut named = chat_input();
+    named.session_header = Some("sess-42".to_string());
+    assert_eq!(
+        mw.handle_completion(&service, named)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    assert_eq!(
+        mw.handle_completion(&service, chat_input())
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+
+    let pres = pres.lock().unwrap().clone();
+    assert_eq!(pres[0]["request"]["sessionKind"], json!("explicit"));
+    assert_eq!(pres[1]["request"]["sessionKind"], json!("inferred"));
+    assert_ne!(
+        pres[0]["request"]["prefixHash"],
+        pres[1]["request"]["prefixHash"]
+    );
+    let report = wait_for_post(&posts, |r| r["sessionKind"] == json!("explicit")).await;
+    assert_eq!(report["prefixHash"], pres[0]["request"]["prefixHash"]);
+}
+
+#[tokio::test]
+async fn final_marks_only_the_report_that_ends_the_walk() {
+    // Attempt 0 times out, attempt 1 serves the stream: the failed attempt's
+    // report is not the end of the request, so only the serving attempt's
+    // settle carries `final`.
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "a:gpt-test", "format": "openai" },
+                { "routeId": "b:gpt-test", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_backend(Arc::new(FailoverScriptedUpstream {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+    input.params["stream"] = json!(true);
+
+    let response = mw.handle_completion(&service, input).await;
+    assert_eq!(response.status().as_u16(), 200);
+    // Drain the stream so the meter settles.
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+    let settled = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
+    assert_eq!(settled["selectedRouteId"], json!("b:gpt-test"));
+    assert_eq!(settled["final"], json!(true));
+    let failed = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(0)).await;
+    assert_eq!(failed["status"], json!(504));
+    assert_eq!(failed["final"], json!(false));
+}
+
+#[tokio::test]
+async fn final_lands_on_the_last_failed_attempt_when_nothing_serves() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow": true,
+            "candidates": [
+                { "routeId": "openai:a", "format": "openai" },
+                { "routeId": "openai:b", "format": "openai" }
+            ]
+        }),
+    )
+    .await;
+    let mw = middleware(control_url);
+    // Retryable but not a capacity signal: a single pass over both candidates.
+    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let (status, _, _) = response_parts(mw.handle_completion(&service, chat_input()).await).await;
+    assert_eq!(status, 503);
+
+    wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
+    // Reports are fire-and-forget and may land in either order.
+    let mut finals: Vec<(i64, bool)> = posts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r["status"].as_i64() == Some(503))
+        .map(|r| {
+            (
+                r["attemptIndex"].as_i64().unwrap(),
+                r["final"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    finals.sort();
+    assert_eq!(finals, vec![(0, false), (1, true)]);
 }
 
 #[tokio::test]
@@ -3729,6 +3872,7 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3921,6 +4065,7 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: abort.clone(),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4277,6 +4422,7 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
