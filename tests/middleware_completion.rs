@@ -634,7 +634,6 @@ fn chat_input() -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream: false,
         tee_only: false,
-        session_header: None,
     }
 }
 
@@ -666,7 +665,6 @@ fn systemone_input() -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream: false,
         tee_only: false,
-        session_header: None,
     }
 }
 
@@ -692,7 +690,6 @@ fn responses_input(stream: bool) -> CompletionInput {
         user_model: Some("gpt-test".to_string()),
         stream,
         tee_only: false,
-        session_header: None,
     }
 }
 
@@ -3509,10 +3506,10 @@ async fn client_named_session_is_explicit_and_outranks_the_opening() {
         br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
     );
 
-    // Same body twice: once with the header, once without. The header names
-    // the session, so the two keys differ although the opening is identical.
+    // Same opening twice: once with a prompt_cache_key, once without. The
+    // key names the session, so the two keys differ.
     let mut named = chat_input();
-    named.session_header = Some("sess-42".to_string());
+    named.params["prompt_cache_key"] = json!("sess-42");
     assert_eq!(
         mw.handle_completion(&service, named)
             .await

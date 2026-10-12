@@ -70,9 +70,6 @@ pub struct CompletionInput {
     /// so the control plane 404s a non-TEE model before any forward. Attested
     /// serving itself is enforced via `aci_required` (forced true alongside this).
     pub tee_only: bool,
-    /// The `x-session-id` request header, when the client sent one: a
-    /// session the client names outranks the one inferred from the body.
-    pub session_header: Option<String>,
 }
 
 /// What response finalization needs to answer a request the gateway itself
@@ -115,7 +112,6 @@ pub async fn run(
         user_model,
         stream,
         tee_only,
-        session_header,
     } = input;
 
     // What the client is told about who served the request. Built before
@@ -213,8 +209,6 @@ pub async fn run(
     // never leaves this process. Computed before the consult (its whole point
     // is to inform it) and echoed on the post report via the meters below.
     let request_features = if send_request_features {
-        let explicit_session =
-            request_features::explicit_session(&params, session_header.as_deref());
         request_features::extract(
             endpoint,
             &params,
@@ -222,7 +216,6 @@ pub async fn run(
             prefix_hash_key,
             received_body.len(),
             stream,
-            explicit_session.as_deref(),
         )
     } else {
         None

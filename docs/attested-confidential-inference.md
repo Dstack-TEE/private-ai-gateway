@@ -93,14 +93,15 @@ that fails partway (`stream_abort`, the one line that carries a request ID).
 Such a line can name the requested model or the request host. It never carries
 request or response content.
 
-`prefixHash` is the session key for cache-affinity routing: an HMAC-SHA256,
-truncated to 32 hex characters, of either a session identifier the client
-named (`session_id`, `x-session-id`, or `prompt_cache_key`) or, failing one,
-the conversation's opening two messages. The gateway derives the HMAC key from
-dstack KMS, so the key never leaves the TEE. The control plane can see when
-two requests share a session or an opening — within one workspace, identical
-openings map to one key — but it cannot test a guessed identifier or opening
-against the hash, and it never receives either. See the
+`prefixHash` is the key for cache-affinity routing: an HMAC-SHA256, truncated
+to 32 hex characters, of either the client's `prompt_cache_key` or, failing
+one, the conversation's opening two messages. The gateway derives the HMAC key
+from dstack KMS, so the key never leaves the TEE. The control plane can see
+when two requests share a cache key or an opening — identical openings map to
+one key — but it cannot test a guessed key or opening against the hash, and it
+never receives either. `prompt_cache_key` is only a routing hint: it does not
+select, pin or verify an attested session. To pin one, use
+`provider.aci_session_ids` with `provider.aci_verified`. See the
 [control-plane contract](control-plane-contract.md) for every field.
 
 Provider workloads can have their own internal routing, telemetry, or storage

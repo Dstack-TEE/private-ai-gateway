@@ -50,8 +50,8 @@ const OPENING_CAP: usize = 16_384;
 /// a client bug cannot pin unrelated conversations together.
 const MAX_SESSION_ID: usize = 256;
 
-/// How the session key was obtained: named by the client (`session_id`,
-/// `x-session-id`, `prompt_cache_key`) or inferred from the conversation's
+/// How the session key was obtained: named by the client's
+/// `prompt_cache_key` or inferred from the conversation's
 /// opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -284,9 +284,6 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
 /// Extract features for the endpoints whose body shape this module knows.
 /// `None` for the rest: an absent block routes exactly as before, which is the
 /// correct degradation for a shape nobody taught the extractor.
-///
-/// `explicit_session` is the client-named session identifier, already chosen
-/// by `explicit_session` below; `None` falls back to the inferred key.
 pub fn extract(
     endpoint: Endpoint,
     params: &Value,
@@ -294,7 +291,6 @@ pub fn extract(
     prefix_hash_key: &PrefixHashKey,
     request_bytes: usize,
     stream: bool,
-    explicit_session: Option<&str>,
 ) -> Option<RequestFeatures> {
     let mut acc = Acc::default();
     let surface = match endpoint {
@@ -393,7 +389,12 @@ pub fn extract(
         _ => ResponseFormatKind::Text,
     };
 
-    let session = session_key(endpoint, params, explicit_session, prefix_hash_key);
+    let session = session_key(
+        endpoint,
+        params,
+        explicit_session(params).as_deref(),
+        prefix_hash_key,
+    );
 
     Some(RequestFeatures {
         surface,
@@ -416,18 +417,17 @@ pub fn extract(
     })
 }
 
-/// The client-named session identifier, in the usual sticky-routing
-/// precedence: body
-/// `session_id`, then the `x-session-id` header, then body `prompt_cache_key`
-/// (OpenAI's own cache-routing hint). A candidate is honored only when it is
-/// a string of 1..=256 UTF-16 units; an oversized or non-string one is passed
-/// over for the next, never truncated.
-pub fn explicit_session(params: &Value, session_header: Option<&str>) -> Option<String> {
-    let body = |key: &str| params.get(key).and_then(Value::as_str);
-    [body("session_id"), session_header, body("prompt_cache_key")]
-        .into_iter()
-        .flatten()
-        .find(|id| (1..=MAX_SESSION_ID).contains(&id.encode_utf16().count()))
+/// The client-named session: its `prompt_cache_key` (OpenAI's cache-routing
+/// hint), honored only as a string of 1..=256 UTF-16 units — an oversized one
+/// is ignored, never truncated. Fields named `session_id` / `x-session-id`
+/// are deliberately not read: in this gateway a session is an attested
+/// upstream session (`provider.aci_session_ids`), and a routing hint must not
+/// look like a way to pin one.
+pub fn explicit_session(params: &Value) -> Option<String> {
+    params
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|id| (1..=MAX_SESSION_ID).contains(&id.encode_utf16().count()))
         .map(str::to_string)
 }
 
@@ -756,20 +756,11 @@ mod tests {
     }
 
     fn features(params: &Value) -> RequestFeatures {
-        extract(
-            Endpoint::ChatComplete,
-            params,
-            None,
-            &test_key(),
-            0,
-            false,
-            None,
-        )
-        .unwrap()
+        extract(Endpoint::ChatComplete, params, None, &test_key(), 0, false).unwrap()
     }
 
     fn features_on(endpoint: Endpoint, params: &Value) -> RequestFeatures {
-        extract(endpoint, params, None, &test_key(), 0, false, None).unwrap()
+        extract(endpoint, params, None, &test_key(), 0, false).unwrap()
     }
 
     #[test]
@@ -803,7 +794,6 @@ mod tests {
             &test_key(),
             1234,
             true,
-            None,
         )
         .unwrap();
         assert_eq!(f.surface, Surface::Chat);
@@ -948,8 +938,7 @@ mod tests {
             None,
             &test_key(),
             0,
-            false,
-            None,
+            false
         )
         .is_none());
     }
@@ -1053,73 +1042,46 @@ mod tests {
     }
 
     #[test]
-    fn explicit_session_outranks_the_opening_in_edge_precedence() {
+    fn prompt_cache_key_names_the_session_and_outranks_the_opening() {
         let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
         let inferred = features(&params);
         params["prompt_cache_key"] = json!("cache-1");
-        // Body session_id > x-session-id header > prompt_cache_key.
-        assert_eq!(
-            explicit_session(&params, Some("hdr-1")).as_deref(),
-            Some("hdr-1")
-        );
-        params["session_id"] = json!("sess-1");
-        assert_eq!(
-            explicit_session(&params, Some("hdr-1")).as_deref(),
-            Some("sess-1")
-        );
-        params.as_object_mut().unwrap().remove("session_id");
-        assert_eq!(explicit_session(&params, None).as_deref(), Some("cache-1"));
+        assert_eq!(explicit_session(&params).as_deref(), Some("cache-1"));
         // An explicit key is keyed from the identifier, not the opening, so a
-        // different conversation naming the same session shares the key…
-        let named = extract(
-            Endpoint::ChatComplete,
-            &params,
-            None,
-            &test_key(),
-            0,
-            false,
-            Some("cache-1"),
-        )
-        .unwrap();
-        let other = chat(json!([{ "role": "user", "content": "something else" }]));
-        let other_named = extract(
-            Endpoint::ChatComplete,
-            &other,
-            None,
-            &test_key(),
-            0,
-            false,
-            Some("cache-1"),
-        )
-        .unwrap();
+        // different conversation naming the same key shares it…
+        let named = features(&params);
+        let mut other = chat(json!([{ "role": "user", "content": "something else" }]));
+        other["prompt_cache_key"] = json!("cache-1");
         assert_eq!(named.session_kind, Some(SessionKind::Explicit));
-        assert_eq!(named.prefix_hash, other_named.prefix_hash);
+        assert_eq!(named.prefix_hash, features(&other).prefix_hash);
         // …and differs from the inferred key of the same opening.
         assert_ne!(named.prefix_hash, inferred.prefix_hash);
     }
 
     #[test]
-    fn oversized_or_non_string_session_ids_are_passed_over() {
+    fn session_named_fields_are_not_read() {
+        // `session_id` would read as pinning an attested session; it is not
+        // a routing hint here, so the key stays inferred.
         let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
-        // 257 UTF-16 units: ignored, so the next candidate (none here) applies
-        // and the caller falls back to the inferred key.
-        params["session_id"] = json!("s".repeat(257));
-        assert_eq!(explicit_session(&params, None), None);
+        params["session_id"] = json!("sess-1");
+        assert_eq!(explicit_session(&params), None);
+        assert_eq!(features(&params).session_kind, Some(SessionKind::Inferred));
+    }
+
+    #[test]
+    fn oversized_or_non_string_cache_keys_are_ignored() {
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        params["prompt_cache_key"] = json!("s".repeat(257));
+        assert_eq!(explicit_session(&params), None);
         // Exactly 256 is honored; an astral character counts two units.
-        params["session_id"] = json!("s".repeat(256));
-        assert!(explicit_session(&params, None).is_some());
-        params["session_id"] = json!("😀".repeat(128) + "s");
-        assert_eq!(explicit_session(&params, None), None);
-        // An oversized body id does not shadow a valid header id.
-        params["session_id"] = json!("s".repeat(257));
-        assert_eq!(
-            explicit_session(&params, Some("hdr")).as_deref(),
-            Some("hdr")
-        );
-        params["session_id"] = json!(42);
-        assert_eq!(explicit_session(&params, None), None);
-        params["session_id"] = json!("");
-        assert_eq!(explicit_session(&params, None), None);
+        params["prompt_cache_key"] = json!("s".repeat(256));
+        assert!(explicit_session(&params).is_some());
+        params["prompt_cache_key"] = json!("😀".repeat(128) + "s");
+        assert_eq!(explicit_session(&params), None);
+        params["prompt_cache_key"] = json!(42);
+        assert_eq!(explicit_session(&params), None);
+        params["prompt_cache_key"] = json!("");
+        assert_eq!(explicit_session(&params), None);
     }
 
     #[test]
@@ -1127,16 +1089,9 @@ mod tests {
         // The caller's own order wins over stickiness.
         let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
         params["provider"] = json!({ "order": ["a", "b"] });
-        let f = extract(
-            Endpoint::ChatComplete,
-            &params,
-            None,
-            &test_key(),
-            0,
-            false,
-            Some("sess-1"),
-        )
-        .unwrap();
+        // Even a named session does not stick against a pinned order.
+        params["prompt_cache_key"] = json!("sess-1");
+        let f = features(&params);
         assert_eq!(f.prefix_hash, None);
         assert_eq!(f.session_kind, None);
         // An empty order pins nothing.
@@ -1174,7 +1129,6 @@ mod tests {
                 &PrefixHashKey::new(key),
                 0,
                 false,
-                None,
             )
             .unwrap()
             .prefix_hash
@@ -1208,16 +1162,7 @@ mod tests {
                 { "type": "text", "text": "the chart" },
             ]},
         ]}]});
-        let f = extract(
-            Endpoint::Messages,
-            &params,
-            None,
-            &test_key(),
-            0,
-            false,
-            None,
-        )
-        .unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key(), 0, false).unwrap();
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
     }
@@ -1232,7 +1177,6 @@ mod tests {
                 &test_key(),
                 0,
                 false,
-                None,
             )
             .unwrap()
         };
@@ -1279,8 +1223,7 @@ mod tests {
                 Some(&disabled),
                 &test_key(),
                 0,
-                false,
-                None,
+                false
             )
             .unwrap()
             .reasoning,
@@ -1302,16 +1245,7 @@ mod tests {
             ]}],
             "thinking": { "type": "disabled" },
         });
-        let f = extract(
-            Endpoint::Messages,
-            &params,
-            None,
-            &test_key(),
-            0,
-            false,
-            None,
-        )
-        .unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key(), 0, false).unwrap();
         assert_eq!(f.reasoning, ReasoningIntent::Disabled);
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
@@ -1320,16 +1254,7 @@ mod tests {
         assert_eq!(f.session_kind, Some(SessionKind::Inferred));
         let mut other = params.clone();
         other["system"] = json!("you are verbose");
-        let g = extract(
-            Endpoint::Messages,
-            &other,
-            None,
-            &test_key(),
-            0,
-            false,
-            None,
-        )
-        .unwrap();
+        let g = extract(Endpoint::Messages, &other, None, &test_key(), 0, false).unwrap();
         assert_ne!(f.prefix_hash, g.prefix_hash);
     }
 
@@ -1358,8 +1283,7 @@ mod tests {
             None,
             &test_key(),
             0,
-            false,
-            None,
+            false
         )
         .is_none());
     }
