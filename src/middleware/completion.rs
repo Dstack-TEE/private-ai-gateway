@@ -214,8 +214,6 @@ pub async fn run(
             &params,
             reasoning_requirements.as_ref(),
             prefix_hash_key,
-            received_body.len(),
-            stream,
         )
     } else {
         None

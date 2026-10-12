@@ -56,7 +56,7 @@ the relying party checks independently.
 | Local client or agent | Plaintext prompt and response | API key and all local context |
 | Attested gateway workload | Plaintext after TLS or E2EE termination | Requested model, credential, routing constraints, and provider response |
 | Accepted provider workload or route | Plaintext needed for routing or inference | Gateway-side provider credential and request metadata |
-| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a session key, usage, and status metadata |
+| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a cache-affinity key, usage, and status metadata |
 | Cloud host and workload operator | Not through the accepted TEE memory boundary | Network timing, addresses, sizes, and operational metadata |
 
 ### What leaves the request path
@@ -68,8 +68,8 @@ against the code:
 
 | Destination | Contents | Defined in |
 | --- | --- | --- |
-| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, message, image and tool counts, input-character and tools-schema lengths, the declared output cap, the streaming flag, the request surface, and the session key (`prefixHash`, with `sessionKind`) — counts and one keyed digest, never content | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
-| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the session key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
+| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and the cache-affinity key (`prefixHash`, with `sessionKind`) | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make this checkable:

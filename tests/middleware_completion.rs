@@ -3451,7 +3451,6 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
 
     let mut input = chat_input();
     input.params["messages"][0]["content"] = json!("s".repeat(5000));
-    let received_len = input.received_body.len() as u64;
     let response = mw.handle_completion(&service, input).await;
     assert_eq!(response.status().as_u16(), 200);
 
@@ -3464,25 +3463,12 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
     assert_eq!(features["reasoning"], json!("unspecified"));
     assert_eq!(features["responseFormat"], json!("text"));
     assert_eq!(features["inputModalities"], json!(["text"]));
-    // Request-shape counts: one message of 5000 ASCII chars, no tools, no
-    // image, no declared output cap, not streamed, on the chat surface.
-    assert_eq!(features["surface"], json!("chat"));
-    assert_eq!(features["messagesCount"], json!(1));
-    assert_eq!(features["inputChars"], json!(5000));
-    assert_eq!(features["imageCount"], json!(0));
-    assert_eq!(features["toolsCount"], json!(0));
-    assert_eq!(features["toolsBytes"], json!(0));
-    assert_eq!(features["toolChoice"], json!(""));
-    assert_eq!(features["maxOutputTokens"], json!(0));
-    assert_eq!(features["stream"], json!(false));
-    // The received body, not the parsed params the test rewrote above.
-    assert_eq!(features["requestBytes"], json!(received_len));
     let hash = features["prefixHash"]
         .as_str()
         .expect("session key")
         .to_string();
     assert_eq!(hash.len(), 32);
-    // No client-named session: the key is inferred from the opening.
+    // No prompt_cache_key: the key is inferred from the opening.
     assert_eq!(features["sessionKind"], json!("inferred"));
 
     // The post report echoes the key and its kind — billing keys cache
@@ -3493,7 +3479,7 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
 }
 
 #[tokio::test]
-async fn client_named_session_is_explicit_and_outranks_the_opening() {
+async fn prompt_cache_key_is_explicit_and_outranks_the_opening() {
     let (control_url, pres, posts) = spawn_control_capturing_pre(json!({
         "allow": true,
         "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],

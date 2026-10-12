@@ -446,6 +446,6 @@ should weigh them.
   request timeout" - high confidence from the explicit comments and the
   send-closure structure.
 - These findings concern the providers' own routers and prompt caches. They
-  do not conflict with the gateway's session key (`prefixHash` in the control
-  plane contract), which steers the gateway's choice *between* upstreams and
+  do not conflict with the gateway's cache-affinity key (`prefixHash` in the
+  control plane contract), which steers the gateway's choice *between* upstreams and
   claims nothing about cache behaviour inside any of them.

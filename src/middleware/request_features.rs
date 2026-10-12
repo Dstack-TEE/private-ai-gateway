@@ -78,67 +78,9 @@ pub enum ResponseFormatKind {
     JsonSchema,
 }
 
-/// Which request surface the features describe, after the gateway's own
-/// bridges have run: a Responses body that was bridged to chat reports `chat`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Surface {
-    Chat,
-    Messages,
-    Completions,
-}
-
-/// OpenAI `tool_choice`, reduced to its shape: the three string modes pass
-/// through, an object (a named tool, in either OpenAI or Anthropic form) is
-/// `named`, and absent or unrecognized is the empty string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolChoiceKind {
-    #[serde(rename = "")]
-    Unset,
-    Auto,
-    None,
-    Required,
-    Named,
-}
-
-/// Request-shape counts, as defined by the control-plane contract: character
-/// counts are UTF-16 code units (JavaScript `String.length`), and each count
-/// is clamped to the width the contract carries (16 bits for message, image and
-/// tool counts; 32 bits for character and byte lengths).
-const U16_MAX: u64 = 0xffff;
-const U32_MAX: u64 = 0xffff_ffff;
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestFeatures {
-    pub surface: Surface,
-    /// Bytes of the client body exactly as received, before any bridge.
-    pub request_bytes: u64,
-    /// Entries in `messages[]` (chat, Messages) or items in an array
-    /// `prompt` (completions); a string prompt counts zero. Anthropic's
-    /// top-level `system` is not a message.
-    pub messages_count: u64,
-    /// UTF-16 units of message text: string content, text parts (typed
-    /// `text`/`input_text`/`output_text` or untyped), plus each tool call's
-    /// argument string. Tool schemas and `json_schema` are NOT included —
-    /// they are measured by `tools_bytes` and the token estimate instead. On
-    /// the Messages surface the same rule covers text blocks and serialized
-    /// `tool_use.input`.
-    pub input_chars: u64,
-    /// Image parts (`image_url`, Anthropic `image`), including those inside
-    /// tool results.
-    pub image_count: u64,
-    /// `tools.len()` only; legacy `functions` count toward `has_tools` but
-    /// not here.
-    pub tools_count: u64,
-    /// UTF-16 length of the `tools` array serialized as JSON, nothing else.
-    pub tools_bytes: u64,
-    pub tool_choice: ToolChoiceKind,
-    /// The client's declared output cap: `max_completion_tokens` when it is a
-    /// non-negative integer, else `max_tokens`; `0` when neither is declared.
-    pub max_output_tokens: u64,
-    pub stream: bool,
     /// Low-biased heuristic estimate of the prompt's token count (no
     /// tokenizer here): ascii_bytes/5 + non_ascii_chars/3 + directly-counted
     /// tokens. The
@@ -168,8 +110,7 @@ pub struct RequestFeatures {
     pub session_kind: Option<SessionKind>,
 }
 
-/// Walk accumulator: token-estimate tallies, seen modalities, and the
-/// request-shape counts.
+/// Walk accumulator: token-estimate tallies and seen modalities.
 #[derive(Default)]
 struct Acc {
     ascii_bytes: u64,
@@ -178,14 +119,6 @@ struct Acc {
     /// with a documented basis, and literal token-id arrays (exact).
     extra_tokens: u64,
     modalities: BTreeSet<&'static str>,
-    /// Request-shape counts; see the matching `RequestFeatures` fields.
-    chars: u64,
-    messages: u64,
-    images: u64,
-}
-
-fn utf16_len(text: &str) -> u64 {
-    text.encode_utf16().count() as u64
 }
 
 impl Acc {
@@ -194,9 +127,10 @@ impl Acc {
             self.modalities.insert("text");
         }
         self.estimate(text);
-        self.chars += utf16_len(text);
     }
 
+    /// Text that counts toward the estimate but is not message content —
+    /// serialized tools / schemas and tool-call arguments.
     fn estimate(&mut self, text: &str) {
         for c in text.chars() {
             if c.is_ascii() {
@@ -207,36 +141,9 @@ impl Acc {
         }
     }
 
-    /// A text part the transforms do not forward (`input_text`,
-    /// `output_text`, an untyped `text`): it is still prompt text, so it
-    /// reaches `input_chars`, but not the estimate, which
-    /// follows what the upstream will actually see.
-    fn chars_only(&mut self, text: &str) {
-        self.chars += utf16_len(text);
-    }
-
-    /// A tool call's arguments (OpenAI `tool_calls[].function.arguments`,
-    /// Anthropic `tool_use.input`): real prompt tokens AND request text, so
-    /// they feed the estimate and `input_chars`.
-    fn tool_arguments(&mut self, text: &str) {
-        self.estimate(text);
-        self.chars += utf16_len(text);
-    }
-
-    /// Serialized tool / output schemas: they are rendered into the prompt
-    /// upstream, so they count toward the estimate, but they are not
-    /// conversation text (`input_chars` excludes them; `tools_bytes` measures
-    /// them).
-    fn schema_text(&mut self, text: &str) {
-        self.estimate(text);
-    }
-
     /// A non-text part: record its modality and floor its token cost.
     fn media(&mut self, modality: &'static str, floor_tokens: u64) {
         self.modalities.insert(modality);
-        if modality == "image" {
-            self.images += 1;
-        }
         self.extra_tokens += floor_tokens;
     }
 
@@ -289,22 +196,12 @@ pub fn extract(
     params: &Value,
     requirements: Option<&ReasoningConfig>,
     prefix_hash_key: &PrefixHashKey,
-    request_bytes: usize,
-    stream: bool,
 ) -> Option<RequestFeatures> {
     let mut acc = Acc::default();
-    let surface = match endpoint {
-        Endpoint::ChatComplete => Surface::Chat,
-        Endpoint::Messages => Surface::Messages,
-        Endpoint::Complete => Surface::Completions,
-        Endpoint::Embed | Endpoint::CreateModelResponse | Endpoint::SystemOne => return None,
-    };
     match endpoint {
         Endpoint::ChatComplete => walk_openai_messages(params, &mut acc),
         Endpoint::Messages => walk_anthropic(params, &mut acc),
         Endpoint::Complete => match params.get("prompt") {
-            // A string prompt is one conversation but zero `messages[]`
-            // entries.
             Some(Value::String(prompt)) => acc.text(prompt),
             // Legacy completions also allow arrays: a batch of string
             // prompts, ONE tokenized prompt (a flat token-id array — exact
@@ -314,7 +211,6 @@ pub fn extract(
             // not the sum — summing 100 prompts of 1k tokens each would read
             // as 100k and wrongly rule out every model that could serve them.
             Some(Value::Array(items)) => {
-                acc.messages = items.len() as u64;
                 if !items.is_empty() && items.iter().all(Value::is_number) {
                     acc.extra_tokens += items.len() as u64;
                 } else {
@@ -323,7 +219,6 @@ pub fn extract(
                         let item_tokens = match item {
                             Value::String(text) => {
                                 acc.modalities.insert("text");
-                                acc.chars += utf16_len(text);
                                 text_tokens(text)
                             }
                             Value::Array(ids) => {
@@ -347,23 +242,12 @@ pub fn extract(
     let non_empty =
         |key: &str| matches!(params.get(key), Some(Value::Array(items)) if !items.is_empty());
     let has_tools = non_empty("tools") || non_empty("functions");
-    // `tools_count` / `tools_bytes` measure `tools` alone; legacy
-    // `functions` only count toward `has_tools`.
-    let (tools_count, tools_bytes) = match params.get("tools") {
-        Some(Value::Array(tools)) => (
-            tools.len() as u64,
-            serde_json::to_string(tools)
-                .map(|s| utf16_len(&s))
-                .unwrap_or(0),
-        ),
-        _ => (0, 0),
-    };
     if has_tools {
         // Tool schemas are serialized into the prompt upstream; count them.
         for key in ["tools", "functions"] {
             if non_empty(key) {
                 if let Ok(serialized) = serde_json::to_string(&params[key]) {
-                    acc.schema_text(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
         }
@@ -380,7 +264,7 @@ pub fn extract(
                 .and_then(|f| f.get("json_schema"))
             {
                 if let Ok(serialized) = serde_json::to_string(schema) {
-                    acc.schema_text(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
             ResponseFormatKind::JsonSchema
@@ -397,16 +281,6 @@ pub fn extract(
     );
 
     Some(RequestFeatures {
-        surface,
-        request_bytes: request_bytes as u64,
-        messages_count: acc.messages.min(U16_MAX),
-        input_chars: acc.chars.min(U32_MAX),
-        image_count: acc.images.min(U16_MAX),
-        tools_count: tools_count.min(U16_MAX),
-        tools_bytes: tools_bytes.min(U32_MAX),
-        tool_choice: tool_choice_kind(params.get("tool_choice")),
-        max_output_tokens: max_output_tokens(endpoint, params),
-        stream,
         estimated_prompt_tokens: acc.estimated_tokens(),
         has_tools,
         input_modalities: acc.modalities.iter().copied().collect(),
@@ -539,43 +413,14 @@ fn utf16_prefix(text: &str, cap: usize) -> &str {
     text
 }
 
-/// `tool_choice` reduced to its shape; see `ToolChoiceKind`.
-fn tool_choice_kind(value: Option<&Value>) -> ToolChoiceKind {
-    match value {
-        Some(Value::String(mode)) => match mode.as_str() {
-            "auto" => ToolChoiceKind::Auto,
-            "none" => ToolChoiceKind::None,
-            "required" => ToolChoiceKind::Required,
-            _ => ToolChoiceKind::Unset,
-        },
-        Some(Value::Object(_)) => ToolChoiceKind::Named,
-        _ => ToolChoiceKind::Unset,
-    }
-}
-
-/// The declared output cap. Chat prefers `max_completion_tokens` and falls
-/// back to `max_tokens`; the other surfaces only have `max_tokens`. Anything
-/// that is not a non-negative integer reads as undeclared (`0`), and the value
-/// is clamped to the 32-bit width the contract carries.
-fn max_output_tokens(endpoint: Endpoint, params: &Value) -> u64 {
-    let count = |key: &str| params.get(key).and_then(Value::as_u64);
-    let declared = match endpoint {
-        Endpoint::ChatComplete => count("max_completion_tokens").or_else(|| count("max_tokens")),
-        _ => count("max_tokens"),
-    };
-    declared.unwrap_or(0).min(U32_MAX)
-}
-
 /// OpenAI `messages[]`: content is a string or an array of typed parts. Shape
 /// knowledge mirrors the request transforms; a part type neither knows is
-/// skipped here exactly as it is dropped there — except that its text, if
-/// any, still reaches `input_chars` (see `Acc::chars_only`).
+/// skipped here exactly as it is dropped there.
 fn walk_openai_messages(params: &Value, acc: &mut Acc) {
     let Some(messages) = params.get("messages").and_then(Value::as_array) else {
         return;
     };
     for msg in messages {
-        acc.messages += 1;
         match msg.get("content") {
             Some(Value::String(text)) => acc.text(text),
             Some(Value::Array(parts)) => {
@@ -583,11 +428,6 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                     match part.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             acc.text(part.get("text").and_then(Value::as_str).unwrap_or(""))
-                        }
-                        Some("input_text") | Some("output_text") | None => {
-                            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                                acc.chars_only(text);
-                            }
                         }
                         // 85 tokens is OpenAI's low-detail image floor — the
                         // smallest any vision model bills an image at.
@@ -614,7 +454,7 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                     .and_then(|f| f.get("arguments"))
                     .and_then(Value::as_str)
                 {
-                    acc.tool_arguments(arguments);
+                    acc.estimate(arguments);
                 }
             }
         }
@@ -639,8 +479,6 @@ fn walk_anthropic(params: &Value, acc: &mut Acc) {
         return;
     };
     for msg in messages {
-        // The system block above is not a `messages[]` entry.
-        acc.messages += 1;
         match msg.get("content") {
             Some(Value::String(text)) => acc.text(text),
             Some(Value::Array(blocks)) => {
@@ -665,7 +503,7 @@ fn anthropic_content_block(block: &Value, acc: &mut Acc) {
         Some("tool_use") => {
             if let Some(input) = block.get("input") {
                 if let Ok(serialized) = serde_json::to_string(input) {
-                    acc.tool_arguments(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
         }
@@ -756,191 +594,7 @@ mod tests {
     }
 
     fn features(params: &Value) -> RequestFeatures {
-        extract(Endpoint::ChatComplete, params, None, &test_key(), 0, false).unwrap()
-    }
-
-    fn features_on(endpoint: Endpoint, params: &Value) -> RequestFeatures {
-        extract(endpoint, params, None, &test_key(), 0, false).unwrap()
-    }
-
-    #[test]
-    fn counts_follow_the_contract_definitions() {
-        // Three messages, two tools, one image. Tool-call arguments are
-        // conversation text; the tool schemas are not (they are `tools_bytes`).
-        let params = json!({
-            "model": "m",
-            "messages": [
-                { "role": "system", "content": "be brief" },
-                { "role": "user", "content": [
-                    { "type": "text", "text": "look at this" },
-                    { "type": "image_url", "image_url": { "url": "https://x/img.png" } },
-                    { "text": "untyped part" },
-                ]},
-                { "role": "assistant", "content": null, "tool_calls": [
-                    { "function": { "name": "f", "arguments": "{\"q\":1}" } },
-                ]},
-            ],
-            "tools": [
-                { "type": "function", "function": { "name": "f", "parameters": { "type": "object" } } },
-                { "type": "function", "function": { "name": "g" } },
-            ],
-            "tool_choice": "auto",
-            "max_tokens": 256,
-        });
-        let f = extract(
-            Endpoint::ChatComplete,
-            &params,
-            None,
-            &test_key(),
-            1234,
-            true,
-        )
-        .unwrap();
-        assert_eq!(f.surface, Surface::Chat);
-        assert_eq!(f.request_bytes, 1234);
-        assert_eq!(f.messages_count, 3);
-        assert_eq!(f.image_count, 1);
-        assert_eq!(f.tools_count, 2);
-        assert_eq!(
-            f.tools_bytes,
-            serde_json::to_string(&params["tools"]).unwrap().len() as u64
-        );
-        assert_eq!(f.tool_choice, ToolChoiceKind::Auto);
-        assert_eq!(f.max_output_tokens, 256);
-        assert!(f.stream);
-        let expected_chars =
-            "be brief".len() + "look at this".len() + "untyped part".len() + "{\"q\":1}".len();
-        assert_eq!(f.input_chars, expected_chars as u64);
-
-        // `functions` alone: tools for routing, but not a counted `tools` array.
-        let legacy = features(&json!({
-            "model": "m",
-            "messages": [{ "role": "user", "content": "hi" }],
-            "functions": [{ "name": "f" }],
-        }));
-        assert!(legacy.has_tools);
-        assert_eq!(legacy.tools_count, 0);
-        assert_eq!(legacy.tools_bytes, 0);
-    }
-
-    #[test]
-    fn max_completion_tokens_wins_over_max_tokens_and_absent_is_zero() {
-        let both = features(&json!({
-            "model": "m",
-            "messages": [{ "role": "user", "content": "hi" }],
-            "max_tokens": 10,
-            "max_completion_tokens": 20,
-        }));
-        assert_eq!(both.max_output_tokens, 20);
-        let only_max_tokens = features(&json!({
-            "model": "m",
-            "messages": [{ "role": "user", "content": "hi" }],
-            "max_tokens": 10,
-        }));
-        assert_eq!(only_max_tokens.max_output_tokens, 10);
-        let absent = features(&chat(json!([{ "role": "user", "content": "hi" }])));
-        assert_eq!(absent.max_output_tokens, 0);
-        // A non-integer declaration reads as undeclared, not as an error.
-        let fractional = features(&json!({
-            "model": "m",
-            "messages": [{ "role": "user", "content": "hi" }],
-            "max_tokens": 1.5,
-        }));
-        assert_eq!(fractional.max_output_tokens, 0);
-        // Messages and completions only know `max_tokens`.
-        let messages = features_on(
-            Endpoint::Messages,
-            &json!({ "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 7 }),
-        );
-        assert_eq!(messages.max_output_tokens, 7);
-    }
-
-    #[test]
-    fn anthropic_system_is_not_a_message() {
-        let f = features_on(
-            Endpoint::Messages,
-            &json!({
-                "system": "be brief",
-                "messages": [
-                    { "role": "user", "content": "hi" },
-                    { "role": "assistant", "content": [
-                        { "type": "tool_use", "name": "f", "input": { "q": 1 } },
-                    ]},
-                ],
-            }),
-        );
-        assert_eq!(f.surface, Surface::Messages);
-        assert_eq!(f.messages_count, 2);
-        // System text and tool_use input are input characters all the same.
-        let expected = "be brief".len()
-            + "hi".len()
-            + serde_json::to_string(&json!({ "q": 1 })).unwrap().len();
-        assert_eq!(f.input_chars, expected as u64);
-    }
-
-    #[test]
-    fn utf16_units_not_scalars() {
-        // One emoji is one scalar but two UTF-16 units — JavaScript's
-        // `String.length`, which the contract measures characters in.
-        let f = features(&chat(json!([{ "role": "user", "content": "😀" }])));
-        assert_eq!(f.input_chars, 2);
-        let cjk = features(&chat(json!([{ "role": "user", "content": "谢谢" }])));
-        assert_eq!(cjk.input_chars, 2);
-    }
-
-    #[test]
-    fn tool_choice_object_is_named() {
-        let named = features(&json!({
-            "model": "m",
-            "messages": [{ "role": "user", "content": "hi" }],
-            "tool_choice": { "type": "function", "function": { "name": "f" } },
-        }));
-        assert_eq!(named.tool_choice, ToolChoiceKind::Named);
-        for (mode, kind) in [
-            ("auto", ToolChoiceKind::Auto),
-            ("none", ToolChoiceKind::None),
-            ("required", ToolChoiceKind::Required),
-            ("anything-else", ToolChoiceKind::Unset),
-        ] {
-            let f = features(&json!({
-                "model": "m",
-                "messages": [{ "role": "user", "content": "hi" }],
-                "tool_choice": mode,
-            }));
-            assert_eq!(f.tool_choice, kind, "{mode}");
-        }
-        let absent = features(&chat(json!([{ "role": "user", "content": "hi" }])));
-        assert_eq!(absent.tool_choice, ToolChoiceKind::Unset);
-        assert_eq!(serde_json::to_value(absent.tool_choice).unwrap(), json!(""));
-        assert_eq!(
-            serde_json::to_value(named.tool_choice).unwrap(),
-            json!("named")
-        );
-    }
-
-    #[test]
-    fn surface_follows_bridged_endpoint() {
-        let chat_surface = features(&chat(json!([{ "role": "user", "content": "hi" }])));
-        assert_eq!(
-            serde_json::to_value(chat_surface.surface).unwrap(),
-            json!("chat")
-        );
-        let completions = features_on(Endpoint::Complete, &json!({ "prompt": "hi" }));
-        assert_eq!(completions.surface, Surface::Completions);
-        // A string prompt is zero `messages[]`; an array prompt counts items.
-        assert_eq!(completions.messages_count, 0);
-        let batch = features_on(Endpoint::Complete, &json!({ "prompt": ["a", "bb"] }));
-        assert_eq!(batch.messages_count, 2);
-        assert_eq!(batch.input_chars, 3);
-        assert!(extract(
-            Endpoint::Embed,
-            &json!({ "input": "x" }),
-            None,
-            &test_key(),
-            0,
-            false
-        )
-        .is_none());
+        extract(Endpoint::ChatComplete, params, None, &test_key()).unwrap()
     }
 
     #[test]
@@ -1127,8 +781,6 @@ mod tests {
                 &params,
                 None,
                 &PrefixHashKey::new(key),
-                0,
-                false,
             )
             .unwrap()
             .prefix_hash
@@ -1162,7 +814,7 @@ mod tests {
                 { "type": "text", "text": "the chart" },
             ]},
         ]}]});
-        let f = extract(Endpoint::Messages, &params, None, &test_key(), 0, false).unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key()).unwrap();
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
     }
@@ -1175,8 +827,6 @@ mod tests {
                 &json!({ "model": "m", "prompt": prompt }),
                 None,
                 &test_key(),
-                0,
-                false,
             )
             .unwrap()
         };
@@ -1217,16 +867,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            extract(
-                Endpoint::ChatComplete,
-                &plain,
-                Some(&disabled),
-                &test_key(),
-                0,
-                false
-            )
-            .unwrap()
-            .reasoning,
+            extract(Endpoint::ChatComplete, &plain, Some(&disabled), &test_key())
+                .unwrap()
+                .reasoning,
             ReasoningIntent::Disabled
         );
         // reasoning.exclude is response visibility, not intent — it arrives
@@ -1245,7 +888,7 @@ mod tests {
             ]}],
             "thinking": { "type": "disabled" },
         });
-        let f = extract(Endpoint::Messages, &params, None, &test_key(), 0, false).unwrap();
+        let f = extract(Endpoint::Messages, &params, None, &test_key()).unwrap();
         assert_eq!(f.reasoning, ReasoningIntent::Disabled);
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
@@ -1254,7 +897,7 @@ mod tests {
         assert_eq!(f.session_kind, Some(SessionKind::Inferred));
         let mut other = params.clone();
         other["system"] = json!("you are verbose");
-        let g = extract(Endpoint::Messages, &other, None, &test_key(), 0, false).unwrap();
+        let g = extract(Endpoint::Messages, &other, None, &test_key()).unwrap();
         assert_ne!(f.prefix_hash, g.prefix_hash);
     }
 
@@ -1277,14 +920,6 @@ mod tests {
 
     #[test]
     fn unknown_shapes_send_nothing() {
-        assert!(extract(
-            Endpoint::Embed,
-            &json!({ "input": "x" }),
-            None,
-            &test_key(),
-            0,
-            false
-        )
-        .is_none());
+        assert!(extract(Endpoint::Embed, &json!({ "input": "x" }), None, &test_key()).is_none());
     }
 }
