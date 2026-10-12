@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -39,16 +39,26 @@ impl std::fmt::Debug for PrefixHashKey {
     }
 }
 
-/// First-bytes cap for the prefix hash. 4096 bytes is ≈1k tokens — aligned
-/// with the smallest prefix the major providers cache at all (1024 tokens),
-/// so a shorter shared prefix that this cap would have distinguished is one
-/// no upstream cache would have rewarded anyway. Within one conversation the
-/// first 4KB do not change as turns are appended, which is what makes the
-/// hash a stable affinity key.
-const PREFIX_CAP: usize = 4096;
-/// How much of a media part's url/data feeds the hash: enough to distinguish,
-/// cheap enough to never matter.
-const MEDIA_SNIPPET: usize = 128;
+/// How much of a conversation's opening feeds the inferred session key, in
+/// UTF-16 units, so every component keying sessions this way agrees on which
+/// two openings are "the same conversation". Bounds the hashing work a large
+/// first message (an inline image) could demand; two openings alike this far
+/// would share a prompt cache anyway.
+const OPENING_CAP: usize = 16_384;
+/// Longest client-named session identifier honored, in UTF-16 units; a
+/// longer one is ignored, not truncated, so
+/// a client bug cannot pin unrelated conversations together.
+const MAX_SESSION_ID: usize = 256;
+
+/// How the session key was obtained: named by the client's
+/// `prompt_cache_key` or inferred from the conversation's
+/// opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    Explicit,
+    Inferred,
+}
 
 /// What the client asked reasoning to do — not what any backend will do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,15 +98,19 @@ pub struct RequestFeatures {
     pub input_modalities: Vec<&'static str>,
     pub reasoning: ReasoningIntent,
     pub response_format: ResponseFormatKind,
-    /// The cache-affinity key: hex HMAC-SHA256, under the KMS-derived
-    /// `PrefixHashKey`, of the canonical first bytes of the conversation,
-    /// truncated to 32 chars (`hash_api_key` style).
+    /// The cache-affinity (session) key: hex HMAC-SHA256, under the
+    /// KMS-derived `PrefixHashKey`, of either the client-named session
+    /// identifier or the conversation's opening two messages, truncated to
+    /// 32 chars (`hash_api_key` style). The wire name predates the session
+    /// semantics and is kept for the control plane's sake.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
+    /// Which of the two the key is; absent together with `prefix_hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_kind: Option<SessionKind>,
 }
 
-/// Walk accumulator: token-estimate tallies, seen modalities, and the capped
-/// canonical prefix. The estimate keeps counting after the prefix is full.
+/// Walk accumulator: token-estimate tallies and seen modalities.
 #[derive(Default)]
 struct Acc {
     ascii_bytes: u64,
@@ -105,42 +119,19 @@ struct Acc {
     /// with a documented basis, and literal token-id arrays (exact).
     extra_tokens: u64,
     modalities: BTreeSet<&'static str>,
-    prefix: Vec<u8>,
 }
 
 impl Acc {
-    fn prefix_push(&mut self, data: &[u8]) {
-        if self.prefix.len() < PREFIX_CAP {
-            let room = PREFIX_CAP - self.prefix.len();
-            self.prefix.extend_from_slice(&data[..data.len().min(room)]);
-        }
-    }
-
-    /// Every message contributes its role to the prefix: "user: hi" and
-    /// "assistant: hi" must not collide.
-    fn begin_message(&mut self, role: &str) {
-        self.prefix_push(role.as_bytes());
-        self.prefix_push(b"\0");
-    }
-
     fn text(&mut self, text: &str) {
         if !text.is_empty() {
             self.modalities.insert("text");
         }
-        for c in text.chars() {
-            if c.is_ascii() {
-                self.ascii_bytes += 1;
-            } else {
-                self.non_ascii_chars += 1;
-            }
-        }
-        self.prefix_push(text.as_bytes());
+        self.estimate(text);
     }
 
-    /// Text that counts toward the estimate but not the prefix — serialized
-    /// tools / schemas, which sit outside the message sequence the upstream
-    /// caches by.
-    fn text_outside_prefix(&mut self, text: &str) {
+    /// Text that counts toward the estimate but is not message content —
+    /// serialized tools / schemas and tool-call arguments.
+    fn estimate(&mut self, text: &str) {
         for c in text.chars() {
             if c.is_ascii() {
                 self.ascii_bytes += 1;
@@ -150,47 +141,14 @@ impl Acc {
         }
     }
 
-    /// A non-text part: record its modality, floor its token cost, and feed a
-    /// distinguishing snippet of its url/data to the prefix.
-    fn media(&mut self, modality: &'static str, floor_tokens: u64, reference: Option<&str>) {
+    /// A non-text part: record its modality and floor its token cost.
+    fn media(&mut self, modality: &'static str, floor_tokens: u64) {
         self.modalities.insert(modality);
         self.extra_tokens += floor_tokens;
-        self.prefix_push(modality.as_bytes());
-        self.prefix_push(b"\0");
-        if let Some(reference) = reference {
-            let mut end = reference.len().min(MEDIA_SNIPPET);
-            while !reference.is_char_boundary(end) {
-                end -= 1;
-            }
-            self.prefix_push(&reference.as_bytes()[..end]);
-        }
     }
 
     fn estimated_tokens(&self) -> u64 {
         self.ascii_bytes / 5 + self.non_ascii_chars / 3 + self.extra_tokens
-    }
-
-    /// The affinity key, or `None` when there is nothing worth keying.
-    ///
-    /// Emitted only when the canonical prefix filled the whole cap. Below it
-    /// the "prefix" is the entire conversation so far, which means two things
-    /// at once: the key would change on every appended turn (a single-shot
-    /// Redis entry that can never stick), and a conversation under ~1k tokens
-    /// is below the smallest prefix providers cache anyway. Dropping those
-    /// also removes the one real dictionary target — a complete short prefix
-    /// like `user\0hi` is trivially enumerable; a full 4KB one is only
-    /// guessable when the guesser already holds every byte of it.
-    ///
-    /// The digest is HMAC-SHA256 under a key that never leaves the TEE, so
-    /// the control plane cannot test guesses, even of fully known templates.
-    /// It still sees when two requests share a prefix: that equality is what
-    /// cache affinity routes on.
-    fn prefix_hash(&self, key: &PrefixHashKey) -> Option<String> {
-        if self.prefix.len() < PREFIX_CAP {
-            return None;
-        }
-        let digest = hmac_sha256(&key.0, &self.prefix);
-        Some(hex::encode(digest)[..32].to_string())
     }
 }
 
@@ -244,10 +202,7 @@ pub fn extract(
         Endpoint::ChatComplete => walk_openai_messages(params, &mut acc),
         Endpoint::Messages => walk_anthropic(params, &mut acc),
         Endpoint::Complete => match params.get("prompt") {
-            Some(Value::String(prompt)) => {
-                acc.begin_message("user");
-                acc.text(prompt);
-            }
+            Some(Value::String(prompt)) => acc.text(prompt),
             // Legacy completions also allow arrays: a batch of string
             // prompts, ONE tokenized prompt (a flat token-id array — exact
             // count, better than any estimate), or a batch of tokenized
@@ -255,8 +210,6 @@ pub fn extract(
             // window ON ITS OWN, so the routable number is the LARGEST item,
             // not the sum — summing 100 prompts of 1k tokens each would read
             // as 100k and wrongly rule out every model that could serve them.
-            // No prefix either: a batch is not a conversation, so there is
-            // nothing for cache affinity to key.
             Some(Value::Array(items)) => {
                 if !items.is_empty() && items.iter().all(Value::is_number) {
                     acc.extra_tokens += items.len() as u64;
@@ -294,7 +247,7 @@ pub fn extract(
         for key in ["tools", "functions"] {
             if non_empty(key) {
                 if let Ok(serialized) = serde_json::to_string(&params[key]) {
-                    acc.text_outside_prefix(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
         }
@@ -311,7 +264,7 @@ pub fn extract(
                 .and_then(|f| f.get("json_schema"))
             {
                 if let Ok(serialized) = serde_json::to_string(schema) {
-                    acc.text_outside_prefix(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
             ResponseFormatKind::JsonSchema
@@ -320,14 +273,144 @@ pub fn extract(
         _ => ResponseFormatKind::Text,
     };
 
+    let session = session_key(
+        endpoint,
+        params,
+        explicit_session(params).as_deref(),
+        prefix_hash_key,
+    );
+
     Some(RequestFeatures {
         estimated_prompt_tokens: acc.estimated_tokens(),
         has_tools,
         input_modalities: acc.modalities.iter().copied().collect(),
         reasoning: reasoning_intent(endpoint, params, requirements),
         response_format,
-        prefix_hash: acc.prefix_hash(prefix_hash_key),
+        prefix_hash: session.as_ref().map(|(hash, _)| hash.clone()),
+        session_kind: session.map(|(_, kind)| kind),
     })
+}
+
+/// The client-named session: its `prompt_cache_key` (OpenAI's cache-routing
+/// hint), honored only as a string of 1..=256 UTF-16 units — an oversized one
+/// is ignored, never truncated. Fields named `session_id` / `x-session-id`
+/// are deliberately not read: in this gateway a session is an attested
+/// upstream session (`provider.aci_session_ids`), and a routing hint must not
+/// look like a way to pin one.
+pub fn explicit_session(params: &Value) -> Option<String> {
+    params
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|id| (1..=MAX_SESSION_ID).contains(&id.encode_utf16().count()))
+        .map(str::to_string)
+}
+
+/// The session key and how it was obtained, or `None` when nothing should
+/// stick: the caller pinned its own provider order (`provider.order`), or the
+/// body has no conversation to key.
+///
+/// Explicit keys hash the identifier; inferred keys hash the conversation's
+/// opening — the first system/developer message and the first other message,
+/// which stay the same as turns are appended, so the key is stable from the
+/// first turn without any length threshold. Both are HMAC-SHA256 under a key
+/// that never leaves the TEE, so the control plane cannot test guesses, even
+/// of a fully known opening; it only sees when two requests share one, which
+/// is what affinity routes on. The two domains are separated by a tag so a
+/// session named after an opening's JSON cannot collide with it.
+fn session_key(
+    endpoint: Endpoint,
+    params: &Value,
+    explicit_session: Option<&str>,
+    key: &PrefixHashKey,
+) -> Option<(String, SessionKind)> {
+    let pinned_order = params
+        .get("provider")
+        .and_then(|p| p.get("order"))
+        .and_then(Value::as_array)
+        .is_some_and(|order| !order.is_empty());
+    if pinned_order {
+        return None;
+    }
+    let (material, kind) = match explicit_session {
+        Some(id) => (format!("explicit\0{id}"), SessionKind::Explicit),
+        None => {
+            let opening = conversation_opening(endpoint, params)?;
+            let serialized = serde_json::to_string(&opening).ok()?;
+            (
+                format!("opening\0{}", utf16_prefix(&serialized, OPENING_CAP)),
+                SessionKind::Inferred,
+            )
+        }
+    };
+    let digest = hmac_sha256(&key.0, material.as_bytes());
+    Some((hex::encode(digest)[..32].to_string(), kind))
+}
+
+/// The two messages that identify a conversation:
+/// `[[role, content] | null, [role, content] | null]` for chat and Messages
+/// (Anthropic's top-level `system` stands in as the system entry), `[prompt]`
+/// for completions. `None` when the body carries neither.
+fn conversation_opening(endpoint: Endpoint, params: &Value) -> Option<Value> {
+    let pick = |msg: &Value| {
+        Value::Array(vec![
+            msg.get("role").cloned().unwrap_or(Value::Null),
+            msg.get("content").cloned().unwrap_or(Value::Null),
+        ])
+    };
+    let is_system = |msg: &Value| {
+        matches!(
+            msg.get("role").and_then(Value::as_str),
+            Some("system") | Some("developer")
+        )
+    };
+    match endpoint {
+        Endpoint::ChatComplete => {
+            let messages = params.get("messages").and_then(Value::as_array)?;
+            let system = messages.iter().find(|m| is_system(m)).map(pick);
+            let first = messages.iter().find(|m| !is_system(m)).map(pick);
+            if system.is_none() && first.is_none() {
+                return None;
+            }
+            Some(Value::Array(vec![
+                system.unwrap_or(Value::Null),
+                first.unwrap_or(Value::Null),
+            ]))
+        }
+        Endpoint::Messages => {
+            let system = params
+                .get("system")
+                .map(|system| Value::Array(vec![Value::from("system"), system.clone()]));
+            let first = params
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.first())
+                .map(pick);
+            if system.is_none() && first.is_none() {
+                return None;
+            }
+            Some(Value::Array(vec![
+                system.unwrap_or(Value::Null),
+                first.unwrap_or(Value::Null),
+            ]))
+        }
+        Endpoint::Complete => params
+            .get("prompt")
+            .map(|prompt| Value::Array(vec![prompt.clone()])),
+        Endpoint::Embed | Endpoint::CreateModelResponse | Endpoint::SystemOne => None,
+    }
+}
+
+/// The longest prefix of `text` holding at most `cap` UTF-16 units, cut on a
+/// character boundary (a surrogate pair is kept or dropped whole).
+fn utf16_prefix(text: &str, cap: usize) -> &str {
+    let mut units = 0;
+    for (index, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > cap {
+            return &text[..index];
+        }
+    }
+    text
 }
 
 /// OpenAI `messages[]`: content is a string or an array of typed parts. Shape
@@ -338,7 +421,6 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
         return;
     };
     for msg in messages {
-        acc.begin_message(msg.get("role").and_then(Value::as_str).unwrap_or(""));
         match msg.get("content") {
             Some(Value::String(text)) => acc.text(text),
             Some(Value::Array(parts)) => {
@@ -349,48 +431,22 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                         }
                         // 85 tokens is OpenAI's low-detail image floor — the
                         // smallest any vision model bills an image at.
-                        Some("image_url") => acc.media(
-                            "image",
-                            85,
-                            part.get("image_url")
-                                .and_then(|i| i.get("url"))
-                                .and_then(Value::as_str),
-                        ),
+                        Some("image_url") => acc.media("image", 85),
                         // Audio/video floors are 0: no provider documents a
                         // minimum billing for them, and a floor the input may
                         // undercut (an empty clip) breaks the lower-bound
                         // direction. The modality is the routable fact.
-                        Some("input_audio") => acc.media(
-                            "audio",
-                            0,
-                            part.get("input_audio")
-                                .and_then(|a| a.get("data"))
-                                .and_then(Value::as_str),
-                        ),
-                        Some("video_url") => acc.media(
-                            "video",
-                            0,
-                            part.get("video_url")
-                                .and_then(|v| v.get("url"))
-                                .and_then(Value::as_str),
-                        ),
+                        Some("input_audio") => acc.media("audio", 0),
+                        Some("video_url") => acc.media("video", 0),
                         // No token floor: a file's cost is unknowable here and
                         // the estimate is a lower bound.
-                        Some("file") => acc.media(
-                            "file",
-                            0,
-                            part.get("file")
-                                .and_then(|f| f.get("file_url").or_else(|| f.get("file_data")))
-                                .and_then(Value::as_str),
-                        ),
+                        Some("file") => acc.media("file", 0),
                         _ => {}
                     }
                 }
             }
             _ => {}
         }
-        // Same reasoning as anthropic tool_use: arguments are prompt tokens
-        // (estimate), not affinity identity (prefix).
         if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 if let Some(arguments) = call
@@ -398,7 +454,7 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
                     .and_then(|f| f.get("arguments"))
                     .and_then(Value::as_str)
                 {
-                    acc.text_outside_prefix(arguments);
+                    acc.estimate(arguments);
                 }
             }
         }
@@ -409,12 +465,8 @@ fn walk_openai_messages(params: &Value, acc: &mut Acc) {
 /// `messages[]`, whose blocks type differently from OpenAI parts.
 fn walk_anthropic(params: &Value, acc: &mut Acc) {
     match params.get("system") {
-        Some(Value::String(text)) => {
-            acc.begin_message("system");
-            acc.text(text);
-        }
+        Some(Value::String(text)) => acc.text(text),
         Some(Value::Array(blocks)) => {
-            acc.begin_message("system");
             for block in blocks {
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     acc.text(text);
@@ -427,7 +479,6 @@ fn walk_anthropic(params: &Value, acc: &mut Acc) {
         return;
     };
     for msg in messages {
-        acc.begin_message(msg.get("role").and_then(Value::as_str).unwrap_or(""));
         match msg.get("content") {
             Some(Value::String(text)) => acc.text(text),
             Some(Value::Array(blocks)) => {
@@ -447,34 +498,12 @@ fn walk_anthropic(params: &Value, acc: &mut Acc) {
 fn anthropic_content_block(block: &Value, acc: &mut Acc) {
     match block.get("type").and_then(Value::as_str) {
         Some("text") => acc.text(block.get("text").and_then(Value::as_str).unwrap_or("")),
-        Some("image") => {
-            let source = block.get("source");
-            acc.media(
-                "image",
-                85,
-                source
-                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
-                    .and_then(Value::as_str),
-            );
-        }
-        Some("document") => {
-            let source = block.get("source");
-            acc.media(
-                "file",
-                0,
-                source
-                    .and_then(|s| s.get("url").or_else(|| s.get("data")))
-                    .and_then(Value::as_str),
-            );
-        }
-        // Tool inputs are real prompt tokens, so they feed the estimate — but
-        // deliberately NOT the prefix: the affinity key trades distinctiveness
-        // for stability, and two conversations differing only in tool history
-        // sharing a routing preference costs nothing.
+        Some("image") => acc.media("image", 85),
+        Some("document") => acc.media("file", 0),
         Some("tool_use") => {
             if let Some(input) = block.get("input") {
                 if let Ok(serialized) = serde_json::to_string(input) {
-                    acc.text_outside_prefix(&serialized);
+                    acc.estimate(&serialized);
                 }
             }
         }
@@ -621,10 +650,8 @@ mod tests {
     }
 
     #[test]
-    fn tools_and_schema_count_toward_the_estimate_but_not_the_prefix() {
-        // Long enough to fill the prefix cap, so the hash comparison below is
-        // between real keys, not two Nones.
-        let plain = chat(json!([{ "role": "user", "content": "h".repeat(5000) }]));
+    fn tools_and_schema_count_toward_the_estimate_but_not_the_session_key() {
+        let plain = chat(json!([{ "role": "user", "content": "h".repeat(500) }]));
         let mut with_tools = plain.clone();
         with_tools["tools"] = json!([{ "type": "function", "function": {
             "name": "get_weather", "parameters": { "type": "object",
@@ -633,52 +660,121 @@ mod tests {
         assert!(b.has_tools);
         assert!(b.estimated_prompt_tokens > a.estimated_prompt_tokens + 80);
         // The affinity key must not fracture on tool-schema edits: the
-        // upstream caches by the message prefix, not the tool block.
+        // opening is the conversation's messages, not the tool block.
         assert_eq!(a.prefix_hash, b.prefix_hash);
     }
 
     #[test]
-    fn prefix_hash_is_stable_across_appended_turns() {
-        let system = json!({ "role": "system", "content": "s".repeat(5000) });
+    fn inferred_key_is_the_opening_and_survives_appended_turns() {
+        let system = json!({ "role": "system", "content": "be terse" });
         let turn1 = chat(json!([system, { "role": "user", "content": "first" }]));
         let turn2 = chat(json!([system, { "role": "user", "content": "first" },
             { "role": "assistant", "content": "answer" },
             { "role": "user", "content": "second" }]));
-        // The 4KB cap is inside the long system prompt, so appended turns
-        // cannot move the hash…
-        assert_eq!(features(&turn1).prefix_hash, features(&turn2).prefix_hash);
-        // …while a different system prompt lands a different key.
-        let other = chat(json!([{ "role": "system", "content": "t".repeat(5000) }]));
-        assert_ne!(features(&turn1).prefix_hash, features(&other).prefix_hash);
-    }
-
-    #[test]
-    fn sub_cap_prefixes_emit_no_hash() {
-        // A conversation that has not filled the cap is both worthless to key
-        // (the key would change every turn, and it is under the smallest
-        // prefix providers cache) and the one dictionary-guessable case —
-        // `user\0hi` is enumerable, a full 4KB prefix is not.
-        assert_eq!(
-            features(&chat(json!([{ "role": "user", "content": "hi" }]))).prefix_hash,
-            None
-        );
-        assert_eq!(features(&chat(json!([]))).prefix_hash, None);
-    }
-
-    #[test]
-    fn full_prefixes_distinguish_by_role_and_text() {
-        let long = "x".repeat(5000);
-        let user = features(&chat(json!([{ "role": "user", "content": long }])));
-        let assistant = features(&chat(
-            json!([{ "role": "assistant", "content": "x".repeat(5000) }]),
-        ));
+        let (a, b) = (features(&turn1), features(&turn2));
+        // Short conversations key from the first turn — no length threshold —
+        // and appended turns cannot move the key…
+        assert_eq!(a.session_kind, Some(SessionKind::Inferred));
+        assert_eq!(a.prefix_hash, b.prefix_hash);
+        assert_eq!(a.prefix_hash.as_ref().unwrap().len(), 32);
+        // …while a different system prompt alone lands a different key.
+        let other = chat(json!([{ "role": "system", "content": "be verbose" },
+            { "role": "user", "content": "first" }]));
+        assert_ne!(a.prefix_hash, features(&other).prefix_hash);
+        // The role is part of the opening: the same text as an assistant turn
+        // is a different conversation.
+        let user = features(&chat(json!([{ "role": "user", "content": "x" }])));
+        let assistant = features(&chat(json!([{ "role": "assistant", "content": "x" }])));
         assert_ne!(user.prefix_hash, assistant.prefix_hash);
-        assert_eq!(user.prefix_hash.as_ref().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn empty_conversation_emits_no_key() {
+        let f = features(&chat(json!([])));
+        assert_eq!(f.prefix_hash, None);
+        assert_eq!(f.session_kind, None);
+    }
+
+    #[test]
+    fn prompt_cache_key_names_the_session_and_outranks_the_opening() {
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        let inferred = features(&params);
+        params["prompt_cache_key"] = json!("cache-1");
+        assert_eq!(explicit_session(&params).as_deref(), Some("cache-1"));
+        // An explicit key is keyed from the identifier, not the opening, so a
+        // different conversation naming the same key shares it…
+        let named = features(&params);
+        let mut other = chat(json!([{ "role": "user", "content": "something else" }]));
+        other["prompt_cache_key"] = json!("cache-1");
+        assert_eq!(named.session_kind, Some(SessionKind::Explicit));
+        assert_eq!(named.prefix_hash, features(&other).prefix_hash);
+        // …and differs from the inferred key of the same opening.
+        assert_ne!(named.prefix_hash, inferred.prefix_hash);
+    }
+
+    #[test]
+    fn session_named_fields_are_not_read() {
+        // `session_id` would read as pinning an attested session; it is not
+        // a routing hint here, so the key stays inferred.
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        params["session_id"] = json!("sess-1");
+        assert_eq!(explicit_session(&params), None);
+        assert_eq!(features(&params).session_kind, Some(SessionKind::Inferred));
+    }
+
+    #[test]
+    fn oversized_or_non_string_cache_keys_are_ignored() {
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        params["prompt_cache_key"] = json!("s".repeat(257));
+        assert_eq!(explicit_session(&params), None);
+        // Exactly 256 is honored; an astral character counts two units.
+        params["prompt_cache_key"] = json!("s".repeat(256));
+        assert!(explicit_session(&params).is_some());
+        params["prompt_cache_key"] = json!("😀".repeat(128) + "s");
+        assert_eq!(explicit_session(&params), None);
+        params["prompt_cache_key"] = json!(42);
+        assert_eq!(explicit_session(&params), None);
+        params["prompt_cache_key"] = json!("");
+        assert_eq!(explicit_session(&params), None);
+    }
+
+    #[test]
+    fn pinned_provider_order_emits_no_key() {
+        // The caller's own order wins over stickiness.
+        let mut params = chat(json!([{ "role": "user", "content": "hi" }]));
+        params["provider"] = json!({ "order": ["a", "b"] });
+        // Even a named session does not stick against a pinned order.
+        params["prompt_cache_key"] = json!("sess-1");
+        let f = features(&params);
+        assert_eq!(f.prefix_hash, None);
+        assert_eq!(f.session_kind, None);
+        // An empty order pins nothing.
+        params["provider"] = json!({ "order": [] });
+        assert!(features(&params).prefix_hash.is_some());
+    }
+
+    #[test]
+    fn opening_is_cut_on_utf16_units() {
+        // One astral character past the cap: the cut keeps the pair whole.
+        let text = "a".repeat(OPENING_CAP - 1) + "😀";
+        assert_eq!(
+            utf16_prefix(&text, OPENING_CAP).encode_utf16().count(),
+            OPENING_CAP - 1
+        );
+        assert_eq!(utf16_prefix("short", OPENING_CAP), "short");
+        // Two openings that differ only past the cap share a key.
+        let a = features(&chat(
+            json!([{ "role": "user", "content": "x".repeat(20_000) + "a" }]),
+        ));
+        let b = features(&chat(
+            json!([{ "role": "user", "content": "x".repeat(20_000) + "b" }]),
+        ));
+        assert_eq!(a.prefix_hash, b.prefix_hash);
     }
 
     #[test]
     fn secret_keys_the_hash() {
-        let params = chat(json!([{ "role": "user", "content": "s".repeat(5000) }]));
+        let params = chat(json!([{ "role": "user", "content": "s".repeat(50) }]));
         let hash = |key: [u8; 32]| {
             extract(
                 Endpoint::ChatComplete,
@@ -744,8 +840,14 @@ mod tests {
         assert_eq!(f(json!([1, 2, 3, 4])).estimated_prompt_tokens, 4);
         // A batch of tokenized prompts: largest again.
         assert_eq!(f(json!([[1, 2, 3], [4, 5]])).estimated_prompt_tokens, 3);
-        // Not a conversation — nothing for affinity to key.
-        assert_eq!(f(json!(["a".repeat(9000)])).prefix_hash, None);
+        // A batch keys too: the prompt array is the opening.
+        let batch = f(json!(["a".repeat(90), "b"]));
+        assert_eq!(batch.session_kind, Some(SessionKind::Inferred));
+        assert_eq!(
+            batch.prefix_hash,
+            f(json!(["a".repeat(90), "b"])).prefix_hash
+        );
+        assert_ne!(batch.prefix_hash, f(json!(["a".repeat(90)])).prefix_hash);
     }
 
     #[test]
@@ -790,9 +892,13 @@ mod tests {
         assert_eq!(f.reasoning, ReasoningIntent::Disabled);
         assert_eq!(f.input_modalities, vec!["image", "text"]);
         assert!(f.estimated_prompt_tokens >= 85);
-        // Short conversation: below the cap, so no affinity key (see
-        // sub_cap_prefixes_emit_no_hash).
-        assert!(f.prefix_hash.is_none());
+        // The opening keys from the first turn: Anthropic's top-level
+        // `system` is the system entry, so changing it changes the key.
+        assert_eq!(f.session_kind, Some(SessionKind::Inferred));
+        let mut other = params.clone();
+        other["system"] = json!("you are verbose");
+        let g = extract(Endpoint::Messages, &other, None, &test_key()).unwrap();
+        assert_ne!(f.prefix_hash, g.prefix_hash);
     }
 
     #[test]

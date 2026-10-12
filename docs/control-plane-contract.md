@@ -43,7 +43,8 @@ The request uses camelCase:
     "inputModalities": ["image", "text"],
     "reasoning": "enabled",
     "responseFormat": "json_schema",
-    "prefixHash": "0123456789abcdef0123456789abcdef"
+    "prefixHash": "0123456789abcdef0123456789abcdef",
+    "sessionKind": "inferred"
   },
   "tee": true
 }
@@ -71,11 +72,12 @@ list of what the control plane receives, see
 | `inputModalities` | Deduplicated, stably ordered values from `text`, `image`, `file`, `audio`, and `video`. |
 | `reasoning` | Client intent: `enabled`, `disabled`, or `unspecified`. Response-visibility controls do not change this value. |
 | `responseFormat` | `text`, `json_object`, or `json_schema`. A missing response format becomes `text`. |
-| `prefixHash` | Optional 32-character lowercase hex cache-affinity key for the canonical first 4 KiB of a conversation. It is present only when that prefix fills the 4 KiB cap. It is HMAC-SHA256 under a key the gateway derives from dstack KMS, so it reveals only whether two prefixes are equal. It does not prove prompt contents or request authenticity. |
+| `prefixHash` | Optional 32-character lowercase hex cache-affinity key. It is HMAC-SHA256, under a key the gateway derives from dstack KMS, of either the client's `prompt_cache_key` (1–256 UTF-16 units) or, failing one, the conversation's opening: the first system/developer message and the first other message (the array `prompt` for completions), cut at 16 KiB of UTF-16 units. The opening does not change as turns are appended, so the key is stable from the first turn. Absent when the body has no conversation to key or the caller pinned `provider.order`. The control plane can only test two keys for equality; it cannot recover or verify a cache key or an opening from the hash. The field name predates this derivation. |
+| `sessionKind` | `explicit` when `prefixHash` hashes the client's `prompt_cache_key`, `inferred` when it hashes the opening; absent with `prefixHash`. |
 
 Treat these fields as routing hints. They are counts, booleans, closed enums,
 and one digest. They carry no prompt text, but they do describe the request,
-and `prefixHash` links requests that share a prefix.
+and `prefixHash` links requests that share a `prompt_cache_key` or an opening.
 
 An allow response:
 
@@ -226,6 +228,7 @@ gateway failures. The JSON shape is camelCase:
   "selectedRouteId": "provider-a:public-model-id",
   "requestModel": "public-model-id",
   "prefixHash": "0123456789abcdef0123456789abcdef",
+  "sessionKind": "inferred",
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 8,
@@ -254,6 +257,7 @@ The stable fields are:
 | `selectedRouteId` | Always, nullable | Route for an attempt. `null` identifies a request-level summary. |
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
+| `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
 | `usage` | Always, nullable | Raw provider usage before client cost injection. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
 | `ttftMs` | Optional | Time to first token for a streaming attempt. |

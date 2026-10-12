@@ -147,7 +147,7 @@ control plane over HTTP or HTTPS and then calls the ACI service in-process.
 | `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
 | `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
 | `middleware.sse_keepalive_ms` | integer | `5000` | Interval for pre-header processing comments and post-header idle heartbeats. Zero disables both. See [Streaming keepalives and early commit](#streaming-keepalives-and-early-commit). |
-| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash keyed with a gateway key derived from dstack KMS. No prompt text is sent. Set false to omit the `request` block. |
+| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional cache-affinity key (`prefixHash` with `sessionKind`): an HMAC, under a gateway key derived from dstack KMS, of the client's `prompt_cache_key` or of the conversation's opening two messages. No prompt text is sent. Set false to omit the `request` block. |
 | `middleware.tee_only_domains` | string array | `[]` | Hostnames that serve TEE models only, matched against the normalized HTTP `Host`. See [TEE-only hostnames](#tee-only-hostnames). |
 
 The control plane must implement the

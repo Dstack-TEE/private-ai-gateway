@@ -33,7 +33,7 @@ use crate::aggregator::service::{
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
-use super::request_features::{self, PrefixHashKey};
+use super::request_features::{self, PrefixHashKey, SessionKind};
 use super::request_transform::{
     build_candidates, messages_reasoning, responses_to_chat_params, validate_responses_request,
     Endpoint, ResponsesCandidateInput, TransformError,
@@ -241,6 +241,9 @@ pub async fn run(
         prefix_hash: request_features
             .as_ref()
             .and_then(|features| features.prefix_hash.clone()),
+        session_kind: request_features
+            .as_ref()
+            .and_then(|features| features.session_kind),
         started,
         is_streaming: stream,
         armed: None,
@@ -915,8 +918,9 @@ struct Meter {
     tenant: TenantIdentity,
     virtual_key_id: Option<i64>,
     /// Echoed on every report so billing can key cache affinity; see
-    /// `PostReport::prefix_hash`.
+    /// `PostReport::prefix_hash` and `PostReport::session_kind`.
     prefix_hash: Option<String>,
+    session_kind: Option<SessionKind>,
     started: Instant,
     is_streaming: bool,
     /// Present only between arming the forward and reporting its outcome.
@@ -1337,6 +1341,7 @@ impl Meter {
             attempt_index,
             upstream_status,
             prefix_hash: self.prefix_hash.clone(),
+            session_kind: self.session_kind,
             started: self.started,
             downstream_abort,
             settled,
@@ -1362,6 +1367,7 @@ impl Meter {
             error_source: None,
             error_message: None,
             prefix_hash: self.prefix_hash.clone(),
+            session_kind: self.session_kind,
         }
     }
 

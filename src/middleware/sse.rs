@@ -30,6 +30,7 @@ use crate::sse_protocol::SseProtocol;
 
 use super::control::ControlClient;
 use super::pricing;
+use super::request_features::SessionKind;
 use super::response_transform;
 use super::stream_transform::UpstreamUsage;
 use super::types::{ErrorClass, ErrorSource, PostReport, SpendMode, TenantIdentity};
@@ -116,6 +117,7 @@ pub struct StreamReport {
     pub upstream_status: u16,
     /// Echoed on the settle report; see `PostReport::prefix_hash`.
     pub prefix_hash: Option<String>,
+    pub session_kind: Option<SessionKind>,
     pub started: Instant,
     /// Set by the response-body wrapper when the downstream finalizer
     /// (receipt drafting / E2EE) errors mid-consumption. The meter's drop then
@@ -171,6 +173,7 @@ impl StreamReport {
             error_source,
             error_message: error_class,
             prefix_hash: self.prefix_hash.clone(),
+            session_kind: self.session_kind,
         };
         let control = self.control.clone();
         // Fire-and-forget. Guard against being called from a drop that runs
@@ -881,6 +884,7 @@ mod tests {
             attempt_index: 0,
             upstream_status: 200,
             prefix_hash: None,
+            session_kind: None,
             started: Instant::now(),
             downstream_abort: Arc::new(AtomicBool::new(false)),
             settled: Arc::new(AtomicBool::new(false)),
