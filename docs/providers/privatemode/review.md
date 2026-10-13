@@ -4,7 +4,8 @@ Audit date: 2026-05-26 UTC. Provider behavior was rechecked against
 Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
-traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
+traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
+current deployment pins v1.58.0, rechecked on 2026-10-12 PDT.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
@@ -26,6 +27,17 @@ traffic on 2026-09-23, and upstream source through v1.56 was rechecked.
 > Privatemode, so it is required again: verification fails closed when no
 > complete manifest can be read, and the previous complete entry is used while
 > the proxy writes a new one.
+
+> **Status (2026-10-12 PDT, v1.58.0 recheck):** the official OCI index digest is
+> `sha256:5e8f549169c4288c24c902eadc4c6ebfaaf05c06e5605449c34469257929b143`.
+> Tagged source confirms the same manifest-log path and line format, startup
+> attestation/secret exchange before listening, `/readyz`, encrypted chat,
+> completions and embeddings, and default plaintext forwarding of `/v1/models`.
+> The Compose flags still work as deprecated aliases; `--listen-address` now
+> exists with the same wildcard default. The Compose explicitly sets
+> `--api-key-fallback=always` to preserve the measured startup credential behavior.
+> No adapter behavior change is needed. Live acceptance passed on a production-OS
+> Phala test CVM on 2026-10-13; see the [verification evidence][v158-live-evidence].
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).
@@ -50,9 +62,9 @@ Deployment conditions:
 - Bind the accepted credential digest in measured static policy and require a
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
-- Expose only the gateway listener from the workload network. Version 1.48 of
-  the official proxy has no listen-address flag and opens its configured port on
-  the network namespace's wildcard address.
+- Expose only the gateway listener from the workload network. Version 1.58 of
+  the official proxy supports `--listen-address` and defaults to `0.0.0.0`;
+  the Compose keeps that default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
   unknown status and use no revoked-certificate grace period.
 - Use the proxy's dynamic manifest mode so provider updates do not require a
@@ -115,7 +127,7 @@ Open or conditional:
 - Privatemode does not expose a per-worker TLS SPKI or public E2EE key for the
   gateway to pin directly. Its binding is transitive through the manifest,
   attested Coordinator/Mesh CA, and secret-release protocol.
-- Version 1.48 does not expose which manifest produced the active inference
+- Version 1.58 does not expose which manifest produced the active inference
   secret. Its manifest history is written before attestation and secret
   exchange complete. The gateway therefore reports the latest fetched digest
   but does not use it for manifest-specific claims.
@@ -147,12 +159,49 @@ owner key. Its policy set differs from the July observation. This digest is a
 proxy fetch-log observation, not proof that the request's active secret used
 that manifest. No worker GPU/OS/weights claims are added on its basis.
 
-Between source v1.48 and v1.56, the proxy gained listener/CORS and bounded
-HTTP request handling; the Secret Service path changed internally, but the
-client still verifies the mesh certificate and signed hybrid HPKE exchange.
-Full-body encryption and dynamic-manifest validation remain. The newer source
-does not upgrade the pinned v1.48 binary or bind its active secret to a
-manifest; a proxy-image update still needs a separate measured review.
+Between source v1.48 and v1.58, the proxy gained listener/CORS and bounded
+HTTP request handling. The client still verifies the mesh certificate and
+signed hybrid HPKE exchange.
+Full-body encryption and dynamic-manifest validation remain. The deployment
+now pins the reviewed v1.58.0 image. Its background secret refresh retries
+failures with bounded backoff, while each encrypted attempt still calls
+`LatestSecret` and rejects an expired secret that cannot be refreshed. The
+active secret still is not bound to a manifest observation.
+
+The v1.58 source also adds optional hosted-deployment controls: a local models
+document can replace `/v1/models` forwarding, and API-key fallback can be changed.
+The Compose leaves the models document unset and explicitly selects
+`--api-key-fallback=always`, so `/v1/models` remains plaintext and the startup
+API key still replaces outbound authorization. The gateway's three
+allowed handlers all call `forwardEncrypted`; no new plaintext-forwarding
+handler was found. See the tagged
+[CLI](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/cmd/cmd.go),
+[handlers](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/internal/server/server.go),
+[setup](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/internal/setup/setup.go), and
+[secret manager](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/internal/oss/secretmanager/secretmanager.go).
+
+On 2026-10-12 PDT, a local v1.58.0 Docker proxy verified a live Coordinator SNP
+report, exchanged a secret, and served buffered and streaming `gpt-oss-120b`
+chat through the gateway. Both returned HTTP 200. Exact response-byte hashes,
+receipt signatures, cited session content addresses and evidence, and the
+proxy-image/credential binding passed. The local offline audits failed `id-4`
+because the official dstack v0.5.3 and v0.6.0 simulators' sample Compose bytes
+disagree with their quotes' recorded Compose hash. This was a problem in the
+simulator sample data.
+
+The [Phala verification on 2026-10-13][v158-live-evidence] supplies the live
+acceptance evidence. A test CVM on the `dstack-0.5.9` production OS ran gateway
+commit `ad238fad` and the pinned v1.58.0 proxy. The attested Compose equaled the
+local render. `pap verify --require-production-os --accept-compose` passed
+`id-1` through `id-4` and `policy-os`; only `id-6` failed, as expected on the
+default Phala URL where TLS terminates outside the workload. Buffered and
+streaming chat returned HTTP 200, and `pap audit --require-verified` had zero
+failures, with `receipt-1` through `receipt-4` and `upstream-1` through
+`upstream-2` passing. The session's `proxy_image_sha256` binding matched the
+v1.58.0 image digest and credential digest, with an explicitly unbound dynamic
+manifest observation. The test CVM was then deleted.
+
+[v158-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/410#issuecomment-6136973775
 
 A later source trace showed that the proxy replaces inbound authorization with
 its startup credential. The current adapter therefore sends no internal Bearer,

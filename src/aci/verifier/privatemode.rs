@@ -15,7 +15,7 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 /// the gateway. The proxy completes its initial Contrast verification and
 /// secret exchange before serving, so its readiness probe corroborates startup
 /// and liveness. Dynamic manifest history is reported as an observation only:
-/// v1.48 does not bind a logged manifest to the secret used for a request.
+/// v1.58 does not bind a logged manifest to the secret used for a request.
 #[derive(Debug, Clone)]
 pub struct PrivatemodeProviderVerifier {
     deployment: Arc<PrivatemodeProxyDeployment>,
