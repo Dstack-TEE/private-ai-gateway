@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.4.0...desktop-v0.5.0-beta.1) (2026-10-13)
+
+
+### Features
+
+* **desktop:** relay System One through local API ([#411](https://github.com/Dstack-TEE/private-ai-gateway/issues/411)) ([ee735ac](https://github.com/Dstack-TEE/private-ai-gateway/commit/ee735ac64fcb701fe7ad707cff424ec220f339ba))
+
+
+### Bug Fixes
+
+* **desktop:** skip non-text models in endpoint probes ([#413](https://github.com/Dstack-TEE/private-ai-gateway/issues/413)) ([f3c2d06](https://github.com/Dstack-TEE/private-ai-gateway/commit/f3c2d06e7a8f47dda7eff9263bf624161a4b2c4c))
+
 ## [0.4.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0...desktop-v0.4.0) (2026-10-07)
 
 Private AI Proxy 0.4.0 signs in to RedPill with a device code, the way Phala sign-in already works.
