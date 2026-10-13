@@ -38,6 +38,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
                 | "/v1/messages"
                 | "/v1/messages/count_tokens"
                 | "/v1/chat/completions"
+                | "/v1/systemone"
         );
     }
     let Ok(agent) = Agent::from_id(agent) else {
@@ -342,6 +343,9 @@ mod tests {
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/messages"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/systemone"));
+        assert!(!agent_allows("codex", "/v1/systemone"));
+        assert!(!agent_allows("claude-code", "/v1/systemone"));
         assert!(agent_allows("opencode", "/v1/models"));
         assert!(!agent_allows("opencode", "/v1/responses"));
     }

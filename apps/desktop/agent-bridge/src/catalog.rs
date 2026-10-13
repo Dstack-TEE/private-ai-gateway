@@ -31,6 +31,10 @@ pub enum Surface {
     ChatCompletions,
     Messages,
     Responses,
+    /// Native System One relay surface. This is intentionally excluded from
+    /// endpoint inventory and agent projection lists; the Local API only uses
+    /// verified catalog membership for this route.
+    SystemOne,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -175,6 +179,7 @@ impl Surface {
             Surface::ChatCompletions => "/v1/chat/completions",
             Surface::Messages => "/v1/messages",
             Surface::Responses => "/v1/responses",
+            Surface::SystemOne => "/v1/systemone",
         }
     }
 }
@@ -194,12 +199,18 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
+        if surface == Surface::SystemOne {
+            return true;
+        }
         self.supported_surfaces
             .as_ref()
             .is_none_or(|surfaces| surfaces.contains(&surface))
     }
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
+        if surface == Surface::SystemOne {
+            return false;
+        }
         self.supports(surface)
             && self
                 .agent_surfaces
