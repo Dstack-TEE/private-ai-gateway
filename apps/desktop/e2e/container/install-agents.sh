@@ -76,7 +76,10 @@ for agent in claude-code codex dsh opencode pi oh-my-pi openclaw hermes; do
       pi --list-models >/dev/null
       ;;
     oh-my-pi)
-      from_script oh-my-pi https://omp.sh/install --binary --ref "v$OH_MY_PI_VERSION"
+      # OMP's npm package is a Bun CLI; install Bun where AGENT_PATH finds it.
+      BUN_INSTALL="$HOME/.local" from_script bun https://bun.sh/install
+      export PATH="$HOME/.local/bin:$PATH"
+      logged oh-my-pi npm install --global --ignore-scripts "@oh-my-pi/pi-coding-agent@$OH_MY_PI_VERSION"
       pinned "$OH_MY_PI_VERSION" omp --version
       omp config list >/dev/null
       ;;
