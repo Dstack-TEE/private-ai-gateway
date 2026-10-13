@@ -256,6 +256,32 @@ jobs:
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14
+      - name: Install asc
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=5.14.3
+          # From the release's asc_5.14.3_checksums.txt, pinned independently of the download.
+          case "$RUNNER_ARCH" in
+            ARM64)
+              arch=arm64
+              sha256=8445a2110c4472e926bac69cf90ebcec91a28e4eb142b6d2c81fc4addb16aaae
+              ;;
+            X64)
+              arch=amd64
+              sha256=82d5ce6c0ad63a9eacf56d618a4d3a0f9d6a10ae684a5b58cc2b89760f22311c
+              ;;
+            *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          tool_directory="$RUNNER_TEMP/asc"
+          mkdir -p "$tool_directory"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/rorkai/App-Store-Connect-CLI/releases/download/$version/asc_${version}_macOS_${arch}" \
+            --output "$tool_directory/asc"
+          printf '%s  %s\n' "$sha256" "$tool_directory/asc" | shasum -a 256 --check
+          chmod 755 "$tool_directory/asc"
+          echo "$tool_directory" >> "$GITHUB_PATH"
+          "$tool_directory/asc" version
       - name: Prepare App Store Connect key
         shell: bash
         env:
@@ -270,9 +296,32 @@ jobs:
           mkdir -p "$key_directory"
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_path"
           echo "APPLE_API_KEY_ROOT=$key_root" >> "$GITHUB_ENV"
+      - name: Check asc authentication and resolve App Store app
+        shell: bash
+        env: &asc-app-store-connect
+          ASC_KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          ASC_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER }}
+          ASC_PRIVATE_KEY_PATH: ${{ env.APPLE_API_KEY_ROOT }}/private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+          ASC_BYPASS_KEYCHAIN: '1'
+          ASC_STRICT_AUTH: '1'
+          ASC_TELEMETRY_DISABLED: '1'
+        run: |
+          set -euo pipefail
+          asc --read-only auth doctor --output json > "$APPLE_API_KEY_ROOT/auth.json"
+          bundle_id="$(jq -er '.identifier | select(type == "string" and length > 0)' apps/desktop/src-tauri/tauri.conf.json)"
+          asc --read-only apps list --bundle-id "$bundle_id" --paginate --output json > "$APPLE_API_KEY_ROOT/apps.json"
+          app_id="$(jq -er --arg bundle_id "$bundle_id" '
+            if (.data | length) != 1
+              or .data[0].attributes.bundleId != $bundle_id
+              or (.data[0].id | test("^[0-9]+$") | not)
+            then error("Expected exactly one App Store app matching the bundle identifier")
+            else .data[0].id
+            end
+          ' "$APPLE_API_KEY_ROOT/apps.json")"
+          echo "APPLE_APP_STORE_APP_ID=$app_id" >> "$GITHUB_ENV"
       - name: Validate with App Store Connect
         shell: bash
-        env: &app-store-connect
+        env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -281,12 +330,24 @@ jobs:
           xcrun altool --validate-app --type macos --file "$APPLE_APP_STORE_PACKAGE" --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
       - name: Upload to App Store Connect
         if: inputs.build_number != ''
+        timeout-minutes: 50
         shell: bash
-        env: *app-store-connect
+        env: *asc-app-store-connect
         run: |
           set -euo pipefail
-          cd "$APPLE_API_KEY_ROOT"
-          xcrun altool --upload-app --type macos --file "$APPLE_APP_STORE_PACKAGE" --apiKey "$APPLE_API_KEY" --apiIssuer "$APPLE_API_ISSUER"
+          # asc builds upload has no processing-timeout flag; ASC_TIMEOUT bounds --wait.
+          ASC_TIMEOUT=45m ASC_UPLOAD_TIMEOUT=15m asc builds upload \
+            --app "$APPLE_APP_STORE_APP_ID" --pkg "$APPLE_APP_STORE_PACKAGE" \
+            --version "$APP_VERSION" --build-number "$APPLE_APP_STORE_BUILD_NUMBER" \
+            --wait --output json > "$APPLE_API_KEY_ROOT/upload.json"
+          build_id="$(jq -er '.buildId | select(type == "string" and length > 0)' "$APPLE_API_KEY_ROOT/upload.json")"
+          # The upload receipt includes buildId but not processingState.
+          asc --read-only builds info --build-id "$build_id" --output json > "$APPLE_API_KEY_ROOT/build.json"
+          {
+            printf '### App Store Connect build\n\n```json\n'
+            jq '{buildId: .data.id, processingState: .data.attributes.processingState}' "$APPLE_API_KEY_ROOT/build.json"
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Remove signing material
         if: always()
         shell: bash

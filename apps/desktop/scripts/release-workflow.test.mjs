@@ -80,7 +80,7 @@ test("only a release tag's call uploads to App Store Connect", async () => {
   const appStore = await readWorkflow("desktop-mac-app-store.yml");
   const steps = appStore.jobs.package.steps;
   const validate = steps.findIndex((step) => step.run?.includes("altool --validate-app"));
-  const uploads = steps.flatMap((step, index) => (step.run?.includes("--upload-app") ? [index] : []));
+  const uploads = steps.flatMap((step, index) => (step.run?.includes("asc builds upload") ? [index] : []));
   assert.notEqual(validate, -1);
   assert.equal(steps[validate].if, undefined);
   // Only desktop-native.yml passes a build number; a manual run has none, so

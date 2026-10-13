@@ -42,7 +42,7 @@ on a reader-app entitlement.
 
 A stable release tag runs `Desktop release`, which calls `Desktop Mac App Store`
 through `Desktop Tauri` and publishes the Direct release only after the upload
-succeeds (see
+and App Store processing succeed (see
 [Release orchestration](distribution.md#release-orchestration)). The reusable
 workflow resolves at the tagged commit, so the MAS and Direct artifacts cannot
 drift to different source revisions. The marketing version is the committed
@@ -65,10 +65,12 @@ Both preflights run before checkout, dependency installation and compilation.
 They reject missing/blank values and malformed base64 or ASC identifier/key
 formats without printing values. Actual certificate/profile validity is checked
 by import and packaging. Certificate secrets are scoped to preflight/import;
-upload secrets are scoped to preflight/upload preparation and delivery. Cleanup
-runs with `always()`, including failed preflight runs. Keep the ASC app record,
+upload secrets are scoped to preflight, app lookup, key preparation and delivery.
+Cleanup runs with `always()`, including failed preflight runs. Keep the ASC app record,
 explicit App ID `org.dstack.private-ai-proxy`, team, agreements and applicable
-tax/banking details ready; preflight does not verify external account state.
+tax/banking details ready; the initial preflight checks credential format, while
+asc checks authentication and resolves exactly one app record by the bundle
+identifier in `src-tauri/tauri.conf.json` before validation and delivery.
 
 A release's committed version must be stable. CFBundleVersion is one to three
 period-separated integers of at most 18 characters, and for a Mac app it must
@@ -106,17 +108,28 @@ signed copy of the same Universal MAS binaries with the shared runtime sandbox
 entitlements, then signs the untouched build output for distribution. The smoke
 copy omits profile-authorized identity and Keychain groups; the packaging script
 validates those separately on the final app, and `altool --validate-app` validates
-the final pkg before upload. Do not attempt to make the distribution package
+the final pkg before upload. Apple's [current upload documentation](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/)
+still supports altool validation and upload; its [deprecation applies to notarization](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool).
+Do not attempt to make the distribution package
 locally runnable or weaken its signature to satisfy CI.
 
 Pull requests and pushes to `main` only verify. Uploads happen only when a
 stable release tag calls the workflow; the upload must run from that tag and
-passes App Store validation before delivery. The signed pkg is also kept as a
-workflow artifact for review.
+passes App Store validation before delivery. The workflow downloads asc
+[5.14.3](https://github.com/rorkai/App-Store-Connect-CLI/releases/tag/5.14.3) for the
+runner's architecture and verifies a hardcoded SHA-256 from that release's
+official checksums. asc uses the same API key file with keychain bypass and
+strict authentication, without storing a profile. `asc builds upload --wait`
+fails on processing rejection or timeout: upload requests are bounded at 15
+minutes, and discovery/processing uses a 45-minute command timeout within the
+50-minute upload step and 120-minute package job. After success, the workflow
+reads the build's processing state and records it with the build ID in the job
+summary. The signed pkg is also kept as a workflow artifact for review.
 
 A manual run (`gh workflow run desktop-mac-app-store.yml --ref main`) also
 takes the release path up to that validation: Universal build, smoke test,
-signing and `altool --validate-app`, but no upload. Run it before promoting a
+signing and `altool --validate-app`, plus the asc checksum, authentication and
+read-only app lookup checks, but no upload. Run it before promoting a
 stable version, and after changing the packaging. The `mac-app-store`
 environment admits only `main` and `desktop-v*` tags. App Store versions are
 `x.y.z`, so the run packages its ref as the stable version it leads to
@@ -135,6 +148,9 @@ all jobs**. It re-runs only the failed jobs and their dependents
 ([REST: Re-run failed jobs](https://docs.github.com/en/rest/actions/workflow-runs#re-run-failed-jobs-from-a-workflow-run)),
 so the successful upload is not repeated, and `GITHUB_RUN_NUMBER` does not change
 on a re-run ([Variables](https://docs.github.com/en/actions/reference/workflows-and-actions/variables)).
+An asc processing failure or timeout can follow a successful upload. Check App
+Store Connect for the build or pending upload before retrying; do not upload
+the same build number again. See [App Store job recovery](distribution.md#if-the-app-store-job-fails-on-the-tag).
 
 ## Privacy and export compliance
 
