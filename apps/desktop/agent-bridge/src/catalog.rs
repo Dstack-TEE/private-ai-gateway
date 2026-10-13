@@ -31,9 +31,7 @@ pub enum Surface {
     ChatCompletions,
     Messages,
     Responses,
-    /// Native System One relay surface. This is intentionally excluded from
-    /// endpoint inventory and agent projection lists; the Local API only uses
-    /// verified catalog membership for this route.
+    /// Native System One relay surface.
     SystemOne,
 }
 
@@ -182,6 +180,24 @@ impl Surface {
             Surface::SystemOne => "/v1/systemone",
         }
     }
+
+    fn output_modality(self) -> &'static str {
+        match self {
+            Surface::SystemOne => "decisions",
+            Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
+        }
+    }
+
+    fn uses_endpoint_inventory(self) -> bool {
+        !matches!(self, Surface::SystemOne)
+    }
+
+    fn is_agent_surface(self) -> bool {
+        matches!(
+            self,
+            Surface::ChatCompletions | Surface::Messages | Surface::Responses
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -199,23 +215,33 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        if surface == Surface::SystemOne {
-            return true;
-        }
-        self.supported_surfaces
-            .as_ref()
-            .is_none_or(|surfaces| surfaces.contains(&surface))
+        self.supports_output_modality(surface)
+            && (!surface.uses_endpoint_inventory()
+                || self
+                    .supported_surfaces
+                    .as_ref()
+                    .is_none_or(|surfaces| surfaces.contains(&surface)))
     }
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
-        if surface == Surface::SystemOne {
-            return false;
-        }
         self.supports(surface)
+            && surface.is_agent_surface()
+            && self.supports_output_modality(Surface::ChatCompletions)
             && self
                 .agent_surfaces
                 .as_ref()
                 .is_none_or(|surfaces| surfaces.contains(&surface))
+    }
+
+    fn supports_output_modality(&self, surface: Surface) -> bool {
+        let Some(modalities) = self.remote.extra.get("output_modalities") else {
+            return true;
+        };
+        modalities.as_array().is_some_and(|modalities| {
+            modalities
+                .iter()
+                .any(|modality| modality.as_str() == Some(surface.output_modality()))
+        })
     }
 
     pub fn id(&self) -> &str {

@@ -172,6 +172,32 @@ fn catalog_preserves_verified_entries_as_listed() {
 }
 
 #[test]
+fn output_modalities_gate_surfaces_and_agent_projections() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "decisions", "output_modalities": ["decisions"] },
+            { "id": "text", "output_modalities": ["text"] },
+            { "id": "legacy" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let decisions = catalog.get("decisions").unwrap();
+    assert!(decisions.supports(Surface::SystemOne));
+    assert!(!decisions.supports(Surface::Responses));
+    assert!(!decisions.supports_agent(Surface::Responses));
+
+    let text = catalog.get("text").unwrap();
+    assert!(!text.supports(Surface::SystemOne));
+    assert!(text.supports(Surface::Responses));
+    assert!(text.supports_agent(Surface::Responses));
+
+    let legacy = catalog.get("legacy").unwrap();
+    assert!(legacy.supports(Surface::SystemOne));
+    assert!(legacy.supports(Surface::Responses));
+}
+
+#[test]
 fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
     let catalog = Catalog::from_remote(
         &json!({ "data": [

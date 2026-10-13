@@ -62,7 +62,7 @@ async fn spawn(router: Router) -> String {
 
 /// A stand-in verified upstream that echoes what it received.
 async fn mock_upstream() -> String {
-    let echo = |headers: HeaderMap, body: Bytes| async move {
+    let echo = |uri: Uri, headers: HeaderMap, body: Bytes| async move {
         let header = |name: &str| {
             headers
                 .get(name)
@@ -78,6 +78,7 @@ async fn mock_upstream() -> String {
                 "anthropic-beta": header("anthropic-beta"),
                 "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
+                "path": uri.to_string(),
                 "body": String::from_utf8_lossy(&body),
             })),
         )
@@ -417,9 +418,13 @@ async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
     // System One still admits any model present in the verified catalog.
     let mut session = state.session();
     session.catalog.as_mut().unwrap().models[0].supported_surfaces = Some(vec![Surface::Responses]);
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["decisions"]));
     state.publish(session);
 
-    let proxy = spawn(router(state)).await;
+    let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
     let body = r#"{"model":"openai/gpt-oss-20b","state":{"step":1},"questions":[]}"#;
     let response = client
@@ -433,7 +438,25 @@ async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
     assert_eq!(response.status(), StatusCode::OK);
     let forwarded: Value = response.json().await.unwrap();
     assert_eq!(forwarded["authorization"], json!("Bearer sk-real"));
+    assert_eq!(forwarded["path"], "/v1/systemone");
     assert_eq!(forwarded["body"], body);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["text"]));
+    state.publish(session);
+    let chat_model = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"openai/gpt-oss-20b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_model.status(), StatusCode::BAD_REQUEST);
+    let error: Value = chat_model.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
 
     let coding_agent = client
         .post(format!("{proxy}/v1/systemone"))
