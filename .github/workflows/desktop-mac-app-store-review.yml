@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-mac-app-store-review-${{ inputs.version }}-${{ inputs.build_number }}
+  group: desktop-mac-app-store-review-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
@@ -97,6 +97,36 @@ jobs:
           ASC_TELEMETRY_DISABLED: '1'
           REVIEW_VERSION: ${{ inputs.version }}
           REVIEW_BUILD_NUMBER: ${{ inputs.build_number }}
+          JQ_BUILD_ID: |
+            if (.data | type) != "array" or (.data | length) != 1
+              or .data[0].attributes.processingState != "VALID"
+              or (.data[0].id | type) != "string"
+              or (.data[0].id | try (test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not) catch true)
+            then error("Expected exactly one VALID Mac App Store build")
+            else .data[0].id
+            end
+          JQ_PREVIOUS_VERSION: |
+            if (.items | type) != "array" or (.items | length) != 1
+              or .items[0].attributes.appVersionState != "READY_FOR_DISTRIBUTION"
+            then error("Expected exactly one previous live Mac App Store version")
+            else .items[0].attributes.versionString
+            end
+          JQ_VERSION_ID: |
+            if (.data | type) != "array" or (.data | length) != 1
+              or (.data[0].id | type) != "string"
+              or (.data[0].id | try (test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not) catch true)
+            then error("Expected exactly one staged Mac App Store version")
+            else .data[0].id
+            end
+          JQ_LOCALIZATIONS: |
+            (.data | type) == "array" and (.data | length) > 0
+            and ((.data | map(.id) | map(select(type == "string" and length > 0)) | length) == (.data | length))
+          JQ_RELEASE_TYPE_UPDATE: '.id == $version_id'
+          JQ_RELEASE_TYPE_VERIFY: |
+            (.data | type) == "array" and (.data | length) == 1
+            and .data[0].id == $version_id
+            and .data[0].attributes.releaseType == "MANUAL"
+          JQ_DOCTOR: '(.summary | type == "object") and (.summary.blocking == 0) and (.summary.errors == 0)'
         run: |
           set -euo pipefail
           bundle_id="$(jq -er '.identifier | select(type == "string" and length > 0)' apps/desktop/src-tauri/tauri.conf.json)"
@@ -116,26 +146,12 @@ jobs:
           asc --read-only builds list --app "$app_id" --platform MAC_OS \
             --version "$REVIEW_VERSION" --build-number "$REVIEW_BUILD_NUMBER" \
             --processing-state VALID --paginate --output json > "$ASC_REVIEW_ROOT/builds.json"
-          build_id="$(jq -er '
-            if (.data | type) != "array" or (.data | length) != 1
-              or .data[0].attributes.processingState != "VALID"
-              or (.data[0].id | type) != "string"
-              or (.data[0].id | try (test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not) catch true)
-            then error("Expected exactly one VALID Mac App Store build")
-            else .data[0].id
-            end
-          ' "$ASC_REVIEW_ROOT/builds.json")"
+          build_id="$(jq -er "$JQ_BUILD_ID" "$ASC_REVIEW_ROOT/builds.json")"
           printf 'ASC_REVIEW_BUILD_ID=%s\n' "$build_id" >> "$GITHUB_ENV"
 
           asc --read-only versions list --app "$app_id" --platform MAC_OS \
             --state READY_FOR_DISTRIBUTION --latest --output json > "$ASC_REVIEW_ROOT/live-versions.json"
-          previous_version="$(jq -er '
-            if (.items | type) != "array" or (.items | length) != 1
-              or .items[0].attributes.appVersionState != "READY_FOR_DISTRIBUTION"
-            then error("Expected exactly one previous live Mac App Store version")
-            else .items[0].attributes.versionString
-            end
-          ' "$ASC_REVIEW_ROOT/live-versions.json")"
+          previous_version="$(jq -er "$JQ_PREVIOUS_VERSION" "$ASC_REVIEW_ROOT/live-versions.json")"
           printf 'ASC_REVIEW_PREVIOUS_VERSION=%s\n' "$previous_version" >> "$GITHUB_ENV"
 
       - name: Extract What's New from the desktop changelog
@@ -226,21 +242,11 @@ jobs:
           set -euo pipefail
           asc versions list --app "$ASC_REVIEW_APP_ID" --platform MAC_OS \
             --version "$ASC_REVIEW_VERSION" --paginate --output json > "$ASC_REVIEW_ROOT/target-versions.json"
-          version_id="$(jq -er '
-            if (.data | type) != "array" or (.data | length) != 1
-              or (.data[0].id | type) != "string"
-              or (.data[0].id | try (test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$") | not) catch true)
-            then error("Expected exactly one staged Mac App Store version")
-            else .data[0].id
-            end
-          ' "$ASC_REVIEW_ROOT/target-versions.json")"
+          version_id="$(jq -er "$JQ_VERSION_ID" "$ASC_REVIEW_ROOT/target-versions.json")"
           printf 'ASC_REVIEW_VERSION_ID=%s\n' "$version_id" >> "$GITHUB_ENV"
 
           asc --read-only localizations list --version "$version_id" --paginate --output json > "$ASC_REVIEW_ROOT/localizations.json"
-          jq -e '
-            (.data | type) == "array" and (.data | length) > 0
-            and ((.data | map(.id) | map(select(type == "string" and length > 0)) | length) == (.data | length))
-          ' "$ASC_REVIEW_ROOT/localizations.json" >/dev/null
+          jq -e "$JQ_LOCALIZATIONS" "$ASC_REVIEW_ROOT/localizations.json" >/dev/null
 
       - name: Set What's New for every localization
         if: inputs.dry_run != true
@@ -263,14 +269,10 @@ jobs:
           set -euo pipefail
           asc versions update --version-id "$ASC_REVIEW_VERSION_ID" \
             --release-type MANUAL --output json > "$ASC_REVIEW_ROOT/release-type.json"
-          jq -e --arg version_id "$ASC_REVIEW_VERSION_ID" '.id == $version_id' "$ASC_REVIEW_ROOT/release-type.json" >/dev/null
+          jq -e --arg version_id "$ASC_REVIEW_VERSION_ID" "$JQ_RELEASE_TYPE_UPDATE" "$ASC_REVIEW_ROOT/release-type.json" >/dev/null
           asc --read-only versions list --app "$ASC_REVIEW_APP_ID" --platform MAC_OS \
             --version "$ASC_REVIEW_VERSION" --paginate --output json > "$ASC_REVIEW_ROOT/release-type-verify.json"
-          jq -e --arg version_id "$ASC_REVIEW_VERSION_ID" '
-            (.data | type) == "array" and (.data | length) == 1
-            and .data[0].id == $version_id
-            and .data[0].attributes.releaseType == "MANUAL"
-          ' "$ASC_REVIEW_ROOT/release-type-verify.json" >/dev/null
+          jq -e --arg version_id "$ASC_REVIEW_VERSION_ID" "$JQ_RELEASE_TYPE_VERIFY" "$ASC_REVIEW_ROOT/release-type-verify.json" >/dev/null
 
       - name: Require strict App Store readiness
         if: inputs.dry_run != true
@@ -296,7 +298,7 @@ jobs:
           doctor_status=0
           asc --read-only review doctor --app "$ASC_REVIEW_APP_ID" --version-id "$ASC_REVIEW_VERSION_ID" \
             --platform MAC_OS --output json > "$ASC_REVIEW_ROOT/doctor.json" || doctor_status=$?
-          jq -e '(.summary | type == "object") and (.summary.blocking == 0) and (.summary.errors == 0)' "$ASC_REVIEW_ROOT/doctor.json" >/dev/null || {
+          jq -e "$JQ_DOCTOR" "$ASC_REVIEW_ROOT/doctor.json" >/dev/null || {
             echo 'App Store review doctor reported blockers.' >&2
             exit 1
           }
