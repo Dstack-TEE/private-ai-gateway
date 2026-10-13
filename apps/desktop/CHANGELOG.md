@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.1...desktop-v0.5.0-beta.2) (2026-10-13)
+
+
+### Features
+
+* **ci:** add guarded Mac App Store review workflow ([#418](https://github.com/Dstack-TEE/private-ai-gateway/issues/418)) ([d6a7fcc](https://github.com/Dstack-TEE/private-ai-gateway/commit/d6a7fcc16e2dc8626f7e70f7536edd19cffbbe1f))
+* **desktop:** add a Decisions tab to the Local API examples ([#415](https://github.com/Dstack-TEE/private-ai-gateway/issues/415)) ([4a562b7](https://github.com/Dstack-TEE/private-ai-gateway/commit/4a562b7e001dca6086c2d8da16b3a41d6caa6fa6))
+
+
+### Bug Fixes
+
+* **desktop-e2e:** install Oh My Pi from npm ([#419](https://github.com/Dstack-TEE/private-ai-gateway/issues/419)) ([0337126](https://github.com/Dstack-TEE/private-ai-gateway/commit/03371260b10e98c1032667b65e7d8df10c0d70c6))
+
 ## [0.5.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.4.0...desktop-v0.5.0-beta.1) (2026-10-13)
 
 
