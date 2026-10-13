@@ -1365,13 +1365,19 @@ fn push_messages_turn(turn: &Value, messages: &mut Vec<Value>) -> Result<(), Tra
     let role = turn
         .get("role")
         .and_then(Value::as_str)
-        .filter(|role| matches!(*role, "user" | "assistant"))
-        .ok_or_else(|| TransformError::invalid_request("message role must be user or assistant"))?;
+        .filter(|role| matches!(*role, "user" | "assistant" | "system"))
+        .ok_or_else(|| {
+            TransformError::invalid_request("message role must be user, assistant or system")
+        })?;
     match turn.get("content") {
         Some(Value::String(text)) => {
             push_message(messages, json!({ "role": role, "content": text }))
         }
         Some(Value::Array(blocks)) if role == "user" => push_user_turn(blocks, messages)?,
+        Some(Value::Array(blocks)) if role == "system" => push_message(
+            messages,
+            json!({ "role": "system", "content": text_blocks(blocks)? }),
+        ),
         Some(Value::Array(blocks)) => push_message(messages, assistant_turn(blocks)?),
         _ => {
             return Err(TransformError::invalid_request(
@@ -3174,6 +3180,69 @@ mod tests {
             chat["messages"][3]["content"],
             json!([{ "type": "image_url", "image_url": { "url": "https://x/a.png" } }])
         );
+    }
+
+    #[test]
+    fn messages_bridge_accepts_claude_code_environment_system_turn() {
+        // Redacted capture of Claude Code 2.1.283: the environment is a cached
+        // system turn after the user's prompt, separate from top-level system.
+        let request = json!({
+            "model": "z-ai/glm-5.3-flash",
+            "max_tokens": 32000,
+            "stream": true,
+            "system": [
+                { "type": "text", "text": "[redacted attribution]" },
+                { "type": "text", "text": "[redacted instructions]", "cache_control": { "type": "ephemeral" } },
+                { "type": "text", "text": "[redacted tools]", "cache_control": { "type": "ephemeral" } }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "[redacted reminder]" },
+                        { "type": "text", "text": "Reply with exactly: PAP-OK" }
+                    ]
+                },
+                {
+                    "role": "system",
+                    "content": [{ "type": "text", "text": "# Environment\n[redacted]", "cache_control": { "type": "ephemeral" } }]
+                }
+            ],
+            "thinking": { "type": "adaptive", "display": "omitted" },
+            "context_management": { "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }] },
+            "output_config": { "effort": "high" }
+        });
+        let system = "[redacted attribution]\n\n[redacted instructions]\n\n[redacted tools]";
+        let user = "[redacted reminder]\n\nReply with exactly: PAP-OK";
+        for hoist in [false, true] {
+            let bodies = build_candidates(
+                &request,
+                Endpoint::Messages,
+                &[hoisting_candidate(hoist)],
+                None,
+                None,
+            )
+            .unwrap();
+            let expected = if hoist {
+                json!([
+                    { "role": "system", "content": format!("{system}\n\n# Environment\n[redacted]") },
+                    { "role": "user", "content": user }
+                ])
+            } else {
+                json!([
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user },
+                    { "role": "system", "content": "# Environment\n[redacted]" }
+                ])
+            };
+            assert_eq!(bodies[0].1["messages"], expected, "hoist={hoist}");
+        }
+        // Accepting system turns does not admit malformed or tool roles.
+        for role in [Value::Null, json!(1), json!("tool")] {
+            let mut invalid = request.clone();
+            invalid["messages"][1]["role"] = role;
+            assert!(messages_to_chat_params(&invalid).is_err());
+        }
     }
 
     #[test]
