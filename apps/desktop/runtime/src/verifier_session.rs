@@ -21,7 +21,7 @@ use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::Error;
 use aci_protocol::types::ServiceCapabilities;
-use agent_bridge::catalog::{Catalog, EndpointInventory};
+use agent_bridge::catalog::{Catalog, EndpointInventory, Surface};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::config as settings_config;
 use desktop_core::contracts::{
@@ -982,29 +982,47 @@ pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.
 fn catalog_summary(catalog: &Catalog, previous: Option<&CatalogSummary>) -> CatalogSummary {
+    let inventory_surfaces = [
+        Surface::ChatCompletions,
+        Surface::Messages,
+        Surface::Responses,
+    ];
     let models: Vec<ModelSummary> = catalog
         .models
         .iter()
-        .map(|model| ModelSummary {
-            id: model.id().to_string(),
-            name: model.display_name().to_string(),
-            supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
-                surfaces
-                    .iter()
-                    .map(|surface| surface.path().to_string())
-                    .collect()
-            }),
-            context_length: model.remote.context_length,
-            max_output_length: model.remote.max_output_length,
-            is_tee: model.bool_field("is_tee"),
-            input_price_per_million: model.price_per_million("prompt"),
-            output_price_per_million: model.price_per_million("completion"),
-            cache_read_price_per_million: model.price_per_million("input_cache_read"),
-            cache_write_price_per_million: model.price_per_million("input_cache_write"),
-            input_modalities: model.string_array("input_modalities"),
-            output_modalities: model.string_array("output_modalities"),
-            capabilities: model.string_array("supported_features"),
-            description: model.string_field("description"),
+        .map(|model| {
+            let supported_endpoints: Vec<String> = inventory_surfaces
+                .iter()
+                .copied()
+                .filter(|surface| model.supports(*surface))
+                .map(|surface| surface.path().to_string())
+                .collect();
+            // Preserve no-inventory semantics for models that pass every text
+            // surface; an explicit empty list prevents decisions-only models
+            // from falling through the renderer's legacy `None` behavior.
+            let supported_endpoints = if model.supported_surfaces.is_none()
+                && supported_endpoints.len() == inventory_surfaces.len()
+            {
+                None
+            } else {
+                Some(supported_endpoints)
+            };
+            ModelSummary {
+                id: model.id().to_string(),
+                name: model.display_name().to_string(),
+                supported_endpoints,
+                context_length: model.remote.context_length,
+                max_output_length: model.remote.max_output_length,
+                is_tee: model.bool_field("is_tee"),
+                input_price_per_million: model.price_per_million("prompt"),
+                output_price_per_million: model.price_per_million("completion"),
+                cache_read_price_per_million: model.price_per_million("input_cache_read"),
+                cache_write_price_per_million: model.price_per_million("input_cache_write"),
+                input_modalities: model.string_array("input_modalities"),
+                output_modalities: model.string_array("output_modalities"),
+                capabilities: model.string_array("supported_features"),
+                description: model.string_field("description"),
+            }
         })
         .collect();
     // Carry forward ids that disappeared until the service lists them
