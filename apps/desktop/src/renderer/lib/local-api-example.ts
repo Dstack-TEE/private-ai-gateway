@@ -30,10 +30,11 @@ export function localApiExample(kind: ExampleKind, language: ExampleLanguage, en
     ].join("\n");
   }
   if (kind === "decisions") {
-    // System One is native buffered JSON, so the examples call it over plain HTTP.
-    const authorization = JSON.stringify(`Bearer ${apiKey ?? "LOCAL_API_KEY"}`);
-    if (language === "python") return `import requests\n\nresponse = requests.post(\n    ${JSON.stringify(url.toString())},\n    headers={"Authorization": ${authorization}},\n    json=${JSON.stringify(body, null, 4).replaceAll("\n", "\n    ")},\n    timeout=60,\n)\nresponse.raise_for_status()\nprint(response.json()["answers"])`;
-    return `const response = await fetch(${JSON.stringify(url.toString())}, {\n  method: "POST",\n  headers: {\n    Authorization: ${authorization},\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify(${payload.replaceAll("\n", "\n  ")}),\n  signal: AbortSignal.timeout(60_000),\n});\nif (!response.ok) throw new Error(\`System One request failed: \${response.status} \${await response.text()}\`);\nconst { answers } = await response.json();\nconsole.log(answers);`;
+    // The TypeSafe SDKs take the API root and append /v1/systemone themselves.
+    const baseUrl = JSON.stringify(url.origin);
+    const key = JSON.stringify(apiKey ?? "LOCAL_API_KEY");
+    if (language === "python") return `# pip install typesafe-sdk\nfrom typesafe_sdk import Noul, TypeSafeClient\n\nwith TypeSafeClient(\n    api_key=${key},\n    base_url=${baseUrl},\n) as client:\n    response = client.system_one(\n        model=${JSON.stringify(model)},\n        state={"ticket": "App crashes on login after update"},\n        questions={"bug": Noul(instructions="Is this a bug report?")},\n    )\nprint(response.nouls["bug"].noul)`;
+    return `// npm install @typesafe-ai/sdk\nimport { noul, TypeSafeClient } from "@typesafe-ai/sdk";\n\nconst client = new TypeSafeClient({\n  baseURL: ${baseUrl},\n  apiKey: ${key},\n});\n\nconst response = await client.systemOne({\n  model: ${JSON.stringify(model)},\n  state: { ticket: "App crashes on login after update" },\n  questions: { bug: noul("Is this a bug report?") },\n});\nconsole.log(response.answers.bug.noul);`;
   }
   const baseUrl = JSON.stringify(new URL("/v1", endpoint).toString());
   if (language === "python") return `from openai import OpenAI\n\nclient = OpenAI(\n    api_key=${JSON.stringify(apiKey ?? "LOCAL_API_KEY")},\n    base_url=${baseUrl},\n)\n\nresponse = client.chat.completions.create(\n    model=${JSON.stringify(model)},\n    messages=[{"role": "user", "content": "Hello"}],\n)\nprint(response.choices[0].message.content)`;
