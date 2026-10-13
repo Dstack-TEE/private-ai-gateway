@@ -349,6 +349,9 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
     throw new Error("The model catalog must contain a nonempty data array of model IDs.");
   }
   const ids = [...new Set(catalog.data.map(model => model.id))];
+  const nonTextModels = new Set(catalog.data
+    .filter(model => Array.isArray(model.output_modalities) && !model.output_modalities.includes("text"))
+    .map(model => model.id));
   if (modelIds.some(id => !ids.includes(id))) throw new Error("A requested model is absent from the catalog.");
   const jobs = (modelIds.length ? [...new Set(modelIds)] : ids)
     .flatMap(model => [...new Set(surfaceNames)].map(surface => ({ model, surface })));
@@ -381,6 +384,14 @@ export async function probe({ endpoint, key, modelIds = [], surfaceNames = surfa
     while (cursor < jobs.length) {
       const index = cursor++;
       const { model, surface } = jobs[index];
+      if (nonTextModels.has(model)) {
+        const result = { status: "unavailable", reason: "no_text_output" };
+        results[index] = {
+          model, endpoint: `/v1/${surface}`, ...result,
+          checks: { streaming: { ...result }, tools: { ...result }, toolResult: { ...result } },
+        };
+        continue;
+      }
       const { result, httpStatus } = await request(model, surface, payload(model, surface));
       const capabilityChecks = checks("not_probed");
       if (result.status === "supported") {
