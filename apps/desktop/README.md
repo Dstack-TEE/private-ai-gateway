@@ -62,6 +62,12 @@ audited afterward; an audit failure updates Usage but cannot retract bytes that
 were already delivered. Usage keeps each checked receipt, shown in the request's
 proof details and printed by [`pap usage show <id> --receipt`](docs/cli.md#coverage).
 
+The Local API exposes `GET /v1/models`, plus `POST /v1/chat/completions`,
+`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`,
+`POST /v1/responses/compact`, and `POST /v1/systemone`. The System One route
+accepts native buffered JSON and is available to the local-tools token; all
+inference routes require a verified session and a model from its catalog.
+
 Only agents that are both linked and currently protected are authorized on the
 Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset
 settings, or disconnecting restores the owned configuration; quitting the app

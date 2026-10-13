@@ -162,11 +162,38 @@ fn catalog_preserves_verified_entries_as_listed() {
     let catalog = Catalog::from_remote(&remote(), 1).unwrap();
     assert_eq!(catalog.models.len(), 2);
     assert!(catalog.get("openai/gpt-oss-20b").is_some());
+    assert!(catalog.models[0].supports(Surface::SystemOne));
     let list = catalog.openai_list();
     assert_eq!(list["data"][0]["is_tee"], json!(true));
     assert_eq!(list["data"][0]["supported_features"], json!(["tools"]));
     assert!(Catalog::from_remote(&json!({ "data": [] }), 1).is_err());
     assert!(Catalog::from_remote(&json!({ "data": [{ "name": "no id" }] }), 1).is_err());
+}
+
+#[test]
+fn output_modalities_gate_surfaces_and_agent_projections() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "decisions", "output_modalities": ["decisions"] },
+            { "id": "text", "output_modalities": ["text"] },
+            { "id": "legacy" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let decisions = catalog.get("decisions").unwrap();
+    assert!(decisions.supports(Surface::SystemOne));
+    assert!(!decisions.supports(Surface::Responses));
+    assert!(!decisions.supports_agent(Surface::Responses));
+
+    let text = catalog.get("text").unwrap();
+    assert!(!text.supports(Surface::SystemOne));
+    assert!(text.supports(Surface::Responses));
+    assert!(text.supports_agent(Surface::Responses));
+
+    let legacy = catalog.get("legacy").unwrap();
+    assert!(legacy.supports(Surface::SystemOne));
+    assert!(legacy.supports(Surface::Responses));
 }
 
 #[test]

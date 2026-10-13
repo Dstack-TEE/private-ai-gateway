@@ -31,6 +31,8 @@ pub enum Surface {
     ChatCompletions,
     Messages,
     Responses,
+    /// System One relay surface.
+    SystemOne,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -175,6 +177,14 @@ impl Surface {
             Surface::ChatCompletions => "/v1/chat/completions",
             Surface::Messages => "/v1/messages",
             Surface::Responses => "/v1/responses",
+            Surface::SystemOne => "/v1/systemone",
+        }
+    }
+
+    fn output_modality(self) -> &'static str {
+        match self {
+            Surface::SystemOne => "decisions",
+            Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
         }
     }
 }
@@ -194,9 +204,12 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        self.supported_surfaces
-            .as_ref()
-            .is_none_or(|surfaces| surfaces.contains(&surface))
+        self.outputs(surface.output_modality())
+            && (surface == Surface::SystemOne
+                || self
+                    .supported_surfaces
+                    .as_ref()
+                    .is_none_or(|surfaces| surfaces.contains(&surface)))
     }
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
@@ -205,6 +218,17 @@ impl CatalogModel {
                 .agent_surfaces
                 .as_ref()
                 .is_none_or(|surfaces| surfaces.contains(&surface))
+    }
+
+    fn outputs(&self, modality: &str) -> bool {
+        self.remote
+            .extra
+            .get("output_modalities")
+            .is_none_or(|modalities| {
+                modalities
+                    .as_array()
+                    .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
+            })
     }
 
     pub fn id(&self) -> &str {

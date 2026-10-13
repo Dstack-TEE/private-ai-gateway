@@ -1,4 +1,5 @@
 use super::*;
+use crate::tokens::LOCAL_TOOLS_AGENT;
 
 struct HttpService {
     base_url: String,
@@ -61,7 +62,7 @@ async fn spawn(router: Router) -> String {
 
 /// A stand-in verified upstream that echoes what it received.
 async fn mock_upstream() -> String {
-    let echo = |headers: HeaderMap, body: Bytes| async move {
+    let echo = |uri: Uri, headers: HeaderMap, body: Bytes| async move {
         let header = |name: &str| {
             headers
                 .get(name)
@@ -77,6 +78,7 @@ async fn mock_upstream() -> String {
                 "anthropic-beta": header("anthropic-beta"),
                 "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
+                "path": uri.to_string(),
                 "body": String::from_utf8_lossy(&body),
             })),
         )
@@ -85,6 +87,7 @@ async fn mock_upstream() -> String {
         .route("/v1/chat/completions", post(echo))
         .route("/v1/responses", post(echo))
         .route("/v1/messages/count_tokens", post(echo))
+        .route("/v1/systemone", post(echo))
         .route(
             "/v1/models",
             get(|| async {
@@ -106,6 +109,10 @@ fn tokens() -> TokenSet {
     set.insert("codex-token".to_string(), "codex".to_string());
     set.insert("claude-token".to_string(), "claude-code".to_string());
     set.insert("opencode-token".to_string(), "opencode".to_string());
+    set.insert(
+        "local-tools-token".to_string(),
+        LOCAL_TOOLS_AGENT.to_string(),
+    );
     set
 }
 
@@ -397,6 +404,81 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
     assert_eq!(counted.status().as_u16(), 200);
     let echo: Value = counted.json().await.unwrap();
     assert_eq!(echo["authorization"], json!("Bearer sk-real"));
+}
+
+#[tokio::test]
+async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+
+    // Endpoint inventory observations cover only the three agent surfaces;
+    // System One still admits any model present in the verified catalog.
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0].supported_surfaces = Some(vec![Surface::Responses]);
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["decisions"]));
+    state.publish(session);
+
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let body = r#"{"model":"openai/gpt-oss-20b","state":{"step":1},"questions":[]}"#;
+    let response = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["authorization"], json!("Bearer sk-real"));
+    assert_eq!(forwarded["path"], "/v1/systemone");
+    assert_eq!(forwarded["body"], body);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["text"]));
+    state.publish(session);
+    let chat_model = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"openai/gpt-oss-20b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_model.status(), StatusCode::BAD_REQUEST);
+    let error: Value = chat_model.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+
+    let coding_agent = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("codex-token")
+        .json(&json!({"model":"openai/gpt-oss-20b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(coding_agent.status(), StatusCode::FORBIDDEN);
+    let error: Value = coding_agent.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "forbidden");
+
+    let unknown = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"unknown/model","state":{},"questions":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let error: Value = unknown.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_not_found");
 }
 
 #[tokio::test]

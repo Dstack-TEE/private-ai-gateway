@@ -1165,3 +1165,30 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         assert_eq!(carried.get(field), expected, "{field}");
     }
 }
+
+#[test]
+fn catalog_summary_gates_chat_endpoints_by_output_modality() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "kev-4b", "output_modalities": ["decisions"] },
+            { "id": "chat", "output_modalities": ["text"] },
+            { "id": "legacy" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let summary = catalog_summary(&catalog, None);
+
+    let endpoints = |id| {
+        summary
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap()
+            .supported_endpoints
+            .clone()
+    };
+    assert_eq!(endpoints("kev-4b"), Some(Vec::new()));
+    assert_eq!(endpoints("chat"), None);
+    assert_eq!(endpoints("legacy"), None);
+}
