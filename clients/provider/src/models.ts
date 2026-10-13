@@ -117,6 +117,10 @@ export function mapAciModel(
   model: AciServerModel,
   config: AciProviderConfig,
 ): AciModel | undefined {
+  if (Array.isArray(model.output_modalities) && !model.output_modalities.includes("text")) {
+    return undefined;
+  }
+
   const id = nonEmptyString(model.id, "<unknown>", "id");
   if (config.models.isTeeOnly && model.is_tee !== true) return undefined;
   if (config.models.allowlist?.length && !config.models.allowlist.includes(id)) return undefined;
