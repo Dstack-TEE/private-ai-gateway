@@ -180,6 +180,9 @@ Pass credentials through the named environment variable, never as command-line
 arguments. Temporary HTTP failures remain availability failures rather than
 proof of incompatibility. Network errors and malformed responses remain
 inconclusive. Review the complete report before updating the inventory.
+Models whose catalog `output_modalities` is an array without `text` are recorded
+as `unavailable` with reason `no_text_output`, including all capability checks,
+without inference requests. Models without output modality metadata are probed normally.
 
 ## Branding
 
