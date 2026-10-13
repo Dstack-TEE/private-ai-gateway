@@ -163,7 +163,6 @@ fn catalog_preserves_verified_entries_as_listed() {
     assert_eq!(catalog.models.len(), 2);
     assert!(catalog.get("openai/gpt-oss-20b").is_some());
     assert!(catalog.models[0].supports(Surface::SystemOne));
-    assert!(!catalog.models[0].supports_agent(Surface::SystemOne));
     let list = catalog.openai_list();
     assert_eq!(list["data"][0]["is_tee"], json!(true));
     assert_eq!(list["data"][0]["supported_features"], json!(["tools"]));

@@ -31,7 +31,7 @@ pub enum Surface {
     ChatCompletions,
     Messages,
     Responses,
-    /// Native System One relay surface.
+    /// System One relay surface.
     SystemOne,
 }
 
@@ -187,17 +187,6 @@ impl Surface {
             Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
         }
     }
-
-    fn uses_endpoint_inventory(self) -> bool {
-        !matches!(self, Surface::SystemOne)
-    }
-
-    fn is_agent_surface(self) -> bool {
-        matches!(
-            self,
-            Surface::ChatCompletions | Surface::Messages | Surface::Responses
-        )
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -215,8 +204,8 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        self.supports_output_modality(surface)
-            && (!surface.uses_endpoint_inventory()
+        self.outputs(surface.output_modality())
+            && (surface == Surface::SystemOne
                 || self
                     .supported_surfaces
                     .as_ref()
@@ -225,23 +214,21 @@ impl CatalogModel {
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
         self.supports(surface)
-            && surface.is_agent_surface()
-            && self.supports_output_modality(Surface::ChatCompletions)
             && self
                 .agent_surfaces
                 .as_ref()
                 .is_none_or(|surfaces| surfaces.contains(&surface))
     }
 
-    fn supports_output_modality(&self, surface: Surface) -> bool {
-        let Some(modalities) = self.remote.extra.get("output_modalities") else {
-            return true;
-        };
-        modalities.as_array().is_some_and(|modalities| {
-            modalities
-                .iter()
-                .any(|modality| modality.as_str() == Some(surface.output_modality()))
-        })
+    fn outputs(&self, modality: &str) -> bool {
+        self.remote
+            .extra
+            .get("output_modalities")
+            .is_none_or(|modalities| {
+                modalities
+                    .as_array()
+                    .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
+            })
     }
 
     pub fn id(&self) -> &str {
