@@ -34,8 +34,10 @@ current deployment pins v1.58.0, rechecked on 2026-10-12 PDT.
 > attestation/secret exchange before listening, `/readyz`, encrypted chat,
 > completions and embeddings, and default plaintext forwarding of `/v1/models`.
 > The Compose flags still work as deprecated aliases; `--listen-address` now
-> exists with the same wildcard default, and `--api-key-fallback=always` preserves
-> the measured startup credential behavior. No adapter behavior change is needed.
+> exists with the same wildcard default. The Compose explicitly sets
+> `--api-key-fallback=always` to preserve the measured startup credential behavior.
+> No adapter behavior change is needed. Live acceptance passed on a production-OS
+> Phala test CVM on 2026-10-13; see the [verification evidence][v158-live-evidence].
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).
@@ -168,8 +170,9 @@ active secret still is not bound to a manifest observation.
 
 The v1.58 source also adds optional hosted-deployment controls: a local models
 document can replace `/v1/models` forwarding, and API-key fallback can be changed.
-The Compose selects neither option, so `/v1/models` remains plaintext and the
-startup API key still replaces outbound authorization. The gateway's three
+The Compose leaves the models document unset and explicitly selects
+`--api-key-fallback=always`, so `/v1/models` remains plaintext and the startup
+API key still replaces outbound authorization. The gateway's three
 allowed handlers all call `forwardEncrypted`; no new plaintext-forwarding
 handler was found. See the tagged
 [CLI](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/cmd/cmd.go),
@@ -177,17 +180,28 @@ handler was found. See the tagged
 [setup](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/internal/setup/setup.go), and
 [secret manager](https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/internal/oss/secretmanager/secretmanager.go).
 
-
 On 2026-10-12 PDT, a local v1.58.0 Docker proxy verified a live Coordinator SNP
 report, exchanged a secret, and served buffered and streaming `gpt-oss-120b`
 chat through the gateway. Both returned HTTP 200. Exact response-byte hashes,
 receipt signatures, cited session content addresses and evidence, and the
-proxy-image/credential binding passed. Each offline `pap audit` had eight
-passing checks, three skipped checks, and one failure: `id-4`, because the
-official dstack v0.5.3 and current v0.6.0 simulator fixtures publish Compose
-bytes that disagree with their quote's recorded Compose hash. The complete
-live acceptance check remains blocked on a consistent dstack test endpoint;
-this run does not establish the deployed gateway's hardware identity.
+proxy-image/credential binding passed. The local offline audits failed `id-4`
+because the official dstack v0.5.3 and v0.6.0 simulators' sample Compose bytes
+disagree with their quotes' recorded Compose hash. This was a problem in the
+simulator sample data.
+
+The [Phala verification on 2026-10-13][v158-live-evidence] supplies the live
+acceptance evidence. A test CVM on the `dstack-0.5.9` production OS ran gateway
+commit `ad238fad` and the pinned v1.58.0 proxy. The attested Compose equaled the
+local render. `pap verify --require-production-os --accept-compose` passed
+`id-1` through `id-4` and `policy-os`; only `id-6` failed, as expected on the
+default Phala URL where TLS terminates outside the workload. Buffered and
+streaming chat returned HTTP 200, and `pap audit --require-verified` had zero
+failures, with `receipt-1` through `receipt-4` and `upstream-1` through
+`upstream-2` passing. The session's `proxy_image_sha256` binding matched the
+v1.58.0 image digest and credential digest, with an explicitly unbound dynamic
+manifest observation. The test CVM was then deleted.
+
+[v158-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/410#issuecomment-6136973775
 
 A later source trace showed that the proxy replaces inbound authorization with
 its startup credential. The current adapter therefore sends no internal Bearer,

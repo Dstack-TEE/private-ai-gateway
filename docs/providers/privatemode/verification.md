@@ -92,7 +92,9 @@ unstructured handlers, which the gateway does not expose; it forwards
 - `/v1/embeddings`
 
 The gateway sends no internal Bearer token. The proxy applies its measured
-startup credential outbound under v1.58's default `--api-key-fallback=always`.
+startup credential outbound because the Compose explicitly sets
+`--api-key-fallback=always`. Upstream v1.58 warns that the default will change
+to `never` in a future release; the explicit flag preserves this behavior.
 The Compose's `--apiKey`, `--nvidiaOCSPAllowUnknown`, and
 `--nvidiaOCSPRevokedGracePeriod` flags remain supported as deprecated aliases
 for the new kebab-case spellings in v1.58. The proxy now supports

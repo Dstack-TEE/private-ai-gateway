@@ -49,6 +49,7 @@ fn privatemode_deployment_contract_is_pinned() {
             &[
                 "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:5e8f549169c4288c24c902eadc4c6ebfaaf05c06e5605449c34469257929b143",
                 "--apiKey", "@/run/secrets/privatemode-api-key",
+                "--api-key-fallback=always",
                 "--nvidiaOCSPAllowUnknown=false", "--nvidiaOCSPRevokedGracePeriod=0",
                 "source: privatemode-api-key", "tmpfs:",
                 "privatemode-manifests:/var/lib/privatemode/manifests",

@@ -54,6 +54,7 @@ services:
       - "8080"
       - --apiKey
       - "@/run/secrets/privatemode-api-key"
+      - --api-key-fallback=always
       - --nvidiaOCSPAllowUnknown=false
       - --nvidiaOCSPRevokedGracePeriod=0
     tmpfs:
