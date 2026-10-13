@@ -68,7 +68,7 @@ jobs:
           key: pap-mas-verify-v2-${{ runner.os }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}
           restore-keys: pap-mas-verify-v2-${{ runner.os }}-
       - run: xcodebuild -version
-      - uses: ./.github/actions/desktop-node
+      - uses: ./.github/actions/desktop-node # zizmor: ignore[ self-repository ]
       # Desktop Tauri (desktop-native.yml) runs `npm run check`, the release
       # script tests and cargo fmt for the same changes; this job covers what
       # only compiles on macOS.
@@ -187,7 +187,7 @@ jobs:
         run: |
           xcodebuild -version
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - uses: ./.github/actions/desktop-node
+      - uses: ./.github/actions/desktop-node # zizmor: ignore[ self-repository ]
       - name: Validate release request
         working-directory: apps/desktop
         env:
@@ -256,32 +256,7 @@ jobs:
           path: apps/desktop/release/*-mac-app-store.pkg
           if-no-files-found: error
           retention-days: 14
-      - name: Install asc
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=5.14.3
-          # From the release's asc_5.14.3_checksums.txt, pinned independently of the download.
-          case "$RUNNER_ARCH" in
-            ARM64)
-              arch=arm64
-              sha256=8445a2110c4472e926bac69cf90ebcec91a28e4eb142b6d2c81fc4addb16aaae
-              ;;
-            X64)
-              arch=amd64
-              sha256=82d5ce6c0ad63a9eacf56d618a4d3a0f9d6a10ae684a5b58cc2b89760f22311c
-              ;;
-            *) echo "Unsupported runner architecture: $RUNNER_ARCH" >&2; exit 1 ;;
-          esac
-          tool_directory="$RUNNER_TEMP/asc"
-          mkdir -p "$tool_directory"
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://github.com/rorkai/App-Store-Connect-CLI/releases/download/$version/asc_${version}_macOS_${arch}" \
-            --output "$tool_directory/asc"
-          printf '%s  %s\n' "$sha256" "$tool_directory/asc" | shasum -a 256 --check
-          chmod 755 "$tool_directory/asc"
-          echo "$tool_directory" >> "$GITHUB_PATH"
-          "$tool_directory/asc" version
+      - uses: ./.github/actions/asc # zizmor: ignore[ self-repository ]
       - name: Prepare App Store Connect key
         shell: bash
         env:

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +8,7 @@ import { load } from "js-yaml";
 import { publishedRelease, releaseChannel } from "./release-channel.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const reviewFixtureRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/app-store-review");
 
 async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
@@ -89,6 +91,51 @@ test("only a release tag's call uploads to App Store Connect", async () => {
   assert.equal(steps[uploads[0]].if, "inputs.build_number != ''");
   assert.equal(appStore.on.workflow_dispatch.inputs?.build_number, undefined);
   assert.ok(validate < uploads[0]);
+});
+
+test("App Store review workflow is protected and manual", async () => {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  assert.deepEqual(Object.keys(review.on), ["workflow_dispatch"]);
+  assert.deepEqual(Object.keys(review.on.workflow_dispatch.inputs).sort(), ["build_number", "dry_run", "version"]);
+  const job = review.jobs.review;
+  assert.equal(job.environment, "app-store-review");
+  assert.deepEqual(job.permissions, { contents: "read" });
+  assert.match(JSON.stringify(review.concurrency), /cancel-in-progress/);
+  assert.equal(review.concurrency.group, "desktop-mac-app-store-review-${{ inputs.version }}");
+  assert.equal(job["timeout-minutes"], 30);
+  const workflowText = JSON.stringify(review);
+  assert.match(workflowText, /refs\/heads\/main/);
+  assert.doesNotMatch(workflowText, /APPLE_API_/);
+});
+
+test("App Store review jq selectors match captured asc response shapes", async () => {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  const resolveStep = review.jobs.review.steps.find((step) => step.name === "Resolve app, valid build and previous live version");
+  assert.ok(resolveStep, "missing review resolution step");
+  const fixture = (name) => path.join(reviewFixtureRoot, name);
+  const jq = (variable, name, { raw = false, args = [] } = {}) => execFileSync(
+    "jq",
+    ["-e", ...(raw ? ["-r"] : []), ...args, resolveStep.env[variable], fixture(name)],
+    { encoding: "utf8" },
+  ).trim();
+
+  const buildId = jq("JQ_BUILD_ID", "builds-list.json", { raw: true });
+  assert.equal(buildId, "168c235e-f446-46fb-93ce-756dc6385675");
+
+  const previousVersion = jq("JQ_PREVIOUS_VERSION", "live-versions.json", { raw: true });
+  assert.equal(previousVersion, "0.4.0");
+
+  const versionId = jq("JQ_VERSION_ID", "target-version.json", { raw: true });
+  assert.equal(versionId, "f42e78ba-3f88-4ff3-b5a4-32b2f77bd9c0");
+
+  assert.equal(jq("JQ_LOCALIZATIONS", "localizations-list.json"), "true");
+  assert.equal(jq("JQ_RELEASE_TYPE_UPDATE", "release-type-update.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq("JQ_RELEASE_TYPE_VERIFY", "release-type-verify.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq("JQ_DOCTOR", "review-doctor.json"), "true");
 });
 
 test("npm publishes the channel wrapper after its platform versions", async () => {
