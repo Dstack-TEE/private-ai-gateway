@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { exampleModels, localApiExample } from "../src/renderer/lib/local-api-example.ts";
 
@@ -65,49 +68,51 @@ test("the decisions curl example posts the System One body", { skip: process.pla
   assert.deepEqual(JSON.parse(example.slice(example.indexOf("<<'JSON'\n") + 9, -"\nJSON".length)), decisions);
 });
 
-test("the decisions JavaScript example posts the System One body and prints the answers", async () => {
+test("the decisions JavaScript example asks the TypeSafe SDK and prints the answer", () => {
   const example = localApiExample("decisions", "javascript", "http://127.0.0.1:4190", model, key);
-  const AsyncFunction = (async () => {}).constructor;
-  const requests = [];
-  const logged = [];
-  const fetch = async (url, init) => {
-    requests.push({ url, init });
-    return { ok: true, json: async () => ({ model, answers, usage: {} }) };
-  };
-  await new AsyncFunction("fetch", "console", example)(fetch, { log: (value) => logged.push(value) });
-  assert.equal(requests.length, 1);
-  const [{ url, init }] = requests;
-  assert.equal(url, "http://127.0.0.1:4190/v1/systemone");
-  assert.equal(init.method, "POST");
-  assert.deepEqual(init.headers, { Authorization: `Bearer ${key}`, "Content-Type": "application/json" });
-  assert.deepEqual(JSON.parse(init.body), decisions);
-  assert.ok(init.signal instanceof AbortSignal);
-  assert.deepEqual(logged, [answers]);
-
-  const failing = async () => ({ ok: false, status: 422, text: async () => "invalid questions" });
-  await assert.rejects(new AsyncFunction("fetch", "console", example)(failing, console), /422 invalid questions/);
+  // Runs the example against a stand-in for @typesafe-ai/sdk that records the calls.
+  const directory = mkdtempSync(join(tmpdir(), "local-api-example-"));
+  try {
+    const sdk = join(directory, "node_modules", "@typesafe-ai", "sdk");
+    mkdirSync(sdk, { recursive: true });
+    writeFileSync(join(sdk, "package.json"), JSON.stringify({ name: "@typesafe-ai/sdk", type: "module", exports: "./index.js" }));
+    writeFileSync(join(sdk, "index.js"), `
+const calls = [];
+process.on("exit", () => console.log(JSON.stringify(calls)));
+export const noul = (instructions) => ({ type: "noul", instructions });
+export class TypeSafeClient {
+  constructor(config) { calls.push(config); }
+  async systemOne(request) { calls.push(request); return ${JSON.stringify({ model, answers, usage: {} })}; }
+}
+`);
+    writeFileSync(join(directory, "example.mjs"), example);
+    const [answerLine, callsLine] = execFileSync(process.execPath, [join(directory, "example.mjs")], { encoding: "utf8" }).trim().split("\n");
+    assert.equal(answerLine, "0.87");
+    assert.deepEqual(JSON.parse(callsLine), [{ baseURL: "http://127.0.0.1:4190", apiKey: key }, decisions]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
-test("the decisions Python example posts the System One body and prints the answers", { skip: process.platform === "win32" }, () => {
+test("the decisions Python example asks the TypeSafe SDK and prints the answer", { skip: process.platform === "win32" }, () => {
   const example = localApiExample("decisions", "python", "http://127.0.0.1:4190", model, key);
-  // Runs the example against a stand-in for requests that records the call.
+  // Runs the example against a stand-in for typesafe_sdk that records the calls.
   const harness = `
 import json, sys, types
 calls = []
-class Response:
-    def raise_for_status(self): calls.append("raise_for_status")
-    def json(self): return json.loads(sys.argv[2])
-def post(url, **kwargs):
-    calls.append({"url": url, **kwargs})
-    return Response()
-sys.modules["requests"] = types.SimpleNamespace(post=post)
+def Noul(**kwargs): return {"type": "noul", **kwargs}
+class TypeSafeClient:
+    def __init__(self, **kwargs): calls.append(kwargs)
+    def __enter__(self): return self
+    def __exit__(self, *args): calls.append("closed")
+    def system_one(self, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(nouls={"bug": types.SimpleNamespace(noul=0.87)})
+sys.modules["typesafe_sdk"] = types.SimpleNamespace(Noul=Noul, TypeSafeClient=TypeSafeClient)
 exec(sys.argv[1])
 print(json.dumps(calls))
 `;
-  const [answersLine, callsLine] = execFileSync("python3", ["-c", harness, example, JSON.stringify({ model, answers, usage: {} })], { encoding: "utf8" }).trim().split("\n");
-  assert.equal(answersLine, "{'bug': {'type': 'noul', 'noul': 0.87}}");
-  assert.deepEqual(JSON.parse(callsLine), [
-    { url: "http://127.0.0.1:4190/v1/systemone", headers: { Authorization: `Bearer ${key}` }, json: decisions, timeout: 60 },
-    "raise_for_status",
-  ]);
+  const [answerLine, callsLine] = execFileSync("python3", ["-c", harness, example], { encoding: "utf8" }).trim().split("\n");
+  assert.equal(answerLine, "0.87");
+  assert.deepEqual(JSON.parse(callsLine), [{ api_key: key, base_url: "http://127.0.0.1:4190" }, decisions, "closed"]);
 });
