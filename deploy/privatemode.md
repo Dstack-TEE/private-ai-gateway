@@ -1,6 +1,6 @@
 # Deploy with the Privatemode proxy
 
-`compose.privatemode.yaml` runs the gateway and the official, digest-pinned
+`compose.privatemode.yaml` runs the gateway and the official v1.58.0, digest-pinned
 [Privatemode](../docs/providers/privatemode/verification.md) proxy in one
 measured dstack workload. The proxy owns Privatemode attestation, secret
 exchange, and E2EE; the gateway pins the proxy image, credential digest, and
@@ -204,7 +204,7 @@ jq -e '
 credential_sha256="$(
   printf %s "$PRIVATEMODE_API_KEY" | sha256sum | cut -d' ' -f1
 )"
-proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:5e8f549169c4288c24c902eadc4c6ebfaaf05c06e5605449c34469257929b143"
 
 # Require the signed receipt's cited session to describe the measured
 # Privatemode deployment that handled this request.

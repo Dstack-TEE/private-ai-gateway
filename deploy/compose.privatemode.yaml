@@ -44,7 +44,7 @@ services:
     restart: unless-stopped
 
   privatemode-proxy:
-    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307
+    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:5e8f549169c4288c24c902eadc4c6ebfaaf05c06e5605449c34469257929b143
     labels:
       ai.private-gateway.privatemode-credential-sha256: ${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}
     command:
@@ -85,7 +85,7 @@ configs:
           "manifest_log_path": "/run/privatemode-manifests/log.txt",
           "credential_path": "/run/secrets/privatemode-api-key",
           "credential_sha256": "${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}",
-          "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+          "proxy_image_digest": "sha256:5e8f549169c4288c24c902eadc4c6ebfaaf05c06e5605449c34469257929b143"
         }
       }
 
