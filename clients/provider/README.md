@@ -62,8 +62,10 @@ Model discovery uses the verified connection but sends no inference API key;
 the gateway's `/v1/models` catalog is public. Host adapters own credentials and
 attach them only to inference requests.
 
-The catalog is authoritative: malformed required metadata fails discovery
-instead of being replaced with guessed defaults. [Catalog authority](../architecture.md#catalog-authority)
+Models whose `output_modalities` array does not include `text` are skipped
+before validating their other metadata. For chat models, the catalog is
+authoritative: malformed required metadata fails discovery instead of being
+replaced with guessed defaults. [Catalog authority](../architecture.md#catalog-authority)
 lists how each field maps.
 
 ## Receipts, sessions, and inspection
