@@ -81,7 +81,8 @@ release tags and calls `Desktop Tauri` (`desktop-native.yml`) at the tagged
 commit. The tag must match the committed version and be contained in `main`.
 The run verifies and builds all six targets. For a stable version it also calls
 `Desktop Mac App Store` in parallel, which signs, validates and uploads the App
-Store build. Only stable versions reach the App Store.
+Store build, then waits for App Store processing. Only stable versions reach
+the App Store.
 
 The App Store build's CFBundleVersion is `100 + <Desktop release run number>`.
 A Mac app's build number must increase with every upload, across versions, and
@@ -92,7 +93,7 @@ tags use a run number but upload nothing. The offset starts above the hand-numbe
 [next build number](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 does for existing Mac apps.
 
-Once every package and the App Store upload have succeeded, the run:
+Once every package and App Store build processing have succeeded, the run:
 
 1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
@@ -243,12 +244,14 @@ lists only the commits since the last beta, so curate the notes before merging.
 The release job needs the App Store job, so nothing is published: the draft
 release, the feeds and npm are unchanged.
 
-- If the cause is outside the tagged commit (a secret, certificate, profile or
-  App Store Connect agreement, or the runner), fix it and **Re-run failed
-  jobs**. The build number was never uploaded, so the App Store job can use it
-  again.
-- Otherwise, or if App Store Connect already lists the build, keep the notes,
-  delete the draft release and its tag, land the fix on `main` and release
+- Check App Store Connect for the run's build number, including pending uploads:
+  a processing failure or timeout can follow successful delivery.
+- If no upload was accepted and the cause is outside the tagged commit (a
+  secret, certificate, profile or App Store Connect agreement, or the runner),
+  fix it and **Re-run failed jobs**. The build number was never uploaded, so
+  the App Store job can use it again.
+- Otherwise, or if App Store Connect already lists the build or a pending
+  upload, keep the notes, delete the draft release and its tag, land the fix on `main` and release
   `<next-patch>` with the steps above. release-please has already recorded
   `<version>` on `main` and does not tag it again. Its empty commit needs the
   footer `Release-As: <next-patch>`; without it, prerelease versioning proposes
