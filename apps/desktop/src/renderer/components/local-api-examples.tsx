@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Check, Copy } from "lucide-react";
 import { exampleModels, localApiExample, type ExampleKind, type ExampleLanguage } from "../lib/local-api-example";
 import { useCopy } from "../hooks/use-copy";
@@ -27,6 +28,19 @@ export function LocalApiExamplesDialog(control: DialogControl) {
     try { return localApiExample(kind, language, endpoint, model || "MODEL_ID", apiKey); }
     catch { return undefined; }
   }, [endpoint, kind, language, model, apiKey]);
+  // Loaded with the dialog; the code shows plain until it is ready, or if it fails.
+  const { data: highlight } = useQuery({
+    queryKey: ["example-highlighter"],
+    queryFn: () => import("../lib/example-highlighter").then((module) => module.createExampleHighlighter()),
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+  });
+  const tokens = useMemo(() => {
+    if (!code || !highlight) return undefined;
+    try { return highlight(code, language); }
+    catch { return undefined; }
+  }, [code, highlight, language]);
   const { copy, copying, error, isCopied, status } = useCopy();
   return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
     <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { if (value === "chat" || value === "decisions") setTab(value); }}>
@@ -43,7 +57,9 @@ export function LocalApiExamplesDialog(control: DialogControl) {
             <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
           </div>
           <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
-            <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
+            <pre className="p-4 text-xs leading-relaxed"><code>{tokens
+              ? tokens.map((line, index) => <Fragment key={index}>{index > 0 && "\n"}{line.map((token) => <span key={token.offset} className="text-(--shiki-light) dark:text-(--shiki-dark)" style={token.htmlStyle}>{token.content}</span>)}</Fragment>)
+              : code ?? "Local API example unavailable."}</code></pre>
           </TabsContent>
         </Tabs>
       </TabsContent>

@@ -48,6 +48,7 @@
     "react-day-picker": "^10.0.2",
     "react-dom": "19.3.0",
     "recharts": "^3.10.1",
+    "shiki": "^4.5.0",
     "shlex": "3.0.0"
   },
   "devDependencies": {
