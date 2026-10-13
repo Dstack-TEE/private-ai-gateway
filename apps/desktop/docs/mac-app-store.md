@@ -230,6 +230,29 @@ References: [SDK requirements](https://developer.apple.com/support/third-party-S
 Complete screenshots, support/privacy URLs, age rating, content rights, pricing
 (free), United States-only storefront availability, privacy answers, export
 compliance, and reviewer notes in ASC.
+
+After the signed Mac and TestFlight gates above pass, an approved operator can
+run the manual `Desktop Mac App Store Review` workflow from `main`. Enter the
+marketing version and the already-uploaded CFBundleVersion, and leave **dry
+run** enabled for the first invocation. The workflow resolves the app and
+requires the build to be `VALID`, copies metadata from the previous live Mac
+version, extracts that release's What's New text from this changelog, and shows
+the complete staging plan without mutating ASC.
+
+The protected `app-store-review` environment must contain the separate App
+Store Connect App Manager key as `ASC_REVIEW_KEY_ID`, `ASC_REVIEW_ISSUER_ID`,
+and `ASC_REVIEW_PRIVATE_KEY`. Do not reuse the upload workflow's Developer key.
+The required environment reviewer must approve the non-dry run. That run sets
+What's New for every version localization, sets release type to manual after
+approval, checks `asc review doctor`, and submits the prepared version for App
+Review. App Store release remains manual after Apple approves it; this workflow
+does not publish automatically.
+
+If the dry-run plan is correct, rerun with dry run disabled. Keep the workflow
+summary and ASC review status with the release audit. The workflow refuses
+dispatches from branches other than `main` and never builds or uploads an
+artifact.
+
 Release only after the signed/TestFlight gates pass. Keep the prior release and
 its source/version provenance. Stop phased release or remove availability in ASC
 if needed; ship a corrected higher build through App Store review. Never activate

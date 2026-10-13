@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +8,7 @@ import { load } from "js-yaml";
 import { publishedRelease, releaseChannel } from "./release-channel.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const reviewFixtureRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/app-store-review");
 
 async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
@@ -89,6 +91,79 @@ test("only a release tag's call uploads to App Store Connect", async () => {
   assert.equal(steps[uploads[0]].if, "inputs.build_number != ''");
   assert.equal(appStore.on.workflow_dispatch.inputs?.build_number, undefined);
   assert.ok(validate < uploads[0]);
+});
+
+test("App Store review workflow is protected and manual", async () => {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  assert.deepEqual(Object.keys(review.on), ["workflow_dispatch"]);
+  assert.deepEqual(Object.keys(review.on.workflow_dispatch.inputs).sort(), ["build_number", "dry_run", "version"]);
+  const job = review.jobs.review;
+  assert.equal(job.environment, "app-store-review");
+  assert.deepEqual(job.permissions, { contents: "read" });
+  assert.match(JSON.stringify(review.concurrency), /cancel-in-progress/);
+  assert.equal(job["timeout-minutes"], 30);
+  const workflowText = JSON.stringify(review);
+  assert.match(workflowText, /refs\/heads\/main/);
+  assert.doesNotMatch(workflowText, /APPLE_API_/);
+});
+
+test("App Store review jq selectors match captured asc response shapes", () => {
+  const fixture = (name) => path.join(reviewFixtureRoot, name);
+  const jq = (program, name, { raw = false, args = [] } = {}) => execFileSync(
+    "jq",
+    ["-e", ...(raw ? ["-r"] : []), ...args, program, fixture(name)],
+    { encoding: "utf8" },
+  ).trim();
+
+  const uuid = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+  const buildId = jq(`
+    if (.data | type) != "array" or (.data | length) != 1
+      or .data[0].attributes.processingState != "VALID"
+      or (.data[0].id | type) != "string"
+      or (.data[0].id | try (test("${uuid}") | not) catch true)
+    then error("Expected exactly one VALID Mac App Store build")
+    else .data[0].id
+    end
+  `, "builds-list.json", { raw: true });
+  assert.equal(buildId, "168c235e-f446-46fb-93ce-756dc6385675");
+
+  const previousVersion = jq(`
+    if (.items | type) != "array" or (.items | length) != 1
+      or .items[0].attributes.appVersionState != "READY_FOR_DISTRIBUTION"
+    then error("Expected exactly one previous live Mac App Store version")
+    else .items[0].attributes.versionString
+    end
+  `, "live-versions.json", { raw: true });
+  assert.equal(previousVersion, "0.4.0");
+
+  const versionId = jq(`
+    if (.data | type) != "array" or (.data | length) != 1
+      or (.data[0].id | type) != "string"
+      or (.data[0].id | try (test("${uuid}") | not) catch true)
+    then error("Expected exactly one staged Mac App Store version")
+    else .data[0].id
+    end
+  `, "target-version.json", { raw: true });
+  assert.equal(versionId, "f42e78ba-3f88-4ff3-b5a4-32b2f77bd9c0");
+
+  assert.equal(jq(`
+    (.data | type) == "array" and (.data | length) > 0
+    and ((.data | map(.id) | map(select(type == "string" and length > 0)) | length) == (.data | length))
+  `, "localizations-list.json"), "true");
+  assert.equal(jq(".id == $version_id", "release-type-update.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq(`
+    (.data | type) == "array" and (.data | length) == 1
+    and .data[0].id == $version_id
+    and .data[0].attributes.releaseType == "MANUAL"
+  `, "release-type-verify.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq(
+    '(.summary | type == "object") and (.summary.blocking == 0) and (.summary.errors == 0)',
+    "review-doctor.json",
+  ), "true");
 });
 
 test("npm publishes the channel wrapper after its platform versions", async () => {

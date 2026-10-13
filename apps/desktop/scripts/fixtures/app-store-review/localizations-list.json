@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "type": "appStoreVersionLocalizations",
+      "id": "f0bdf4a4-646a-4057-8f36-ccfd2f8a9e01",
+      "attributes": {
+        "locale": "en-US",
+        "whatsNew": "Previous release notes"
+      }
+    }
+  ],
+  "links": {},
+  "meta": {}
+}

@@ -1,0 +1,21 @@
+{
+  "appId": "1234567890",
+  "coverageWarnings": [],
+  "latestSubmission": null,
+  "nextAction": "Ready to submit.",
+  "reviewDetailConfigured": true,
+  "reviewDetailId": "2d0a5d6c-40c1-4a37-bc1f-3f57a29c1402",
+  "reviewState": "",
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 0,
+    "blocking": 0
+  },
+  "version": {
+    "id": "0f9bf8a7-5be6-4ce2-9db5-e4f7dbdd5678",
+    "version": "0.4.0",
+    "platform": "MAC_OS",
+    "state": "READY_FOR_DISTRIBUTION"
+  }
+}
