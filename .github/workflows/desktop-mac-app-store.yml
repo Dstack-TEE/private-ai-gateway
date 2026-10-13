@@ -307,7 +307,10 @@ jobs:
           ASC_TELEMETRY_DISABLED: '1'
         run: |
           set -euo pipefail
-          asc --read-only auth doctor --output json > "$APPLE_API_KEY_ROOT/auth.json"
+          if ! asc --read-only auth doctor --output json > "$APPLE_API_KEY_ROOT/auth.json"; then
+            cat "$APPLE_API_KEY_ROOT/auth.json" >&2
+            exit 1
+          fi
           bundle_id="$(jq -er '.identifier | select(type == "string" and length > 0)' apps/desktop/src-tauri/tauri.conf.json)"
           asc --read-only apps list --bundle-id "$bundle_id" --paginate --output json > "$APPLE_API_KEY_ROOT/apps.json"
           app_id="$(jq -er --arg bundle_id "$bundle_id" '

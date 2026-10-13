@@ -121,8 +121,10 @@ runner's architecture and verifies a hardcoded SHA-256 from that release's
 official checksums. asc uses the same API key file with keychain bypass and
 strict authentication, without storing a profile. `asc builds upload --wait`
 fails on processing rejection or timeout: upload requests are bounded at 15
-minutes, and discovery/processing uses a 45-minute command timeout within the
-50-minute upload step and 120-minute package job. After success, the workflow
+minutes. The 45-minute `ASC_TIMEOUT` deadline is measured from command start;
+upload time counts against it, leaving the remaining time for discovery and
+processing. The upload step has a 50-minute timeout within the 120-minute
+package job. After success, the workflow
 reads the build's processing state and records it with the build ID in the job
 summary. The signed pkg is also kept as a workflow artifact for review.
 
