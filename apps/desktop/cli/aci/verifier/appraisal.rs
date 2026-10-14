@@ -77,11 +77,10 @@ impl CheckResult {
 }
 
 /// `Online` verifies the quote to the vendor root with collateral from
-/// `pccs_url`, or when `None` from Phala's PCCS and, if it is unavailable,
-/// Intel's PCS. `Offline` parses the quote and checks its binding, but never
+/// `pccs_url` alone. `Offline` parses the quote and checks its binding, but never
 /// verifies it to the vendor root.
 pub enum QuoteSource<'a> {
-    Online { pccs_url: Option<&'a str> },
+    Online { pccs_url: &'a str },
     Offline { reason: &'a str },
 }
 
@@ -301,7 +300,7 @@ async fn appraise_quote(
         // cannot pass.
         QuoteSource::Online { pccs_url } => match verify_quote_to_root(
             &raw,
-            *pccs_url,
+            pccs_url,
             inputs.now_secs,
             &inputs.report.attestation.tee_type,
         )
@@ -311,7 +310,7 @@ async fn appraise_quote(
                 CheckId::Quote,
                 format!(
                     "{} quote verified (TCB status {}) and binds report_data; collateral from {}",
-                    verified.tee_type, verified.status, verified.collateral_from
+                    verified.tee_type, verified.status, pccs_url
                 ),
             ),
             Err(e) => failed(CheckId::Quote, e.into()),

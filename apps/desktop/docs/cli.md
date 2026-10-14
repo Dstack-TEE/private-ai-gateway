@@ -36,11 +36,10 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
-Online verification fetches the quote's DCAP collateral from the Phala PCCS
-and, when it cannot be reached or answers HTTP 5xx, from Intel's PCS. Either
-way the collateral is Intel-signed and checked to Intel's root; the id-1
-detail names the service that supplied it, and a failure names each service
-tried and why.
+Online verification fetches the quote's DCAP collateral only from the Phala
+PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
+to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
+fetch failed, including the underlying transport or HTTP error.
 
 The pinned channel uses the TLS keys the verified report declares for the
 host: every attested TLS key when none is domain-scoped, otherwise only the
