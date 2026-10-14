@@ -1722,6 +1722,7 @@ impl VerifierLauncher for UnreachableVerifier {
                 "Cannot reach tee.invalid.",
             )
             .into(),
+            verification: None,
         });
         Ok(Box::new(IdleTask))
     }

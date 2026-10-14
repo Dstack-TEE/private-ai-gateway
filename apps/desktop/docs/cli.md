@@ -268,6 +268,32 @@ presentation derived from them (`phase`, such as `protected` or
 protection switch offers). `protection` is additive and always describes the
 state it accompanies.
 
+When the service answers but fails a verification check, such as a TLS key
+that is not in its attested keyset (id-6), protection stays off (fail closed).
+`start` exits `1` with code `service_verification_failed` and a message naming
+each failed check, its spec section and detail, and what to do. The protection
+session stays on, so the backend keeps retrying with backoff until `stop`.
+`status` then shows the reason:
+
+```text
+Not protected (verification failed; retrying)
+…
+Checks: 5 passed, 1 failed, 0 skipped
+  Failed: id-6 the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)]
+…
+Error: Service verification failed: id-6 … [9.1(6)] — observed SPKI sha256:… is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off.
+```
+
+In JSON, `gateway.verificationFailed` is `true`, `gateway.protection.phase` is
+`verificationFailed`, `gateway.checks` holds the transcript with the failed
+check's `status` `fail`, and `gateway.error` holds the message. While a retry
+runs they stay until its result replaces them. A verdict without a failed
+check, such as PARTIAL or an incomplete report, is reported the same way and
+names the verdict. The desktop app shows **Verification failed
+— retrying** with the failed check, and the privacy dialog shows the message.
+The service log records it at warn level. `pap verify URL` prints the full
+transcript without the backend.
+
 Read-only commands do not start a missing backend. A successful `status` means
 the query succeeded, not that protection is active: inspect `gateway.status`
 and `gateway.configurationVerification` in JSON. Connection and configuration
@@ -530,7 +556,9 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe. Credentials use a hidden prompt
+restart protection; it is not a read-only probe. The service is verified with
+the credential before anything is saved: when verification fails, nothing is
+saved and the command exits `1` with the reason, as `start` reports it. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.

@@ -611,9 +611,7 @@ async fn initialize(
         print!("{}", verification.transcript.render_human());
     }
     if !verification.transcript.verified() {
-        return Err(VerifyError::Failed(
-            "service verification failed; refusing to start the proxy (fail closed)".to_string(),
-        ));
+        return Err(VerifyError::Rejected(verification.transcript));
     }
 
     let verification_summary = verification.transcript.to_json();

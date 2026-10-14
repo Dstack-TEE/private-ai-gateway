@@ -388,6 +388,11 @@ pub struct AppState {
     pub protected_since: Option<u64>,
     #[serde(default)]
     pub reconnecting: bool,
+    /// The last verification reached a verdict other than VERIFIED: the
+    /// service answered but did not pass. `checks` and `error` say why, and a
+    /// retry keeps them until its own result replaces them.
+    #[serde(default)]
+    pub verification_failed: bool,
     /// User protection session, independent of the current verified transport.
     #[serde(default)]
     pub session_active: bool,
@@ -550,6 +555,7 @@ impl Default for AppState {
             session_id: None,
             protected_since: None,
             reconnecting: false,
+            verification_failed: false,
             session_active: false,
             session_usage: UsageSummary::default(),
             usage_revision: 0,

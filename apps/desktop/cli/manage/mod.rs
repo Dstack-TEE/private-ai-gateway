@@ -11,7 +11,7 @@ use clap::CommandFactory;
 use desktop_core::{
     client::{CallError, Client, Watched},
     contracts::*,
-    protocol::{export_path, rpc, NotificationKind, Preference},
+    protocol::{self, export_path, rpc, NotificationKind, Preference},
     usage::UsageQuery,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -223,16 +223,32 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
                 return value(AppStateWire::from(state))
             }
             VerificationStatus::Verifying => {}
-            _ => {
-                return Err(
-                    "Protection did not become verified. Inspect private-ai-proxy status.".into(),
-                )
-            }
+            _ => return Err(unverified(&state)),
         }
         if Instant::now() >= deadline {
             return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Why `start` ended without verified protection: the backend's reason,
+/// typed as a verification failure when the service did not pass.
+fn unverified(state: &AppState) -> CallError {
+    let Some(error) = &state.error else {
+        return "Protection did not become verified. Inspect private-ai-proxy status.".into();
+    };
+    let mut message = format!("Protection did not become verified. {error}");
+    if state.reconnecting {
+        message.push_str(" The backend retries in the background until private-ai-proxy stop.");
+    }
+    if state.verification_failed {
+        CallError::Api(protocol::Error::new(
+            protocol::ErrorCode::ServiceVerificationFailed,
+            message,
+        ))
+    } else {
+        message.into()
     }
 }
 
@@ -1037,6 +1053,28 @@ fn value(input: impl Serialize) -> Result<Value, CallError> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn a_failed_verification_fails_start_with_its_reason() {
+        let mut state = AppState {
+            status: VerificationStatus::Error,
+            reconnecting: true,
+            verification_failed: true,
+            error: Some("Service verification failed: id-6 … protection stays off.".into()),
+            ..AppState::default()
+        };
+        let CallError::Api(error) = unverified(&state) else {
+            panic!("a failed check is a typed API error");
+        };
+        assert_eq!(error.code, protocol::ErrorCode::ServiceVerificationFailed);
+        assert_eq!(
+            error.message,
+            "Protection did not become verified. Service verification failed: id-6 … protection stays off. The backend retries in the background until private-ai-proxy stop."
+        );
+        // A connection failure is not a verification result.
+        state.verification_failed = false;
+        assert!(matches!(unverified(&state), CallError::Local(_)));
+    }
 
     #[test]
     fn automation_modes_never_prompt_or_imply_consent() {

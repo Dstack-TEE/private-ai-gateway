@@ -182,6 +182,13 @@ fn status(value: &Value) -> String {
         _ if state["configurationVerification"] == true => {
             "Verifying profile (not protecting traffic)"
         }
+        _ if state["protection"]["phase"] == "verificationFailed" => {
+            if state["reconnecting"] == true {
+                "Not protected (verification failed; retrying)"
+            } else {
+                "Not protected (verification failed)"
+            }
+        }
         _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",
@@ -310,7 +317,12 @@ fn status(value: &Value) -> String {
             .filter(|check| check["status"] == "fail")
             .take(3)
         {
-            lines.push(format!("  Failed: {}", text(&check["title"])));
+            lines.push(format!(
+                "  Failed: {} {} [{}]",
+                text(&check["id"]),
+                text(&check["title"]),
+                text(&check["section"])
+            ));
         }
     }
     if let Some(models) = state["catalog"]["models"].as_array() {
@@ -477,4 +489,40 @@ fn label(key: &str) -> String {
         }
     }
     label
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn status_shows_a_failed_check_and_its_reason() {
+        let mut state = AppState {
+            status: VerificationStatus::Error,
+            session_active: true,
+            reconnecting: true,
+            verification_failed: true,
+            error: Some("Service verification failed: id-6 … protection stays off.".into()),
+            ..AppState::default()
+        };
+        state.checks.push(VerificationCheck {
+            id: "id-6".into(),
+            section: "9.1(6)".into(),
+            title: "channel bound to the attested keyset".into(),
+            status: "fail".into(),
+            detail: "observed SPKI is not attested".into(),
+        });
+        let value = serde_json::json!({"gateway": AppStateWire::from(state)});
+        let rendered = status(&value);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines[0], "Not protected (verification failed; retrying)");
+        assert!(lines.contains(&"Checks: 0 passed, 1 failed, 0 skipped"));
+        assert!(lines.contains(&"  Failed: id-6 channel bound to the attested keyset [9.1(6)]"));
+        assert!(lines.contains(&"Error: Service verification failed: id-6 … protection stays off."));
+        assert_eq!(
+            value["gateway"]["checks"][0]["status"], "fail",
+            "--json carries the failed check"
+        );
+    }
 }

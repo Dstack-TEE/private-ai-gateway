@@ -237,7 +237,7 @@ pub enum Profiles {
     },
     /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
     Login(AccountLoginOptions),
-    /// Save a new profile and credential; protection verifies it when started.
+    /// Verify a new profile's service with its credential, then save and select it. Nothing is saved when verification fails.
     Add {
         #[arg(long, help = "Unique profile ID")]
         id: String,
