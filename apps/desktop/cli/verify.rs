@@ -5,6 +5,7 @@
 //! fetched, observed channel bound.
 
 use crate::aci::types::AttestationReport;
+use crate::aci::verifier::DEFAULT_PCCS_URL;
 use crate::args::VerifyArgs;
 use crate::checks::{
     run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
@@ -105,7 +106,9 @@ pub async fn verify_service(
             nonce: Some(&nonce),
             now_secs: desktop_core::now_secs(),
             expiry_skipped: false,
-            quote: QuoteSource::Online { pccs_url: None },
+            quote: QuoteSource::Online {
+                pccs_url: DEFAULT_PCCS_URL,
+            },
             channel,
             policy,
             require_production_os,
