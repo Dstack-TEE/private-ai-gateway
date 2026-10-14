@@ -51,8 +51,17 @@ current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 > and `--api-key-fallback=always` still applies the startup credential.
 > Removing the unused app/proxy client-header switch leaves this proxy's
 > default header unchanged. No adapter behavior change is needed.
-> Live acceptance for v1.59.0 remains pending.
+> Upstream moved its Contrast dependency (the Coordinator attestation library)
+> from v1.24.1 to v1.25.0; the live Phala run covers this update.
+> [Live acceptance passed][v159-live-evidence] on a test CVM running the
+> `dstack-0.5.9` production OS and gateway commit `33f5ac54`; the attested
+> Compose equaled the local render. `pap verify --require-production-os
+> --accept-compose` passed `id-1` through `id-4` and `policy-os`; only `id-6`
+> failed, as expected on the default Phala URL. Buffered and streaming chat
+> returned HTTP 200, and `pap audit --require-verified` had zero failures.
+> The session binds the v1.59.0 proxy image digest and credential digest.
 
+[v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
 [v159-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.58.0...v1.59.0
 [v159-cli]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
 [v159-manifestlog]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
