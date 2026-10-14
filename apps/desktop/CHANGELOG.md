@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0...desktop-v0.5.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **ci:** include beta changes in App Store What's New ([#435](https://github.com/Dstack-TEE/private-ai-gateway/issues/435)) ([3d5aaa0](https://github.com/Dstack-TEE/private-ai-gateway/commit/3d5aaa06e2d534a37c82a850e2d9c47b21ce7b11))
+* **desktop:** remove Intel PCS collateral fallback ([#437](https://github.com/Dstack-TEE/private-ai-gateway/issues/437)) ([45b1273](https://github.com/Dstack-TEE/private-ai-gateway/commit/45b1273083d4043680735ab7c2f5111385dc6d90))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.5.1 ([#438](https://github.com/Dstack-TEE/private-ai-gateway/issues/438)) ([b3b17af](https://github.com/Dstack-TEE/private-ai-gateway/commit/b3b17af3880c6a3be94185ed089439c94ef6bd89))
+
 ## [0.5.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.4...desktop-v0.5.0) (2026-10-14)
 
 
