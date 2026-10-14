@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.2...desktop-v0.5.0-beta.3) (2026-10-14)
+
+
+### Features
+
+* **desktop:** highlight the Local API examples with Shiki ([#421](https://github.com/Dstack-TEE/private-ai-gateway/issues/421)) ([3ba2c50](https://github.com/Dstack-TEE/private-ai-gateway/commit/3ba2c5030456423d80c86527b6ebd21f314cf816))
+* **desktop:** use the TypeSafe SDKs in the Decisions examples ([#420](https://github.com/Dstack-TEE/private-ai-gateway/issues/420)) ([442a362](https://github.com/Dstack-TEE/private-ai-gateway/commit/442a3620e6f1397d293e1a460337e88b82b9d712))
+
+
+### Bug Fixes
+
+* **desktop:** explain service verification failures, still fail closed ([#425](https://github.com/Dstack-TEE/private-ai-gateway/issues/425)) ([8a8ce77](https://github.com/Dstack-TEE/private-ai-gateway/commit/8a8ce77d39f6c0b434141bd91c42de1d76cd4073))
+
 ## [0.5.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.1...desktop-v0.5.0-beta.2) (2026-10-13)
 
 
