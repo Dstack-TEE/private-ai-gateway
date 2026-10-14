@@ -22,9 +22,7 @@ pub fn observing_spki_client(
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, String> {
     crate::install_crypto_provider();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+    let inner = rustls::client::WebPkiServerVerifier::builder(webpki_root_store())
         .build()
         .map_err(|e| format!("failed to build TLS verifier: {e}"))?;
     let tls = rustls::ClientConfig::builder()
@@ -41,6 +39,32 @@ pub fn observing_spki_client(
         .use_preconfigured_tls(tls)
         .build()
         .map_err(|e| e.to_string())
+}
+
+/// Client for public HTTPS services, such as the DCAP collateral services: it
+/// validates the server's chain to the bundled Mozilla roots the ACI client
+/// also starts from, so it accepts the same certificates on every platform
+/// rather than following each OS's own verifier and policy.
+pub fn webpki_client(
+    connect_timeout: Duration,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    crate::install_crypto_provider();
+    let tls = rustls::ClientConfig::builder()
+        .with_root_certificates(webpki_root_store())
+        .with_no_client_auth();
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(timeout)
+        .use_preconfigured_tls(tls)
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {}", error_chain_message(&e)))
+}
+
+fn webpki_root_store() -> Arc<rustls::RootCertStore> {
+    Arc::new(rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    })
 }
 
 /// Per-hostname record of observed leaf SPKIs and registered pins, shared
@@ -93,6 +117,21 @@ pub fn error_chain<'a>(
             None => error.source(),
         }
     })
+}
+
+/// `error` and its causes on one line, outermost first, such as "error sending
+/// request for url (…): client error (Connect): tcp connect error: Connection
+/// refused (os error 61)". A cause its parent already displays (an `io::Error`
+/// shows the error it carries) is not repeated.
+pub fn error_chain_message(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for cause in error_chain(error) {
+        let text = cause.to_string();
+        if parts.last().is_none_or(|parent| !parent.contains(&text)) {
+            parts.push(text);
+        }
+    }
+    parts.join(": ")
 }
 
 impl SpkiObservations {

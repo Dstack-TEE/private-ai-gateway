@@ -4,10 +4,11 @@ import { SwitchControl } from "./controls";
 import type { AppState } from "../../shared/contracts";
 import { cn } from "../lib/utils";
 
-/** The protection title with the session's elapsed time: large in the overview card, small in the page header. */
+/** The protection title with the session's elapsed time, or a retry under way: large in the overview card, small in the page header. */
 export function ProtectionStatus({ state, variant }: { state: AppState; variant: "card" | "header" }): React.JSX.Element {
   const { phase, title } = state.protection;
   const active = phase === "protected";
+  const retrying = phase === "verificationFailed" && state.reconnecting;
   const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -36,6 +37,7 @@ export function ProtectionStatus({ state, variant }: { state: AppState; variant:
       : "grid-cols-[14px_auto] justify-center justify-items-end gap-x-1.25")}>
       {active ? <ShieldCheck size={iconSize} aria-hidden="true" /> : phase === "reconnecting" ? <RefreshCw size={iconSize} aria-hidden="true" /> : <ShieldX size={iconSize} aria-hidden="true" />}
       <span aria-live="polite">{title}</span>
+      {retrying && card && <span className="col-start-2 text-xs leading-4.5 font-normal text-muted-foreground">Retrying…</span>}
       {elapsed !== undefined && <time className={cn("w-[8ch] font-mono text-xs leading-4.5 whitespace-nowrap text-muted-foreground tabular-nums", card ? "col-start-2 font-normal" : "col-span-full font-medium")} dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );

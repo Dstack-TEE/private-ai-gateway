@@ -1,7 +1,5 @@
 //! ACI relying-party appraisal used by the CLI and local proxy.
 
-pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
-
 mod appraisal;
 mod dstack;
 mod policy;
