@@ -11,6 +11,10 @@ on:
         description: Valid App Store Connect CFBundleVersion to submit
         required: true
         type: string
+      whats_new:
+        description: 'Optional What''s New override; separate lines with \n or " • "'
+        required: false
+        type: string
       dry_run:
         description: Plan the staging without changing App Store Connect
         required: true
@@ -158,6 +162,7 @@ jobs:
         shell: bash
         env:
           REVIEW_VERSION: ${{ inputs.version }}
+          REVIEW_WHATS_NEW: ${{ inputs.whats_new }}
         run: |
           set -euo pipefail
           python3 - <<'PYTHON'
@@ -166,27 +171,55 @@ jobs:
           from pathlib import Path
 
           version = os.environ["REVIEW_VERSION"]
-          changelog = Path("apps/desktop/CHANGELOG.md").read_text(encoding="utf-8")
-          pattern = re.compile(
-              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)",
-              re.MULTILINE | re.DOTALL,
-          )
-          match = pattern.search(changelog)
-          if not match:
-              raise SystemExit(f"No changelog section found for {version}")
-          text = match.group(1)
-          text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-          text = re.sub(r"(?m)^\s*#{1,6}\s*", "", text)
-          text = re.sub(r"`([^`]*)`", r"\1", text)
-          text = re.sub(r"(?:\*\*|__)", "", text)
-          text = re.sub(r"(?m)^\s*[*+-]\s+", "- ", text)
-          text = "\n".join(line.rstrip() for line in text.splitlines()).strip()
+          override = os.environ["REVIEW_WHATS_NEW"]
+          if override:
+              text = override.replace("\\n", "\n").replace(" • ", "\n").strip()
+          else:
+              try:
+                  changelog = Path("apps/desktop/CHANGELOG.md").read_text(encoding="utf-8")
+              except OSError as error:
+                  raise SystemExit(f"Unable to read desktop changelog: {error}") from error
+              headings = list(re.finditer(r"^## \[([^\]]+)\][^\n]*$", changelog, re.MULTILINE))
+              target = next((heading for heading in headings if heading.group(1) == version), None)
+              if target is None:
+                  raise SystemExit(f"No changelog section found for {version}")
+              previous = next((heading for heading in headings
+                               if heading.start() > target.start()
+                               and re.fullmatch(r"\d+\.\d+\.\d+", heading.group(1))), None)
+              changes = changelog[target.end():previous.start() if previous else len(changelog)]
+              category = None
+              entries = []
+              for line in changes.splitlines():
+                  if line.startswith("## "):
+                      category = None
+                  elif line.startswith("### "):
+                      category = line[4:].strip()
+                  elif category in {"Features", "Bug Fixes"}:
+                      bullet = re.match(r"^[*+-]\s+(.+)$", line)
+                      if not bullet:
+                          continue
+                      entry = bullet.group(1)
+                      scope = re.match(r"^(?:\*\*)?([\w-]+):(?:\*\*)?\s*", entry)
+                      if scope:
+                          if scope.group(1) != "desktop":
+                              continue
+                          entry = entry[scope.end():]
+                      entry = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", entry)
+                      entry = re.sub(r"\s*\((?:#\d+|[0-9a-f]{7,40})\)", "", entry)
+                      entry = re.sub(r"(?<!\w)(\*{1,2}|_{1,2}|~~)(.+?)\1(?!\w)", r"\2", entry)
+                      entry = re.sub(r"`([^`]*)`", r"\1", entry).strip()
+                      if entry:
+                          entries.append(entry)
+              text = "\n".join(f"• {entry}" for entry in dict.fromkeys(entries))
           if not text:
-              raise SystemExit(f"Changelog section for {version} is empty")
+              raise SystemExit("What's New must not be empty")
           if len(text) > 4000:
               raise SystemExit("What's New exceeds Apple's 4000-character limit")
           output = Path(os.environ["ASC_REVIEW_ROOT"]) / "whats-new.txt"
-          output.write_text(text + "\n", encoding="utf-8")
+          try:
+              output.write_text(text + "\n", encoding="utf-8")
+          except OSError as error:
+              raise SystemExit(f"Unable to write What's New: {error}") from error
           PYTHON
 
       - name: Check review doctor before the dry run

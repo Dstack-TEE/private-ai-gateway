@@ -236,8 +236,19 @@ run the manual `Desktop Mac App Store Review` workflow from `main`. Enter the
 marketing version and the already-uploaded CFBundleVersion, and leave **dry
 run** enabled for the first invocation. The workflow resolves the app and
 requires the build to be `VALID`, copies metadata from the previous live Mac
-version, extracts that release's What's New text from this changelog, and shows
+version, prepares What's New from the desktop changelog, and shows
 the complete staging plan without mutating ASC.
+
+Leave the optional `whats_new` input empty to collect desktop-scoped and unscoped
+Features and Bug Fixes from the target release and all intervening prerelease
+sections, stopping at the previous stable release. The default removes internal
+scopes, other categories, Markdown and issue/commit references, deduplicates
+entries, and puts each change on a `• ` line. To supply your own release notes,
+set `whats_new`; it preserves your text after trimming surrounding whitespace.
+The GitHub dispatch form is single-line: use literal `\n` or ` • ` between
+changes (for example, `First change\nSecond change`); both become newlines.
+Actual multiline input is also accepted. Both paths require non-empty text of
+at most 4000 characters.
 
 The protected `app-store-review` environment must contain the separate App
 Store Connect App Manager key as `ASC_REVIEW_KEY_ID`, `ASC_REVIEW_ISSUER_ID`,
