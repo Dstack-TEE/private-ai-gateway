@@ -5,7 +5,7 @@ Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
 traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-current deployment pins v1.58.0, rechecked on 2026-10-12 PDT.
+current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
@@ -39,6 +39,26 @@ current deployment pins v1.58.0, rechecked on 2026-10-12 PDT.
 > No adapter behavior change is needed. Live acceptance passed on a production-OS
 > Phala test CVM on 2026-10-13; see the [verification evidence][v158-live-evidence].
 
+> **Status (2026-10-13 PDT, v1.59.0 recheck):** the official OCI index digest is
+> `sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`.
+> The [v1.58.0..v1.59.0 source comparison][v159-source-compare] and tagged
+> [CLI][v159-cli], [manifest logger][v159-manifestlog],
+> [setup][v159-setup], and [handlers][v159-handlers] confirm the same
+> `<workspace>/manifests/log.txt` path and RFC 3339 timestamp/path format,
+> startup attestation/secret exchange before listening, `/readyz`, encrypted
+> chat, completions and embeddings, and plaintext `/v1/models` forwarding
+> with the Compose defaults. The camelCase flag aliases remain supported,
+> and `--api-key-fallback=always` still applies the startup credential.
+> Removing the unused app/proxy client-header switch leaves this proxy's
+> default header unchanged. No adapter behavior change is needed.
+> Live acceptance for v1.59.0 remains pending.
+
+[v159-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.58.0...v1.59.0
+[v159-cli]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
+[v159-manifestlog]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[v159-setup]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/setup/setup.go
+[v159-handlers]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
+
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).
 Attestation framework: [`edgelesssys/contrast`](https://github.com/edgelesssys/contrast).
@@ -62,7 +82,7 @@ Deployment conditions:
 - Bind the accepted credential digest in measured static policy and require a
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
-- Expose only the gateway listener from the workload network. Version 1.58 of
+- Expose only the gateway listener from the workload network. Version 1.59 of
   the official proxy supports `--listen-address` and defaults to `0.0.0.0`;
   the Compose keeps that default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
@@ -127,7 +147,7 @@ Open or conditional:
 - Privatemode does not expose a per-worker TLS SPKI or public E2EE key for the
   gateway to pin directly. Its binding is transitive through the manifest,
   attested Coordinator/Mesh CA, and secret-release protocol.
-- Version 1.58 does not expose which manifest produced the active inference
+- Version 1.59 does not expose which manifest produced the active inference
   secret. Its manifest history is written before attestation and secret
   exchange complete. The gateway therefore reports the latest fetched digest
   but does not use it for manifest-specific claims.
@@ -162,8 +182,8 @@ that manifest. No worker GPU/OS/weights claims are added on its basis.
 Between source v1.48 and v1.58, the proxy gained listener/CORS and bounded
 HTTP request handling. The client still verifies the mesh certificate and
 signed hybrid HPKE exchange.
-Full-body encryption and dynamic-manifest validation remain. The deployment
-now pins the reviewed v1.58.0 image. Its background secret refresh retries
+Full-body encryption and dynamic-manifest validation remain. That deployment
+pinned the reviewed v1.58.0 image. Its background secret refresh retries
 failures with bounded backoff, while each encrypted attempt still calls
 `LatestSecret` and rejects an expired secret that cannot be refreshed. The
 active secret still is not bound to a manifest observation.

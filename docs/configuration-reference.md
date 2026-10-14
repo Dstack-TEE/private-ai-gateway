@@ -367,7 +367,7 @@ manifest-history volume, restart policy, and private network. Mutable routes
 must match the static origin and cannot set `bearer_token` or `path`; all share
 the measured Compose credential. The gateway validates the credential digest, requires the proxy's
 `/readyz` readiness probe to succeed, reports the latest fetched manifest as explicitly
-unbound metadata, and forwards only to the encrypted v1.58 handlers. Separate
+unbound metadata, and forwards only to the encrypted v1.59 handlers. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 

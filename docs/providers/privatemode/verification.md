@@ -34,10 +34,10 @@ every route.
 
 ## What the manifest observation proves
 
-Privatemode v1.58 writes every fetched manifest to
+Privatemode v1.59 writes every fetched manifest to
 `<workspace>/manifests/log.txt`, the manifest history its documentation
 describes for audit. The documentation does not specify the line format; the
-gateway parses the v1.58 format (`<RFC 3339 time> <path>/<N>.json`, from
+gateway parses the v1.59 format (`<RFC 3339 time> <path>/<N>.json`, from
 [`internal/manifestlog`][manifestlog-source] in the tagged source) and resolves
 `<N>.json` next to the log. Recheck that format whenever the pinned proxy image
 changes. The gateway reads the latest version from the shared read-only
@@ -50,7 +50,7 @@ manifest-history volume and reports:
 
 This is useful update visibility, but it is not a channel binding. The proxy
 writes the history entry before Coordinator verification and before secret
-exchange completes. The v1.58 API does not expose the manifest associated with
+exchange completes. The v1.59 API does not expose the manifest associated with
 the secret used for a request. A receipt therefore must not use the observation
 to assert manifest-specific GPU, OS, serving-software, or model-weight claims.
 
@@ -82,7 +82,7 @@ startup and liveness. It does not use or identify the current inference secret.
 The refresh loop now retries failed background updates with bounded backoff;
 `LatestSecret` still fails closed if an expired secret cannot be refreshed.
 
-For inference, the gateway permits only these v1.58 handlers, all of which the
+For inference, the gateway permits only these v1.59 handlers, all of which the
 proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
 unstructured handlers, which the gateway does not expose; it forwards
 `/v1/models` unencrypted.
@@ -93,11 +93,11 @@ unstructured handlers, which the gateway does not expose; it forwards
 
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound because the Compose explicitly sets
-`--api-key-fallback=always`. Upstream v1.58 warns that the default will change
+`--api-key-fallback=always`. Upstream v1.59 warns that the default will change
 to `never` in a future release; the explicit flag preserves this behavior.
 The Compose's `--apiKey`, `--nvidiaOCSPAllowUnknown`, and
 `--nvidiaOCSPRevokedGracePeriod` flags remain supported as deprecated aliases
-for the new kebab-case spellings in v1.58. The proxy now supports
+for the kebab-case spellings introduced in v1.58. The proxy supports
 `--listen-address`; its default remains `0.0.0.0`, appropriate for the private
 Compose network. The forwarding client rejects redirects and
 ignores HTTP proxy environment variables.
@@ -188,4 +188,4 @@ To test a Phala deployment, follow the
 - [Privatemode TCB source](https://github.com/edgelesssys/privatemode-public)
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
-[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.58.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
