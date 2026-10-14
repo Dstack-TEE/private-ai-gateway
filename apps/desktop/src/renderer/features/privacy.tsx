@@ -3,7 +3,7 @@ import { Check, LockOpen, RefreshCw, ShieldCheck, ShieldX } from "lucide-react";
 import { AppDialog, AppDialogBody, DoneFooter, type DialogControl } from "../components/app-dialog";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import type { AppState, Tone, VerificationCheck } from "../../shared/contracts";
-import { hasLiveVerification } from "../lib/protection";
+import { checkTitle, hasLiveVerification } from "../lib/protection";
 import { useShell } from "../lib/shell";
 import { formatTimestamp, hardwareName, shorten, trustName } from "../lib/format";
 import { Detail } from "../components/detail";
@@ -19,29 +19,12 @@ const CHECK_PRESENTATION: Record<VerificationCheck["status"], { iconClass: strin
   info: { iconClass: "bg-warning/10 text-warning", tone: "warning" },
 };
 
-const CHECK_TITLES: Record<string, string> = {
-  "id-1": "Hardware attestation is genuine",
-  "id-2": "Attestation is bound to this session",
-  "id-3": "Service keys are current",
-  "id-4": "Service is built from public source",
-  "id-5": "Private key stays inside the enclave",
-  "id-6": "Connection uses the attested key",
-  "policy-os": "Production OS image (reported by the service)",
-  "receipt-1": "Receipt signature",
-  "receipt-2": "Receipt matches verified service",
-  "receipt-3": "Request bytes match receipt",
-  "receipt-4": "Response bytes match receipt",
-  "receipt-note": "Service request rewrite",
-  "upstream-1": "Upstream inference was verified",
-  "upstream-2": "Upstream session evidence",
-};
-
 export function PrivacyDialog(control: DialogControl): React.JSX.Element {
   const { state } = useShell();
   // Why protection failed; the window shows only the title.
   const failure = state.protection.tone === "danger" ? state.endpointError ?? state.error : undefined;
   return <AppDialog {...control} title="Privacy verification" className="sm:max-w-2xl">
-    {failure && <Alert variant="destructive"><AlertTitle>{state.protection.title}</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
+    {failure && <Alert variant="destructive"><AlertTitle>{state.protection.title}</AlertTitle><AlertDescription className="wrap-anywhere">{failure}</AlertDescription></Alert>}
     <AppDialogBody><PrivacyVerification state={state} /></AppDialogBody>
     <DoneFooter />
   </AppDialog>;
@@ -130,7 +113,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
 }
 
 function CheckRow({ check }: { check: VerificationCheck }): React.JSX.Element {
-  const title = CHECK_TITLES[check.id] ?? check.title;
+  const title = checkTitle(check);
   const presentation = CHECK_PRESENTATION[check.status];
   return (
     <div className="grid min-h-9 grid-cols-[18px_minmax(0,_1fr)_auto] items-start gap-3 border-b border-border px-3.5 py-3 last:border-b-0">

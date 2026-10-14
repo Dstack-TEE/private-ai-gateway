@@ -78,7 +78,7 @@ export type Protection = { phase: ProtectionPhase, title: string, tone: Tone, ac
 /**
  * What protection is doing, as the user sees it.
  */
-export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "blocked" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
+export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "verificationFailed" | "blocked" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
 export type ProtectionAction = { operation: ProtectionOperation, label: string, enabled: boolean, };
 /**
  * What the protection switch and the tray's protection item do.

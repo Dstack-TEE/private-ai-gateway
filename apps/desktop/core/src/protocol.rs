@@ -353,6 +353,9 @@ pub enum ErrorCode {
     /// The Confidential AI service could not be reached or is not one; the
     /// message names the host and the reason.
     ServiceConnectionFailed,
+    /// The service answered but failed verification, so protection stays off
+    /// (fail closed); the message names the failing checks and what to do.
+    ServiceVerificationFailed,
     /// The backend kept running; its log has the reason (errdefs System, INTERNAL).
     ShutdownRefused,
     /// An unexpected failure whose details stay in the service (errdefs System, INTERNAL).
@@ -392,7 +395,9 @@ impl ErrorCode {
             | Self::RevisionConflict => 409,
             Self::UnsupportedMediaType => 415,
             Self::TooManyRequests => 429,
-            Self::AccountError | Self::ServiceConnectionFailed => 502,
+            Self::AccountError
+            | Self::ServiceConnectionFailed
+            | Self::ServiceVerificationFailed => 502,
             Self::Busy => 503,
             Self::ShutdownRefused
             | Self::OperationFailed

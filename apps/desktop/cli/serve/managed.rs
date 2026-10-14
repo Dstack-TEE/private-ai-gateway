@@ -16,6 +16,7 @@ use desktop_runtime::verifier_session::{
 
 use super::{initialize, proxy_request, text_response, ProxyState, Reporter, VerifierOptions};
 use crate::checks::VerifierPolicy;
+use crate::transcript::{Check, CheckDef, Status, Transcript, ID_1};
 use crate::verify::VerifyError;
 
 impl VerifiedService for ProxyState {
@@ -137,15 +138,28 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                 }
                 Err(error) => {
                     let detail = error.to_string();
-                    worker_events(VerifierEvent::Fatal {
-                        error: match error {
-                            VerifyError::Service(error) => protocol::Error::new(
+                    let (error, verification) = match error {
+                        VerifyError::Service(error) => (
+                            protocol::Error::new(
                                 ErrorCode::ServiceConnectionFailed,
                                 error.to_string(),
                             )
                             .into(),
-                            VerifyError::Failed(detail) => detail.into(),
-                        },
+                            None,
+                        ),
+                        VerifyError::Rejected(transcript) => (
+                            protocol::Error::new(
+                                ErrorCode::ServiceVerificationFailed,
+                                rejection(&transcript),
+                            )
+                            .into(),
+                            Some(transcript.to_json()),
+                        ),
+                        VerifyError::Failed(detail) => (detail.into(), None),
+                    };
+                    worker_events(VerifierEvent::Fatal {
+                        error,
+                        verification,
                     });
                     Err(detail)
                 }
@@ -153,6 +167,39 @@ impl VerifierLauncher for InProcessVerifierLauncher {
         });
         Ok(task)
     }
+}
+
+/// Why the service failed verification, for the user and the service log:
+/// each failed check as `pap verify` prints it, then what to do. Protection
+/// stays off either way.
+fn rejection(transcript: &Transcript) -> String {
+    // What blocks the verdict: a failure, or a hardware root that did not
+    // pass (PARTIAL).
+    let blocking: Vec<&Check> = transcript
+        .checks
+        .iter()
+        .filter(|check| {
+            check.status == Status::Fail
+                || (check.def.id == ID_1.id && check.status != Status::Pass)
+        })
+        .collect();
+    let checks = blocking
+        .iter()
+        .map(|check| {
+            let CheckDef { id, section, title } = check.def;
+            format!("{id} {title} [{section}] — {}", check.detail)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let hint = blocking
+        .iter()
+        .find_map(|check| match check.def.id {
+            "id-6" => Some("The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off."),
+            "id-3" => Some("The service's attested keys have expired. The operator must renew them; protection stays off."),
+            _ => None,
+        })
+        .unwrap_or("Protection stays off until the service passes verification.");
+    format!("Service verification failed: {checks}. {hint}")
 }
 
 pub(super) fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) -> Reporter {
@@ -197,4 +244,25 @@ pub(super) fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) ->
             cost_usd: None,
         });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{ID_2, ID_5, ID_6};
+
+    #[test]
+    fn a_rejection_names_the_failed_check_and_what_to_do() {
+        let mut transcript = Transcript::default();
+        transcript.pass(ID_2, "ok");
+        transcript.skip(ID_5, "no custody policy", "no custody policy");
+        transcript.fail(
+            ID_6,
+            "observed SPKI sha256:ab for https://tee.example is NOT an attested entry clients pin",
+        );
+        assert_eq!(
+            rejection(&transcript),
+            "Service verification failed: id-6 the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)] — observed SPKI sha256:ab for https://tee.example is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off."
+        );
+    }
 }

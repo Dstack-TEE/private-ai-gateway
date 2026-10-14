@@ -17,7 +17,7 @@ import { ProtectedControl, ProtectionStatus } from "../components/protection";
 import { ServiceLogo } from "../components/brand";
 import { AccountBalanceValue } from "../components/account-tools";
 import { toneTextClass } from "../lib/tone";
-import { activeProfile } from "../lib/protection";
+import { activeProfile, checkTitle } from "../lib/protection";
 import { cn } from "../lib/utils";
 
 const TLS_TRACKS = [
@@ -103,6 +103,8 @@ function StatusSurface(): React.JSX.Element {
   const protectedNow = protection.phase === "protected";
   const developmentMode = !state.config.requireProductionOs;
   const profile = activeProfile(state);
+  // The reason is in the privacy dialog; the card names the failed check.
+  const failedCheck = protection.phase === "verificationFailed" ? state.checks.find((check) => check.status === "fail") : undefined;
   return (
     <Card size="sm" role="region" className={cn(
       "relative isolate min-h-36 min-w-0 transition-colors duration-200 ease-out motion-reduce:transition-none",
@@ -112,6 +114,7 @@ function StatusSurface(): React.JSX.Element {
       <CardContent className="relative z-2 grid w-full flex-1 grid-cols-[minmax(0,1fr)_44px] grid-rows-[auto_1fr] gap-x-3 gap-y-2">
         <div className={cn("col-start-1 row-start-1 min-w-0 transition-colors duration-200 ease-out motion-reduce:transition-none", toneTextClass[protection.tone])}>
           <ProtectionStatus state={state} variant="card" />
+          {failedCheck && <p className="mt-1 truncate text-xs text-muted-foreground">Failed check: {checkTitle(failedCheck)}</p>}
         </div>
         <div className="col-span-full row-start-2 flex min-w-0 items-center gap-2 self-end">
         {state.backendConnected === false ? <Button variant="outline" size="sm" disabled={shell.startingBackend} onClick={shell.startBackend}><RefreshCw className={shell.startingBackend ? "animate-control-spin" : undefined} aria-hidden="true" />{shell.startingBackend ? "Starting…" : "Start Background Service"}</Button> : <>

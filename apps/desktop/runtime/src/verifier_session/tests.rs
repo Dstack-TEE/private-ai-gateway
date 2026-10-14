@@ -387,6 +387,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
             proxy.session().generation,
             VerifierEvent::Fatal {
                 error: failure.clone().into(),
+                verification: None,
             },
         )
         .unwrap();
@@ -401,6 +402,78 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     assert_eq!(
         manager.snapshot().error.as_deref(),
         Some(failure.message.as_str())
+    );
+    manager.stop().unwrap();
+}
+
+/// A service that answers but fails a check, here channel binding (id-6),
+/// keeps forwarding closed and is retried; the state names the failed check
+/// and the authored reason, which also answers a waiting caller.
+#[tokio::test]
+async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
+    use desktop_core::protection::{Protection, ProtectionPhase};
+    use desktop_core::protocol::{self, ErrorCode};
+
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let failure = protocol::Error::new(
+        ErrorCode::ServiceVerificationFailed,
+        "Service verification failed: id-6 … protection stays off.",
+    );
+    let verification = serde_json::json!({"checks": [
+        {"id": "id-2", "section": "9.1(2)", "title": "binding chain", "status": "pass", "detail": "ok"},
+        {"id": "id-6", "section": "9.1(6)", "title": "channel bound to the attested keyset", "status": "fail",
+         "detail": "observed SPKI sha256:ab is NOT an attested entry clients pin"},
+    ]});
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Fatal {
+                error: failure.clone().into(),
+                verification: Some(verification),
+            },
+        )
+        .unwrap();
+
+    let error = manager
+        .wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(protocol::Error::from(error), failure);
+    let state = manager.snapshot();
+    assert_eq!(state.status, VerificationStatus::Error);
+    assert_eq!(state.error.as_deref(), Some(failure.message.as_str()));
+    let failed: Vec<_> = state
+        .checks
+        .iter()
+        .filter(|check| check.status == "fail")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].id.as_str(), failed[0].section.as_str()),
+        ("id-6", "9.1(6)")
+    );
+    assert!(!proxy.session().verified);
+    assert!(crate::recovery::should_retry(&state));
+    assert_eq!(
+        Protection::of(&state).phase,
+        ProtectionPhase::VerificationFailed
     );
     manager.stop().unwrap();
 }
@@ -602,6 +675,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 generation,
                 VerifierEvent::Fatal {
                     error: "task failed".into(),
+                    verification: None,
                 },
             )
             .unwrap();

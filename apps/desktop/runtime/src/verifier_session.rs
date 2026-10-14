@@ -79,10 +79,12 @@ pub enum VerifierEvent {
         code: Option<String>,
         reason: String,
     },
-    /// Verification cannot run. An `Error::Api` is authored for the user
-    /// and answers a waiting caller as it is.
+    /// Verification cannot run or did not pass. An `Error::Api` is authored
+    /// for the user and answers a waiting caller as it is. A failed
+    /// verification carries its transcript, whose checks say what failed.
     Fatal {
         error: Error,
+        verification: Option<Value>,
     },
     Terminated {
         error: Option<String>,

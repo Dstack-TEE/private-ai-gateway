@@ -17,13 +17,16 @@ use crate::client::{
 };
 use crate::transcript::Transcript;
 
-/// Why a verification could not run: the service could not be reached or is
-/// not an ACI service (authored for the user), or another failure whose
+/// Why a verification could not run or did not pass: the service could not
+/// be reached or is not an ACI service (authored for the user), its verdict
+/// was not VERIFIED (the transcript says why), or another failure whose
 /// detail is for the log.
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error(transparent)]
     Service(#[from] ServiceError),
+    #[error("service verification failed; refusing to start the proxy (fail closed)")]
+    Rejected(Transcript),
     #[error("{0}")]
     Failed(String),
 }

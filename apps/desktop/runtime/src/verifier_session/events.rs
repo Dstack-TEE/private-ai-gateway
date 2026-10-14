@@ -44,8 +44,12 @@ impl SessionManager {
                 runtime.state.error = Some(reason);
                 runtime.failure = None;
             }
-            VerifierEvent::Fatal { error } => {
+            VerifierEvent::Fatal {
+                error,
+                verification,
+            } => {
                 runtime.lose_verification();
+                runtime.state.checks = parse_checks(verification.as_ref());
                 runtime.state.error = Some(error.to_string());
                 runtime.failure = Some(error);
             }
