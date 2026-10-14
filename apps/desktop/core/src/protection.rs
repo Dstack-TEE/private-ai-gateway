@@ -97,9 +97,6 @@ impl Protection {
             ProtectionPhase::LocalApiUnavailable => ("Local API unavailable", Tone::Danger),
             ProtectionPhase::VerifyingConfiguration => ("Verifying configuration…", Tone::Neutral),
             ProtectionPhase::Verifying => ("Verifying…", Tone::Neutral),
-            ProtectionPhase::VerificationFailed if state.reconnecting => {
-                ("Verification failed — retrying", Tone::Danger)
-            }
             ProtectionPhase::VerificationFailed => ("Verification failed", Tone::Danger),
             ProtectionPhase::Blocked => ("Protection blocked", Tone::Danger),
             ProtectionPhase::Interrupted => ("Protection interrupted", Tone::Danger),
@@ -312,7 +309,7 @@ mod tests {
         state.verification_failed = true;
         let protection = Protection::of(&state);
         assert_eq!(protection.phase, ProtectionPhase::VerificationFailed);
-        assert_eq!(protection.title, "Verification failed — retrying");
+        assert_eq!(protection.title, "Verification failed");
         assert_eq!(protection.tone, Tone::Danger);
         assert_eq!(protection.action.label, "Cancel Reconnection");
         // A retry in progress still shows the failure it retries.
