@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.4...desktop-v0.5.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* **desktop:** clarify status during failed verification retries ([#432](https://github.com/Dstack-TEE/private-ai-gateway/issues/432)) ([1b8286f](https://github.com/Dstack-TEE/private-ai-gateway/commit/1b8286f3e796eea5a05f6dcc083be9ad5c9628a2))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.5.0 ([#434](https://github.com/Dstack-TEE/private-ai-gateway/issues/434)) ([2efdeda](https://github.com/Dstack-TEE/private-ai-gateway/commit/2efdeda11954706f6a9458f130124d6c4df4aed4))
+
 ## [0.5.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.3...desktop-v0.5.0-beta.4) (2026-10-14)
 
 
