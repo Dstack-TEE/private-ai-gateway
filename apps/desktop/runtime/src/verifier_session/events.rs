@@ -49,6 +49,7 @@ impl SessionManager {
                 verification,
             } => {
                 runtime.lose_verification();
+                runtime.state.verification_failed = verification.is_some();
                 runtime.state.checks = parse_checks(verification.as_ref());
                 runtime.state.error = Some(error.to_string());
                 runtime.failure = Some(error);

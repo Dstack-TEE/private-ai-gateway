@@ -408,7 +408,8 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
 
 /// A service that answers but fails a check, here channel binding (id-6),
 /// keeps forwarding closed and is retried; the state names the failed check
-/// and the authored reason, which also answers a waiting caller.
+/// and the authored reason, which also answers a waiting caller. A retry
+/// keeps showing them until a verified identity replaces them.
 #[tokio::test]
 async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     use desktop_core::protection::{Protection, ProtectionPhase};
@@ -458,6 +459,7 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     assert_eq!(protocol::Error::from(error), failure);
     let state = manager.snapshot();
     assert_eq!(state.status, VerificationStatus::Error);
+    assert!(state.verification_failed);
     assert_eq!(state.error.as_deref(), Some(failure.message.as_str()));
     let failed: Vec<_> = state
         .checks
@@ -474,6 +476,55 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     assert_eq!(
         Protection::of(&state).phase,
         ProtectionPhase::VerificationFailed
+    );
+
+    // The verifier ends; a retry in progress still shows the failure.
+    let generation = proxy.session().generation;
+    manager
+        .terminated(generation, Some("rejected".into()))
+        .unwrap();
+    manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+            require_production_os: true,
+        })
+        .unwrap();
+    let retrying = manager.snapshot();
+    assert_eq!(retrying.status, VerificationStatus::Verifying);
+    assert!(retrying.reconnecting && retrying.verification_failed);
+    assert_eq!(retrying.error.as_deref(), Some(failure.message.as_str()));
+    assert!(retrying.checks.iter().any(|check| check.id == "id-6"));
+    assert_eq!(
+        Protection::of(&retrying).phase,
+        ProtectionPhase::VerificationFailed
+    );
+    assert!(!proxy.session().verified);
+
+    // A verified identity replaces it.
+    let identity = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:keyset",
+        "keyset_not_after": 2_000_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {"serving": "aggregator", "supported_e2ee_versions": []},
+        "verification": {"checks": [
+            {"id": "id-6", "section": "9.1(6)", "title": "channel", "status": "pass", "detail": "ok"},
+        ]},
+    }));
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::IdentityUpdated { identity },
+        )
+        .unwrap();
+    let identified = manager.snapshot();
+    assert!(!identified.verification_failed && identified.error.is_none());
+    assert!(identified.checks.iter().all(|check| check.status == "pass"));
+    assert_eq!(
+        Protection::of(&identified).phase,
+        ProtectionPhase::Reconnecting
     );
     manager.stop().unwrap();
 }
@@ -1165,6 +1216,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         session_id: Some("session".into()),
         protected_since: Some(100),
         reconnecting: true,
+        verification_failed: true,
         session_active: true,
         session_usage: UsageSummary {
             requests: 3,
@@ -1219,6 +1271,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         "checks",
         "protectedSince",
         "reconnecting",
+        "verificationFailed",
         "error",
     ];
     let json = |state: &AppState| serde_json::to_value(state).unwrap();
@@ -1227,7 +1280,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         json(&SessionManager::carried(&previous)),
         json(&AppState::default()),
     );
-    assert_eq!(fixture.as_object().unwrap().len(), 31);
+    assert_eq!(fixture.as_object().unwrap().len(), 32);
     for (field, value) in fixture.as_object().unwrap() {
         // Differs from its default, so keeping it is observable.
         assert_ne!(Some(value), defaults.get(field), "{field}");

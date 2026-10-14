@@ -191,6 +191,14 @@ fn rejection(transcript: &Transcript) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ");
+    let verdict = transcript.verdict_line();
+    let reason = if checks.is_empty() {
+        format!("the service report was incomplete ({verdict})")
+    } else if transcript.count(Status::Fail) == 0 {
+        format!("{verdict}; {checks}")
+    } else {
+        checks
+    };
     let hint = blocking
         .iter()
         .find_map(|check| match check.def.id {
@@ -199,7 +207,7 @@ fn rejection(transcript: &Transcript) -> String {
             _ => None,
         })
         .unwrap_or("Protection stays off until the service passes verification.");
-    format!("Service verification failed: {checks}. {hint}")
+    format!("Service verification failed: {reason}. {hint}")
 }
 
 pub(super) fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) -> Reporter {
@@ -250,6 +258,26 @@ pub(super) fn managed_reporter(events: tokio::sync::mpsc::Sender<ProxyEvent>) ->
 mod tests {
     use super::*;
     use crate::transcript::{ID_2, ID_5, ID_6};
+
+    /// A verdict without a failed check still says what was not verified.
+    #[test]
+    fn a_rejection_without_a_failed_check_names_the_verdict() {
+        assert_eq!(
+            rejection(&Transcript::default()),
+            "Service verification failed: the service report was incomplete (NOT VERIFIED (0 pass, 0 failed)). Protection stays off until the service passes verification."
+        );
+        let mut partial = Transcript::default();
+        partial.skip(
+            ID_1,
+            "quote collateral unavailable",
+            "quote collateral offline",
+        );
+        partial.pass(ID_2, "ok");
+        assert_eq!(
+            rejection(&partial),
+            "Service verification failed: PARTIAL — hardware root not verified (1 pass, 1 skipped: quote collateral offline); id-1 hardware quote verifies to TEE vendor root and binds report_data (dstack tdx policy) [9.1(1)] — quote collateral unavailable. Protection stays off until the service passes verification."
+        );
+    }
 
     #[test]
     fn a_rejection_names_the_failed_check_and_what_to_do() {

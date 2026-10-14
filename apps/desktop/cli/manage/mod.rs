@@ -233,7 +233,7 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
 }
 
 /// Why `start` ended without verified protection: the backend's reason,
-/// typed as a verification failure when a check failed.
+/// typed as a verification failure when the service did not pass.
 fn unverified(state: &AppState) -> CallError {
     let Some(error) = &state.error else {
         return "Protection did not become verified. Inspect private-ai-proxy status.".into();
@@ -242,7 +242,7 @@ fn unverified(state: &AppState) -> CallError {
     if state.reconnecting {
         message.push_str(" The backend retries in the background until private-ai-proxy stop.");
     }
-    if state.checks.iter().any(|check| check.status == "fail") {
+    if state.verification_failed {
         CallError::Api(protocol::Error::new(
             protocol::ErrorCode::ServiceVerificationFailed,
             message,
@@ -1055,20 +1055,14 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn a_failed_check_fails_start_with_its_reason() {
+    fn a_failed_verification_fails_start_with_its_reason() {
         let mut state = AppState {
             status: VerificationStatus::Error,
             reconnecting: true,
+            verification_failed: true,
             error: Some("Service verification failed: id-6 … protection stays off.".into()),
             ..AppState::default()
         };
-        state.checks.push(VerificationCheck {
-            id: "id-6".into(),
-            section: "9.1(6)".into(),
-            title: "channel".into(),
-            status: "fail".into(),
-            detail: "observed SPKI is not attested".into(),
-        });
         let CallError::Api(error) = unverified(&state) else {
             panic!("a failed check is a typed API error");
         };
@@ -1077,7 +1071,8 @@ mod tests {
             error.message,
             "Protection did not become verified. Service verification failed: id-6 … protection stays off. The backend retries in the background until private-ai-proxy stop."
         );
-        state.checks.clear();
+        // A connection failure is not a verification result.
+        state.verification_failed = false;
         assert!(matches!(unverified(&state), CallError::Local(_)));
     }
 

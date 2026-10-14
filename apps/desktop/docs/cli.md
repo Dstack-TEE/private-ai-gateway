@@ -284,9 +284,12 @@ Checks: 5 passed, 1 failed, 0 skipped
 Error: Service verification failed: id-6 … [9.1(6)] — observed SPKI sha256:… is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off.
 ```
 
-In JSON, `gateway.protection.phase` is `verificationFailed`, `gateway.checks`
-holds the transcript with the failed check's `status` `fail`, and
-`gateway.error` holds the message. The desktop app shows **Verification failed
+In JSON, `gateway.verificationFailed` is `true`, `gateway.protection.phase` is
+`verificationFailed`, `gateway.checks` holds the transcript with the failed
+check's `status` `fail`, and `gateway.error` holds the message. While a retry
+runs they stay until its result replaces them. A verdict without a failed
+check, such as PARTIAL or an incomplete report, is reported the same way and
+names the verdict. The desktop app shows **Verification failed
 — retrying** with the failed check, and the privacy dialog shows the message.
 The service log records it at warn level. `pap verify URL` prints the full
 transcript without the backend.

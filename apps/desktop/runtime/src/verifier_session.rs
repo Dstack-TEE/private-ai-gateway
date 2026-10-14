@@ -176,12 +176,22 @@ impl RuntimeState {
     fn identify(&mut self, identity: &IdentityEvent) {
         self.state.identity = Some(parse_identity(identity));
         self.state.checks = parse_checks(Some(&identity.verification));
+        self.state.verification_failed = false;
         self.state.error = None;
         self.identity_ready = true;
         self.epoch += 1;
         self.state.status = VerificationStatus::Verifying;
         self.state.progress = Some("Reading the verified model list".to_string());
         self.state.catalog = None;
+    }
+
+    /// A failure that is not a verification result ends a failed
+    /// verification a retry carried: its checks no longer explain the error.
+    fn end_failed_verification(&mut self) {
+        if self.state.verification_failed {
+            self.state.verification_failed = false;
+            self.state.checks.clear();
+        }
     }
 }
 
@@ -304,6 +314,11 @@ impl SessionManager {
         if reset_catalog_history {
             runtime.last_catalog = None;
         }
+        // A retry keeps showing the failed verification it retries until its
+        // own result replaces it.
+        let retried_failure =
+            (continuing && !verification_only && runtime.state.verification_failed)
+                .then(|| (runtime.state.checks.clone(), runtime.state.error.clone()));
         runtime.state = AppState {
             status: VerificationStatus::Verifying,
             configuration_verification: verification_only,
@@ -330,6 +345,11 @@ impl SessionManager {
             },
             ..Self::carried(&runtime.state)
         };
+        if let Some((checks, error)) = retried_failure {
+            runtime.state.verification_failed = true;
+            runtime.state.checks = checks;
+            runtime.state.error = error;
+        }
         drop(runtime);
 
         self.publish_unverified(generation, 0, Some(session_id.clone()));
@@ -896,6 +916,7 @@ impl SessionManager {
                 Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
                 None => "Verifier stopped unexpectedly".to_string(),
             });
+            runtime.end_failed_verification();
         }
         self.end_verifier(runtime, generation, None);
         Ok(())
@@ -919,6 +940,7 @@ impl SessionManager {
         }
         let task = runtime.task.take();
         runtime.state.error = Some(message);
+        runtime.end_failed_verification();
         runtime.failure = None;
         self.end_verifier(runtime, generation, task);
         Ok(())

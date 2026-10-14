@@ -502,6 +502,7 @@ mod tests {
             status: VerificationStatus::Error,
             session_active: true,
             reconnecting: true,
+            verification_failed: true,
             error: Some("Service verification failed: id-6 … protection stays off.".into()),
             ..AppState::default()
         };

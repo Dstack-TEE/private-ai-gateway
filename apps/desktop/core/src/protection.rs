@@ -37,8 +37,9 @@ pub enum ProtectionPhase {
     LocalApiUnavailable,
     VerifyingConfiguration,
     Verifying,
-    /// The service answered but failed a verification check; the state's
-    /// `checks` and `error` say which and why. Protection stays off.
+    /// The service answered but did not pass verification; the state's
+    /// `checks` and `error` say why. Protection stays off, also while a retry
+    /// runs.
     VerificationFailed,
     Blocked,
     Interrupted,
@@ -148,10 +149,12 @@ fn phase(state: &AppState) -> ProtectionPhase {
     if state.backend_connected == Some(false) && state.error.is_none() {
         return ProtectionPhase::Starting;
     }
-    let failed_check = state.status == VerificationStatus::Error
-        && state.checks.iter().any(|check| check.status == "fail");
-    if state.reconnecting && !failed_check {
-        return ProtectionPhase::Reconnecting;
+    if state.reconnecting {
+        return if state.verification_failed {
+            ProtectionPhase::VerificationFailed
+        } else {
+            ProtectionPhase::Reconnecting
+        };
     }
     if state.endpoint_error.is_some() {
         return ProtectionPhase::LocalApiUnavailable;
@@ -162,7 +165,9 @@ fn phase(state: &AppState) -> ProtectionPhase {
         }
         VerificationStatus::Verifying => ProtectionPhase::Verifying,
         VerificationStatus::Blocked => ProtectionPhase::Blocked,
-        VerificationStatus::Error if failed_check => ProtectionPhase::VerificationFailed,
+        VerificationStatus::Error if state.verification_failed => {
+            ProtectionPhase::VerificationFailed
+        }
         VerificationStatus::Error => ProtectionPhase::Interrupted,
         VerificationStatus::Verified if state.configuration_verification => {
             ProtectionPhase::ConfigurationVerified
@@ -186,7 +191,7 @@ fn active_profile_ready(state: &AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contracts::{ConfidentialProfile, ProfileAuth, ServiceProvider, VerificationCheck};
+    use crate::contracts::{ConfidentialProfile, ProfileAuth, ServiceProvider};
 
     fn state(status: VerificationStatus, api_key_saved: bool) -> AppState {
         AppState {
@@ -299,26 +304,27 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_check_is_shown_instead_of_reconnecting() {
+    fn a_failed_verification_is_shown_instead_of_reconnecting() {
         let mut state = state(VerificationStatus::Error, true);
         state.session_active = true;
         state.reconnecting = true;
         assert_eq!(Protection::of(&state).phase, ProtectionPhase::Reconnecting);
-        state.checks.push(VerificationCheck {
-            id: "id-6".into(),
-            section: "9.1(6)".into(),
-            title: "channel bound to the attested keyset".into(),
-            status: "fail".into(),
-            detail: "observed SPKI is not attested".into(),
-        });
+        state.verification_failed = true;
         let protection = Protection::of(&state);
         assert_eq!(protection.phase, ProtectionPhase::VerificationFailed);
         assert_eq!(protection.title, "Verification failed — retrying");
         assert_eq!(protection.tone, Tone::Danger);
         assert_eq!(protection.action.label, "Cancel Reconnection");
-        // A retry in progress is reconnecting again.
+        // A retry in progress still shows the failure it retries.
         state.status = VerificationStatus::Verifying;
-        assert_eq!(Protection::of(&state).phase, ProtectionPhase::Reconnecting);
+        assert_eq!(
+            Protection::of(&state).phase,
+            ProtectionPhase::VerificationFailed
+        );
+        // Without a session to resume, the failure is final.
+        state.status = VerificationStatus::Error;
+        state.reconnecting = false;
+        assert_eq!(Protection::of(&state).title, "Verification failed");
     }
 
     #[test]
