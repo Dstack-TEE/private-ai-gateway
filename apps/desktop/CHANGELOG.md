@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.3...desktop-v0.5.0-beta.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **desktop:** fetch DCAP collateral reliably and explain why it failed ([#428](https://github.com/Dstack-TEE/private-ai-gateway/issues/428)) ([1c48f3c](https://github.com/Dstack-TEE/private-ai-gateway/commit/1c48f3c98ef276db2dfa2dc4501ef1df353af6ac))
+
 ## [0.5.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.2...desktop-v0.5.0-beta.3) (2026-10-14)
 
 
