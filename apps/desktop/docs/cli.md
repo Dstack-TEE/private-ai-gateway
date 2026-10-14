@@ -279,7 +279,7 @@ that is not in its attested keyset (id-6), protection stays off (fail closed).
 `start` exits `1` with code `service_verification_failed` and a message naming
 each failed check, its spec section and detail, and what to do. The protection
 session stays on, so the backend keeps retrying with backoff until `stop`.
-`status` then shows the reason:
+`status` keeps the reason visible, also while a retry runs:
 
 ```text
 Not protected (verification failed; retrying)
@@ -287,8 +287,12 @@ Not protected (verification failed; retrying)
 Checks: 5 passed, 1 failed, 0 skipped
   Failed: id-6 the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)]
 …
+Retry: verifying again (attempt in progress)
 Error: Service verification failed: id-6 … [9.1(6)] — observed SPKI sha256:… is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off.
 ```
+
+While a retry is in progress, human output replaces transient verifier progress
+with `Retry: verifying again (attempt in progress)`.
 
 In JSON, `gateway.verificationFailed` is `true`, `gateway.protection.phase` is
 `verificationFailed`, `gateway.checks` holds the transcript with the failed

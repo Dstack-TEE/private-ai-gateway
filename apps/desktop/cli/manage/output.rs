@@ -361,11 +361,15 @@ fn status(value: &Value) -> String {
             }
         }
     }
-    for (key, label) in [
-        ("progress", "Progress"),
-        ("error", "Error"),
-        ("endpointError", "Warning"),
-    ] {
+    let retrying_failed_verification = state["reconnecting"] == true
+        && state["protection"]["phase"] == "verificationFailed"
+        && state["status"] == "verifying";
+    if retrying_failed_verification {
+        lines.push("Retry: verifying again (attempt in progress)".into());
+    } else if let Some(progress) = state["progress"].as_str().filter(|s| !s.is_empty()) {
+        lines.push(format!("Progress: {}", safe(progress)));
+    }
+    for (key, label) in [("error", "Error"), ("endpointError", "Warning")] {
         if let Some(value) = state[key].as_str().filter(|s| !s.is_empty()) {
             lines.push(format!("{label}: {}", safe(value)));
         }
@@ -497,12 +501,13 @@ mod tests {
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
 
     #[test]
-    fn status_shows_a_failed_check_and_its_reason() {
+    fn status_shows_a_failed_check_and_its_reason_during_a_retry() {
         let mut state = AppState {
-            status: VerificationStatus::Error,
+            status: VerificationStatus::Verifying,
             session_active: true,
             reconnecting: true,
             verification_failed: true,
+            progress: Some("Starting the verifier".into()),
             error: Some("Service verification failed: id-6 … protection stays off.".into()),
             ..AppState::default()
         };
@@ -517,12 +522,65 @@ mod tests {
         let rendered = status(&value);
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines[0], "Not protected (verification failed; retrying)");
+        assert!(lines.contains(&"Retry: verifying again (attempt in progress)"));
+        assert!(!rendered.contains("Progress:"));
         assert!(lines.contains(&"Checks: 0 passed, 1 failed, 0 skipped"));
         assert!(lines.contains(&"  Failed: id-6 channel bound to the attested keyset [9.1(6)]"));
         assert!(lines.contains(&"Error: Service verification failed: id-6 … protection stays off."));
-        assert_eq!(
-            value["gateway"]["checks"][0]["status"], "fail",
-            "--json carries the failed check"
-        );
+        let json = render_line(
+            &Action::Status { watch: false },
+            &Global {
+                json: true,
+                non_interactive: false,
+                yes: false,
+            },
+            &value,
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), value);
+        assert_eq!(value["gateway"]["progress"], "Starting the verifier");
+        assert_eq!(value["gateway"]["checks"][0]["status"], "fail");
+    }
+
+    #[test]
+    fn status_shows_a_failed_verification_without_a_retry_in_progress() {
+        for (reconnecting, headline) in [
+            (true, "Not protected (verification failed; retrying)"),
+            (false, "Not protected (verification failed)"),
+        ] {
+            let state = AppState {
+                status: VerificationStatus::Error,
+                reconnecting,
+                verification_failed: true,
+                error: Some("Service verification failed; protection stays off.".into()),
+                ..AppState::default()
+            };
+            let rendered = status(&serde_json::json!({"gateway": AppStateWire::from(state)}));
+            let lines: Vec<&str> = rendered.lines().collect();
+            assert_eq!(lines[0], headline);
+            assert!(!rendered.contains("Retry:"));
+            assert!(!rendered.contains("Progress:"));
+            assert!(lines.contains(&"Error: Service verification failed; protection stays off."));
+        }
+    }
+
+    #[test]
+    fn status_keeps_progress_while_verifying_normally() {
+        for (reconnecting, headline) in [
+            (false, "Verifying"),
+            (true, "Reconnecting (requests paused)"),
+        ] {
+            let state = AppState {
+                status: VerificationStatus::Verifying,
+                reconnecting,
+                progress: Some("Starting the verifier".into()),
+                ..AppState::default()
+            };
+            let rendered = status(&serde_json::json!({"gateway": AppStateWire::from(state)}));
+            let lines: Vec<&str> = rendered.lines().collect();
+            assert_eq!(lines[0], headline);
+            assert!(lines.contains(&"Progress: Starting the verifier"));
+            assert!(!rendered.contains("Retry:"));
+        }
     }
 }
