@@ -1,6 +1,6 @@
 # ArmetAI Per-Model TDX Review
 
-Date: 2026-09-29 UTC. Updated: 2026-10-09 UTC.
+Date: 2026-09-29 UTC. Updated: 2026-10-14 UTC.
 
 > [!NOTE]
 > This is the provider's **self-assessment** against the
@@ -15,12 +15,13 @@ in-TD TLS proxy repositories with commits, to be listed before review).
 
 ## Verdict
 
-**Decision pending.** The adapter verifies the live `poc1.armet.ai` endpoint
-(see [Live probe](#live-probe-2026-10-02) and
+**Decision pending.** The adapter verifies the current live endpoint
+`ctf.armet.ai` (see [New endpoint](#new-endpoint-ctfarmetai-2026-10-14)), and
+earlier verified `poc1.armet.ai` (see [Live probe](#live-probe-2026-10-02) and
 re-probes on [2026-10-07](#re-probe-after-redeploy-2026-10-07) and
-[2026-10-09](#re-probe-after-redeploy-2026-10-09)), but source provenance, the
-Fortanix DSM key-release policy and the privacy boundary have not been
-reviewed.
+[2026-10-09](#re-probe-after-redeploy-2026-10-09)). Source provenance, the
+in-TD TLS key-generation and ACME code (pinned by digest in `initdata.toml`),
+and the privacy boundary have not been reviewed.
 
 The proposed trust model is:
 
@@ -48,24 +49,33 @@ measurement pins and the TODOs under criteria 7 and 13.
   verification, and debug TDs rejected. The identity is the pinned measurement
   subject over MRTD, RTMR0-3, TD_ATTRIBUTES, XFAM, MRCONFIGID, MROWNER and
   MROWNERCONFIG.
-- **TLS key custody:** the TLS private key is not generated per boot. It is
-  held in Fortanix DSM and released directly into the TD through an
-  attestation-gated secure key release after attestation verification from Fortanix CCM. 
-  The key therefore persists across TD launches; the re-probe observed the same 
-  SPKI (`e3e15952…1cd5`) after a relaunch that changed `MRCONFIGID`.
-- **Provider evidence through live review session:** the gateway cannot check custody itself. It
-  only sees the SPKI the quote commits to, so we suggest to reviewers to have a call to check on:
-  - **the release policy:** the attestation claims DSM requires before it
-    releases the key. We will walk through the secure key release mechanism involving CCM and DSM.
-    We will explain the key release requires the same measurements the gateway pins, 
-    including `MRCONFIGID`, so a TD launched with different `initdata.toml` 
-    (for example, one allowing exec) cannot obtain the key;
-  - **policy updates:** the release policy is updated together with the
-    published pins for each release, and older accepted measurements are
-    removed from it on schedule;
-  - **blast radius:** one key serves every TD launch and release that satisfies
-    the policy, so a compromise of any accepted TD exposes the key for all of
-    them. Document the rotation plan.
+- **TLS key custody (since 2026-10-14):** the TLS private key is generated
+  inside the TD and its certificate is obtained from inside the TD via ACME
+  (Let's Encrypt). Fortanix DSM and CCM are no longer involved in TLS key
+  release. On `ctf.armet.ai` the live certificate (Let's Encrypt `YE1`, ECDSA,
+  `CN=ctf.armet.ai`) carries the TD-attested SPKI `d01db5a7…6e35`. The earlier
+  `poc1.armet.ai` deployment used a DSM-released key; see the dated sections
+  below.
+- **Measurement of the key-generation code:** the TLS key-generation and ACME
+  code is not part of the measured image. Between `poc1` and `ctf` the TLS
+  implementation changed, but MRTD and RTMR0-3 are unchanged and only
+  `MRCONFIGID` changed. ArmetAI states that `initdata.toml` pins that code by
+  digest, so it is covered by `MRCONFIGID` and therefore by the gateway's pin.
+  A change to the code changes the digest, `MRCONFIGID` and the subject, and
+  fails closed until re-pinned.
+- **Provider evidence through live review session:** the gateway cannot check
+  custody itself. It only sees the SPKI the quote commits to. We will show:
+  - the `initdata.toml` entries that pin the TLS key-generation and ACME
+    component by digest, and that the TD refuses to run it unless the fetched
+    artifact matches that digest;
+  - that the key is generated in TD memory, never persisted outside the TD or
+    exported, and that a relaunch produces a new key;
+  - how the ACME challenge is answered from inside the TD.
+- **WebPKI note:** whoever controls the `ctf.armet.ai` DNS or the HAProxy
+  front end could also obtain a publicly trusted certificate for the name,
+  with their own key. The gateway does not rely on WebPKI. It pins the
+  TD-attested SPKI, so such a certificate fails the pin. Certificate
+  Transparency monitoring for the domain is a useful extra signal.
 
 ### 2. Channel binding
 
@@ -74,8 +84,8 @@ measurement pins and the TODOs under criteria 7 and 13.
   rotation fails closed until the gateway re-verifies.
 - **Provider evidence through live review session:** TLS terminates inside the TD. No load
   balancer, CDN or ingress terminates TLS outside it.
-- **Network path:** `poc1.armet.ai` resolves to a server
-  (`52.53.179.221`) running HAProxy in TCP passthrough mode, which forwards to
+- **Network path:** `ctf.armet.ai` (and earlier `poc1.armet.ai`) resolves to a
+  server (`52.53.179.221`) running HAProxy in TCP passthrough mode, which forwards to
   the TD without terminating TLS. The live probe saw the TD-attested SPKI on
   the public origin. HAProxy is outside the trust boundary: SPKI pinning means
   it cannot read or alter traffic without the TD's private key, only drop or
@@ -178,8 +188,9 @@ Live:
 
 - A request for a model the TD does not serve (`GLM-5.3-Other`) was refused by
   the endpoint with `409`, and the verifier failed closed.
-- After the 2026-10-07 and 2026-10-09 relaunches changed `MRCONFIGID`, the
-  previous pin was rejected at the measurement step each time.
+- After the 2026-10-07, 2026-10-09 and 2026-10-14 relaunches changed
+  `MRCONFIGID`, the previous pin was rejected at the measurement step each
+  time.
 
 The certificate-rotation and VM-shape checks are **TODO**.
 
@@ -340,6 +351,47 @@ signed receipt citing the verified ArmetAI session.
 
 `tool_choice: required`, a named function, parallel tool calls and structured
 outputs were not tested.
+
+## New endpoint `ctf.armet.ai` (2026-10-14)
+
+ArmetAI redeployed the model to a new origin, `https://ctf.armet.ai`, with a
+new TLS implementation: the key is generated inside the TD and the certificate
+is obtained via ACME (see [criterion 1](#1-workload-identity)). All verifier,
+hermetic and end-to-end tests were rerun for `GLM-5.3-Flash`.
+
+| Check | Result |
+| --- | --- |
+| Wire contract and `report_data` commitment | Pass |
+| Reported SPKI equals live certificate SPKI | Pass (`d01db5a7…6e35`, new) |
+| Certificate | Let's Encrypt `YE1`, ECDSA, `CN=ctf.armet.ai`, issued 2026-10-15 03:50 UTC |
+| Previous pin (`f7bc92c4…6f4b`) | Rejected at the measurement step |
+| New subject, pinned for the test | `verified`; TCB `UpToDate`, no advisories; NRAS 8 × GH100, every GPU nonce-matched |
+| Wrong model | `409` from the endpoint; verifier failed closed |
+| Hermetic soundness (ArmetAI, SecretAI) | Pass |
+| `cargo test -p private-ai-gateway --all-targets` | 533 passed, 0 failed |
+
+Changed values; MRTD, RTMR0-3, TD attributes, XFAM and the TDX module are
+unchanged from `poc1.armet.ai`:
+
+| Field | Value |
+| --- | --- |
+| MRCONFIGID | `4937f0a5…0ecd63` (was `ea7bfcb3…7fede6`) |
+| Subject | `tdx-measurement:sha256:b954e6732ffe38e5c79901add18a20ffe9fc649b896806e283473e5017876420` |
+
+End to end through a locally run gateway, pinned to the new subject:
+
+| Check | Result |
+| --- | --- |
+| Live E2E suite, quick profile | Pass; the session records endpoint `https://ctf.armet.ai` and binding `d01db5a7…6e35` |
+| Receipt audit (`pap audit`, offline) | Receipt and `upstream-1` checks pass; only `id-4` (the gateway's own source provenance) fails, as before |
+| Chat with `provider.aci_verified: true` | `200` with `X-Receipt-Id` |
+| Streaming with `provider.aci_verified: true` | `200` with `X-Receipt-Id`, terminated by `[DONE]` |
+| Pinned to a non-current `aci_session_ids` value | `412`, refused before forwarding |
+| Tool calling, `tool_choice: auto` | Non-streaming and streaming return a valid `get_weather` call (`finish_reason: tool_calls`); the follow-up turn with the tool result returns a final answer using it |
+| Session claims | Unchanged: `tee_attested`, `tcb_up_to_date`, `serving_software_known_good`, `gpu_attested` asserted; `os_known_good`, `model_weights_provenance` unknown |
+
+The live E2E suite ran with the session-label fix merged upstream in #400.
+The new subject was pinned for this test only.
 
 ## Hard reject conditions
 
