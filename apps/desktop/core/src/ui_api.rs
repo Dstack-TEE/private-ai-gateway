@@ -125,7 +125,6 @@ pub mod requests {
         SaveAccountLogin {
             id: String,
             profile: ConfidentialProfileInput,
-            require_production_os: bool,
             workspace_id: Option<i64>,
         } -> AppStateWire;
         GetOrganizationUrl { organization_slug: String } -> String;
@@ -458,7 +457,6 @@ async fn save_account_login(
             operation_id: operation_id.clone(),
             id: input.id,
             profile: input.profile,
-            require_production_os: input.require_production_os,
             workspace_id: input.workspace_id,
         },
     )

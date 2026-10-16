@@ -18,9 +18,8 @@ struct Cli {
     global: Global,
     #[command(subcommand)]
     command: Command,
-    /// Require an attested production OS image
-    // Declared after the commands, so help lists it after their own options.
-    #[arg(long, global = true)]
+    /// Deprecated compatibility flag; OS images are no longer appraised.
+    #[arg(long, global = true, hide = true)]
     require_production_os: bool,
 }
 
@@ -61,7 +60,7 @@ async fn main() {
     let Cli {
         global,
         command,
-        require_production_os: production,
+        require_production_os,
     } = Cli::try_parse().unwrap_or_else(|error| {
         // Parsing failed, so `--json` is known only from the raw arguments.
         if machine_output(&["--json"]) && error.use_stderr() {
@@ -70,21 +69,21 @@ async fn main() {
         }
         error.exit()
     });
+    if require_production_os {
+        eprintln!("warning: --require-production-os is deprecated and has no effect; clients no longer appraise the OS image.");
+    }
     let json = global.json;
     let aci = |result: Result<i32, String>| result.map_err(CallError::Local);
     let (result, failure_code) = match command {
-        Command::Aci(Aci::Verify(a)) => (aci(verify::run(a, production).await), 1),
-        Command::Aci(Aci::Audit(a)) => (aci(audit::run(a, production).await), 1),
-        Command::Aci(Aci::Sessions(a)) => (aci(sessions::run(a, production).await), 1),
-        Command::Aci(Aci::Send(a)) => (aci(send::run(a, production).await), 1),
+        Command::Aci(Aci::Verify(a)) => (aci(verify::run(a).await), 1),
+        Command::Aci(Aci::Audit(a)) => (aci(audit::run(a).await), 1),
+        Command::Aci(Aci::Sessions(a)) => (aci(sessions::run(a).await), 1),
+        Command::Aci(Aci::Send(a)) => (aci(send::run(a).await), 1),
         // Keep pap's own failures apart from curl's exit codes.
-        Command::Aci(Aci::Curl(a)) => (
-            aci(curl::run(a, production).await),
-            curl::PAP_FAILURE_EXIT_CODE,
-        ),
+        Command::Aci(Aci::Curl(a)) => (aci(curl::run(a).await), curl::PAP_FAILURE_EXIT_CODE),
         Command::Aci(Aci::Serve(mut a)) => {
             a.json_events |= json;
-            (aci(serve::run(a, production).await), 1)
+            (aci(serve::run(a).await), 1)
         }
         // Management calls block on the local API; keep them off the async workers.
         Command::Manage(action) => {
@@ -147,6 +146,27 @@ fn invoked_as_aci(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_deprecated_os_flag_is_still_global() {
+        for args in [
+            vec![
+                "pap",
+                "--require-production-os",
+                "verify",
+                "https://tee.example",
+            ],
+            vec![
+                "pap",
+                "verify",
+                "https://tee.example",
+                "--require-production-os",
+            ],
+            vec!["pap", "profiles", "edit", "work", "--require-production-os"],
+        ] {
+            assert!(Cli::try_parse_from(args).unwrap().require_production_os);
+        }
+    }
 
     #[test]
     fn every_alias_channel_is_recognized() {

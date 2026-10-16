@@ -32,8 +32,6 @@ export class AciConnectionError extends AciError {
 }
 
 export interface AciPolicy {
-  /** Appraise the measured dstack OS hash against the production allowlist. */
-  requireProductionOs?: boolean;
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this client. Empty or
    * omitted means hardware-bound measurement without release pinning.

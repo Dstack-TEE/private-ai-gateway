@@ -577,7 +577,6 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(state["sessionActive"], false);
     assert_eq!(state["localApi"]["listenAddress"], "127.0.0.1");
     assert_eq!(state["localApi"]["port"], 4180);
-    assert_eq!(state["config"]["requireProductionOs"], true);
     assert_eq!(backend.run(&["token", "show", "--yes"]), key);
     assert_eq!(backend.run(&["profiles", "list"]), profiles);
     assert!(backend

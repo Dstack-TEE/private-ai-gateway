@@ -20,16 +20,10 @@ use crate::verify::{verify_service, ServiceVerification};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
-pub async fn run(args: SendArgs, require_production_os: bool) -> Result<i32, String> {
+pub async fn run(args: SendArgs) -> Result<i32, String> {
     let bearer = api_key(&args)?;
-    let verification = verify_service(
-        &args.base_url,
-        None,
-        &args.policy.verifier_policy()?,
-        require_production_os,
-        false,
-    )
-    .await?;
+    let verification =
+        verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
         print!("{}", verification.transcript.render_human());

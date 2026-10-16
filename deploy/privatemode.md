@@ -36,10 +36,9 @@ phala deploy -n private-ai-gateway \
   --wait
 ```
 
-When an SSH key is available, the Phala CLI selects a dev OS image by default,
-and its default production image may be newer than the reviewed allowlist.
-`--no-dev-os` with an explicit image keeps the deployment on a production OS
-image that `pap verify --require-production-os` accepts.
+When an SSH key is available, the Phala CLI selects a dev OS image by default.
+`--no-dev-os` with an explicit image selects the intended production image.
+Clients do not appraise the OS image; production runs only production dstack images.
 
 Rendering puts the git commit, image digest, and the digests of the admin
 token and Privatemode API key into the measured Compose; the secrets themselves
@@ -130,7 +129,7 @@ compose_hash="$(
   jq -j '.attestation.evidence.app_compose' "$artifact_dir/report.json" |
     sha256sum | cut -d' ' -f1
 )"
-if pap verify "$GATEWAY_URL" --nonce "$nonce" --require-production-os \
+if pap verify "$GATEWAY_URL" --nonce "$nonce" \
   --accept-compose "$compose_hash" --json \
   >"$artifact_dir/live-verification.json"; then
   :
@@ -140,7 +139,7 @@ fi
 # Phala's default app URL terminates TLS outside this workload, so id-6 fails
 # as for any gateway deployment there; bind TLS inside the workload to pass it
 # (README.md#bind-public-tls-identities). The quote, nonce/keyset binding,
-# expiry, measured Compose, and production OS image must pass.
+# expiry, and measured Compose must pass.
 jq -e --slurpfile report "$artifact_dir/report.json" '
   .verdict.failed == 1 and
   .verdict.workload_keyset_digest == $report[0].workload_keyset_digest and

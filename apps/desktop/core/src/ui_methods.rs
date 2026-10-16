@@ -15,7 +15,6 @@ macro_rules! renderer_methods {
                 get_state => GetState,
                 start => Start,
                 stop => Stop,
-                set_require_production_os => SetRequireProductionOs,
                 activate_profile => ActivateProfile,
                 delete_profile => DeleteProfile,
                 save_configuration => SaveConfiguration,

@@ -305,7 +305,6 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let identity = identity_event(serde_json::json!({
@@ -373,7 +372,6 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
         .begin_verification(
             StartConfig {
                 remote_url: "https://unreachable.invalid".into(),
-                require_production_os: true,
             },
             false,
         )
@@ -427,7 +425,6 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     let started = manager
         .start(StartConfig {
             remote_url: "https://tee.example".into(),
-            require_production_os: true,
         })
         .unwrap();
     let failure = protocol::Error::new(
@@ -486,7 +483,6 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     manager
         .start(StartConfig {
             remote_url: "https://tee.example".into(),
-            require_production_os: true,
         })
         .unwrap();
     let retrying = manager.snapshot();
@@ -544,7 +540,6 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let generation = proxy.session().generation;
@@ -584,7 +579,6 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let state = manager.stop().unwrap();
@@ -608,7 +602,6 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.start(config.clone()).unwrap();
     tokio::task::yield_now().await;
@@ -654,7 +647,6 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     manager
@@ -690,7 +682,6 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         ));
         let config = StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         };
         manager.start(config.clone()).unwrap();
         if verification_only {
@@ -760,7 +751,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.restore_snapshot(AppState {
         status: VerificationStatus::Verified,
@@ -808,7 +798,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     manager.stop_with_reconnect(true).unwrap();
     let candidate = StartConfig {
         remote_url: "https://tee.redpill.ai".into(),
-        ..config.clone()
     };
     let verification = manager.begin_verification(candidate.clone(), true).unwrap();
     assert_eq!(verification.session_id, resumed.session_id);
@@ -1091,7 +1080,6 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let stopped = manager.stop().unwrap();
@@ -1130,7 +1118,6 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     let revoked = |epoch| {
         let session = proxy.session();
@@ -1226,7 +1213,6 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         error: Some("Verification failed".into()),
         config: StartConfig {
             remote_url: "https://tee.example".into(),
-            require_production_os: false,
         },
         profiles: vec![ConfidentialProfile {
             id: "profile".into(),

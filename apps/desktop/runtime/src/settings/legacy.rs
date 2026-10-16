@@ -164,7 +164,6 @@ fn store_error(error: keyring::Error) -> String {
 struct ServiceSettings {
     active_profile_id: String,
     profiles: Vec<ConfidentialProfile>,
-    require_production_os: bool,
 }
 
 /// 0.1.x `preferences.json`.
@@ -298,7 +297,6 @@ fn settings_from(
         ..Config::default()
     };
     if let Some(service) = service {
-        config.require_production_os = service.require_production_os;
         for profile in service.profiles {
             config.profiles.insert(
                 profile.id,

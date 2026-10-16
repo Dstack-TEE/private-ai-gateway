@@ -42,6 +42,10 @@ const RECEIPT_KEY_ID = 'static-receipt-ed25519';
 
 test('transcript: quote verify (id-1) fails closed on the stub quote; bindings pass; compose is an honest skip', async () => {
   const { lines, verdict } = await reportTranscript(report, FIXTURE_NONCE, { now: FIXED_NOW });
+  assert.deepEqual(
+    lines.map((line) => line.id),
+    ['id-1', 'id-2', 'id-3', 'id-4', 'id-5', 'id-6'],
+  );
   const byId = new Map(lines.map((l) => [l.id, l]));
   const g = (id: string) => {
     const f = byId.get(id);

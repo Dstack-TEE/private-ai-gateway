@@ -72,15 +72,14 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
     start: (config) => call("start", { config }),
-    setRequireProductionOs: (required) => call("set_require_production_os", { required }),
-    saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
+    saveConfiguration: (profile, key) => call("save_configuration", { profile, key }),
     beginAccountLogin: async (profile) => {
       const login = await call("begin_account_login", { profile });
       presentAccountLogin(login);
       return login;
     },
     pollAccountLogin: (id) => call("poll_account_login", { id }),
-    saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => call("save_account_login", { id, profile, requireProductionOs, workspaceId }),
+    saveAccountLogin: (id, profile, workspaceId) => call("save_account_login", { id, profile, workspaceId }),
     getAccountDetails: (profileId) => call("get_account_details", { profileId }),
     getAccountBalance: (target) => call("get_account_balance", { target }),
     cancelAccountLogin: (id) => call("cancel_account_login", { id }),

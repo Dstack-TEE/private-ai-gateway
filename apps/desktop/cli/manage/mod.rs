@@ -304,7 +304,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
         } => {
             let profile = ConfidentialProfileInput {
                 id: id.clone(),
@@ -325,7 +324,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = read_key(global, *key_stdin)?;
             value(client.call(rpc::Verify {
                 profile,
-                require_production_os: !allow_development_os,
                 key: Some(key),
             })?)
         }
@@ -343,7 +341,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                     provider: profile.provider,
                     remote_url: profile.remote_url,
                 },
-                require_production_os: state.config.require_production_os,
                 key,
             })?)
         }
@@ -353,8 +350,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
-            require_production_os,
         } => {
             let state = client.state()?;
             let saved = find(state.profiles, id)?;
@@ -374,12 +369,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = (*key_stdin || target_changed || !saved.credential_saved)
                 .then(|| read_key(global, *key_stdin))
                 .transpose()?;
-            value(client.call(rpc::Verify {
-                profile,
-                require_production_os: !allow_development_os
-                    && (*require_production_os || state.config.require_production_os),
-                key,
-            })?)
+            value(client.call(rpc::Verify { profile, key })?)
         }
         Profiles::Use { id } => {
             confirm(global, "Switch the active profile?")?;

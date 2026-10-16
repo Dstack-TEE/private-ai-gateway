@@ -249,12 +249,7 @@ unlocked OS keychain for a process running as you.
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
-- **The production OS check relies on the service's own report.** It
-  compares the OS image hash that the service records in its RTMR3 event log
-  with a reviewed allowlist. It does not rebuild the MRTD and RTMR0-2 boot
-  measurements from the OS image, so it does not prove on its own which
-  image booted. For that assurance, run a dstack verifier over the same quote
-  (see the [CLI README](../cli/README.md)).
+- Clients do not appraise the OS image; production runs only production dstack images.
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to

@@ -258,12 +258,11 @@ host. Policy flags narrow what it accepts:
 | --- | --- |
 | `--accept-compose <hash>` | Workload release |
 | `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
-| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
 
-Without a custody policy, the CLI reports custody as skipped. It does not
-reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a
-dstack verifier run over the same quote, event log, and VM configuration. The
-TypeScript verifier does not check custody.
+Without a custody policy, the CLI reports custody as skipped. The TypeScript
+verifier does not check custody.
+
+Clients do not appraise the OS image; production runs only production dstack images.
 
 Do not turn an unproven field into a stronger claim. A reported repository,
 commit, image, model ID, or TCB status remains a label until the applicable

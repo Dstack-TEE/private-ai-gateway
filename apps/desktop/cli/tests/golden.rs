@@ -83,6 +83,40 @@ fn serve_json(body: Vec<u8>) -> String {
 }
 
 #[test]
+fn the_deprecated_os_flag_warns_without_changing_verification() {
+    let report =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aci_report_fixture.json");
+    let service = serve_json(fs::read(report).unwrap());
+    let nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
+    let mut results = Vec::new();
+    for deprecated in [false, true] {
+        let mut command = std::process::Command::new(cargo_bin!("private-ai-proxy"));
+        command.args(["verify", &service, "--nonce", nonce, "--json"]);
+        if deprecated {
+            command.arg("--require-production-os");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1)); // The stub quote still fails.
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            if deprecated {
+                "warning: --require-production-os is deprecated and has no effect; clients no longer appraise the OS image.\n"
+            } else {
+                ""
+            }
+        );
+        let mut transcript: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        // The clock can tick between the two runs.
+        transcript["checks"][2]
+            .as_object_mut()
+            .unwrap()
+            .remove("detail");
+        results.push(transcript);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
 fn help() {
     pap().assert().code(2).stdout_eq("").stderr_eq(str![[r#"
 Private AI Proxy: manage local protection and verify confidential AI services
@@ -115,12 +149,11 @@ Commands:
   help         Print this message or the help of the given subcommand(s)
 
 Options:
-      --json                   Emit compact JSON instead of human-readable output
-      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
-      --yes                    Approve a command's documented mutation without prompting
-      --require-production-os  Require an attested production OS image
-  -h, --help                   Print help (see more with '--help')
-  -V, --version                Print version
+      --json             Emit compact JSON instead of human-readable output
+      --non-interactive  Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes              Approve a command's documented mutation without prompting
+  -h, --help             Print help (see more with '--help')
+  -V, --version          Print version
 
 "#]]);
     pap()
@@ -152,8 +185,6 @@ Options:
           Print the verification transcript as JSON instead of the human-readable form.
       --explain
           Print a one-line explanation for every check, not just failures.
-      --require-production-os
-          Require an attested production OS image
   -h, --help
           Print help
 
@@ -172,19 +203,18 @@ Arguments:
   [VALUE]  Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it
 
 Options:
-      --json                   Emit compact JSON instead of human-readable output
-      --value-stdin            Read the web-ui.password value from stdin instead of a hidden terminal prompt
-      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
-      --yes                    Approve a command's documented mutation without prompting
-      --require-production-os  Require an attested production OS image
-  -h, --help                   Print help
+      --json             Emit compact JSON instead of human-readable output
+      --value-stdin      Read the web-ui.password value from stdin instead of a hidden terminal prompt
+      --non-interactive  Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+      --yes              Approve a command's documented mutation without prompting
+  -h, --help             Print help
 
 "#]]);
     // Every command, option and value, by digest.
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["d5034ddec38401e69182b4ba88e26679b35bbfa99719e76b3fc99808e417f47d"]
+        str!["e6ec947ef65d67525afeb8ca4edf5f41f353e9c7f913a597baa488aeafd7d8ef"]
     );
 }
 
@@ -529,21 +559,6 @@ Usage: private-ai-proxy profiles add --id <ID> --name <NAME> --url <URL>
 For more information, try '--help'.
 
 "#]]);
-    let edit = [
-        "profiles",
-        "edit",
-        "w",
-        "--allow-development-os",
-        "--require-production-os",
-    ];
-    fails(2, &edit).stderr_eq(str![[r#"
-error: the argument '--allow-development-os' cannot be used with '--require-production-os'
-
-Usage: private-ai-proxy profiles edit --allow-development-os <ID>
-
-For more information, try '--help'.
-
-"#]]);
     fails(
         2,
         &["agents", "connect", "codex", "--dry-run", "--revision", "r"],
@@ -611,7 +626,7 @@ fn management_with_a_backend() {
     let fails = |code: i32, args: &[&str]| pap(args).assert().code(code).stdout_eq("");
 
     json(&["settings", "show"]).stdout_eq(str![[r#"
-{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","require-production-os":true,"connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
+{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
 
 "#]]);
     json(&["profiles", "list"]).stdout_eq(str![[r#"
@@ -643,7 +658,7 @@ private-ai-proxy: Profile not found
 
 "#]]);
     json(&["profiles", "remove", &profile, "--yes"]).stdout_eq(str![[r#"
-{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":4},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
+{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai"},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":4},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
 
 "#]]);
 
@@ -681,7 +696,7 @@ private-ai-proxy: Only web-ui.password reads its value from stdin
 "#]]);
     let deprecated = json(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
     deprecated.stdout_eq(str![[r#"
-{"require-production-os":true,"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
+{"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
 
 "#]]).stderr_eq(str![[r#"
 warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`
@@ -700,7 +715,7 @@ warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `au
         .assert()
         .success()
         .stdout_eq(str![[r#"
-{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":6},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
+{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai"},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":6},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
 
 "#]]);
 

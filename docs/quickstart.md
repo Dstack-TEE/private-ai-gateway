@@ -94,10 +94,7 @@ for that app. It does not cover the TLS private key. That key stays inside the
 TEE only if the compose you reviewed runs the TLS terminator and keeps its key
 there.
 
-`--require-production-os` also requires the RTMR3 `os-image-hash` to be on the
-CLI's allowlist of reviewed production images. It does not replace a dstack
-verifier run; see
-[Build a verifier policy](attested-confidential-inference.md#build-a-verifier-policy).
+Clients do not appraise the OS image; production runs only production dstack images.
 
 ## 2. Send a familiar API request over the verified channel
 

@@ -30,15 +30,6 @@ evidence) exactly as observed.
   compose measurement (check 4) when the service publishes `app_compose`.
   Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
-- **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
-  require the RTMR3 `os-image-hash` to be in this release's reviewed production
-  allowlist. Development and unknown hashes fail closed. This package does not
-  reconstruct MRTD/RTMR0-2 from a dstack OS image, so a pass is meaningful only
-  together with a dstack verifier result of `is_valid: true` for the same
-  quote, event log, and VM configuration. See
-  [Build a verifier policy](../../docs/attested-confidential-inference.md#build-a-verifier-policy)
-  and the
-  [Phala-direct verification algorithm](../../docs/providers/phala-direct/verification.md#verification-algorithm).
 - **Reviewed release allowlist (§1.3):** pass `acceptedComposeHashes` to accept
   only reviewed `sha256(app_compose)` values measured into RTMR3. Without an
   allowlist the measurement is verified and reported, but the verifier does
@@ -95,16 +86,16 @@ Verification failures return `{ ok: false, checks }`; malformed input throws.
 > Types Wrong, and publishes it with npm provenance from a `clients-v<version>`
 > GitHub Release.
 
+Clients do not appraise the OS image; production runs only production dstack images.
+
 ## Usage
 
-One call runs the ACI checks and OS-hash appraisal:
+One call runs the ACI checks:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
 
-const { verdict, lines } = await verifyService('https://tee.redpill.ai', {
-  requireProductionOs: true,
-});
+const { verdict, lines } = await verifyService('https://tee.redpill.ai');
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
@@ -126,7 +117,6 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
-  policy: { requireProductionOs: true },
   serving: {
     // Every successful JSON POST must carry a receipt and cite verified serving.
     requireVerified: true,

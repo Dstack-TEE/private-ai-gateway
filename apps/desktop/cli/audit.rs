@@ -14,7 +14,7 @@ use crate::checks::{
 };
 use crate::transcript::Transcript;
 
-pub async fn run(args: AuditArgs, require_production_os: bool) -> Result<i32, String> {
+pub async fn run(args: AuditArgs) -> Result<i32, String> {
     let report_bytes = fs::read(&args.report)
         .map_err(|e| format!("failed to read report {}: {e}", args.report))?;
     let report: AttestationReport = serde_json::from_slice(&report_bytes)
@@ -35,7 +35,6 @@ pub async fn run(args: AuditArgs, require_production_os: bool) -> Result<i32, St
                 reason: "offline audit: no live TLS channel observed",
             },
             policy: &args.policy.verifier_policy()?,
-            require_production_os,
             explain: false,
         },
     )
