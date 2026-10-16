@@ -64,6 +64,10 @@ evidence) exactly as observed.
 
 ## Current limits
 
+- **dstack v1 runtime events only.** Runtime-event names and payloads are
+  checked against their digests before replaying RTMR3. Events carrying a
+  `version` field (including opt-in dstack 0.6 v2 events) are rejected;
+  production v1 events omit it.
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3 only.
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not

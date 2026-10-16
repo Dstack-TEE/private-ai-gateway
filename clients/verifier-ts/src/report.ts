@@ -9,16 +9,18 @@
 
 import { getCollateralAndVerify } from '@phala/dcap-qvl';
 import { computeKeysetDigest, computeReportData } from './digest.js';
-import { fromHex, sha256Hex, sha384 } from './crypto.js';
+import { fromHex, toHex, sha256Hex, sha384 } from './crypto.js';
 import { AciFormatError } from './errors.js';
 import type { AttestationReport, Check, ReportVerification, WorkloadKeyset } from './types.js';
 
 /** rt_mr3 lives at this byte offset of a v4 TDX quote: 48-byte header + the
  *  TDReport10 fields up to rt_mr3 (472 bytes). */
 const TDX_RTMR3_OFFSET = 520;
+const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
 
 interface DstackEvent {
   imr: number;
+  event_type: number;
   digest: string;
   event: string;
   event_payload: string;
@@ -112,8 +114,9 @@ function pushEqual(checks: Check[], name: string, actual: string, expected: stri
 /**
  * §9.1 check 4 (dstack policy): the booted docker-compose is the one measured
  * into the report's stated RTMR3. Replays `evidence.event_log` to RTMR3 (SHA-384
- * chain over each `imr==3` digest from a 48-byte-zero start), checks it equals
- * the RTMR3 the raw TDX quote states, then checks `sha256(app_compose)` equals
+ * chain over each `imr==3` digest from a 48-byte-zero start, recomputing and
+ * validating v1 runtime-event digests from their names and payloads), checks
+ * it equals the RTMR3 the raw TDX quote states, then checks `sha256(app_compose)` equals
  * the measured `compose-hash`. Proves the compose against the quote's *stated*
  * RTMR3 only — a genuine, TCB-current quote needs a quote verifier (dcap-qvl.js /
  * the `aci` CLI), and whether the compose is acceptable is caller policy. Throws
@@ -127,7 +130,7 @@ export async function verifyComposeMeasurement(
   if (typeof eventLog !== 'string' || typeof appCompose !== 'string' || typeof quote !== 'string') {
     throw new AciFormatError('evidence needs string event_log, app_compose, and quote');
   }
-  const events = JSON.parse(eventLog) as DstackEvent[];
+  const events = parseDstackEventLog(eventLog);
 
   // The event log must replay to the RTMR3 the raw quote states (v4 TDX offset).
   const replayed = await replayRtmr3(events);
@@ -139,14 +142,15 @@ export async function verifyComposeMeasurement(
   // shape this lookup exists to catch (same rule as the Rust verifier).
   const preSystemReady: DstackEvent[] = [];
   for (const e of events) {
-    if (e.imr !== 3) continue;
+    if (e.imr !== 3 || e.event_type !== DSTACK_RUNTIME_EVENT_TYPE) continue;
     if (e.event === 'system-ready') break;
     if (e.event === 'compose-hash') preSystemReady.push(e);
   }
   const duplicated = preSystemReady.length > 1;
-  const measured = duplicated ? undefined : preSystemReady[0]?.event_payload;
-  const recomputed = (await sha256Hex(new TextEncoder().encode(appCompose))).toLowerCase();
-  const composeOk = !duplicated && measured?.toLowerCase() === recomputed;
+  const measuredEvent = duplicated ? undefined : preSystemReady[0];
+  const measured = measuredEvent ? toHex(eventBytes(measuredEvent.event_payload)) : undefined;
+  const recomputed = await sha256Hex(new TextEncoder().encode(appCompose));
+  const composeOk = !duplicated && measured === recomputed;
 
   const ok = rtmrOk && composeOk;
   return {
@@ -169,13 +173,84 @@ export async function verifyComposeMeasurement(
   };
 }
 
+function parseDstackEventLog(eventLog: string): DstackEvent[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(eventLog);
+  } catch {
+    throw new AciFormatError('dstack event_log is not valid JSON');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new AciFormatError('dstack event_log must be an array');
+  }
+  return parsed.map((value: unknown) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new AciFormatError('invalid dstack event_log entry');
+    }
+    if (Object.hasOwn(value, 'version')) {
+      throw new AciFormatError(
+        'unsupported dstack event log version: only v1 (version absent) is supported',
+      );
+    }
+    const {
+      imr,
+      event_type: eventType,
+      digest,
+      event,
+      event_payload: payload,
+    } = value as Record<string, unknown>;
+    if (
+      typeof imr !== 'number' ||
+      !Number.isInteger(imr) ||
+      imr < 0 ||
+      imr > 0xffffffff ||
+      typeof eventType !== 'number' ||
+      !Number.isInteger(eventType) ||
+      eventType < 0 ||
+      eventType > 0xffffffff ||
+      typeof digest !== 'string' ||
+      typeof event !== 'string' ||
+      typeof payload !== 'string'
+    ) {
+      throw new AciFormatError('invalid dstack event_log entry');
+    }
+    return { imr, event_type: eventType, digest, event, event_payload: payload };
+  });
+}
+
+function eventBytes(hex: string): Uint8Array {
+  // Reject partially parsed bytes while preserving Rust's optional 0x prefix.
+  const value = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (!/^(?:[0-9a-fA-F]{2})*$/.test(value)) {
+    throw new AciFormatError('dstack event digest or payload is not valid hex');
+  }
+  return fromHex(value);
+}
+
 /** Replay the dstack event log's `imr==3` events to RTMR3 (SHA-384 chain over
- *  each digest, zero-padded to 48 bytes). */
+ *  each digest, zero-padded to 48 bytes). Runtime events use the v1 preimage
+ *  defined by dstack/cc-eventlog/src/runtime_events.rs; other event types
+ *  retain their stored digest, matching the Rust verifier. */
 async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array> {
   let mr: Uint8Array = new Uint8Array(48);
   for (const e of events) {
     if (e.imr !== 3) continue;
-    const digest = fromHex(e.digest);
+    let digest = eventBytes(e.digest);
+    if (e.event_type === DSTACK_RUNTIME_EVENT_TYPE) {
+      const name = new TextEncoder().encode(e.event);
+      const payload = eventBytes(e.event_payload);
+      const preimage = new Uint8Array(4 + 1 + name.length + 1 + payload.length);
+      new DataView(preimage.buffer).setUint32(0, e.event_type, true);
+      preimage[4] = 0x3a;
+      preimage.set(name, 5);
+      preimage[5 + name.length] = 0x3a;
+      preimage.set(payload, 6 + name.length);
+      const recomputed = await sha384(preimage);
+      if (digest.length !== recomputed.length || !digest.every((b, i) => b === recomputed[i])) {
+        throw new AciFormatError('dstack runtime event digest does not match event and payload');
+      }
+      digest = recomputed;
+    }
     const buf = new Uint8Array(48 + Math.max(digest.length, 48));
     buf.set(mr);
     buf.set(digest, 48);
