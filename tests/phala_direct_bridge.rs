@@ -34,14 +34,9 @@ fn phala_direct_bridge_is_sound() {
         return;
     }
 
-    // uv leaves a temporary lock file; keep it inside this test's directory.
-    let directory = tempfile::tempdir().unwrap();
     let out = Command::new("uv")
         .args(["run", "python", "scripts/soundness_phala_direct.py"])
         .current_dir(repo_root())
-        .env("TMPDIR", directory.path())
-        .env("TMP", directory.path())
-        .env("TEMP", directory.path())
         .env_remove("PRIVATE_AI_VERIFIER_DIR")
         .output()
         .expect("failed to invoke soundness_phala_direct.py via uv");
