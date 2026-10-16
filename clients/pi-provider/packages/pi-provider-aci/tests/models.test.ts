@@ -44,3 +44,84 @@ test("keeps shared TEE filtering", () => {
     null,
   );
 });
+
+test("applies builtin compat overrides for known upstream quirks", () => {
+  const withOverride = mapAciServerModel(
+    { ...catalogModel, id: "qwen/qwen3.8-27b" },
+    DEFAULT_ACI_CLOUD_CONFIG,
+  );
+  assert.ok(withOverride);
+  assert.equal(withOverride.compat?.supportsDeveloperRole, false);
+  // Models without a builtin entry keep the shared defaults.
+  assert.equal(withOverride.maxTokens, 65_536);
+  assert.equal(withOverride.thinkingLevelMap, undefined);
+
+  const plain = mapAciServerModel(catalogModel, DEFAULT_ACI_CLOUD_CONFIG);
+  assert.ok(plain);
+  assert.equal(plain.compat?.supportsDeveloperRole, true);
+});
+
+test("builtin thinkingLevelMap: off omits reasoning, high remaps to xhigh", () => {
+  const model = mapAciServerModel(
+    { ...catalogModel, id: "phala/qwen3.8-27b-uncensored" },
+    DEFAULT_ACI_CLOUD_CONFIG,
+  );
+  assert.ok(model);
+  assert.deepEqual(model.thinkingLevelMap, {
+    off: null,
+    minimal: "low",
+    high: "xhigh",
+    max: "xhigh",
+  });
+  assert.equal(model.compat?.supportsDeveloperRole, false);
+
+  const gptOss = mapAciServerModel(
+    { ...catalogModel, id: "openai/gpt-oss-120b" },
+    DEFAULT_ACI_CLOUD_CONFIG,
+  );
+  assert.ok(gptOss);
+  assert.deepEqual(gptOss.thinkingLevelMap, {
+    off: null,
+    minimal: "low",
+    xhigh: "high",
+    max: "high",
+  });
+});
+
+test("config overrides patch builtin entries level-by-level", () => {
+  const config = {
+    ...DEFAULT_ACI_CLOUD_CONFIG,
+    models: {
+      ...DEFAULT_ACI_CLOUD_CONFIG.models,
+      overrides: {
+        "phala/qwen3.8-27b-uncensored": {
+          thinkingLevelMap: { high: "medium" },
+          maxTokens: 8192,
+        },
+      },
+    },
+  };
+  const model = mapAciServerModel({ ...catalogModel, id: "phala/qwen3.8-27b-uncensored" }, config);
+  assert.ok(model);
+  // Patched level wins; builtin levels survive the merge.
+  assert.deepEqual(model.thinkingLevelMap, {
+    off: null,
+    minimal: "low",
+    high: "medium",
+    max: "xhigh",
+  });
+  assert.equal(model.maxTokens, 8192);
+  // Non-patch fields keep the builtin value.
+  assert.equal(model.compat?.supportsDeveloperRole, false);
+
+  // Config can also introduce overrides for unknown models.
+  const unknown = mapAciServerModel(catalogModel, {
+    ...DEFAULT_ACI_CLOUD_CONFIG,
+    models: {
+      ...DEFAULT_ACI_CLOUD_CONFIG.models,
+      overrides: { "provider/model": { supportsDeveloperRole: false } },
+    },
+  });
+  assert.ok(unknown);
+  assert.equal(unknown.compat?.supportsDeveloperRole, false);
+});

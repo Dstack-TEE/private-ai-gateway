@@ -13,7 +13,7 @@ import {
   DEFAULT_ACI_PROVIDER_PROFILE,
   resolveAciProviderProfile,
   type AciProviderProfile,
-} from "@phala/aci-provider";
+} from "@phala/aci-provider/profile";
 
 export interface ProviderProfile extends AciProviderProfile {
   /** Footer/status bar key. */
