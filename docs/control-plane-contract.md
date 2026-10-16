@@ -153,6 +153,15 @@ other than `text`, the gateway leaves `messages` unchanged and the upstream
 decides. Anthropic candidates ignore the flag, because the Anthropic adapter
 already moves these messages into `system`.
 
+### `tool_choice: "none"`
+
+For an `openai` candidate, a chat completion body with `tool_choice: "none"`,
+including a `/v1/messages` or `/v1/responses` request converted to chat, is
+forwarded without `tools`. vLLM ignores `none` and still calls or drops a tool
+call ([vllm-project/vllm#55080](https://github.com/vllm-project/vllm/issues/55080)),
+so the gateway removes what the model could call. `tool_choice` itself is kept.
+Anthropic candidates keep their tools, because Anthropic honors `none`.
+
 ### Reasoning policy
 
 `reasoningPolicy` applies to chat completion bodies, including `/v1/responses`

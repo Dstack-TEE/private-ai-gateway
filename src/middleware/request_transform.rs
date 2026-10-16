@@ -371,6 +371,9 @@ fn candidate_params(
     if endpoint != Endpoint::ChatComplete {
         return Ok(params);
     }
+    if candidate.format == ProviderFormat::Openai {
+        strip_tools_when_tool_choice_none(&mut params);
+    }
     // Read request context before the mutable borrow below.
     let derived = chat_template_reasoning_intent(&params, candidate, requested_reasoning);
     let requested_reasoning = requested_reasoning.or(derived.as_ref());
@@ -459,6 +462,18 @@ fn candidate_params(
         (ProviderFormat::Anthropic, _) => return invalid_reasoning(candidate, "has no adapter"),
     }
     Ok(params)
+}
+
+/// `tool_choice: "none"` forbids tool calls, but vLLM ignores it and calls the
+/// tool anyway or drops the turn (vllm-project/vllm#55080). With no `tools` the
+/// model has nothing to call, on any engine. `tool_choice` itself is kept, so a
+/// backend that honours it still sees the caller's intent.
+fn strip_tools_when_tool_choice_none(params: &mut Value) {
+    if params.get("tool_choice").and_then(Value::as_str) == Some("none") {
+        if let Some(object) = params.as_object_mut() {
+            object.remove("tools");
+        }
+    }
 }
 
 /// Merge every `system`/`developer` message into one leading `system` message,
@@ -3648,6 +3663,46 @@ mod tests {
         assert_eq!(bodies[0].1["max_tokens"], 2000);
     }
 
+    #[test]
+    fn tool_choice_none_strips_tools_for_openai_candidates_only() {
+        let tools = json!([{ "type": "function", "function": { "name": "f", "parameters": {} } }]);
+        let openai: RouteCandidate = serde_json::from_value(
+            json!({ "routeId": "v:m", "format": "openai", "engine": "vllm" }),
+        )
+        .unwrap();
+        let body = |candidate: &RouteCandidate, tool_choice: Value| {
+            let params = json!({
+                "model": "m",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "tools": tools,
+                "tool_choice": tool_choice,
+            });
+            build_candidates(
+                &params,
+                Endpoint::ChatComplete,
+                std::slice::from_ref(candidate),
+                None,
+                None,
+            )
+            .unwrap()[0]
+                .1
+                .clone()
+        };
+
+        let none = body(&openai, json!("none"));
+        assert!(none.get("tools").is_none());
+        assert_eq!(none["tool_choice"], json!("none"));
+
+        for choice in [json!("auto"), json!("required")] {
+            assert_eq!(body(&openai, choice)["tools"], tools);
+        }
+
+        // Anthropic has a native `none` and keeps its tools.
+        let anthropic: RouteCandidate =
+            serde_json::from_value(json!({ "routeId": "a:m", "format": "anthropic" })).unwrap();
+        assert!(body(&anthropic, json!("none")).get("tools").is_some());
+    }
+
     fn hoisting_candidate(hoist: bool) -> RouteCandidate {
         let mut fields = json!({ "routeId": "qwen:m", "format": "openai", "engine": "sglang" });
         if hoist {
@@ -3981,9 +4036,10 @@ mod tests {
                 body["reasoning_effort"], "none",
                 "max_tokens {max_tokens}, tool_choice {tool_choice}"
             );
-            // The tool call itself must be untouched by the reasoning shaping.
+            // The tool call itself must be untouched by the reasoning shaping;
+            // only `none` drops the tools (see strip_tools_when_tool_choice_none).
             assert_eq!(body["tool_choice"], tool_choice);
-            assert!(body["tools"].is_array());
+            assert_eq!(body["tools"].is_array(), tool_choice != "none");
         }
     }
 
