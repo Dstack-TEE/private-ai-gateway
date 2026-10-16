@@ -6,13 +6,17 @@
 //! come from `aci-verify`, which Private AI Proxy's own appraisal also uses.
 
 use aci_verify::decode_hex_32;
-use aci_verify::dstack::{dstack_app_id, verify_dstack_compose_measurement};
+use aci_verify::dstack::{
+    dstack_app_id, verify_dstack_compose_measurement, VerifiedReceiptCustody,
+};
 use aci_verify::quote::quote_binds_report_data;
 use aci_verify::report::verify_report_binding;
 use serde_json::Value;
 
 use super::dstack::verify_dstack_kms_receipt_custody;
-use super::quote::{parse_quote_evidence, verify_quote_to_root, QuoteStepError};
+use super::quote::{
+    parse_quote_evidence, tdx_session_material, verify_quote_to_root, QuoteStepError, VerifiedQuote,
+};
 use super::report::{AciReportValidationError, ReportBinding};
 use super::{dcap_report_data, verify_dstack_event_log, AciServiceVerifierPolicy};
 use crate::aci::receipt::ChannelBinding;
@@ -123,6 +127,8 @@ pub struct Appraisal {
     pub results: Vec<CheckResult>,
     pub identity: Option<ReportBinding>,
     pub channel_bindings: Vec<ChannelBinding>,
+    /// Present only after all checks pass with authenticated hardware material.
+    pub session_material: Option<Value>,
 }
 
 impl Appraisal {
@@ -151,7 +157,7 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     // §9.1(2) proves that value is the one the keyset and nonce produce. They
     // are independent, so each reports its own problem.
     let claimed_report_data = decode_hex_32(&report.attestation.report_data_hex);
-    let (quote_result, verified_quote) = match claimed_report_data {
+    let (quote_result, parsed_quote, verified_quote) = match claimed_report_data {
         Ok(claimed) => appraise_quote(&inputs, claimed).await,
         Err(e) => (
             failed_with(
@@ -163,6 +169,7 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
                 ),
             ),
             None,
+            None,
         ),
     };
     results.push(quote_result);
@@ -173,19 +180,32 @@ pub async fn appraise_report(inputs: AppraisalInputs<'_>) -> Result<Appraisal, S
     let keyset = identity.as_ref().map(|b| &b.keyset);
     results.push(appraise_expiry(&inputs, keyset));
 
-    let (provenance_result, app_id) = appraise_provenance(&inputs, verified_quote.as_ref()).await;
+    let (provenance_result, provenance) = appraise_provenance(&inputs, parsed_quote.as_ref()).await;
     results.push(provenance_result);
 
-    results.push(appraise_custody(&inputs, keyset, app_id.as_deref()));
+    let (custody_result, custody) = appraise_custody(
+        &inputs,
+        keyset,
+        provenance.as_ref().and_then(|p| p.app_id.as_deref()),
+    );
+    results.push(custody_result);
 
     let (channel_result, channel_bindings) = appraise_channel(&inputs, keyset);
     results.push(channel_result);
 
     results.sort_by_key(|r| r.id);
+    let session_material = authenticated_session_material(
+        &results,
+        verified_quote.as_ref(),
+        provenance.as_ref(),
+        custody.as_ref(),
+        &report.attestation.source_provenance,
+    );
     Ok(Appraisal {
         results,
         identity,
         channel_bindings,
+        session_material,
     })
 }
 
@@ -227,7 +247,9 @@ fn unreached(id: CheckId, why: &'static str) -> CheckResult {
 
 /// §9.1(2). The `nonce:null` form proves binding but not freshness, so it is
 /// reported as unevaluable rather than passed.
-fn appraise_binding(inputs: &AppraisalInputs<'_>) -> (CheckResult, Option<ReportBinding>) {
+pub(super) fn appraise_binding(
+    inputs: &AppraisalInputs<'_>,
+) -> (CheckResult, Option<ReportBinding>) {
     let binding = match verify_report_binding(inputs.report, inputs.nonce) {
         Ok(binding) => binding,
         Err(e) => {
@@ -269,13 +291,17 @@ fn appraise_binding(inputs: &AppraisalInputs<'_>) -> (CheckResult, Option<Report
 async fn appraise_quote(
     inputs: &AppraisalInputs<'_>,
     claimed_report_data: [u8; 32],
-) -> (CheckResult, Option<dcap_qvl::quote::Report>) {
+) -> (
+    CheckResult,
+    Option<dcap_qvl::quote::Report>,
+    Option<VerifiedQuote>,
+) {
     let evidence = &inputs.report.attestation.evidence;
     let (raw, quote) = match parse_quote_evidence(evidence) {
         Ok(parsed) => parsed,
         Err(e) => {
             let detail = format!("{e} (hardware evidence is required)");
-            return (failed_with(CheckId::Quote, e.into(), detail), None);
+            return (failed_with(CheckId::Quote, e.into(), detail), None, None);
         }
     };
     let explain = inputs.explain.then(|| {
@@ -293,8 +319,10 @@ async fn appraise_quote(
         return (
             failed(CheckId::Quote, e.into()).with_explain(explain),
             Some(quote.report),
+            None,
         );
     }
+    let mut authenticated = None;
     let result = match &inputs.quote {
         // Fail closed: verifying live and unable to reach the vendor root
         // means the quote was never checked — the one thing a forged service
@@ -307,13 +335,14 @@ async fn appraise_quote(
         )
         .await
         {
-            Ok(verified) => pass(
-                CheckId::Quote,
-                format!(
+            Ok(verified) => {
+                let result = pass(CheckId::Quote, format!(
                     "{} quote verified (TCB status {}) and binds report_data; collateral from {pccs_url}",
                     verified.tee_type, verified.status
-                ),
-            ),
+                ));
+                authenticated = Some(verified);
+                result
+            }
             Err(e) => failed(CheckId::Quote, e.into()),
         },
         QuoteSource::Offline { reason } => unevaluable(
@@ -322,10 +351,17 @@ async fn appraise_quote(
             *reason,
         ),
     };
-    (result.with_explain(explain), Some(quote.report))
+    (
+        result.with_explain(explain),
+        Some(quote.report),
+        authenticated,
+    )
 }
 
-fn appraise_expiry(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
+pub(super) fn appraise_expiry(
+    inputs: &AppraisalInputs<'_>,
+    keyset: Option<&WorkloadKeyset>,
+) -> CheckResult {
     let Some(keyset) = keyset else {
         return unreached(
             CheckId::Expiry,
@@ -354,11 +390,16 @@ fn appraise_expiry(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>
     }
 }
 
-/// §9.1(4). Returns the RTMR3-measured app-id, which §9.1(5) anchors on.
+pub(super) struct MeasuredProvenance {
+    pub compose_hash: String,
+    pub app_id: Option<Vec<u8>>,
+}
+
+/// §9.1(4). Retains measured values separately from the diagnostic text.
 pub(super) async fn appraise_provenance(
     inputs: &AppraisalInputs<'_>,
     quote_report: Option<&dcap_qvl::quote::Report>,
-) -> (CheckResult, Option<Vec<u8>>) {
+) -> (CheckResult, Option<MeasuredProvenance>) {
     let evidence = &inputs.report.attestation.evidence;
     let provenance: &SourceProvenance = &inputs.report.attestation.source_provenance;
     let declared = match (
@@ -441,68 +482,92 @@ pub(super) async fn appraise_provenance(
             ),
         )
     };
-    (result.with_explain(explain), app_id)
+    let material = result.passed().then_some(MeasuredProvenance {
+        compose_hash: measured,
+        app_id,
+    });
+    (result.with_explain(explain), material)
 }
 
-fn appraise_custody(
+pub(super) fn appraise_custody(
     inputs: &AppraisalInputs<'_>,
     keyset: Option<&WorkloadKeyset>,
     app_id: Option<&[u8]>,
-) -> CheckResult {
+) -> (CheckResult, Option<VerifiedReceiptCustody>) {
     let subject = keyset.and_then(|k| k.subject.as_deref()).unwrap_or("null");
     let policy = match &inputs.custody {
         CustodyEvidence::Unimplemented { reason } => {
-            return unevaluable(
-                CheckId::Custody,
-                format!("{reason}; subject: {subject} (no policy constraints applied)"),
-                "custody policy not implemented",
-            )
+            return (
+                unevaluable(
+                    CheckId::Custody,
+                    format!("{reason}; subject: {subject} (no policy constraints applied)"),
+                    "custody policy not implemented",
+                ),
+                None,
+            );
         }
         CustodyEvidence::DstackKms { policy } => policy,
     };
     let Some(keyset) = keyset else {
-        return unreached(
-            CheckId::Custody,
-            "no established keyset to check custody for",
+        return (
+            unreached(
+                CheckId::Custody,
+                "no established keyset to check custody for",
+            ),
+            None,
         );
     };
     let Some(app_id) = app_id else {
-        return unreached(
-            CheckId::Custody,
-            "the measured app-id the custody chain anchors on was never established",
+        return (
+            unreached(
+                CheckId::Custody,
+                "the measured app-id the custody chain anchors on was never established",
+            ),
+            None,
         );
     };
-    if let Err(e) = verify_dstack_kms_receipt_custody(
+    let custody = match verify_dstack_kms_receipt_custody(
         &inputs.report.attestation.evidence,
         keyset,
         app_id,
         policy,
     ) {
-        let detail = format!("key custody did not verify: {e}");
-        return failed_with(
-            CheckId::Custody,
-            FailureCause::Evidence(e.to_string()),
-            detail,
-        );
-    }
+        Ok(custody) => custody,
+        Err(e) => {
+            return (
+                failed_with(
+                    CheckId::Custody,
+                    FailureCause::Evidence(e.to_string()),
+                    format!("key custody did not verify: {e}"),
+                ),
+                None,
+            )
+        }
+    };
     // The policy anchor compares against the measured app-id, not the
     // report's own claims.
     if !policy.accepts_measured(keyset, &inputs.report.attestation.source_provenance, app_id) {
-        return failed_with(
-            CheckId::Custody,
-            FailureCause::Policy(format!(
-                "subject {subject} is not acceptable to the verifier policy"
-            )),
-            format!("subject {subject} is not acceptable to the verifier policy"),
+        return (
+            failed_with(
+                CheckId::Custody,
+                FailureCause::Policy(format!(
+                    "subject {subject} is not acceptable to the verifier policy"
+                )),
+                format!("subject {subject} is not acceptable to the verifier policy"),
+            ),
+            None,
         );
     }
-    pass(
-        CheckId::Custody,
-        format!("keys held under the dstack KMS chain; subject {subject} accepted"),
+    (
+        pass(
+            CheckId::Custody,
+            format!("keys held under the dstack KMS chain; subject {subject} accepted"),
+        ),
+        Some(custody),
     )
 }
 
-fn appraise_channel(
+pub(super) fn appraise_channel(
     inputs: &AppraisalInputs<'_>,
     keyset: Option<&WorkloadKeyset>,
 ) -> (CheckResult, Vec<ChannelBinding>) {
@@ -594,4 +659,46 @@ fn appraise_channel(
         )
     });
     (result.with_explain(explain), none)
+}
+
+pub(super) fn authenticated_session_material(
+    results: &[CheckResult],
+    quote: Option<&VerifiedQuote>,
+    provenance: Option<&MeasuredProvenance>,
+    custody: Option<&VerifiedReceiptCustody>,
+    published: &SourceProvenance,
+) -> Option<Value> {
+    if [
+        CheckId::Quote,
+        CheckId::Binding,
+        CheckId::Expiry,
+        CheckId::Provenance,
+        CheckId::Custody,
+        CheckId::Channel,
+    ]
+    .iter()
+    .any(|id| !results.iter().any(|r| r.id == *id && r.passed()))
+        || results.iter().any(|r| !r.passed())
+    {
+        return None;
+    }
+    let quote = quote?;
+    let provenance = provenance?;
+    let custody = custody?;
+    let tdx = tdx_session_material(&quote.report)?;
+    let bytes = crate::aci::digest::jcs_bytes(&tdx).ok()?;
+    let mut advisories = quote.advisory_ids.clone();
+    advisories.sort();
+    advisories.dedup();
+    Some(serde_json::json!({
+        "session_material_version": "aci-service/1",
+        "tdx_report_sha256": crate::aci::digest::sha256_hex(&bytes),
+        "tdx_report": tdx,
+        "tcb_status": quote.status,
+        "advisory_ids": advisories,
+        "measured_compose_hash": provenance.compose_hash,
+        "measured_app_id": hex::encode(provenance.app_id.as_ref()?),
+        "published_source_provenance": published,
+        "receipt_key_custody": custody,
+    }))
 }

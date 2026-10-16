@@ -44,10 +44,11 @@ Two deadlines govern a stored session:
   its lease. A retained expired session remains fetchable but cannot authorize
   another admission.
 
-For non-Chutes events with several bindings, admission filters by pins and
-selects one alternative in canonical JSON order before forwarding. The receipt
-cites the binding actually enforced. Chutes keeps all admitted instances until
-the backend reports which instance served, then releases the sibling leases.
+Admission builds complete logical groups before filtering by pins. One
+origin's TLS alternatives share one session, and the backend receives every
+accepted key in the selected group. The receipt cites that group whichever
+key connects. Chutes keeps all admitted instances until the backend reports
+which instance served, then releases the sibling leases.
 A missing or unmatched Chutes instance identifier is an internal error.
 
 The audit trail runs:
@@ -61,7 +62,8 @@ request -> receipt (X-Receipt-Id)
 ## Reviewed material and snapshot evidence
 
 Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
-`phala-direct/1`, `chutes/1` (per instance), `tinfoil/1` and `privatemode/1`
+`phala-direct/1`, `chutes/1` (per instance), `tinfoil/1`, `privatemode/1` and
+`aci-service/1`
 claims require the matching provider type and built-in verifier ID. Missing,
 unknown, mismatched or incomplete material remains evidence-sensitive. ArmetAI,
 SecretAI (both TDX and SNP), generic external verifiers and legacy Chutes outputs
@@ -77,6 +79,26 @@ report format, hex field lengths and recomputed report digest. Tinfoil retains
 its official measured code, enclave, HPKE key and optional hardware material.
 Privatemode retains the observed manifest digest and `manifest_observed_at`;
 this observation is not bound to the active inference secret.
+
+ACI-service identity uses the accepted `ReportBinding` digest of the original
+keyset JSON, including unknown members, plus explicit `subject` (string or null)
+and `keyset_not_after`. Its `aci-service/1` claims retain the authenticated TDX
+projection, DCAP TCB/advisories, measured compose/app ID, published source
+provenance and normalized receipt-custody identities (without signatures).
+Provenance is published metadata, not independently rebuilt source. Receipt-key
+derivation still relies on measured workload code; other key roles are not
+thereby authenticated. Failed, offline or unevaluable appraisal cannot emit the
+stable profile; parsed diagnostics and human-readable check details never supply
+it. Session expiry is capped at the accepted keyset's `not_after`, independently
+of the verifier cache cap, and admission at that deadline is rejected.
+
+TLS alternatives for one verified origin form one logical session. Bindings are
+sorted by JCS and exact duplicates removed before sealing and pin filtering.
+A pin authorizes the complete group; adding/removing a key changes its material.
+Chutes retains one session per instance, rejects conflicting keys for an instance,
+and cites the instance that served the response. Mixed-origin and other undefined
+multi-binding shapes fail closed. Listing uses this same grouping path from
+current cached verification, without network verification or historical entries.
 
 Equal reviewed material reuses an unexpired document byte for byte, including
 its establishing evidence, without extending validity. Binding, identity,
@@ -107,6 +129,14 @@ fetch, audit and explicitly accept the replacement. Existing policy-based refres
 may do so only under its existing policy. There is no unpinned downgrade. Rollback
 to the old binary may select an old fingerprint or seal a legacy session; clients
 must explicitly accept that replacement too. Stored wire documents stay compatible.
+
+Stage 3 adds one ACI-service identity/profile migration and replaces former
+multi-key singleton sessions with one complete group. Old records remain
+retrievable but their singleton IDs cannot authorize a subset of the new group.
+Singleton non-ACI Stage 2 fingerprints and unchanged Chutes instance IDs remain
+stable. Restart reuse requires current verification of the complete group.
+Rollback preserves readable history but requires explicit audit and repinning;
+there are no ID aliases or pin-policy exceptions.
 
 ## Preflight survey
 

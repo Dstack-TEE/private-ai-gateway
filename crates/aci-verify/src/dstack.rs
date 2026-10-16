@@ -188,22 +188,46 @@ pub enum KeyCustodyError {
     KmsSignatureChain(String),
 }
 
-/// The dstack KMS chain behind the receipt key (§9.1(5)): the custody entry
-/// must name a receipt key the keyset attests, and its signature chain must
-/// lead from the measured `app_id` to a KMS root. Returns that root as a
-/// compressed secp256k1 public key in lowercase hex; whether it is accepted
-/// is the caller's policy.
-///
-/// Residual gap (conformance gaps item 16): the chain signs the evidence's
-/// self-asserted `kms_public_key`, and the link from that k256 scalar to the
-/// published Ed25519 receipt key rests on the measured workload code — which
-/// is why the policy anchor must itself be measured.
+/// Public identities established by the receipt custody-chain check. This does
+/// not prove the Ed25519 derivation independently of measured workload code.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VerifiedReceiptCustody {
+    pub provider: String,
+    pub receipt_public_key: String,
+    pub purpose: String,
+    pub kms_public_key: String,
+    pub app_public_key: String,
+    pub root_public_key: String,
+}
+
+/// Compatibility wrapper returning only the recovered root. The caller must
+/// still apply its accepted-root policy.
 #[must_use = "the recovered KMS root must be checked against the custody policy"]
 pub fn verify_dstack_kms_receipt_chain(
     evidence: &Value,
     keyset: &WorkloadKeyset,
     app_id: &[u8],
 ) -> Result<String, KeyCustodyError> {
+    verify_dstack_kms_receipt_custody(evidence, keyset, app_id)
+        .map(|custody| custody.root_public_key)
+}
+
+/// The dstack KMS chain behind the receipt key (§9.1(5)): the custody entry
+/// must name a receipt key the keyset attests, and its signature chain must
+/// lead from the measured `app_id` to a KMS root. Returns normalized public
+/// identities, with secp256k1 keys in compressed lowercase hex; whether the
+/// recovered root is accepted is the caller's policy.
+///
+/// Residual gap (conformance gaps item 16): the chain signs the evidence's
+/// self-asserted `kms_public_key`, and the link from that k256 scalar to the
+/// published Ed25519 receipt key rests on the measured workload code — which
+/// is why the policy anchor must itself be measured.
+#[must_use = "the recovered KMS root must be checked against the custody policy"]
+pub fn verify_dstack_kms_receipt_custody(
+    evidence: &Value,
+    keyset: &WorkloadKeyset,
+    app_id: &[u8],
+) -> Result<VerifiedReceiptCustody, KeyCustodyError> {
     let key_custody = evidence
         .get("key_custody")
         .ok_or(KeyCustodyError::MissingKeyCustody)?;
@@ -287,7 +311,16 @@ pub fn verify_dstack_kms_receipt_chain(
     .concat();
     let root_public_key = recover_k256_public_key(&root_message, &app_signature)
         .map_err(KeyCustodyError::KmsSignatureChain)?;
-    Ok(hex::encode(root_public_key.to_sec1_bytes()))
+    Ok(VerifiedReceiptCustody {
+        provider: provider.to_string(),
+        receipt_public_key: hex::encode(
+            decode_hex(public_key).map_err(KeyCustodyError::InvalidKeyCustody)?,
+        ),
+        purpose: purpose.to_string(),
+        kms_public_key: kms_public_key_compressed,
+        app_public_key: hex::encode(app_public_key.to_sec1_bytes()),
+        root_public_key: hex::encode(root_public_key.to_sec1_bytes()),
+    })
 }
 
 fn recover_k256_public_key(message: &[u8], signature: &[u8]) -> Result<K256VerifyingKey, String> {
@@ -323,6 +356,107 @@ pub fn compressed_k256_public_key_hex(public_key_hex: &str) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn signed_custody() -> (WorkloadKeyset, Value, Vec<u8>, String, String, String) {
+        use aci_protocol::types::KeyedPublicKey;
+        use k256::ecdsa::SigningKey;
+        let key = |byte| SigningKey::from_slice(&[byte; 32]).unwrap();
+        let root = key(1);
+        let app = key(2);
+        let kms = key(3);
+        let app_id = vec![4; 20];
+        let public = |key: &SigningKey| hex::encode(key.verifying_key().to_sec1_bytes());
+        let sign = |key: &SigningKey, message: &[u8]| {
+            let (signature, recovery) = key
+                .sign_digest_recoverable(Keccak256::new_with_prefix(message))
+                .unwrap();
+            let mut bytes = signature.to_vec();
+            bytes.push(recovery.to_byte());
+            hex::encode(bytes)
+        };
+        let purpose = "aci.receipt.ed25519.v1";
+        let app_message = [
+            b"dstack-kms-issued:".as_slice(),
+            &app_id,
+            app.verifying_key().to_sec1_bytes().as_ref(),
+        ]
+        .concat();
+        let keyset = WorkloadKeyset {
+            subject: None,
+            not_after: 1000,
+            receipt_signing_keys: vec![KeyedPublicKey {
+                key_id: "receipt".into(),
+                algo: "ed25519".into(),
+                public_key_hex: "11".repeat(32),
+            }],
+            e2ee_public_keys: vec![],
+            tls_public_keys: vec![],
+        };
+        let evidence = serde_json::json!({"key_custody": {
+            "provider": "dstack-kms", "keys": [{
+                "role": "receipt", "public_key": "11".repeat(32), "purpose": purpose,
+                // Normalization must agree with the compressed signed value.
+                "kms_public_key": hex::encode(kms.verifying_key().to_encoded_point(false).as_bytes()),
+                "signature_chain": [sign(&app, format!("{purpose}:{}", public(&kms)).as_bytes()),
+                    sign(&root, &app_message)],
+            }],
+        }});
+        (
+            keyset,
+            evidence,
+            app_id,
+            public(&kms),
+            public(&app),
+            public(&root),
+        )
+    }
+
+    #[test]
+    fn structured_receipt_custody_recovers_signed_identities_and_preserves_wrapper() {
+        let (keyset, evidence, app_id, kms, app, root) = signed_custody();
+        let custody = verify_dstack_kms_receipt_custody(&evidence, &keyset, &app_id).unwrap();
+        assert_eq!(
+            custody,
+            VerifiedReceiptCustody {
+                provider: "dstack-kms".into(),
+                receipt_public_key: "11".repeat(32),
+                purpose: "aci.receipt.ed25519.v1".into(),
+                kms_public_key: kms,
+                app_public_key: app,
+                root_public_key: root.clone(),
+            }
+        );
+        assert_eq!(
+            verify_dstack_kms_receipt_chain(&evidence, &keyset, &app_id).unwrap(),
+            root
+        );
+        assert!(serde_json::to_value(custody)
+            .unwrap()
+            .get("signature_chain")
+            .is_none());
+    }
+
+    #[test]
+    fn both_custody_entry_points_reject_invalid_chains() {
+        let (keyset, evidence, app_id, ..) = signed_custody();
+        for (field, value) in [
+            ("signature_chain", serde_json::json!(["00", "00"])),
+            ("purpose", serde_json::json!("other-purpose")),
+            ("public_key", serde_json::json!("22".repeat(32))),
+            ("kms_public_key", serde_json::json!("invalid")),
+        ] {
+            let mut bad = evidence.clone();
+            bad["key_custody"]["keys"][0][field] = value;
+            assert!(
+                verify_dstack_kms_receipt_custody(&bad, &keyset, &app_id).is_err(),
+                "{field}"
+            );
+            assert!(
+                verify_dstack_kms_receipt_chain(&bad, &keyset, &app_id).is_err(),
+                "{field}"
+            );
+        }
+    }
 
     fn runtime_event(event: &str, payload: &[u8]) -> DstackEventLog {
         let mut event = DstackEventLog {

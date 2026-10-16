@@ -958,6 +958,8 @@ fi"#
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
+        identity: None,
+        session_material: None,
         expires_at: tokio::time::Instant::now(),
         not_after: u64::MAX,
         evidence: Some(json!({
@@ -1002,6 +1004,8 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     )
     .unwrap()
     .with_cached(CachedAciServiceVerification {
+        identity: None,
+        session_material: None,
         expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
         not_after: u64::MAX,
         evidence: None,
@@ -1434,7 +1438,10 @@ async fn compose_measurement_passes_and_an_allowlist_pins_the_measured_value() {
     let (result, app_id) =
         appraise_provenance(&provenance_inputs(&report, &[]), Some(&quote_report)).await;
     assert!(result.passed(), "{}", result.detail);
-    assert!(app_id.is_none(), "this log carries no app-id event");
+    assert!(
+        app_id.unwrap().app_id.is_none(),
+        "this log carries no app-id event"
+    );
 
     // An allowlist pins the measured value: the real hash passes, any other
     // list fails even though the measurement itself verified.
