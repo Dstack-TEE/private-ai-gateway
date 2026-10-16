@@ -193,7 +193,7 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
     });
   }
 
-  await t.test('receipt and session fetches are bounded with and without Content-Length', async (t) => {
+  await t.test('receipt and session size caps and deadlines hold with and without Content-Length', { timeout: 5000 }, async (t) => {
     // Reuse the recorded nonce so the real quote and binding checks pass offline.
     const nonceMock = t.mock.method(crypto, 'randomBytes', () => Buffer.from(recorded.nonce, 'hex'));
     syncBuiltinESMExports();
@@ -203,27 +203,37 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
     });
     const chunk = new Uint8Array(1024 * 1024).fill(32);
     for (const artifact of ['receipts', 'sessions']) {
-      for (const withLength of [false, true]) {
+      for (const { withLength, stalled } of [
+        { withLength: false, stalled: false },
+        { withLength: true, stalled: false },
+        { withLength: false, stalled: true },
+        { withLength: true, stalled: true },
+      ]) {
         let cancelled = false;
+        let requestSignal: AbortSignal | undefined;
         const connection = await connectAciWithTransport({
           baseURL: 'https://tee.redpill.ai',
           pccsUrl: options.pccsUrl,
           bootstrapFetch: async () => Response.json(recorded.report),
+          timeoutMs: 100,
         }, ({ spkiPins }) => ({
           observedSpkiSha256: () => spkiPins[0],
           close: async () => {},
           fetch: async (input) => {
-            const path = new Request(input).url;
+            const request = new Request(input);
+            const path = request.url;
             if (path.includes(`/${artifact}/`)) {
+              requestSignal = request.signal;
               let remaining = 34;
               return new Response(new ReadableStream<Uint8Array>({
                 pull(controller) {
+                  if (stalled) return;
                   if (remaining-- > 0) controller.enqueue(chunk);
                   else controller.close();
                 },
                 cancel() { cancelled = true; },
               }), withLength ? {
-                headers: { 'content-length': String(MAX_ATTESTATION_RESPONSE_BYTES + 1) },
+                headers: { 'content-length': stalled ? '100' : String(MAX_ATTESTATION_RESPONSE_BYTES + 1) },
               } : {});
             }
             if (path.includes('/receipts/')) return Response.json(ENVELOPE);
@@ -238,13 +248,14 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
           if (artifact === 'receipts') {
             await assert.rejects(connection.verifyReceipt(), (error: unknown) =>
               error instanceof AciConnectionError && error.code === 'receipt_fetch' &&
-              /response exceeds maximum byte size/.test(error.message));
+              (stalled ? /timed out/ : /response exceeds maximum byte size/).test(error.message));
           } else {
             const audit = await connection.verifyReceipt();
             assert.equal(audit.transcript.verdict.verified, false);
             assert.equal(audit.transcript.lines.find((line) => line.id === 'upstream-2')?.status, 'fail');
           }
-          assert.equal(cancelled, true, `${artifact}, Content-Length: ${withLength}`);
+          assert.equal(cancelled, true, `${artifact}, Content-Length: ${withLength}, stalled: ${stalled}`);
+          if (stalled) assert.equal(requestSignal?.aborted, true);
         } finally {
           await connection.close();
         }

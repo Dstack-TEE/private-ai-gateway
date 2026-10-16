@@ -110,6 +110,8 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
 
+Attestation, receipt and session HTTP deadlines default to 10 seconds; set `timeoutMs` in `verifyService` or `connectAci` options to override.
+
 ### Runtime SDK and agent frameworks
 
 Node and Bun applications establish the same instance-scoped, SPKI-pinned

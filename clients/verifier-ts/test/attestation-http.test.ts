@@ -25,7 +25,7 @@ test('aborting a stalled body cancels the bounded reader', async () => {
   assert.equal(response.body?.locked, false);
 });
 
-test('attestation deadline remains active after headers arrive', { timeout: 2000 }, async (t) => {
+test('connectAci and verifyService deadlines remain active after headers arrive', { timeout: 2000 }, async (t) => {
   let headersSent = false;
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
@@ -40,10 +40,18 @@ test('attestation deadline remains active after headers arrive', { timeout: 2000
   await once(server, 'listening');
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
+  const fetchImpl = Object.assign(
+    (_input: RequestInfo | URL, init?: RequestInit) => fetch(`http://127.0.0.1:${address.port}`, init),
+    { preconnect: globalThis.fetch.preconnect },
+  );
   await assert.rejects(connectAci({
     baseURL: 'https://gateway.example',
     timeoutMs: 100,
-    bootstrapFetch: (_input, init) => fetch(`http://127.0.0.1:${address.port}`, init),
+    bootstrapFetch: fetchImpl,
+  }), /timed out/);
+  await assert.rejects(verifyService('https://gateway.example', {
+    timeoutMs: 100,
+    fetchImpl,
   }), /timed out/);
   assert.equal(headersSent, true);
 });

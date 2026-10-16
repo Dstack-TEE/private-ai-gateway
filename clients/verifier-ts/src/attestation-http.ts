@@ -4,6 +4,29 @@ import { AciError } from './errors.js';
 // the 4 MiB compose and 1 MiB log; production reports are about 54 KB and the
 // largest of 21 measured production sessions was 1,428,775 bytes.
 export const MAX_ATTESTATION_RESPONSE_BYTES = 32 * 1024 * 1024;
+export const DEFAULT_TIMEOUT_MS = 10_000;
+
+/** One deadline for fetching headers and consuming the response body. */
+export async function timedFetch<T>(
+  fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  consume: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new AciError('timeoutMs must be a positive number');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new AciError('ACI request timed out')), timeoutMs);
+  timeout.unref?.();
+  try {
+    const response = await fetchImpl(input, { ...init, signal: controller.signal });
+    return await consume(response, controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 /** Bound response bytes before UTF-8 and JSON decoding. */
 export async function readAciJson(response: Response, signal?: AbortSignal): Promise<unknown> {

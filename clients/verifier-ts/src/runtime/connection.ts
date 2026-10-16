@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readAciJson } from '../attestation-http.js';
+import { DEFAULT_TIMEOUT_MS, readAciJson, timedFetch } from '../attestation-http.js';
 import { AciError } from '../errors.js';
 
 import {
@@ -23,7 +23,6 @@ import {
   type VerifiedAciIdentity,
 } from './types.js';
 
-const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECEIPT_HISTORY_SIZE = 32;
 
 interface InternalExchange extends RecordedAciExchange {
@@ -310,16 +309,24 @@ class RuntimeAciConnection implements AciConnection {
   private async fetchJsonArtifact<T extends object>(path: string, authorization?: string): Promise<T> {
     const root = new URL(this.attestationURL);
     root.pathname = root.pathname.replace(/attestation$/, path);
-    const response = await this.secureFetch(root, {
-      headers: {
-        Accept: 'application/json',
-        ...(authorization ? { Authorization: authorization } : {}),
+    const value = await timedFetch(
+      this.fetch,
+      root,
+      {
+        headers: {
+          Accept: 'application/json',
+          ...(authorization ? { Authorization: authorization } : {}),
+        },
       },
-    });
-    if (!response.ok) {
-      throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
-    }
-    const value = await readAciJson(response).catch((error: unknown) => {
+      this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      async (response, signal) => {
+        if (!response.ok) {
+          throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
+        }
+        return readAciJson(response, signal);
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof AciConnectionError) throw error;
       throw new AciConnectionError(
         'receipt_fetch',
         error instanceof AciError ? error.message : 'ACI artifact endpoint returned invalid JSON',
@@ -644,7 +651,16 @@ async function fetchAttestation(
         );
       }
     },
-  );
+  ).catch((error: unknown) => {
+    if (error instanceof AciConnectionError) throw error;
+    throw new AciConnectionError(
+      'attestation_fetch',
+      error instanceof AciError
+        ? error.message
+        : `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  });
 }
 
 async function probePinnedChannel(
@@ -672,35 +688,16 @@ async function probePinnedChannel(
       }
       await response.body?.cancel();
     },
-  );
-}
-
-async function timedFetch<T>(
-  fetchImpl: AciFetch,
-  input: RequestInfo | URL,
-  init: RequestInit,
-  timeoutMs: number,
-  consume: (response: Response, signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new AciError('ACI request timed out')), timeoutMs);
-  timeout.unref();
-  try {
-    const response = await fetchImpl(input, { ...init, signal: controller.signal });
-    return await consume(response, controller.signal);
-  } catch (error) {
+  ).catch((error: unknown) => {
     if (error instanceof AciConnectionError) throw error;
     throw new AciConnectionError(
       'attestation_fetch',
-      `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
+      error instanceof AciError
+        ? error.message
+        : `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
-  } finally {
-    clearTimeout(timeout);
-  }
+  });
 }
 
 function tlsPinsForHost(keyset: WorkloadKeyset, hostname: string): string[] {

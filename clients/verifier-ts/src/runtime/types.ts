@@ -61,7 +61,7 @@ export interface ConnectAciOptions {
   policy?: AciPolicy;
   /** Gateway serving constraints applied to JSON POST bodies. */
   serving?: AciServingPolicy;
-  /** Attestation/PCCS request timeout, including the attestation body. Default: 10 seconds. */
+  /** Attestation/receipt/session request timeout, including bodies. Default: 10 seconds. */
   timeoutMs?: number;
   pccsUrl?: string;
   /** Fetch used only to bootstrap attestation over normal CA-validated TLS. */
