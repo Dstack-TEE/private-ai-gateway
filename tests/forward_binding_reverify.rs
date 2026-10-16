@@ -71,8 +71,8 @@ impl RecordingVerifier {
     }
 }
 
-/// Returns one binding for the first two verifications (seed + pinned initial
-/// attempt), then a rotated binding for the refresh after a mismatch.
+/// Returns a two-key TLS group for seed + pinned initial admission, then
+/// replaces one member on refresh. Sharing a key must not authorize the new group.
 #[derive(Default)]
 struct RotatingVerifier {
     verify_calls: AtomicUsize,
@@ -82,13 +82,19 @@ struct RotatingVerifier {
 impl UpstreamVerifier for RotatingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let call = self.verify_calls.fetch_add(1, Ordering::SeqCst);
-        let byte = if call < 2 { "aa" } else { "bb" };
+        let byte = if call < 2 { "bb" } else { "cc" };
         UpstreamVerifiedEvent {
             verifier_id: "rotating-verifier/v1".to_string(),
-            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
-                origin: UPSTREAM_ORIGIN.to_string(),
-                spki_sha256: byte.repeat(32),
-            }],
+            channel_bindings: vec![
+                ChannelBinding::TlsSpkiSha256 {
+                    origin: UPSTREAM_ORIGIN.to_string(),
+                    spki_sha256: "aa".repeat(32),
+                },
+                ChannelBinding::TlsSpkiSha256 {
+                    origin: UPSTREAM_ORIGIN.to_string(),
+                    spki_sha256: byte.repeat(32),
+                },
+            ],
             ..event_from_request(&request, VerificationResult::Verified)
         }
     }
@@ -388,7 +394,7 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
     );
 }
 #[tokio::test]
-async fn reverify_cannot_escape_the_requested_aci_session() {
+async fn reverify_cannot_escape_the_requested_aci_group() {
     let backend = Arc::new(MismatchingBackend::mismatch_times(0));
     let verifier = Arc::new(RotatingVerifier::default());
     let service = Arc::new(
@@ -509,4 +515,63 @@ async fn successful_retry_cites_its_own_admission() {
         }]
     );
     assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn reverify_accepts_a_replacement_group_only_with_its_explicit_id() {
+    let backend = Arc::new(MismatchingBackend::mismatch_times(0));
+    let verifier = Arc::new(RotatingVerifier::default());
+    let service = AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        backend.clone(),
+        verifier.clone(),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let cited = |receipt: &private_ai_gateway::aci::receipt::SignedReceipt| {
+        receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "upstream.verified")
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let original = cited(
+        &service
+            .forward_chat_completion_request(forward_request(None))
+            .await
+            .unwrap()
+            .receipt,
+    );
+    verifier.verify_calls.store(2, Ordering::SeqCst);
+    let replacement = cited(
+        &service
+            .forward_chat_completion_request(forward_request(None))
+            .await
+            .unwrap()
+            .receipt,
+    );
+    assert_ne!(original, replacement);
+    verifier.verify_calls.store(1, Ordering::SeqCst);
+    backend.set_mismatches(1);
+    let mut request = forward_request(None);
+    request.aci_session_ids = vec![original, replacement.clone()];
+    let result = service
+        .forward_chat_completion_request(request)
+        .await
+        .unwrap();
+    assert_eq!(cited(&result.receipt), replacement);
+    let document = service.get_attested_session(&replacement).unwrap();
+    assert_eq!(document.document().channel_binding.len(), 2);
+    assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        4,
+        "two seeds plus both admitted retry attempts"
+    );
 }

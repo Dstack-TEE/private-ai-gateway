@@ -3453,3 +3453,239 @@ async fn privatemode_manifest_observation_time_is_material() {
     *h.verifier.0.lock().unwrap() = event;
     assert_ne!(h.listed()[0].session_id(), first);
 }
+
+fn admission_http(service: AciService, provider: &str) -> Harness {
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": provider, "base_url": "https://upstream.test",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[tokio::test]
+async fn tls_group_pins_keep_all_alternatives_and_reject_legacy_singletons() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".into());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
+    event.provider_claims = Some(session_profile("near-ai"));
+    let a = event.channel_bindings[0].clone();
+    let b = ChannelBinding::TlsSpkiSha256 {
+        origin: "https://upstream.test".into(),
+        spki_sha256: "22".repeat(32),
+    };
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "near-ai");
+    let singleton = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    event.channel_bindings = vec![b.clone(), a.clone(), b.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["channel_binding"].as_array().unwrap().len(), 2);
+    let group = listed[0]["session_id"].as_str().unwrap().to_string();
+    assert_ne!(group, singleton);
+    event.channel_bindings = vec![a.clone(), b.clone()];
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"fresh round")).unwrap());
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], group);
+    assert_eq!(
+        pin_session(&h, &singleton).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert!(backend.events.lock().unwrap().is_empty());
+    for key in ["11", "22"] {
+        *backend.tls_key.lock().unwrap() = Some(key.repeat(32));
+        let response = pin_session(&h, &group).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(cited_session(&h, &response), group);
+        assert_eq!(
+            backend
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .channel_bindings,
+            vec![a.clone(), b.clone()]
+        );
+    }
+    // Removing a member restores the original singleton material. A group ID
+    // cannot authorize the new smaller channel, even though it shares a key.
+    event.channel_bindings = vec![a];
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], singleton);
+    assert_eq!(
+        pin_session(&h, &group).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn chutes_groups_pin_instances_cite_the_served_instance_and_survive_sibling_churn() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("chutes".into());
+    event.verifier_id = "private-ai-verifier/chutes/v1".into();
+    let own = session_profile("chutes");
+    let mut fleet = serde_json::json!({});
+    for key in [
+        "session_material_version",
+        "trust_boundary",
+        "evidence_scope",
+        "chute_id",
+        "canonical_model_id",
+    ] {
+        fleet[key] = own[key].clone();
+    }
+    for (map, key) in [
+        ("instance_tdx_reports", "tdx_report"),
+        ("instance_tdx_report_sha256", "tdx_report_sha256"),
+        ("instance_tcb_statuses", "tcb_status"),
+        ("instance_measurements", "measurement"),
+        ("instance_advisory_ids", "advisory_ids"),
+    ] {
+        fleet[map] = serde_json::json!({});
+        for id in ["instance-a", "instance-b", "instance-c"] {
+            fleet[map][id] = own[key].clone();
+        }
+    }
+    fleet["instance_gpu"] = serde_json::json!({});
+    for id in ["instance-a", "instance-b", "instance-c"] {
+        fleet["instance_gpu"][id] = serde_json::json!({});
+        for key in [
+            "gpu_verified",
+            "gpu_arch",
+            "gpu_evidence_present",
+            "gpu_evidence_nonce_matched",
+        ] {
+            fleet["instance_gpu"][id][key] = own[key].clone();
+        }
+    }
+    event.provider_claims = Some(fleet);
+    let binding = |id: &str, byte: &str| ChannelBinding::E2eePublicKeySha256 {
+        provider: "chutes".into(),
+        algorithm: "rsa-oaep-sha256".into(),
+        key_id: Some(id.into()),
+        public_key_sha256: byte.repeat(32),
+    };
+    let a = binding("instance-a", "aa");
+    event.channel_bindings = vec![a.clone(), binding("instance-b", "bb"), a.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "chutes");
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 2);
+    let id = |name: &str| {
+        listed
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == name)
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let a_id = id("instance-a");
+    *backend.instance.lock().unwrap() = Some("instance-a".into());
+    let response = pin_session(&h, &a_id).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), a_id);
+    assert_eq!(
+        backend.events.lock().unwrap()[0].channel_bindings,
+        vec![a.clone()]
+    );
+    // Without a pin, citation follows the actual selected sibling, not order.
+    *backend.instance.lock().unwrap() = Some("instance-b".into());
+    let response = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), id("instance-b"));
+    event.channel_bindings = vec![a.clone(), binding("instance-c", "cc")];
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new fleet round")).unwrap(),
+    );
+    *verifier.0.lock().unwrap() = event.clone();
+    let after = listed_sessions(&h, "").await;
+    assert_eq!(
+        after
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == "instance-a")
+            .unwrap()["session_id"],
+        a_id
+    );
+    event.channel_bindings.push(binding("instance-a", "dd"));
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(
+        pin_session(&h, &a_id).await.status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    let a = event.channel_bindings[0].clone();
+    for extra in [
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://other.test".into(),
+            spki_sha256: "22".repeat(32),
+        },
+        ChannelBinding::E2eePublicKeySha256 {
+            provider: "other".into(),
+            algorithm: "x25519".into(),
+            key_id: None,
+            public_key_sha256: "22".repeat(32),
+        },
+    ] {
+        event.channel_bindings = vec![a.clone(), extra];
+        *h.verifier.0.lock().unwrap() = event.clone();
+        assert!(h
+            .service
+            .forward_chat_completion_request(admission::request(vec![]))
+            .await
+            .is_err());
+        assert!(h.backend.events.lock().unwrap().is_empty());
+    }
+}

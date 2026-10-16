@@ -44,6 +44,7 @@ pub struct Backend {
     pub attempts: Mutex<VecDeque<Attempt>>,
     pub events: Mutex<Vec<UpstreamVerifiedEvent>>,
     pub instance: Mutex<Option<String>>,
+    pub tls_key: Mutex<Option<String>>,
 }
 impl Backend {
     async fn respond(
@@ -51,6 +52,17 @@ impl Backend {
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.events.lock().unwrap().push(event.clone());
+        if let Some(key) = self.tls_key.lock().unwrap().as_ref() {
+            if !event.channel_bindings.iter().any(|binding| {
+                matches!(binding,
+                private_ai_gateway::aci::receipt::ChannelBinding::TlsSpkiSha256 { spki_sha256, .. }
+                    if spki_sha256 == key)
+            }) {
+                return Err(UpstreamError::ChannelBindingMismatch(
+                    "selected TLS key is not admitted".into(),
+                ));
+            }
+        }
         let attempt = self
             .attempts
             .lock()
@@ -150,6 +162,7 @@ impl Harness {
             attempts: Mutex::new(attempts.into()),
             events: Mutex::new(Vec::new()),
             instance: Mutex::new(None),
+            tls_key: Mutex::new(None),
         });
         let verifier = Arc::new(CachedVerifier(Mutex::new(verified_event(
             "admission-test",

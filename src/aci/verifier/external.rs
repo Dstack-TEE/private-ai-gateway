@@ -444,6 +444,7 @@ impl ExternalProviderVerifier {
             evidence = Some(canonical_verified_evidence(evidence)?);
         }
         Ok(UpstreamVerifiedEvent {
+            aci_identity: None,
             upstream_name: request.upstream_name,
             provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,

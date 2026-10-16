@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -76,17 +76,31 @@ impl WithheldResponse for UpstreamStreamResponse {
     }
 }
 
-/// A session sealed for one verified binding (one per Chutes or 0G instance).
-pub(super) struct SealedSession {
+/// A complete logical channel, or one independently selectable Chutes or 0G instance.
+pub(super) struct SessionGroup {
     instance_key: Option<String>,
+    bindings: Vec<ChannelBinding>,
     pub(super) lease: SessionLease,
+}
+
+/// JCS ordering preserves every field and removes only exact duplicates.
+fn canonical_bindings(bindings: &[ChannelBinding]) -> Result<Vec<ChannelBinding>, ServiceError> {
+    let mut canonical = BTreeMap::new();
+    for binding in bindings {
+        let value =
+            serde_json::to_value(binding).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
+        let bytes =
+            digest::jcs_bytes(&value).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
+        canonical.insert(bytes, binding.clone());
+    }
+    Ok(canonical.into_values().collect())
 }
 
 /// Owned authorization for exactly one forwarding attempt.
 pub(super) struct AdmittedUpstream {
     pub(super) event: UpstreamVerifiedEvent,
     pub(super) admitted_at: u64,
-    sessions: Vec<SealedSession>,
+    sessions: Vec<SessionGroup>,
     requires_instance: bool,
 }
 
@@ -741,47 +755,87 @@ impl AciService {
         }
     }
 
-    /// Seal + persist one attested session per verified channel binding, and
-    /// return them. A single-TEE provider yields one; Chutes yields one per
-    /// instance. The receipt cites one of these after response selection;
-    /// each persisted session also carries the evidence + reasons (deep audit).
+    /// Group complete verified channels before sealing or applying pins. Listing
+    /// and admission share this path, using only the current verified event.
     pub(super) fn record_attested_upstream_session(
         &self,
         event: &UpstreamVerifiedEvent,
         now: u64,
-    ) -> Result<Vec<SealedSession>, ServiceError> {
-        // §4.1: a direct service has no upstream hop and publishes no
-        // attested sessions — this also covers the middleware commit paths
-        // and on-demand session listing.
-        if self.serves_directly() {
+    ) -> Result<Vec<SessionGroup>, ServiceError> {
+        if self.serves_directly() || event.result != VerificationResult::Verified {
             return Ok(Vec::new());
         }
-        if event.result != VerificationResult::Verified {
-            return Ok(Vec::new());
-        }
-
-        // Preserve the per-binding fingerprint representation until Stage 3.
-        let identity = Self::identity_from_provider_claims(event.provider_claims.as_ref());
-        let mut sealed = Vec::with_capacity(event.channel_bindings.len());
-        for binding in &event.channel_bindings {
-            let instance = instance_id(event, binding);
-            let claims = match instance {
-                Some(instance_id) => per_instance_session_claims(event, instance_id),
-                None => session_claims_for_event(event),
+        let bindings = canonical_bindings(&event.channel_bindings)?;
+        let groups = if matches!(
+            event.provider_type.as_deref(),
+            Some("chutes") | Some("0g-private-computer")
+        ) {
+            let mut instances = BTreeMap::new();
+            for binding in bindings {
+                let id = instance_id(event, &binding)
+                    .filter(|id| !id.is_empty())
+                    .ok_or(ServiceError::AdmissionInvariant(
+                        "multi-instance binding has no instance identifier",
+                    ))?
+                    .to_string();
+                if instances.insert(id, binding).is_some() {
+                    return Err(ServiceError::AdmissionInvariant(
+                        "conflicting instance bindings",
+                    ));
+                }
+            }
+            instances
+                .into_iter()
+                .map(|(id, binding)| (Some(id), vec![binding]))
+                .collect::<Vec<_>>()
+        } else if bindings.len() <= 1 {
+            if bindings.is_empty() {
+                Vec::new()
+            } else {
+                vec![(None, bindings)]
+            }
+        } else {
+            let ChannelBinding::TlsSpkiSha256 { origin, .. } = &bindings[0] else {
+                return Err(ServiceError::AdmissionInvariant(
+                    "unsupported multi-binding channel",
+                ));
             };
-            let lease = self.seal_attested_session(
-                event,
-                identity.clone(),
-                vec![binding.clone()],
-                claims,
-                now,
-            )?;
-            sealed.push(SealedSession {
-                instance_key: instance.map(str::to_string),
-                lease,
-            });
-        }
-        Ok(sealed)
+            if !bindings.iter().all(|binding| {
+                matches!(binding,
+                ChannelBinding::TlsSpkiSha256 { origin: other, .. } if other == origin)
+            }) || event
+                .url_origin
+                .as_ref()
+                .is_some_and(|endpoint| endpoint != origin)
+            {
+                return Err(ServiceError::AdmissionInvariant(
+                    "mixed or unsupported channel origins",
+                ));
+            }
+            vec![(None, bindings)]
+        };
+        let identity = Self::identity_from_provider_claims(event);
+        groups
+            .into_iter()
+            .map(|(instance_key, bindings)| {
+                let claims = match instance_key.as_deref() {
+                    Some(id) => per_instance_session_claims(event, id),
+                    None => session_claims_for_event(event),
+                };
+                let lease = self.seal_attested_session(
+                    event,
+                    identity.clone(),
+                    bindings.clone(),
+                    claims,
+                    now,
+                )?;
+                Ok(SessionGroup {
+                    instance_key,
+                    bindings,
+                    lease,
+                })
+            })
+            .collect()
     }
 
     /// Finalize a fail-closed refusal into a receipt (§7.5): the exact request
@@ -835,7 +889,7 @@ impl AciService {
         let allowed: HashSet<&str> = allowed_ids.iter().map(String::as_str).collect();
         let mut bindings = Vec::new();
         let mut admitted_sessions = Vec::new();
-        for (binding, session) in event.channel_bindings.iter().cloned().zip(sessions) {
+        for session in sessions {
             if allowed.is_empty() || allowed.contains(session.lease.session_id()) {
                 if !(session.lease.established_at() <= admitted_at
                     && admitted_at < session.lease.expires_at())
@@ -844,7 +898,7 @@ impl AciService {
                         "store returned a session outside its validity window",
                     ));
                 }
-                bindings.push(binding);
+                bindings.extend(session.bindings.iter().cloned());
                 admitted_sessions.push(session);
             }
         }
@@ -852,29 +906,6 @@ impl AciService {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
             ));
-        }
-        if !matches!(
-            event.provider_type.as_deref(),
-            Some("chutes") | Some("0g-private-computer")
-        ) && admitted_sessions.len() > 1
-        {
-            // Order alternatives by their canonical JSON bytes. This does not
-            // change fingerprint serialization; enforce exactly the cited binding.
-            let mut pairs = bindings
-                .into_iter()
-                .zip(admitted_sessions)
-                .map(|(binding, session)| {
-                    let value = serde_json::to_value(&binding)
-                        .map_err(|err| ServiceError::SessionStore(err.to_string()))?;
-                    let canonical = digest::jcs_bytes(&value)
-                        .map_err(|err| ServiceError::SessionStore(err.to_string()))?;
-                    Ok((canonical, binding, session))
-                })
-                .collect::<Result<Vec<_>, ServiceError>>()?;
-            pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let (_, binding, session) = pairs.remove(0);
-            bindings = vec![binding];
-            admitted_sessions = vec![session];
         }
         // Preserve direct and failed/non-TEE events; they have no sessions.
         if !admitted_sessions.is_empty() {
@@ -911,11 +942,13 @@ impl AciService {
         let evidence = event.evidence.as_ref();
         let projected = serde_json::to_value(&claims.extra)
             .map_err(|err| ServiceError::SessionStore(err.to_string()))?;
-        let reviewed = reviewed_session_material(
-            event.provider_type.as_deref(),
-            &event.verifier_id,
-            &projected,
-        );
+        let reviewed = (event.provider_type.as_deref() != Some("aci-service")
+            || event.aci_identity.is_some())
+            && reviewed_session_material(
+                event.provider_type.as_deref(),
+                &event.verifier_id,
+                &projected,
+            );
         let material = ChannelMaterial {
             schema: reviewed.then_some("aci-session-material/1"),
             provider_type: if reviewed {
@@ -939,14 +972,27 @@ impl AciService {
             .fingerprint()
             .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
 
+        let mut expires_at = now
+            .checked_add(self.config.attested_session_ttl_seconds)
+            .ok_or_else(|| {
+                ServiceError::SessionStore("attested session expiry overflow".to_string())
+            })?;
+        if event.provider_type.as_deref() == Some("aci-service") {
+            if let Some(binding) = event.aci_identity.as_ref() {
+                expires_at = expires_at.min(binding.keyset.not_after);
+            }
+        }
+        if expires_at <= now {
+            return Err(ServiceError::AdmissionInvariant(
+                "attested keyset expired before admission",
+            ));
+        }
+
         // Initial retention covers validity and at least one receipt TTL.
         let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
         // Runs only when the channel has no current session, so the evidence
         // is copied only for a new session.
         let mut seal = || {
-            let expires_at = now
-                .checked_add(self.config.attested_session_ttl_seconds)
-                .ok_or_else(|| std::io::Error::other("attested session expiry overflow"))?;
             AttestedSession::seal(SessionDocument {
                 api_version: SESSION_API_VERSION.to_string(),
                 upstream_name: event.upstream_name.clone(),
@@ -970,15 +1016,33 @@ impl AciService {
             })
     }
 
-    /// Lift the response-signing address out of provider claims into a verified
-    /// identity, when present.
-    fn identity_from_provider_claims(
-        provider_claims: Option<&Value>,
-    ) -> Option<WorkloadIdentityRef> {
+    /// Lift signing identity from provider claims and native ACI identity from
+    /// the accepted original-JSON binding, never from arbitrary claims.
+    fn identity_from_provider_claims(event: &UpstreamVerifiedEvent) -> Option<WorkloadIdentityRef> {
         let mut identity = WorkloadIdentityRef::default();
-        if let Some(Value::Object(map)) = provider_claims {
+        if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
             if let Some(addr) = map.get("signing_address").and_then(Value::as_str) {
                 identity.signing_address = Some(addr.to_string());
+            }
+        }
+        if event.provider_type.as_deref() == Some("aci-service") {
+            if let Some(binding) = event.aci_identity.as_ref() {
+                identity.extra.insert(
+                    "workload_keyset_digest".into(),
+                    binding.keyset_digest.clone().into(),
+                );
+                identity.extra.insert(
+                    "subject".into(),
+                    binding
+                        .keyset
+                        .subject
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+                identity
+                    .extra
+                    .insert("keyset_not_after".into(), binding.keyset.not_after.into());
             }
         }
         (!identity.is_empty()).then_some(identity)

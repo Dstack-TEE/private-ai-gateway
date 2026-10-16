@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::verifier::{
-    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
+    AciServiceUpstreamVerifier, ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     PrivatemodeProviderVerifier,
 };
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
@@ -62,6 +62,7 @@ pub(crate) fn reviewed_session_material(
         return false;
     };
     let expected_id = match provider {
+        "aci-service" => AciServiceUpstreamVerifier::VERIFIER_ID,
         "near-ai" => NearAiProviderVerifier::VERIFIER_ID,
         "phala-direct" => PhalaDirectProviderVerifier::VERIFIER_ID,
         "chutes" => ChutesProviderVerifier::VERIFIER_ID,
@@ -87,6 +88,39 @@ pub(crate) fn reviewed_session_material(
     };
     let strings = |keys: &[&str]| keys.iter().all(|k| string(k));
     match provider {
+        "aci-service" => {
+            valid_tdx_material(claims)
+                && string("tcb_status")
+                && claims["advisory_ids"].as_array().is_some_and(|ids| {
+                    ids.iter().all(Value::is_string)
+                        && ids
+                            .windows(2)
+                            .all(|pair| pair[0].as_str() < pair[1].as_str())
+                })
+                && lower_hex(&claims["measured_compose_hash"], 32)
+                && claims["measured_app_id"].as_str().is_some_and(|s| {
+                    !s.is_empty() && lower_hex(&claims["measured_app_id"], s.len() / 2)
+                })
+                && claims["published_source_provenance"]
+                    .as_object()
+                    .is_some_and(|p| {
+                        p.get("image_digest").is_some_and(Value::is_string)
+                            || (p.get("repo_url").is_some_and(Value::is_string)
+                                && p.get("repo_commit").is_some_and(Value::is_string))
+                    })
+                && claims["receipt_key_custody"]["provider"] == "dstack-kms"
+                && claims["receipt_key_custody"]["purpose"] == "aci.receipt.ed25519.v1"
+                && lower_hex(&claims["receipt_key_custody"]["receipt_public_key"], 32)
+                && ["kms_public_key", "app_public_key", "root_public_key"]
+                    .iter()
+                    .all(|key| {
+                        let value = &claims["receipt_key_custody"][key];
+                        lower_hex(value, 33)
+                            && value
+                                .as_str()
+                                .is_some_and(|s| s.starts_with("02") || s.starts_with("03"))
+                    })
+        }
         "near-ai" => {
             valid_tdx_material(claims)
                 && strings(&[

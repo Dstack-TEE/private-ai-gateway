@@ -232,6 +232,8 @@ pub(super) struct CachedAciServiceVerification {
     pub(super) not_after: u64,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
+    pub(super) identity: Option<aci_verify::report::ReportBinding>,
+    pub(super) session_material: Option<Value>,
 }
 
 impl CachedAciServiceVerification {
@@ -251,6 +253,9 @@ impl CachedAciServiceVerification {
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
+            provider_type: Some("aci-service".to_string()),
+            aci_identity: self.identity.clone(),
+            provider_claims: self.session_material.clone(),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
@@ -329,6 +334,8 @@ pub struct AciServiceUpstreamVerifier {
 }
 
 impl AciServiceUpstreamVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "aci-service/v2";
+
     pub fn new(
         report_base_url: impl Into<String>,
         pccs_url: impl Into<String>,
@@ -374,7 +381,7 @@ impl AciServiceUpstreamVerifier {
             verify_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             appraisal: None,
-            verifier_id: "aci-service/v2".to_string(),
+            verifier_id: Self::VERIFIER_ID.to_string(),
         })
     }
 
@@ -486,7 +493,7 @@ impl AciServiceUpstreamVerifier {
         self.finish_verification(started, &body, appraisal)
     }
 
-    fn finish_verification(
+    pub(super) fn finish_verification(
         &self,
         started: Instant,
         body: &[u8],
@@ -514,6 +521,8 @@ impl AciServiceUpstreamVerifier {
             not_after: keyset.not_after,
             evidence,
             channel_bindings,
+            identity: appraisal.identity,
+            session_material: appraisal.session_material,
         })
     }
 

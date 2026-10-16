@@ -79,15 +79,13 @@ change to the spec, and a candidate for future work.
    request to another is refused with `session_not_accepted`, unless the
    deployment sends a client to the same replica or shares the session store.
 
-9. **A channel with several keys becomes several sessions.** The gateway
-   creates one session per channel binding. For Chutes that is right, because
-   each binding is a separate instance. But an `aci-service` upstream that
-   publishes several TLS keys for one origin gets one session per key. Each
-   session claims a narrower binding than the gateway enforces, since the
-   connection accepts any of the keys. The receipt cites the first session, so
-   a client that pinned a sibling session passes the gateway's check and then
-   fails its own receipt check. The fix is to group the bindings of one
-   channel into one session.
+9. **Resolved: logical TLS channels retain their complete accepted key set.**
+   One origin's TLS alternatives are canonicalized and sealed as one session
+   before pin filtering. The gate selects complete groups and the receipt
+   cites that group whichever accepted key connects. Chutes keeps separate
+   sessions for independently selectable instances and cites the served one.
+   Mixed origins, conflicting Chutes keys and unsupported multi-binding shapes
+   fail closed. Legacy singleton pins cannot authorize part of a new group.
 
 10. **A session can expire before the receipts that cite it.** A session's
     retention is set when the session is created at the start of a request,
