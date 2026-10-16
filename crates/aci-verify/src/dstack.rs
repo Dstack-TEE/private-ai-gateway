@@ -16,6 +16,8 @@ use crate::decode_hex;
 mod event_log;
 
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
+// Keep in sync with clients/verifier-ts/src/report.ts.
+const MAX_APP_COMPOSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// One entry of dstack's event log, in the wire shape of the dstack SDK's
 /// `EventLog`.
@@ -145,6 +147,9 @@ pub fn verify_dstack_app_compose(
         .get("app_compose")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing dstack app_compose evidence".to_string())?;
+    if app_compose.len() > MAX_APP_COMPOSE_BYTES {
+        return Err("dstack app_compose exceeds maximum byte size (4 MiB)".into());
+    }
     let actual_compose_hash: [u8; 32] = Sha256::digest(app_compose.as_bytes()).into();
     if &actual_compose_hash != measured_compose_hash {
         return Err(
@@ -353,6 +358,18 @@ pub fn compressed_k256_public_key_hex(public_key_hex: &str) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_compose_is_bounded_by_utf8_bytes_before_hashing() {
+        let compose = "é".repeat(MAX_APP_COMPOSE_BYTES / 2);
+        let hash: [u8; 32] = Sha256::digest(compose.as_bytes()).into();
+        let mut evidence = serde_json::json!({"app_compose": compose});
+        assert!(verify_dstack_app_compose(&evidence, &hash).is_ok());
+        evidence["app_compose"] = Value::String(format!("{compose}é"));
+        assert!(verify_dstack_app_compose(&evidence, &hash)
+            .unwrap_err()
+            .contains("app_compose exceeds maximum byte size"));
+    }
 
     fn runtime_event(event: &str, payload: &[u8]) -> DstackEventLog {
         let mut event = DstackEventLog {

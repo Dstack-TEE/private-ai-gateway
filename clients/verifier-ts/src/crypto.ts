@@ -18,7 +18,7 @@ export function toHex(bytes: Uint8Array): string {
 
 /** Decode hex (optionally `0x`-prefixed) to bytes. */
 export function fromHex(hex: string): Uint8Array {
-  const h = hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex;
+  const h = hex.startsWith('0x') ? hex.slice(2) : hex;
   if (h.length % 2 !== 0) {
     throw new AciFormatError(`hex string has odd length: ${hex.length} chars`);
   }

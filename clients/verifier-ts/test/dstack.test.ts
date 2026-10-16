@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import {
   reportTranscript,
   verifyComposeMeasurement,
+  AciFormatError,
   type AttestationReport,
 } from '../src/index.js';
 import { makeMeasuredComposeReport } from './fixtures.js';
@@ -38,6 +39,18 @@ const recorded = JSON.parse(
     body_base64: string;
   }[];
 };
+
+test('app_compose is bounded by UTF-8 bytes before measurement', async () => {
+  const { report } = await makeMeasuredComposeReport('é'.repeat(2 * 1024 * 1024));
+  assert.equal((await verifyComposeMeasurement(report)).ok, true);
+  for (const oversized of ['x'.repeat(4 * 1024 * 1024 + 1), evidence(report).app_compose + 'é']) {
+    evidence(report).app_compose = oversized;
+    await assert.rejects(verifyComposeMeasurement(report), {
+      name: AciFormatError.name,
+      message: /app_compose exceeds maximum byte size/,
+    });
+  }
+});
 
 function evidence(report: AttestationReport): Evidence {
   return report.attestation.evidence as Evidence;

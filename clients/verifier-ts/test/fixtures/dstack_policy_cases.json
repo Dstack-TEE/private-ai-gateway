@@ -36,5 +36,7 @@
   {"name": "malformed event log 2", "valid": false, "event_log": "{}"},
   {"name": "malformed event log 3", "valid": false, "event_log": "[null]"},
   {"name": "malformed event log 4", "valid": false, "event_log": "[{}]"},
-  {"name": "malformed event log 5", "valid": false, "event_log": "[{\"imr\":3,\"event_type\":-1}]"}
+  {"name": "malformed event log 5", "valid": false, "event_log": "[{\"imr\":3,\"event_type\":-1}]"},
+  {"name": "uppercase 0X prefix in runtime digest", "valid": false, "replacements": [["\"3eb0a8ef02f83dcd28d3403495280f197be5cb8990f0184bf4f30e20d7cc1985c042abc67c8c067aea2b441c8dfc3657\"", "\"0X3eb0a8ef02f83dcd28d3403495280f197be5cb8990f0184bf4f30e20d7cc1985c042abc67c8c067aea2b441c8dfc3657\""]]},
+  {"name": "uppercase 0X prefix in runtime payload", "valid": false, "replacements": [["\"170fb20d504cf0367ddd112d7585e08561d106dc022354c875812738fda041a7\"", "\"0X170fb20d504cf0367ddd112d7585e08561d106dc022354c875812738fda041a7\""]]}
 ]

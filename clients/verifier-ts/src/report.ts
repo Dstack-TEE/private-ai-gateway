@@ -22,6 +22,8 @@ import type { AttestationReport, Check, ReportVerification, WorkloadKeyset } fro
 /** rt_mr3 lives at this byte offset of a v4 TDX quote: 48-byte header + the
  *  TDReport10 fields up to rt_mr3 (472 bytes). */
 const TDX_RTMR3_OFFSET = 520;
+// Keep in sync with crates/aci-verify/src/dstack.rs.
+const MAX_APP_COMPOSE_BYTES = 4 * 1024 * 1024;
 
 /** Options for {@link verifyReportBinding}. */
 export interface ReportBindingOptions {
@@ -127,6 +129,14 @@ export async function verifyComposeMeasurement(
   if (typeof eventLog !== 'string' || typeof appCompose !== 'string' || typeof quote !== 'string') {
     throw new AciFormatError('evidence needs string event_log, app_compose, and quote');
   }
+  // Reject oversized strings before allocating an encoded copy or scanning.
+  if (appCompose.length > MAX_APP_COMPOSE_BYTES) {
+    throw new AciFormatError('dstack app_compose exceeds maximum byte size (4 MiB)');
+  }
+  const composeBytes = new TextEncoder().encode(appCompose);
+  if (composeBytes.length > MAX_APP_COMPOSE_BYTES) {
+    throw new AciFormatError('dstack app_compose exceeds maximum byte size (4 MiB)');
+  }
   checkDstackString(appCompose, 'dstack app_compose');
   const events = parseDstackEventLog(eventLog);
 
@@ -157,7 +167,7 @@ export async function verifyComposeMeasurement(
   const duplicated = preSystemReady.length > 1;
   const measuredEvent = duplicated ? undefined : preSystemReady[0];
   const measured = measuredEvent ? toHex(fromHex(measuredEvent.event_payload)) : undefined;
-  const recomputed = await sha256Hex(new TextEncoder().encode(appCompose));
+  const recomputed = await sha256Hex(composeBytes);
   const composeOk = !duplicated && measured === recomputed;
 
   const ok = rtmrOk && composeOk;

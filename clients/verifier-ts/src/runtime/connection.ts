@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { readAttestationReport } from '../attestation-http.js';
+import { AciError } from '../errors.js';
 
 import {
   bindReportTranscriptChannel,
@@ -629,11 +631,15 @@ async function fetchAttestation(
     );
   }
   try {
-    return (await response.json()) as AttestationReport;
+    return await readAttestationReport(response);
   } catch (error) {
-    throw new AciConnectionError('attestation_fetch', 'ACI attestation endpoint returned invalid JSON', {
-      cause: error,
-    });
+    throw new AciConnectionError(
+      'attestation_fetch',
+      error instanceof AciError
+        ? error.message
+        : 'ACI attestation endpoint returned invalid JSON',
+      { cause: error },
+    );
   }
 }
 

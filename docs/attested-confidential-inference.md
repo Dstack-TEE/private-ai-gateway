@@ -160,7 +160,12 @@ without float or exponent spellings. Duplicate decoded object keys, including
 escaped equivalents, and lone surrogates in compose or event strings are rejected.
 
 Event logs are limited to 1 MiB of UTF-8 and 16 nested containers, including the
-root array. Production evidence currently has about 30 events in a 7.2 KiB log.
+root array; `app_compose` is limited to 4 MiB of UTF-8 before processing.
+Both clients cap attestation HTTP bodies at 32 MiB before JSON decoding, checking
+Content-Length and streaming bytes. This allows JSON escaping of the bounded
+compose and log. A production response measured 53,676 bytes on October 16, 2026:
+30,220 bytes of compose and 7,357 bytes of event log (30 events).
+Hex fields accept an optional lowercase `0x` prefix and either case for digits.
 
 ### 2. Before the gateway forwards data
 

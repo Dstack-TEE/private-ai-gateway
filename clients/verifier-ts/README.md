@@ -67,7 +67,8 @@ evidence) exactly as observed.
 - **dstack v1 runtime events only.** RTMR3 digests are recomputed and checked;
   version must be absent or integer `1`, and names must be lowercase kebab case.
 - **Strict dstack evidence.** Duplicate keys, non-u32 integer tokens and lone
-  surrogates are rejected; event logs are limited to 1 MiB and depth 16. See the
+  surrogates are rejected; event logs are limited to 1 MiB and depth 16, compose
+  to 4 MiB, and attestation responses to 32 MiB. Hex prefixes must be lowercase `0x`. See the
   [shared TS/Rust policy](../../docs/attested-confidential-inference.md#dstack-compose-measurement-91-check-4).
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3 only.

@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use super::report::{rewrite_noted, summarize};
 use super::{ProxyState, RecordedExchange, RequestOutcome, ResponseDelivery, TrustedIdentity};
+use crate::aci::tls::error_chain_message;
 use crate::checks::{
     parse_receipt_document, run_response_checks, session_id_from_receipt, UpstreamContext,
 };
@@ -208,6 +209,7 @@ impl From<String> for AuditFetchError {
 impl From<GetError> for AuditFetchError {
     fn from(error: GetError) -> Self {
         match error {
+            GetError::Request(error) => Self::Transport(error_chain_message(&error)),
             GetError::Failed(error) => Self::Transport(error),
             GetError::TooLarge(limit) => Self::TooLarge(limit),
         }
