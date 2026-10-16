@@ -17,10 +17,10 @@ pub use policy::{CustodyPolicy, CustodyPolicyError};
 pub use quote::{QuoteStepError, DEFAULT_PCCS_URL};
 
 fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
-    if let Some(report) = report.as_sgx() {
-        &report.report_data
-    } else {
-        let report = report.as_td10().expect("DCAP report must be SGX or TDX");
-        &report.report_data
+    match report {
+        dcap_qvl::quote::Report::SgxEnclave(report) => &report.report_data,
+        dcap_qvl::quote::Report::TD10(report) => &report.report_data,
+        dcap_qvl::quote::Report::TD15(report) => &report.base.report_data,
+        dcap_qvl::quote::Report::TD15Ex(report) => &report.base.base.report_data,
     }
 }
