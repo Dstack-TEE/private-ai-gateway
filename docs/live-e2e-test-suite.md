@@ -223,6 +223,7 @@ Optional fields are:
 | `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |
 | `chutes_e2ee_discovery_interval_seconds` | Delay between Chutes discovery passes. |
 | `privatemode_manifest_log_path`, `privatemode_proxy_image_digest` | Required for `privatemode`. The runner writes a matching static `privatemode_proxy` policy with the shared API credential's path and SHA-256; run the official proxy yourself at `base_url`. The standalone verifier phase defers to the gateway, so `strict-release` rejects `privatemode` entries. |
+| `accepted_subjects` | Upstream `accepted_subjects` pins, for example the `tdx-measurement:sha256:` pins `armet-ai` requires. |
 
 Example:
 
