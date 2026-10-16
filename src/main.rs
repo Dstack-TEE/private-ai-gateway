@@ -861,8 +861,10 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 "#;
 
     fn write_temp_cert() -> tempfile::NamedTempFile {
-        let cert = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(cert.path(), TEST_CERT_PEM).unwrap();
+        use std::io::Write;
+
+        let mut cert = tempfile::NamedTempFile::new().unwrap();
+        cert.write_all(TEST_CERT_PEM.as_bytes()).unwrap();
         cert
     }
 
