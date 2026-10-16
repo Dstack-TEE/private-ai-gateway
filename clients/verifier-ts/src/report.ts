@@ -11,20 +11,18 @@ import { getCollateralAndVerify } from '@phala/dcap-qvl';
 import { computeKeysetDigest, computeReportData } from './digest.js';
 import { fromHex, toHex, sha256Hex, sha384 } from './crypto.js';
 import { AciFormatError } from './errors.js';
+import {
+  checkDstackString,
+  parseDstackEventLog,
+  DSTACK_RUNTIME_EVENT_TYPE,
+  MAX_APP_COMPOSE_BYTES,
+  type DstackEvent,
+} from './dstack-event-log.js';
 import type { AttestationReport, Check, ReportVerification, WorkloadKeyset } from './types.js';
 
 /** rt_mr3 lives at this byte offset of a v4 TDX quote: 48-byte header + the
  *  TDReport10 fields up to rt_mr3 (472 bytes). */
 const TDX_RTMR3_OFFSET = 520;
-const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
-
-interface DstackEvent {
-  imr: number;
-  event_type: number;
-  digest: string;
-  event: string;
-  event_payload: string;
-}
 
 /** Options for {@link verifyReportBinding}. */
 export interface ReportBindingOptions {
@@ -130,6 +128,7 @@ export async function verifyComposeMeasurement(
   if (typeof eventLog !== 'string' || typeof appCompose !== 'string' || typeof quote !== 'string') {
     throw new AciFormatError('evidence needs string event_log, app_compose, and quote');
   }
+  checkDstackString(appCompose, 'dstack app_compose', MAX_APP_COMPOSE_BYTES);
   const events = parseDstackEventLog(eventLog);
 
   // The event log must replay to the RTMR3 the raw quote states (v4 TDX offset).
@@ -183,52 +182,6 @@ export async function verifyComposeMeasurement(
   };
 }
 
-function parseDstackEventLog(eventLog: string): DstackEvent[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(eventLog);
-  } catch {
-    throw new AciFormatError('dstack event_log is not valid JSON');
-  }
-  if (!Array.isArray(parsed)) {
-    throw new AciFormatError('dstack event_log must be an array');
-  }
-  return parsed.map((value: unknown) => {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      throw new AciFormatError('invalid dstack event_log entry');
-    }
-    const {
-      version,
-      imr,
-      event_type: eventType,
-      digest,
-      event,
-      event_payload: payload,
-    } = value as Record<string, unknown>;
-    if (Object.hasOwn(value, 'version') && version !== 1) {
-      throw new AciFormatError(
-        'unsupported dstack event log version: expected version absent or numeric 1 (v1)',
-      );
-    }
-    if (
-      typeof imr !== 'number' ||
-      !Number.isInteger(imr) ||
-      imr < 0 ||
-      imr > 0xffffffff ||
-      typeof eventType !== 'number' ||
-      !Number.isInteger(eventType) ||
-      eventType < 0 ||
-      eventType > 0xffffffff ||
-      typeof digest !== 'string' ||
-      typeof event !== 'string' ||
-      typeof payload !== 'string'
-    ) {
-      throw new AciFormatError('invalid dstack event_log entry');
-    }
-    return { imr, event_type: eventType, digest, event, event_payload: payload };
-  });
-}
-
 function eventBytes(hex: string): Uint8Array {
   // Reject partially parsed bytes while preserving Rust's optional 0x prefix.
   const value = hex.startsWith('0x') ? hex.slice(2) : hex;
@@ -238,10 +191,10 @@ function eventBytes(hex: string): Uint8Array {
   return fromHex(value);
 }
 
-/** Replay the dstack event log's `imr==3` events to RTMR3 (SHA-384 chain over
- *  each digest, zero-padded to 48 bytes). Runtime events use the v1 preimage
- *  defined by dstack/cc-eventlog/src/runtime_events.rs; other event types
- *  retain their stored digest, matching the Rust verifier. Returns null when
+/** Replay the validated dstack event log's `imr==3` runtime events to RTMR3.
+ *  Runtime events use the v1 preimage defined by
+ *  dstack/cc-eventlog/src/runtime_events.rs. The parser rejects non-runtime
+ *  events in RTMR3; other registers are ignored. Returns null when
  *  a runtime event's stored digest does not match its recomputed digest. */
 async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array | null> {
   let mr: Uint8Array = new Uint8Array(48);

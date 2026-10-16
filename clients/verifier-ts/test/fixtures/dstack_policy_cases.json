@@ -1,0 +1,542 @@
+[
+  {
+    "name": "unchanged production evidence",
+    "valid": true
+  },
+  {
+    "name": "explicit v1",
+    "valid": true,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":1,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "runtime event disguised as firmware",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":1"
+      ]
+    ]
+  },
+  {
+    "name": "colon in runtime name",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event\":\"compose-hash\"",
+        "\"event\":\"compose-hash:\""
+      ]
+    ]
+  },
+  {
+    "name": "duplicate imr",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":3,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "escaped-equivalent duplicate imr",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":3,\"\\u0069mr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "duplicate unknown key",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"extra\":0,\"ex\\u0074ra\":0,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "nested duplicate unknown key",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"extra\":{\"x\":0,\"\\u0078\":0},\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "lone high surrogate in event name",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event\":\"\"",
+        "\"event\":\"\\ud800\""
+      ]
+    ]
+  },
+  {
+    "name": "lone low surrogate in payload",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_payload\":\"\"",
+        "\"event_payload\":\"\\udc00\""
+      ]
+    ]
+  },
+  {
+    "name": "lone surrogate in unknown string",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"extra\":\"\\ud800\",\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "valid paired Unicode in unknown field",
+    "valid": true,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"extra\":\"\\ud83d\\ude80\",\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "lone high surrogate in compose",
+    "valid": false,
+    "app_compose_json": "\"\\ud800\""
+  },
+  {
+    "name": "lone low surrogate in compose",
+    "valid": false,
+    "app_compose_json": "\"\\udc00\""
+  },
+  {
+    "name": "imr token 3.0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":3.0"
+      ]
+    ]
+  },
+  {
+    "name": "imr token 3e0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":3e0"
+      ]
+    ]
+  },
+  {
+    "name": "imr token -0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":-0"
+      ]
+    ]
+  },
+  {
+    "name": "imr token 4294967296",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":4294967296"
+      ]
+    ]
+  },
+  {
+    "name": "imr token \"3\"",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"imr\":\"3\""
+      ]
+    ]
+  },
+  {
+    "name": "event_type token 134217729.0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":134217729.0"
+      ]
+    ]
+  },
+  {
+    "name": "event_type token 134217729e0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":134217729e0"
+      ]
+    ]
+  },
+  {
+    "name": "event_type token -1",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":-1"
+      ]
+    ]
+  },
+  {
+    "name": "event_type token 4294967296",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":4294967296"
+      ]
+    ]
+  },
+  {
+    "name": "version token 1.0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":1.0,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "version token 1e0",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":1e0,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "version token null",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":null,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "version token 2",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":2,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "version token \"1\"",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":\"1\",\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "version token 4294967296",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":4294967296,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "duplicate event_type",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_type\":134217729",
+        "\"event_type\":134217729,\"event_type\":134217729"
+      ]
+    ]
+  },
+  {
+    "name": "duplicate digest",
+    "valid": false,
+    "replacements": [
+      [
+        "\"digest\":\"f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624\"",
+        "\"digest\":\"f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624\",\"digest\":\"f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624\""
+      ]
+    ]
+  },
+  {
+    "name": "duplicate event",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event\":\"compose-hash\"",
+        "\"event\":\"compose-hash\",\"event\":\"compose-hash\""
+      ]
+    ]
+  },
+  {
+    "name": "duplicate event_payload",
+    "valid": false,
+    "replacements": [
+      [
+        "\"event_payload\":\"170fb20d504cf0367ddd112d7585e08561d106dc022354c875812738fda041a7\"",
+        "\"event_payload\":\"170fb20d504cf0367ddd112d7585e08561d106dc022354c875812738fda041a7\",\"event_payload\":\"170fb20d504cf0367ddd112d7585e08561d106dc022354c875812738fda041a7\""
+      ]
+    ]
+  },
+  {
+    "name": "duplicate version",
+    "valid": false,
+    "replacements": [
+      [
+        "\"imr\":3",
+        "\"version\":1,\"version\":1,\"imr\":3"
+      ]
+    ]
+  },
+  {
+    "name": "entry count at limit",
+    "valid": true,
+    "extra_boot_events": 994
+  },
+  {
+    "name": "entry count over limit",
+    "valid": false,
+    "extra_boot_events": 995
+  },
+  {
+    "name": "nesting depth at limit",
+    "valid": true,
+    "nested_arrays": 14
+  },
+  {
+    "name": "nesting depth over limit",
+    "valid": false,
+    "nested_arrays": 15
+  },
+  {
+    "name": "field bytes at limit",
+    "valid": true,
+    "unknown_field_bytes": 131072
+  },
+  {
+    "name": "field bytes over limit",
+    "valid": false,
+    "unknown_field_bytes": 131073
+  },
+  {
+    "name": "event log bytes at limit",
+    "valid": true,
+    "pad_log_to": 1048576
+  },
+  {
+    "name": "event log bytes over limit",
+    "valid": false,
+    "pad_log_to": 1048577
+  },
+  {
+    "name": "unambiguous custom runtime event",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "22ce180b185cf2fdc3cac029a95ef4ef5289b68e3469cbef81b33c920ca0f10120d298970885b99744c5104587559bf6",
+      "event": "custom-event",
+      "event_payload": "3a0102"
+    }
+  },
+  {
+    "name": "ambiguous v1 event boundary",
+    "valid": false,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "22ce180b185cf2fdc3cac029a95ef4ef5289b68e3469cbef81b33c920ca0f10120d298970885b99744c5104587559bf6",
+      "event": "custom-event:",
+      "event_payload": "0102"
+    }
+  },
+  {
+    "name": "upstream emitted name app-id",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "2aa3fcc64656856d52b6987cefeff9fced8a3115720b60db3f8cd2133704a5b9cbfd70414e16324dc5920d4d5e2853e3",
+      "event": "app-id",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name boot-mr-done",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "98bd7e6bd3952720b65027fd494834045d06b4a714bf737a06b874638b3ea00ff402f7f583e3e3b05e921c8570433ac6",
+      "event": "boot-mr-done",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name compose-hash",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "27cbb1d7fc3e1d2331f13ed765ca6ae815ad7ed50ea9c76b71b29e805e0fa26c04911e3547686044a1603da757452744",
+      "event": "compose-hash",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name gpu-attestation",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "0f15699aff08e3bb3b1e5fe800d78e2925089d7b1a9730c3faafa75f84c433464efba5e416a494abc9c7d13b5407bbcc",
+      "event": "gpu-attestation",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name gpu-policy-hash",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "9ef7425850e6de3de4a5c390cb0002019c9e1bf84aa04bac0c6fb298a59d7ad2c24f456a10f9d6358ae722bb1f1e43f4",
+      "event": "gpu-policy-hash",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name init-script-hash",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "e4db083f5a03415e84c823e95bac7cf507c21f716fe4042b3733bd306d2d26a60b2b07a26c94dac1b47a7e9f086c9ca7",
+      "event": "init-script-hash",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name instance-id",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "305a62e30e8f4ca791946c3ede6755cfacebe02be9101f0bccf2591509a0c8e8095bc83b3d53bfc5d70d6c7cf7813fc5",
+      "event": "instance-id",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name key-provider",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "8dbe91243c6400fc969bcd2b999045cd716f2c74facb4e46337da9e2a85d1d52f721ca6acaf26ca6d1d01835b8d852af",
+      "event": "key-provider",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name mr-kms",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "c436073fcdbbab5e4a9beeee2d9e22be095ddc9af72c993b3c48cacc8792c3c1e270827d78319da93d3eb02dff29514e",
+      "event": "mr-kms",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name os-image-hash",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "c3c5704d6ce2c94c9272eb3bfa66acad844c28ed989b274df3e6ebc098d2f7a0634be0e2b614c9e78fda50073b60a87a",
+      "event": "os-image-hash",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name storage-encrypted",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "cf3dfc84cadbc74e1fd922d1afe31ec065223f68c5231a42265cb786c66e901a3f1cd181ad28b9805a8e616d5a40e84a",
+      "event": "storage-encrypted",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name storage-fs",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "9e37bf8f077850e3a5990a2dcd775cce72de5bda856d2bb959cca2a1a0fffaddaae5b3b01e10c2f7abc4747cc558b92c",
+      "event": "storage-fs",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name system-preparing",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624",
+      "event": "system-preparing",
+      "event_payload": ""
+    }
+  },
+  {
+    "name": "upstream emitted name system-ready",
+    "valid": true,
+    "synthetic_tail": {
+      "imr": 3,
+      "event_type": 134217729,
+      "digest": "1a76b2a80a0be71eae59f80945d876351a7a3fb8e9fd1ff1cede5734aa84ea11fd72b4edfbb6f04e5a85edd114c751bd",
+      "event": "system-ready",
+      "event_payload": ""
+    }
+  }
+]

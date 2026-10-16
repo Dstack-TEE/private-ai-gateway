@@ -212,6 +212,8 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
       assert.equal(id4?.status, 'fail', JSON.stringify(id4));
       assert.match(id4.detail ?? '', reason);
       assert.equal(result.composeHash, undefined);
+      assert.equal(result.verdict.verified, false);
+      assert.match(result.verdict.line, /^NOT VERIFIED/);
     });
   }
 });
@@ -246,56 +248,21 @@ test('duplicate pre-system-ready compose events fail even when RTMR3 matches', a
   assert.equal(result.composeHash, undefined);
 });
 
-test('only RTMR3 runtime events can supply compose-hash or system-ready', async () => {
-  const { report, composeHash } = await makeMeasuredComposeReport();
-  const log = events(report);
-  const compose = composeEvent(log);
-  const decoys = [
-    {
-      imr: 3,
-      event_type: 1,
-      digest: '11'.repeat(32),
-      event: 'system-ready',
-      event_payload: 'not hex',
-    },
-    {
-      imr: 3,
-      event_type: 1,
-      digest: '22'.repeat(64),
-      event: 'compose-hash',
-      event_payload: 'not hex',
-    },
-    { ...compose, imr: 2, digest: 'not hex', event_payload: 'not hex' },
-  ];
-  log.unshift(...decoys);
-  setSyntheticEventLog(report, log);
-  const result = await verifyComposeMeasurement(report);
-  assert.equal(result.ok, true, JSON.stringify(result.checks));
-  assert.equal(result.composeHash, composeHash);
-
-  // A non-runtime event with a compose-hash label is never a measurement.
-  compose.event_type = 1;
-  setSyntheticEventLog(report, log);
-  const missing = await verifyComposeMeasurement(report);
-  assert.equal(missing.ok, false);
-  assert.equal(missing.checks.find((c) => c.name === 'rtmr3')?.ok, true);
-  assert.equal(missing.checks.find((c) => c.name === 'compose_hash')?.ok, false);
+test('RTMR3 rejects non-runtime events even when their stored digests replay', async () => {
+  for (const name of ['system-ready', 'compose-hash', 'firmware']) {
+    const { report } = await makeMeasuredComposeReport();
+    const log = events(report);
+    log.unshift({ imr: 3, event_type: 1, digest: '11'.repeat(48), event: name, event_payload: '' });
+    setSyntheticEventLog(report, log);
+    await assert.rejects(verifyComposeMeasurement(report), /RTMR3 contains a non-runtime event/);
+  }
 });
 
-test('non-runtime system-ready cannot hide duplicate compose events; post-ready events are not selected', async () => {
+test('other registers do not select compose events; post-ready runtime events are not selected', async () => {
   const { report, composeHash } = await makeMeasuredComposeReport();
   const log = events(report);
   const compose = composeEvent(log);
-  log.splice(
-    1,
-    0,
-    { imr: 3, event_type: 1, digest: '11'.repeat(48), event: 'system-ready', event_payload: '' },
-    { ...compose },
-  );
-  setSyntheticEventLog(report, log);
-  assert.equal((await verifyComposeMeasurement(report)).ok, false);
-
-  log.splice(2, 1);
+  log.unshift({ ...compose, imr: 2, digest: 'not hex', event_payload: 'not hex' });
   log.push({ ...compose });
   setSyntheticEventLog(report, log);
   assert.equal((await verifyComposeMeasurement(report)).composeHash, composeHash);
