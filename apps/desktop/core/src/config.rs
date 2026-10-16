@@ -57,8 +57,12 @@ pub struct Config {
     /// The profile protection uses. Defaults to the first profile.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub active_profile: String,
-    /// Refuse services whose attestation reports a development OS image.
+    /// Require the measured OS image hash to be approved in the dstack KMS registry.
     pub require_production_os: bool,
+    /// HTTPS Ethereum RPC providers used together for the production OS policy.
+    /// Omitted uses the client's public providers. Every provider must approve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_registry_rpc_urls: Option<Vec<String>>,
     /// Protect on launch: start protection when the backend starts.
     pub connect_on_launch: bool,
     pub appearance: Appearance,
@@ -86,6 +90,7 @@ impl Default for Config {
         Self {
             active_profile: String::new(),
             require_production_os: true,
+            os_registry_rpc_urls: None,
             connect_on_launch: false,
             appearance: Appearance::default(),
             update_channel: None,
@@ -526,6 +531,10 @@ pub fn line_column(text: &str, offset: usize) -> (usize, usize) {
 
 /// Checks and normalizes the settings the way the management commands do.
 pub fn validate(config: &mut Config) -> Result<(), Invalid> {
+    if let Some(urls) = &config.os_registry_rpc_urls {
+        validate_os_registry_rpc_urls(urls)
+            .map_err(|message| Invalid::at(&["os-registry-rpc-urls"], message))?;
+    }
     if config.profiles.len() > MAX_PROFILES {
         return Err(Invalid::at(
             &["profiles"],
@@ -580,6 +589,30 @@ pub fn validate(config: &mut Config) -> Result<(), Invalid> {
         .map_err(|message| Invalid::at(&["web-ui"], message))?;
     config.web_ui.listen_address = web_ui.config.listen_address;
     config.web_ui.client_host = web_ui.config.client_host;
+    Ok(())
+}
+
+/// Require multiple HTTPS origins, so a duplicate endpoint cannot stand in
+/// for agreement between providers. Operators must choose independent providers.
+pub fn validate_os_registry_rpc_urls(urls: &[String]) -> Result<(), &'static str> {
+    let mut origins = std::collections::HashSet::new();
+    for raw in urls {
+        let url = Url::parse(raw).map_err(|_| "OS registry RPC URLs must be valid HTTPS URLs")?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("OS registry RPC URLs must use HTTPS without user info or fragments");
+        }
+        if !origins.insert(url.origin().ascii_serialization()) {
+            return Err("OS registry RPC URLs must use distinct provider origins");
+        }
+    }
+    if origins.len() < 2 {
+        return Err("OS registry policy requires at least two independent HTTPS RPC providers");
+    }
     Ok(())
 }
 
@@ -834,6 +867,28 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
     }
 
     #[test]
+    fn os_registry_rpc_settings_require_multiple_distinct_https_origins() {
+        let parsed = parse(
+            "os-registry-rpc-urls = ['https://a.example/rpc', 'https://b.example/rpc?key=private']",
+        )
+        .unwrap();
+        assert!(parsed.unknown.is_empty());
+        assert_eq!(parsed.value.os_registry_rpc_urls.unwrap().len(), 2);
+        for urls in [
+            "[]",
+            "['https://a.example']",
+            "['https://a.example', 'http://b.example']",
+            "['https://a.example', 'https://a.example/other']",
+            "['https://a.example', 'https://user:secret@b.example']",
+            "['https://a.example', 'https://b.example/#fragment']",
+        ] {
+            let error = parse(&format!("os-registry-rpc-urls = {urls}")).unwrap_err();
+            assert!(error.contains("os-registry-rpc-urls"));
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
     fn errors_name_the_line_column_and_key() {
         let error = parse("appearance = \"dark\"\n[local-api]\nport = \"x\"\n").unwrap_err();
         assert!(error.starts_with("config.toml:3:8: "), "{error}");
@@ -872,6 +927,7 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
         let mut config = Config {
             active_profile: "work".into(),
             require_production_os: false,
+            os_registry_rpc_urls: None,
             connect_on_launch: true,
             appearance: Appearance::Dark,
             update_channel: Some(UpdateChannel::Beta),

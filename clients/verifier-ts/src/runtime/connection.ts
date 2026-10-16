@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 
+import { validateOsRegistryRpcUrls } from '../os-registry.js';
 import {
   bindReportTranscriptChannel,
   computeVerdict,
@@ -504,6 +505,16 @@ function validateOptions(options: ConnectAciOptions): void {
       throw new AciConnectionError('invalid_policy', `${name} must be a boolean`);
     }
   }
+  if (options.policy?.osRegistryRpcUrls !== undefined) {
+    try {
+      validateOsRegistryRpcUrls(options.policy.osRegistryRpcUrls);
+    } catch (error) {
+      throw new AciConnectionError(
+        'invalid_policy',
+        error instanceof Error ? error.message : 'Invalid OS registry RPC policy',
+      );
+    }
+  }
   const composeHashes = options.policy?.acceptedComposeHashes;
   if (composeHashes !== undefined && (!Array.isArray(composeHashes) || composeHashes.length === 0)) {
     throw new AciConnectionError(
@@ -558,6 +569,9 @@ async function establishIdentity(
       ...(options.policy?.requireProductionOs === undefined
         ? {}
         : { requireProductionOs: options.policy.requireProductionOs }),
+      ...(options.policy?.osRegistryRpcUrls === undefined
+        ? {}
+        : { osRegistryRpcUrls: options.policy.osRegistryRpcUrls }),
       ...(options.policy?.acceptedComposeHashes === undefined
         ? {}
         : { acceptedComposeHashes: options.policy.acceptedComposeHashes }),

@@ -9,6 +9,7 @@ mod capture;
 mod checks;
 mod client;
 pub mod curl;
+mod os_registry;
 pub mod send;
 pub mod serve;
 pub mod sessions;

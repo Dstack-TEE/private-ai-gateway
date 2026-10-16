@@ -52,7 +52,7 @@ pub const ID_6: CheckDef = def(
 pub const POLICY_OS: CheckDef = def(
     "policy-os",
     "1.3",
-    "RTMR3 os-image-hash satisfies the production allowlist",
+    "RTMR3 os-image-hash is approved in the dstack KMS registry",
 );
 pub const RECEIPT_1: CheckDef = def(
     "receipt-1",

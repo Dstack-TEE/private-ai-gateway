@@ -62,7 +62,7 @@ policy flags:
 | `--accept-compose <hex>` | Compose hash to accept; repeatable. Without it the compose measurement is verified and reported, and you appraise its provenance yourself. |
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
-| `--require-production-os` | Require the attested OS image to be a reviewed production image. |
+| `--require-production-os` | Require the RTMR3 OS image hash to be approved in the dstack KMS registry. |
 
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
@@ -72,10 +72,27 @@ anchor: nothing measured corroborates it (spec 4.1), so any app under the same
 KMS root could claim it. Without the custody flags id-5 is an honest skip; no
 trust anchors are built in.
 
-Under `--require-production-os`, the client reads the RTMR3-bound
-`os-image-hash` and requires it to be in the verifier's reviewed
-production-image allowlist. Development and unknown hashes fail closed.
-Updating the allowlist requires a verifier release.
+Under `--require-production-os`, after the hardware quote (id-1) and RTMR3
+provenance (id-4) pass, the client decodes the measured `os-image-hash` as
+32 bytes and calls `DstackKms.allowedOsImages(bytes32)` on Ethereum mainnet
+(chain 1, `0xd343a3f5593b93D8056aB5D60c433622d7D65a80`). These policy
+constants are pinned by the client, never supplied by the gateway.
+
+The default independent RPC providers are PublicNode
+(`https://ethereum-rpc.publicnode.com`) and dRPC (`https://eth.drpc.org`).
+Each must report chain ID `0x1` and return an exact ABI `true` at block tag
+`finalized`. A denial, disagreement, malformed response, network failure or
+10-second request timeout fails closed. Redirects are refused. Approvals are
+read anew on every verification; there is no approval cache. Registry changes
+take effect once finalized, so newly approved dstack versions need no client
+release and approvals can be revoked.
+
+This trusts the owner-approved dstack governance registry and the RPC
+providers' answers. Requiring all independent providers to agree mitigates
+trust in a single RPC provider; the client does not verify Ethereum consensus
+or state proofs. See [RPC configuration](configuration.md#production-os-registry).
+The registry rejects dstack-0.5.9: deploy this policy only after every
+production replica runs an approved OS such as dstack-0.5.12.
 
 This option is an appraisal step, not a dstack boot verifier. The client
 verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or

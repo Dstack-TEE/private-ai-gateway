@@ -35,21 +35,6 @@ use crate::transcript::{
     RECEIPT_4, RECEIPT_NOTE, UPSTREAM_1, UPSTREAM_2,
 };
 
-// Source: the `is_dev: false` entries returned by `phala os-images --json` on
-// 2026-08-13 (dstack 0.5.8–0.5.9, standard and NVIDIA). Before adding an entry,
-// verify the published archive independently with:
-//   uv run python scripts/dstack_os_image.py <os-image-hash>
-const PRODUCTION_DSTACK_OS_IMAGES: &[&str] = &[
-    // dstack-0.5.9 (standard)
-    "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
-    // dstack-nvidia-0.5.9
-    "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9",
-    // dstack-0.5.8 (standard)
-    "6427f4f5ded88b72d326bd973e581c1689c5080c6444a0cf90fec7d9e4c8b92a",
-    // dstack-nvidia-0.5.8
-    "5d286131b20689d0d59bae1b34cd91cb78149016a9ef50afff51fb1a04cad5e4",
-];
-
 pub struct ReportCheckContext<'a> {
     /// The nonce this verifier supplied on the report fetch (§3.2).
     pub nonce: Option<&'a str>,
@@ -61,7 +46,7 @@ pub struct ReportCheckContext<'a> {
     pub channel: ChannelEvidence<'a>,
     pub policy: &'a VerifierPolicy,
     /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
-    /// reviewed production allowlist. A separate dstack verifier must first
+    /// dstack governance registry. A separate dstack verifier must first
     /// bind that hash to MRTD/RTMR0-2 for the same evidence.
     pub require_production_os: bool,
     pub explain: bool,
@@ -166,17 +151,18 @@ pub async fn run_report_checks(
         render(transcript, result);
     }
     if cx.require_production_os {
-        let provenance_verified = appraisal
-            .results
-            .iter()
-            .find(|result| result.id == CheckId::Provenance)
-            .is_some_and(CheckResult::passed);
-        if provenance_verified {
-            run_production_os_policy(transcript, report);
+        let prerequisites_verified = [CheckId::Quote, CheckId::Provenance].iter().all(|id| {
+            appraisal
+                .results
+                .iter()
+                .any(|result| result.id == *id && result.passed())
+        });
+        if prerequisites_verified {
+            run_production_os_policy(transcript, report).await;
         } else {
             transcript.fail(
                 POLICY_OS,
-                "production OS allowlist cannot be evaluated until RTMR3 verifies",
+                "OS registry policy requires verified hardware quote (id-1) and RTMR3 provenance (id-4)",
             );
         }
     }
@@ -189,35 +175,34 @@ pub async fn run_report_checks(
     })
 }
 
-fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
-    let result = (|| {
+async fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
+    let result = async {
         let event_log = report.attestation.evidence["event_log"]
             .as_str()
             .ok_or("attestation evidence carries no dstack event_log")?;
-        // id-4 already established that this exact log replays to the quote.
+        // id-1 and id-4 established that this exact log replays to a genuine quote.
         let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
-            .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
+            .map_err(|_| "invalid dstack event_log evidence")?;
         let event = dstack_rtmr3_event(&events, "os-image-hash")
-            .map_err(|e| format!("dstack event log rejected: {e}"))?
+            .map_err(|_| "dstack os-image-hash event is ambiguous")?
             .ok_or("verified event log carries no os-image-hash event")?;
-        let hash = event.event_payload.to_ascii_lowercase();
-        PRODUCTION_DSTACK_OS_IMAGES
-            .iter()
-            .any(|allowed| hash.eq_ignore_ascii_case(allowed))
-            .then_some(())
-            .ok_or_else(|| format!("OS-image hash {hash} is not a reviewed production image"))?;
-        Ok::<_, String>(hash)
-    })();
+        let mut hash = [0u8; 32];
+        hex::decode_to_slice(&event.event_payload, &mut hash)
+            .map_err(|_| "os-image-hash must decode to exactly 32 bytes")?;
+        crate::os_registry::check(&hash).await?;
+        Ok::<_, &str>(hex::encode(hash))
+    }
+    .await;
 
     match result {
         Ok(hash) => transcript.pass(
             POLICY_OS,
-            format!("RTMR3 os-image-hash {hash} is in the reviewed production allowlist"),
+            format!(
+                "os-image-hash {hash} is approved in dstack KMS registry (chain 1, {})",
+                crate::os_registry::CONTRACT
+            ),
         ),
-        Err(error) => transcript.fail(
-            POLICY_OS,
-            format!("RTMR3 os-image-hash did not satisfy the production allowlist: {error}"),
-        ),
+        Err(error) => transcript.fail(POLICY_OS, error),
     }
 }
 
@@ -908,6 +893,40 @@ mod tests {
             .find(|c| c.def.id == id)
             .unwrap_or_else(|| panic!("check {id} missing from transcript"))
             .status
+    }
+
+    #[tokio::test]
+    async fn os_registry_is_not_evaluated_without_verified_quote_and_provenance() {
+        let report = vector_report();
+        let mut t = Transcript::default();
+        let mut cx = offline_cx(Some(TEST_NONCE), SERVED_AT);
+        cx.require_production_os = true;
+        run_report_checks(&mut t, &report, cx).await.unwrap();
+        assert_eq!(status_of(&t, "policy-os"), Status::Fail);
+        let detail = &t
+            .checks
+            .iter()
+            .find(|c| c.def.id == "policy-os")
+            .unwrap()
+            .detail;
+        assert!(detail.contains("id-1") && detail.contains("id-4"));
+    }
+
+    #[tokio::test]
+    async fn os_registry_requires_an_exact_32_byte_hex_hash_before_network() {
+        for payload in ["ab".to_string(), "gg".repeat(32), "00".repeat(33)] {
+            let mut report = vector_report();
+            report.attestation.evidence["event_log"] = serde_json::json!([{
+                "imr":3, "event_type":0x08000001, "event":"os-image-hash",
+                "event_payload":payload, "digest":"00".repeat(48),
+            }])
+            .to_string()
+            .into();
+            let mut t = Transcript::default();
+            run_production_os_policy(&mut t, &report).await;
+            assert_eq!(status_of(&t, "policy-os"), Status::Fail);
+            assert!(t.checks[0].detail.contains("exactly 32 bytes"));
+        }
     }
 
     #[tokio::test]

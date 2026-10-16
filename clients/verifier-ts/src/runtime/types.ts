@@ -32,8 +32,10 @@ export class AciConnectionError extends AciError {
 }
 
 export interface AciPolicy {
-  /** Appraise the measured dstack OS hash against the production allowlist. */
+  /** Appraise the measured dstack OS hash against the dstack KMS governance registry. */
   requireProductionOs?: boolean;
+  /** Independent HTTPS Ethereum RPC URLs; every provider must approve at finalized. */
+  osRegistryRpcUrls?: readonly string[];
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this client. Empty or
    * omitted means hardware-bound measurement without release pinning.

@@ -10,6 +10,8 @@ import { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 import { verifyReceipt, checkRequestBodyHash, checkResponseBodyHash, findEvent } from './receipt.js';
 import { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 import { AciError } from './errors.js';
+import { fromHex, sha384, toHex } from './crypto.js';
+import { checkOsRegistry, OS_REGISTRY_CONTRACT } from './os-registry.js';
 import type {
   AttestationReport,
   ReceiptEnvelope,
@@ -69,11 +71,13 @@ export interface TranscriptOptions {
    */
   channel?: { observedSpkiSha256: string; host?: string };
   /**
-   * Appraise the RTMR3 `os-image-hash` against this release's production
-   * allowlist (§1.3). This does not reconstruct MRTD/RTMR0-2. Use it only
+   * Appraise the RTMR3 `os-image-hash` against the dstack KMS governance
+   * registry (§1.3). This does not reconstruct MRTD/RTMR0-2. Use it only
    * after a dstack verifier binds the same evidence to the OS-image hash.
    */
   requireProductionOs?: boolean;
+  /** Independent HTTPS Ethereum RPC URLs. All must approve at finalized. */
+  osRegistryRpcUrls?: readonly string[];
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this verifier (§1.3).
    * An empty or omitted list verifies and reports the measurement without
@@ -91,41 +95,15 @@ interface DstackEvent {
   event_payload: string;
 }
 
-// Source: the `is_dev: false` entries returned by `phala os-images --json` on
-// 2026-08-13 (dstack 0.5.8–0.5.9, standard and NVIDIA). The OS hashes were also
-// checked with `uv run python scripts/dstack_os_image.py <os-image-hash>`.
-//
-// Each value is that image's measured dstack v1 runtime-event digest:
-// SHA384(u32le(0x08000001) || ":os-image-hash:" || hex(os-image-hash)).
-// Upstream definition:
-// https://github.com/Dstack-TEE/dstack/blob/5d7d966e2d7ec179c6cf6794f2d214dd54661ef9/dstack/cc-eventlog/src/runtime_events.rs#L113-L139
-const PRODUCTION_DSTACK_OS_IMAGES = new Map([
-  // dstack-0.5.9 (standard)
-  [
-    'bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033',
-    'c936f709860155a455c519b505fe29bde21d1b778534a8f0b41b706b0f789eae2ea899e224fedb2331c18324aab4db93',
-  ],
-  // dstack-nvidia-0.5.9
-  [
-    '806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9',
-    '87cd7e9dd097fa5ccdadf01c77ae4d86eb69debae40c7c9ecd2b0e0ff8ddb37ceeafd3607a0f49c7cfb81eeeaffa17c1',
-  ],
-  // dstack-0.5.8 (standard)
-  [
-    '6427f4f5ded88b72d326bd973e581c1689c5080c6444a0cf90fec7d9e4c8b92a',
-    'dc15768ace33ac7ecd2f86dc032917ed0674d8218a8e138db68e16a4985b2fc4c4576a4b2c8697b83d2a88c990b6f855',
-  ],
-  // dstack-nvidia-0.5.8
-  [
-    '5d286131b20689d0d59bae1b34cd91cb78149016a9ef50afff51fb1a04cad5e4',
-    '040e24a4f644add401d92cedf588eef268bce2089298feac2e54a0f63af63fef47028c2915af65b61ab6161294251614',
-  ],
-]);
-
 function parseDstackEvents(report: AttestationReport): DstackEvent[] {
   const raw = (report.attestation.evidence as Record<string, unknown> | undefined)?.event_log;
   if (typeof raw !== 'string') throw new Error('attestation evidence carries no dstack event_log');
-  const values = JSON.parse(raw) as unknown;
+  let values: unknown;
+  try {
+    values = JSON.parse(raw);
+  } catch {
+    throw new Error('invalid dstack event_log evidence');
+  }
   if (!Array.isArray(values)) throw new Error('dstack event_log is not an array');
 
   return values.map((value, index) => {
@@ -146,7 +124,8 @@ function parseDstackEvents(report: AttestationReport): DstackEvent[] {
   });
 }
 
-function productionDstackOs(report: AttestationReport): string {
+/** @internal Extract and authenticate the OS event from the replayed RTMR3 log. */
+export async function measuredDstackOs(report: AttestationReport): Promise<string> {
   let measurement: { hash: string; digest: string } | undefined;
   for (const event of parseDstackEvents(report)) {
     if (event.imr !== 3 || event.event_type !== DSTACK_RUNTIME_EVENT_TYPE) continue;
@@ -163,8 +142,18 @@ function productionDstackOs(report: AttestationReport): string {
   if (measurement === undefined) throw new Error('verified event log carries no os-image-hash event');
 
   const { hash, digest } = measurement;
-  if (PRODUCTION_DSTACK_OS_IMAGES.get(hash) !== digest) {
-    throw new Error(`OS-image hash ${hash} is not a reviewed production image`);
+  if (!/^[0-9a-f]{64}$/.test(hash)) {
+    throw new Error('os-image-hash must decode to exactly 32 bytes');
+  }
+  // Bind the payload to the digest replayed into RTMR3; the registry must
+  // never appraise an unmeasured label. dstack v1 runtime-event preimage:
+  // u32le(0x08000001) || ":os-image-hash:" || raw 32-byte hash.
+  const prefix = new Uint8Array([1, 0, 0, 8, ...new TextEncoder().encode(':os-image-hash:')]);
+  const preimage = new Uint8Array(prefix.length + 32);
+  preimage.set(prefix);
+  preimage.set(fromHex(hash), prefix.length);
+  if (digest !== toHex(await sha384(preimage))) {
+    throw new Error('os-image-hash payload does not match its RTMR3 event digest');
   }
   return hash;
 }
@@ -176,7 +165,7 @@ const ID_TITLES: Record<string, [section: string, title: string]> = {
   'id-4': ['9.1(4)', 'the running compose is measured into the quote (source provenance)'],
   'id-5': ['9.1(5)', 'private-key custody satisfies the verifier policy'],
   'id-6': ['9.1(6)', 'the channel actually used is bound to the attested keyset'],
-  'policy-os': ['1.3', 'RTMR3 os-image-hash satisfies the production allowlist'],
+  'policy-os': ['1.3', 'RTMR3 os-image-hash is approved in the dstack KMS registry'],
 };
 
 const UPSTREAM_TITLES: Record<string, [section: string, title: string]> = {
@@ -241,7 +230,7 @@ function randomNonceHex(): string {
 export interface VerifyServiceOptions extends TranscriptOptions {
   /** Nonce to send; a fresh 32-byte random hex value by default. */
   nonce?: string;
-  /** Fetch implementation; the global `fetch` by default. */
+  /** Fetch for the gateway report; registry RPC uses the global `fetch`. */
   fetchImpl?: typeof fetch;
 }
 
@@ -273,6 +262,9 @@ export async function verifyService(
       : {}),
     ...(options.acceptedComposeHashes !== undefined
       ? { acceptedComposeHashes: options.acceptedComposeHashes }
+      : {}),
+    ...(options.osRegistryRpcUrls !== undefined
+      ? { osRegistryRpcUrls: options.osRegistryRpcUrls }
       : {}),
     online: true,
   });
@@ -349,7 +341,6 @@ export async function reportTranscript(
   const publishesCompose =
     typeof (report.attestation.evidence as Record<string, unknown> | undefined)?.app_compose ===
     'string';
-  let composeVerified = false;
   let composeHash: string | undefined;
   if (!declared) {
     lines.push(line(ID_TITLES, 'id-4', 'fail', 'the report declares no source provenance (§4.1)'));
@@ -373,7 +364,6 @@ export async function reportTranscript(
   } else {
     try {
       const compose = await verifyComposeMeasurement(report);
-      composeVerified = compose.ok;
       composeHash = compose.composeHash;
       const bad = compose.checks.find((c) => !c.ok);
       const accepted = options.acceptedComposeHashes ?? [];
@@ -416,24 +406,28 @@ export async function reportTranscript(
   }
 
   if (options.requireProductionOs) {
-    if (!composeVerified) {
+    if (
+      !lines.some((line) => line.id === 'id-1' && line.status === 'pass') ||
+      !lines.some((line) => line.id === 'id-4' && line.status === 'pass')
+    ) {
       lines.push(
         line(
           ID_TITLES,
           'policy-os',
           'fail',
-          'production OS allowlist cannot be evaluated until RTMR3 verifies',
+          'OS registry policy requires verified hardware quote (id-1) and RTMR3 provenance (id-4)',
         ),
       );
     } else {
       try {
-        const hash = productionDstackOs(report);
+        const hash = await measuredDstackOs(report);
+        await checkOsRegistry(hash, options.osRegistryRpcUrls);
         lines.push(
           line(
             ID_TITLES,
             'policy-os',
             'pass',
-            `RTMR3 os-image-hash ${hash} is in the reviewed production allowlist`,
+            `os-image-hash ${hash} is approved in dstack KMS registry (chain 1, ${OS_REGISTRY_CONTRACT})`,
           ),
         );
       } catch (error) {
@@ -442,7 +436,7 @@ export async function reportTranscript(
             ID_TITLES,
             'policy-os',
             'fail',
-            `RTMR3 os-image-hash did not satisfy the production allowlist: ${error instanceof Error ? error.message : String(error)}`,
+            `OS registry policy failed: ${error instanceof Error ? error.message : 'approval could not be established'}`,
           ),
         );
       }

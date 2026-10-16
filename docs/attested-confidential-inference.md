@@ -258,7 +258,21 @@ host. Policy flags narrow what it accepts:
 | --- | --- |
 | `--accept-compose <hash>` | Workload release |
 | `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
-| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
+| `--require-production-os` | An RTMR3-bound OS image hash approved in the dstack KMS registry |
+
+The OS policy pins Ethereum mainnet (chain 1) and
+`DstackKms` at `0xd343a3f5593b93D8056aB5D60c433622d7D65a80` in the client,
+independent of gateway evidence. After id-1 and id-4 pass, it calls
+`allowedOsImages(bytes32)` at `finalized` through independent PublicNode and
+dRPC endpoints (configurable). Each must report chain ID `0x1` and return an
+exact ABI `true`; a denial, disagreement, error or timeout fails closed.
+Approvals are not cached: new approved dstack versions need no client release,
+and revocations take effect on subsequent verifications once finalized.
+
+This follows dstack's governance model of owner-approved OS hashes. The
+registry owner and RPC providers remain trusted; multiple providers agreeing
+mitigates a single provider's incorrect answer, without proving Ethereum
+consensus or state. The client OS policy is an appraisal, not a boot verifier.
 
 Without a custody policy, the CLI reports custody as skipped. It does not
 reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a

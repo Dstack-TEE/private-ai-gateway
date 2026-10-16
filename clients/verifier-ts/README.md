@@ -30,12 +30,28 @@ evidence) exactly as observed.
   compose measurement (check 4) when the service publishes `app_compose`.
   Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
-- **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
-  require the RTMR3 `os-image-hash` to be in this release's reviewed production
-  allowlist. Development and unknown hashes fail closed. This package does not
-  reconstruct MRTD/RTMR0-2 from a dstack OS image, so a pass is meaningful only
-  together with a dstack verifier result of `is_valid: true` for the same
-  quote, event log, and VM configuration. See
+- **Production OS registry (§1.3):** pass `requireProductionOs: true` to
+  require the RTMR3 `os-image-hash` to be approved by the owner-controlled
+  dstack KMS governance registry. After id-1 and id-4 pass, the client calls
+  `allowedOsImages(bytes32)` on Ethereum mainnet (chain 1), contract
+  `0xd343a3f5593b93D8056aB5D60c433622d7D65a80`, at `finalized`.
+  PublicNode (`https://ethereum-rpc.publicnode.com`) and dRPC
+  (`https://eth.drpc.org`) are the default independent providers; both support
+  browser CORS. Override them with `osRegistryRpcUrls` in transcript/service
+  options or the runtime's `policy` object. Supply at least two independent
+  providers with distinct HTTPS origins, no user info or fragments, and CORS
+  support for browser use. Each provider must return chain ID `0x1` and an
+  exact 32-byte ABI `true`. Denial, disagreement, malformed data, an error or
+  a 10-second request timeout fails closed. Approvals are never cached;
+  new approved OS versions need no client release, and revocations apply to
+  later verifications once finalized. The client trusts the registry owner
+  and RPC answers; agreement mitigates a single provider's incorrect answer,
+  without verifying Ethereum consensus or state proofs. Chain, contract and
+  function are pinned client policy, never gateway evidence.
+  This is an appraisal, not a boot verifier: the package does not reconstruct
+  MRTD/RTMR0-2 from a dstack OS image, so a pass is meaningful only together
+  with a dstack verifier result of `is_valid: true` for the same quote, event
+  log and VM configuration. See
   [Build a verifier policy](../../docs/attested-confidential-inference.md#build-a-verifier-policy)
   and the
   [Phala-direct verification algorithm](../../docs/providers/phala-direct/verification.md#verification-algorithm).

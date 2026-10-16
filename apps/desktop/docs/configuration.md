@@ -5,7 +5,7 @@ directory, which holds nothing else:
 
 | File | Holds | Permissions |
 | --- | --- | --- |
-| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
+| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, production OS policy and RPC providers, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
 | `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 
@@ -58,6 +58,45 @@ rather than the user: the values a connected agent's credential fields held
 before the connection took them over (put back on disconnect) and replaced
 account keys this device still has to revoke. Like `agent-connections.json`
 beside it, it must not be copied to another device.
+
+## Production OS registry
+
+The desktop app requires the production OS policy by default
+(`require-production-os = true`). Standalone `pap verify`, `send`, `serve`,
+`curl` and `audit` enable it with `--require-production-os`.
+The policy reads the owner-approved `DstackKms.allowedOsImages(bytes32)`
+registry on Ethereum mainnet (chain 1), at
+`0xd343a3f5593b93D8056aB5D60c433622d7D65a80`.
+
+PublicNode (`https://ethereum-rpc.publicnode.com`) and dRPC
+(`https://eth.drpc.org`) are the defaults. Override the list in `config.toml`
+for both the desktop backend and standalone pap commands:
+
+```toml
+os-registry-rpc-urls = ["https://rpc-a.example/eth", "https://rpc-b.example/eth"]
+```
+
+Or set `PRIVATE_AI_PROXY_OS_REGISTRY_RPC_URLS` to a JSON array of URL strings
+in the verifying process's environment; it takes precedence over the file:
+
+```sh
+export PRIVATE_AI_PROXY_OS_REGISTRY_RPC_URLS='["https://rpc-a.example/eth","https://rpc-b.example/eth"]'
+```
+
+A desktop backend launched from the OS may not inherit a shell's environment;
+use the settings file there. Supply at least two independent providers with
+distinct HTTPS origins. User info and URL fragments are rejected. URLs are
+not printed in policy failures; keep provider credentials in the environment
+or a secret store, rather than in this non-secret settings file.
+
+Every configured provider must return chain ID `0x1` and approve the measured
+32-byte OS hash through `eth_call` at `finalized`, within 10 seconds per
+request. Errors and disagreement fail closed. There is no approval cache;
+new approvals and revocations are read on each verification once finalized.
+New approved dstack OS versions need no client release. This trusts the
+registry owner and RPC providers; agreement mitigates a single provider's
+incorrect answer and does not verify Ethereum state proofs. This is an
+appraisal, not a boot verifier: see [the policy's limits](cli.md#verification-policy).
 
 ## Locations
 
