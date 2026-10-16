@@ -26,3 +26,5 @@ and checks only a relying party can run, are recorded in
 [the ACI conformance notes](../../../docs/reviews/aci-spec-conformance-gaps.md).
 [The ACI quickstart](../../../docs/quickstart.md) walks through the commands
 against a live deployment.
+
+A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.

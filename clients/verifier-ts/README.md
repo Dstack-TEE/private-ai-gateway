@@ -62,6 +62,8 @@ evidence) exactly as observed.
   not encrypt or decrypt content fields. Callers can implement that
   field-level wire contract or use a v2-capable client.
 
+A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
+
 ## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification

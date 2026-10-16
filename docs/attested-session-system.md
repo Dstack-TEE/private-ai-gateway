@@ -58,6 +58,56 @@ request -> receipt (X-Receipt-Id)
         -> AttestedSession { claims with reasons, channel_binding, evidence }
 ```
 
+## Reviewed material and snapshot evidence
+
+Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
+`phala-direct/1`, `chutes/1` (per instance), `tinfoil/1` and `privatemode/1`
+claims require the matching provider type and built-in verifier ID. Missing,
+unknown, mismatched or incomplete material remains evidence-sensitive. ArmetAI,
+SecretAI (both TDX and SNP), generic external verifiers and legacy Chutes outputs
+remain evidence-sensitive; neither provider names nor markers alone opt in.
+Shape validation does not authenticate facts; the configured verifier owns that.
+
+The private fingerprint for reviewed material is SHA-256 of JCS over
+`schema: "aci-session-material/1"`, provider type, upstream name, endpoint,
+verifier ID, identity, channel bindings and all recorded claims. TDX profiles
+preserve every supported TD10/TD15 security field except report data; non-freshness
+report-data inputs are retained as identity/bindings/claims. Rust checks the
+report format, hex field lengths and recomputed report digest. Tinfoil retains
+its official measured code, enclave, HPKE key and optional hardware material.
+Privatemode retains the observed manifest digest and `manifest_observed_at`;
+this observation is not bound to the active inference secret.
+
+Equal reviewed material reuses an unexpired document byte for byte, including
+its establishing evidence, without extending validity. Binding, identity,
+measurement, security outcome or claim changes select a different fingerprint.
+A → B → A can reuse unexpired A. Failure alone does not revoke history or force
+a generation; forwarding still needs usable current verification. Recovery may
+reuse equal material. Session expiry may reseal from a still-usable verifier cache
+without network verification: creation time does not mean evidence collection time.
+
+A session contains an establishing-evidence snapshot. A reused session does not
+supply evidence from every later verification round. Session and evidence hashes
+prove integrity; they do not perform provider-specific deep audit (§9.2(4)). Later
+revalidation is the attested aggregator's assertion. A policy requiring independent
+evidence for every authorizing round cannot rely on a snapshot alone.
+
+Phala and Chutes GPU checks are supplemental outcomes. Their current NVIDIA paths
+decode JWTs without signature verification and do not bind device identity to the
+serving CPU. Snapshot reuse establishes neither authenticated GPU identity nor
+continued use of a particular GPU. ArmetAI and SecretAI require separately reviewed,
+complete CPU/GPU projections before they can reuse across evidence changes.
+
+The new fingerprint domain/profile claims cause one expected session replacement
+for newly profiled channels. Existing JSONL fingerprints remain opaque; old records,
+IDs and pins are never rewritten or backfilled. Old and new records coexist under
+the usual retention rules, and new fingerprints can dedup after restart once usable
+verification is available. Fixed old pins receive `412 session_not_accepted`:
+fetch, audit and explicitly accept the replacement. Existing policy-based refresh
+may do so only under its existing policy. There is no unpinned downgrade. Rollback
+to the old binary may select an old fingerprint or seal a legacy session; clients
+must explicitly accept that replacement too. Stored wire documents stay compatible.
+
 ## Preflight survey
 
 `GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the verifier's
@@ -153,11 +203,12 @@ Mappers that read these provider-reported facts read them the same way:
   gateway records instead of rejecting. No status leaves it `unknown`.
 - `production_os_image` of `true` asserts `os_known_good` as
   `verifier_derived`, and `false` refutes it.
-- `gpu_verified` of `true`, set only for a verified and nonce-bound NVIDIA
-  confidential-computing attestation, asserts `gpu_attested` as
-  `verifier_derived`. It attests a genuine CC GPU, not its binding to the
-  serving CPU TEE (spec §8.3). `false` is ambiguous and leaves the claim
-  `unknown`.
+- `gpu_verified` of `true` asserts `gpu_attested` as `verifier_derived`.
+  For Phala and Chutes it records the supplemental check's accepted,
+  nonce-matched outcome, with the unsigned-JWT and CPU-binding limits above;
+  it must not be read as an authenticated device identity or continuity claim.
+  ArmetAI and SecretAI use mandatory signed GPU checks with their own CPU
+  bindings. `false` is ambiguous and leaves the claim `unknown`.
 
 `model_weights_provenance` is `unknown` for every current verifier. Each
 provider's verification page states which claims its adapter asserts and why:

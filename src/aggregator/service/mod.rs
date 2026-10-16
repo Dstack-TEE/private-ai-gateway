@@ -34,6 +34,7 @@ pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 
 mod claims;
+pub(crate) use claims::reviewed_session_material;
 mod clock;
 mod config;
 mod e2ee;

@@ -940,6 +940,45 @@ mod tests {
     /// decoded, parsed and hashed — the work that made a busy log expensive to
     /// boot from — and never reaches the index.
     #[test]
+    fn legacy_and_profiled_records_coexist_and_reuse_after_compaction_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
+        let old = session("legacy", 100, 1000);
+        let new = session_with(
+            "profiled",
+            101,
+            1000,
+            EvidenceRef::from_bytes("text/plain", b"establishing evidence"),
+        );
+        let legacy_fp = crate::aci::digest::sha256_hex(b"legacy evidence-sensitive material");
+        let profiled_fp =
+            crate::aci::digest::sha256_hex(b"aci-session-material/1 reviewed material");
+        {
+            let store = open_store_at(&path, 101);
+            seal_into(&store, &legacy_fp, old.clone(), 2000, 101).unwrap();
+            seal_into(&store, &profiled_fp, new.clone(), 2000, 101).unwrap();
+            store.compact(102).unwrap();
+        }
+        let store = open_store_at(&path, 103);
+        assert_eq!(
+            store.get_session(old.session_id(), 103).unwrap().bytes(),
+            old.bytes()
+        );
+        assert_eq!(
+            store.get_session(new.session_id(), 103).unwrap().bytes(),
+            new.bytes()
+        );
+        assert_eq!(
+            reuse_only(&store, &profiled_fp, 2000, 103).unwrap(),
+            new.session_id()
+        );
+        assert_eq!(
+            reuse_only(&store, &legacy_fp, 2000, 103).unwrap(),
+            old.session_id()
+        );
+    }
+
+    #[test]
     fn replay_drops_lapsed_records_before_loading_them() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.jsonl");

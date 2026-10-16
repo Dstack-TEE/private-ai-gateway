@@ -44,33 +44,13 @@ change to the spec, and a candidate for future work.
    it without warning. Attested sessions are stored on disk, survive restarts,
    and are kept as long as any receipt cites them.
 
-4. **A Chutes session keeps the evidence from the round that created it.**
-   Chutes returns one evidence bundle for all of a chute's instances, and the
-   bundle changes on every verification round because each round uses a new
-   nonce. If the bundle were part of what makes a session unique, every round
-   would create a new session for every instance. An earlier change did
-   exactly that (#142) and was reverted (#145): the session log grew without
-   bound, and replaying it at startup could run out of memory before the
-   gateway served a single request.
-
-   Instead, a Chutes instance session stores the bundle from the round that
-   created it, and the bundle is left out of the fingerprint the gateway uses
-   to find a channel's current session. Re-verifying the same instance while
-   the session is valid reuses that session. A real change, such as a
-   different TCB status, GPU result, or key, still creates a new session.
-   Nothing enforces this automatically, so it stays a design rule: the
-   fingerprint must not include anything that changes on every round.
-
-   The log stores each bundle once, and every instance session that uses it
-   refers to it by digest. Every stored session has its evidence: the gateway
-   rejects a verified result without evidence, and the store refuses a
-   session without it.
-
-   Two limits remain. The stored evidence proves the instance's state when the
-   session was created, not at the time of a later request; each request is
-   still sent only over the instance's attested key. And no client can yet
-   check what the Chutes evidence itself proves (§9.2 check 4, see item 17).
-   Clients can check that the evidence matches its digest (§9.2 check 2).
+4. **Snapshot evidence is the specified audit contract (§8, §9.2).** A reviewed
+   adapter may reuse an unexpired session with equal complete verified material,
+   keeping the establishing evidence unchanged. Later revalidation is the attested
+   aggregator's assertion; deep audit independently checks only establishing
+   evidence. This is no longer a Chutes-specific exception. Incomplete profiles,
+   legacy/custom output, ArmetAI and SecretAI remain evidence-sensitive. Clients
+   still lack provider-specific deep audit (item 17); evidence hashes prove integrity.
 
 5. **Failed streaming requests get no receipt.** When the upstream rejects a
    streaming request, the gateway returns the error without a receipt, as
@@ -78,13 +58,11 @@ change to the spec, and a candidate for future work.
    receipt. No inference happened, so the spec may not require a receipt, but
    the two paths behave differently.
 
-6. **Session pinning is not exact for Chutes.** When a request lists the
-   sessions it accepts (§5.3), the gateway checks the list before forwarding,
-   against the channel's current sessions. A Chutes route serves many
-   instances, and the gateway learns which instance answered only after the
-   response. So an unlisted instance can serve a request that listed one of
-   its siblings. The receipt names the session that actually served it, so the
-   client's receipt check (§9.3 check 6) catches this.
+6. **Chutes pins constrain instances before forwarding.** Admission narrows the
+   allowed E2EE bindings to the pinned sessions. The backend selects from those
+   admitted instances; response selection must report a matching instance or fail
+   internally. The receipt cites that instance's admitted snapshot. This former
+   pinning gap is resolved.
 
 7. **E2EE replay protection works within one process.** The
    [E2EE v2 protocol](../../spec/e2ee-v2.md#7-key-selection-validation-and-replay-protection)
@@ -173,8 +151,8 @@ change to the spec, and a candidate for future work.
 
 17. **Session audits check the evidence's integrity, not what it proves.**
     Both verifiers check that a cited session hashes to its ID, that it was
-    valid when the receipt was issued, and that its evidence matches its
-    digest (§9.2 checks 1 and 2). `pap` can also require specific claims with
+    valid at the receipt's admission-time `served_at`, and that its evidence
+    matches its digest (§9.2 checks 1 and 2). `pap` can also require specific claims with
     `--require-claim` (§9.2 check 3); the TypeScript verifier only displays
     them. Neither verifier re-checks what the evidence proves (§9.2 check 4).
     Possible next steps are a required-claims option for the TypeScript

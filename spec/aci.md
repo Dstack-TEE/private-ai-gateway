@@ -88,8 +88,7 @@ surface**, not its routing policy:
   commercial API), so a client can deliberately choose one. The receipt
   records the serving as unverified (`required: false`, §7.5) and no
   attested session exists (§8).
-- Each successful verification is captured as an immutable, content-addressed
-  **attested session** (§8) that a verifier can fetch and re-check.
+- A successful verification establishes an immutable, content-addressed attested session (§8), or revalidates the verified channel material represented by an unexpired session. The session preserves the evidence used to establish it.
 
 How the aggregator verifies a given upstream (which quote formats, which
 measurements, which provenance) is verifier-specific and out of scope.
@@ -618,15 +617,12 @@ forms:
   serve, it refuses with `session_not_accepted` (§5.3). Either refusal
   error carries `X-Receipt-Id` (§5.2) so the refusal receipt can be
   fetched.
-- A verified event carries `session_id`, the content address of the
-  attested session (§8) holding every verification detail.
+- A verified event carries `session_id`, the content address of the attested session (§8) admitted for the forwarding attempt recorded by this receipt. The session contains the establishing verification's evidence and claims. The service MUST NOT substitute a session established after that forwarding decision.
 - A failed event carries `reason` instead of a `session_id`, because no
   session served the request. With `required: false` the response still
   proceeds, and the receipt shows the inference was served unverified.
 
-To a generic verifier this event proves only that the attested aggregator
-*asserted* the outcome. Deep audit (§9.2) upgrades it to independently
-checked.
+This event is the attested aggregator's assertion that its verification policy authorized the forwarding attempt and that it enforced the cited session's channel binding. Deep audit (§9.2) independently checks the establishing evidence. It does not independently prove a later revalidation or reconstruct the verification round that authorized a particular request.
 
 ### 7.6 Access control
 
@@ -640,21 +636,15 @@ unauthenticated requests MAY be publicly retrievable.
 
 ## 8. Attested Sessions
 
-An aggregator forwards prompts to upstream TEE services. Before trusting
-one, it verifies that upstream's attestation (§1.2). An **attested
-session** is the saved proof of one such verification: which upstream,
-what was checked, the evidence itself, and the period it covers. Receipts
-cite the session by id, so every request can point at the proof without
-carrying it. Only a verified TEE upstream yields a session: serving
-through an upstream with no TEE (§1.2) appears on the receipt as
-unverified, with no session to cite (§7.5).
+An aggregator verifies an upstream's attestation before trusting its channel (§1.2). An attested session is an immutable snapshot of the verification used to establish that channel: the upstream, verified identity and channel material, claims, evidence, and validity period. Receipts cite this snapshot by id. Only a verified TEE upstream yields a session; serving through an upstream with no TEE appears as unverified, with no session to cite (§7.5).
 
-Sessions are per channel and per validity period, not per model or per
-request: a router-style upstream serving many models behind one TEE yields
-one session, and the model served is recorded on each receipt.
-Re-verification, after `expires_at` or whenever the verified material
-changes, produces a new session document with a new period and a new
-id. Sessions are never updated in place.
+Sessions are per verified channel and validity period, rather than per request. A router serving several models through the same verified channel may share one session; the receipt records the model served.
+
+A service MAY reuse an unexpired session when a successful verification establishes equivalent channel material. Equivalence MUST preserve the verified workload identity, channel bindings, security-relevant measurements and attributes, and recorded claims. Differences confined to verification-round freshness or evidence encoding do not by themselves require a new session. A verifier whose projection does not establish this equivalence MUST treat changed evidence as changed material.
+
+Reuse MUST NOT modify the session document or extend its `expires_at`. Changed material cannot be served under the old session. After expiry, a subsequent admission requires a new session. A temporary verification failure does not revoke an immutable session; successful recovery with equivalent material may reuse it while unexpired.
+
+Session validity, verifier-cache freshness, and evidence age are distinct. `established_at` records session creation, not necessarily evidence collection. Creating a session from a currently usable cached verification does not make its evidence newly collected. Every forwarding decision remains subject to the service's current verification and channel-enforcement rules.
 
 A session is immutable and content-addressed:
 
@@ -718,10 +708,7 @@ full record to verify (§9.2).
 - `identity` records the verified identity keys of the upstream (for
   example a response-signing address), when the verifier established
   one. Its fields are verifier-specific.
-- `evidence.data` is a data URI preserving the exact bytes the verifier
-  consumed (a multipart bundle when there were several inputs).
-  `evidence.digest` is the SHA-256 of those decoded bytes. A verifier MUST
-  reject a record whose `data` does not hash to `digest`.
+- `evidence.data` is a data URI preserving the evidence bytes retained for the establishing verification, including a bundle when several inputs are required. `evidence.digest` is the SHA-256 of those decoded bytes. A verifier MUST reject a record whose data does not hash to its digest. Reuse of a session does not replace this evidence with evidence from later verification rounds.
 
 `channel_binding` states what the aggregator enforced when it connected to
 the upstream. Defined shapes:
@@ -838,8 +825,7 @@ checks are the same:
 3. Shallow audit: the channel bindings and typed claims meet your policy
    — for example, `tee_attested` is `asserted` with source
    `hardware_proven`.
-4. Deep audit: re-verify the evidence itself under your policy for that
-   provider.
+4. Deep audit: re-verify the establishing evidence under your policy for that provider, including its support for the recorded identity, bindings and claims. Evaluate freshness using the evidence and the provider's verification rules; session creation time alone is not evidence of collection time. Later revalidation is the aggregator's assertion (§7.5). A policy requiring independently verifiable evidence from each authorizing round MUST reject a session snapshot as insufficient for that requirement.
 
 Pin the sessions that pass (`aci_session_ids`, §5.3). The service then
 refuses to serve you through anything else, and the receipt's cited id

@@ -77,6 +77,7 @@ impl PrivatemodeProviderVerifier {
         event.evidence = Some(manifest.evidence());
         event.channel_bindings = vec![self.deployment.channel_binding()];
         event.provider_claims = Some(serde_json::json!({
+            "session_material_version": "privatemode/1",
             "trust_boundary": "attested-compose-privatemode-proxy",
             "attestation_scope": "contrast-attested-e2ee-secret",
             "request_encryption": "privatemode-oae",
