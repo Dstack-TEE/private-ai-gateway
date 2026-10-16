@@ -12,6 +12,7 @@ import urllib.request
 from typing import Any
 
 from .common import (
+    tdx_session_material,
     emit,
     evidence_bundle,
     failed,
@@ -142,16 +143,12 @@ def chutes_verify_gpu(
     """Check the NVIDIA confidential-computing GPU evidence as SUPPLEMENTAL
     metadata, never a gate (mirrors the PhalaDirect verifier).
 
-    We still run the check: when it succeeds it authenticates the GPU model and
-    related info we surface, which the CPU TEE quote alone does not vouch for. But
-    a real TEE GPU is already established by the measured serving software inside
-    that quote, and a standalone NRAS check only proves a CC-capable GPU exists
-    for a nonce — not that it is bound to this CPU TEE or served this request. So
-    a missing/invalid GPU result is recorded, not fatal: as long as the workload
-    is secure and the info we report is accurate, a failed GPU check never
-    rejects the session, and the typed gpu_attested claim stays Unknown. The CPU
-    TEE quote, report_data binding, debug bit and measurement match remain the
-    hard gates."""
+    Record the existing outcome, including nonce matching. This path decodes
+    NRAS JWTs without signature verification and does not bind a GPU identity
+    to the serving CPU. It supplies no authenticated device or continuity claim.
+    Missing/invalid GPU results remain supplemental; the CPU quote, report_data
+    binding, debug bit and measurement match remain the hard gates.
+    """
     result: dict[str, Any] = {
         "gpu_evidence_present": bool(gpu_evidence),
         "gpu_verified": False,
@@ -245,6 +242,8 @@ async def chutes_verify_instance(
     )
 
     return {
+        **tdx_session_material(quote_bytes),
+        "advisory_ids": sorted(set(verified_report.advisory_ids)),
         "instance_id": instance_id,
         "measurement": measurement,
         "public_key_sha256": sha256_base64_key(e2e_pubkey),
@@ -450,6 +449,10 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     # single instance's session can bind its own CPU evidence.
     instance_measurements = {item["instance_id"]: item["measurement"] for item in verified}
     provider_claims = {
+        "session_material_version": "chutes/1",
+        "instance_tdx_reports": {item["instance_id"]: item.get("tdx_report") for item in verified},
+        "instance_tdx_report_sha256": {item["instance_id"]: item.get("tdx_report_sha256") for item in verified},
+        "instance_advisory_ids": {item["instance_id"]: item["advisory_ids"] for item in verified},
         "trust_boundary": "model_instance",
         "evidence_scope": "model_instance",
         "chute_id": chute_id,

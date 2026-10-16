@@ -3208,3 +3208,180 @@ async fn current_listing_remains_admissible_but_expired_history_cannot_satisfy_p
         "expired history must not authorize another forward"
     );
 }
+
+fn session_profile(provider: &str) -> Value {
+    let profiles: Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    profiles[provider].clone()
+}
+
+#[tokio::test]
+async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        verifier,
+    } = admission::Harness::new(
+        [101, 103, 104, 106]
+            .into_iter()
+            .map(|at| admission::Attempt::Response { status: 200, at })
+            .collect(),
+    );
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".to_string());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".to_string();
+    event.provider_claims = Some(session_profile("near-ai"));
+    *verifier.0.lock().unwrap() = event.clone();
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "near-ai", "base_url": "https://near.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let original = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let full = h
+        .requester
+        .get(&format!("/v1/aci/sessions/{original}"), &[])
+        .await;
+    let original_bytes = full.body;
+    // A new successful round with different evidence keeps the establishing bytes.
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"round two")).unwrap());
+    // EvidenceRef serializes its data URI as `data`, just like the bridge.
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let accepted = pin_session(&h, &original).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), original);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    assert_eq!(backend.events.lock().unwrap()[0].evidence, event.evidence);
+
+    // B changes measured identity: a fixed A pin is refused before backend I/O.
+    clock.set(102);
+    let a = event.clone();
+    event.provider_claims.as_mut().unwrap()["compose_hash"] = serde_json::json!("ff".repeat(32));
+    *verifier.0.lock().unwrap() = event;
+    let b = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(b, original);
+    let refused = pin_session(&h, &original).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(backend.events.lock().unwrap().len(), 1);
+    assert_eq!(pin_session(&h, &b).await.status, StatusCode::OK);
+
+    // A -> B -> A can select the original still-unexpired A snapshot.
+    *verifier.0.lock().unwrap() = a.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let returned = pin_session(&h, &original).await;
+    assert_eq!(returned.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &returned), original);
+
+    // An unusable verification fails closed, without revoking immutable history.
+    clock.set(105);
+    let mut failed = a.clone();
+    failed.result = VerificationResult::Failed;
+    failed.reason = Some("fixture verification failure".to_string());
+    *verifier.0.lock().unwrap() = failed;
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_ne!(pin_session(&h, &original).await.status, StatusCode::OK);
+    assert_eq!(backend.events.lock().unwrap().len(), 3);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    *verifier.0.lock().unwrap() = a;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    assert_eq!(pin_session(&h, &original).await.status, StatusCode::OK);
+
+    // Expiry reseals from the same cached verification; fixed pins need replacement.
+    clock.set(110);
+    let replacement = listed_sessions(&h, "").await[0].clone();
+    assert_ne!(replacement["session_id"], original);
+    assert_eq!(replacement["established_at"], 110);
+    assert_eq!(replacement["expires_at"], 120);
+    assert_eq!(
+        pin_session(&h, &original).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
+    for provider in ["armet-ai", "secret-ai", "chutes", "custom"] {
+        for cpu in ["tdx", "sev-snp"] {
+            let h = admission::Harness::new(vec![]);
+            let mut event = common::verified_event("admission-test", "model-a");
+            event.provider_type = Some(provider.to_string());
+            event.verifier_id = format!("private-ai-verifier/{provider}/v1");
+            // An unsupported marker cannot opt in, even with copied complete TDX material.
+            let mut claims = session_profile("near-ai");
+            claims["session_material_version"] = serde_json::json!(format!("{provider}/1"));
+            claims["cpu_type"] = serde_json::json!(cpu);
+            event.provider_claims = Some(claims);
+            if provider == "chutes" {
+                event.channel_bindings = vec![ChannelBinding::E2eePublicKeySha256 {
+                    provider: "chutes".to_string(),
+                    algorithm: "rsa-oaep-sha256".to_string(),
+                    key_id: Some("instance-a".to_string()),
+                    public_key_sha256: "ab".repeat(32),
+                }];
+            }
+            *h.verifier.0.lock().unwrap() = event.clone();
+            let first = h.listed()[0].session_id().to_string();
+            event.evidence = Some(
+                serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new evidence"))
+                    .unwrap(),
+            );
+            *h.verifier.0.lock().unwrap() = event;
+            assert_ne!(h.listed()[0].session_id(), first, "{provider}/{cpu}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn privatemode_manifest_observation_time_is_material() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    event.provider_type = Some("privatemode".to_string());
+    event.verifier_id = "privatemode-proxy/co-deployed-contrast/v1".to_string();
+    event.provider_claims = Some(session_profile("privatemode"));
+    event.channel_bindings = vec![ChannelBinding::ProxyImageSha256 {
+        provider: "privatemode".to_string(),
+        proxy_image_digest: sha256_hex(b"image"),
+        credential_sha256: "ab".repeat(32),
+    }];
+    *h.verifier.0.lock().unwrap() = event.clone();
+    let first = h.listed()[0].session_id().to_string();
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"refreshed evidence")).unwrap(),
+    );
+    *h.verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(h.listed()[0].session_id(), first);
+    event.provider_claims.as_mut().unwrap()["manifest_observed_at"] =
+        serde_json::json!("2026-10-16T12:01:00Z");
+    *h.verifier.0.lock().unwrap() = event;
+    assert_ne!(h.listed()[0].session_id(), first);
+}

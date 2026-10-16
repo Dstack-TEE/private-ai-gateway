@@ -1,4 +1,11 @@
 /**
+ * A session contains an establishing-evidence snapshot. A reused session does not
+ * supply evidence from every later verification round. Session and evidence hashes
+ * prove integrity; they do not perform provider-specific deep audit. Fixed session
+ * pins require explicit replacement after expiry or material migration.
+ */
+
+/**
  * The verification transcript engine plus the one-call {@link verifyService}
  * entry point. DOM-free, so any web or node project imports it directly. Check
  * ids, titles, and section cites are the shared ACI transcript vocabulary (the

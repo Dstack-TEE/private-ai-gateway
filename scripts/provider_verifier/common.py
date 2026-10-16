@@ -30,6 +30,7 @@ __all__ = [
     "provider_options",
     "request_timeout_seconds",
     "tdx_debug_enabled",
+    "tdx_session_material",
     "verified_nras_gpu_claims",
 ]
 
@@ -224,3 +225,34 @@ def verified_nras_gpu_claims(
         if isinstance(model, str) and model:
             models.add(model)
     return sorted(models), len(gpu_reports)
+
+
+def tdx_session_material(quote: bytes | str) -> dict[str, Any]:
+    """Project an already authenticated quote; parsing adds no verification.
+
+    These ASCII-only fields have the same sorted JSON encoding as JCS. Unknown
+    report forms or malformed input leave the adapter evidence-sensitive.
+    """
+    import dcap_qvl
+
+    try:
+        quote_bytes = bytes.fromhex(quote) if isinstance(quote, str) else quote
+        report = dcap_qvl.Quote.parse(quote_bytes).report
+        if isinstance(report, dcap_qvl.TdReport15):
+            report_format = "td15"
+        elif isinstance(report, dcap_qvl.TdReport10):
+            report_format = "td10"
+        else:
+            return {}
+        fields = [
+            "tee_tcb_svn", "mr_seam", "mr_signer_seam", "seam_attributes",
+            "td_attributes", "xfam", "mr_td", "mr_config_id", "mr_owner",
+            "mr_owner_config", "rt_mr0", "rt_mr1", "rt_mr2", "rt_mr3",
+        ]
+        if report_format == "td15":
+            fields += ["tee_tcb_svn2", "mr_service_td"]
+        material = {"report_format": report_format}
+        material.update({name: getattr(report, name).hex() for name in fields})
+        return {"tdx_report": material, "tdx_report_sha256": sha256_json_prefixed(material)}
+    except (ValueError, TypeError, AttributeError):
+        return {}

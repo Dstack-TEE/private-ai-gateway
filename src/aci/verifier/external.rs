@@ -457,6 +457,10 @@ impl ExternalProviderVerifier {
             reason: output.reason.clone(),
             evidence,
             channel_bindings,
+            // Optional reviewed profiles are checked at session projection (after
+            // per-instance slicing for Chutes). Incomplete/custom/legacy claims
+            // are accepted here and keep evidence-sensitive dedup. Evidence
+            // integrity and binding enforcement above are never bypassed.
             provider_claims: output.provider_claims.clone(),
         })
     }
@@ -562,6 +566,11 @@ struct ExternalProviderVerifierOutput {
     evidence: Option<Value>,
     #[serde(default)]
     channel_bindings: Vec<ExternalChannelBinding>,
+    /// Optional session_material_version profiles: near-ai/1, phala-direct/1,
+    /// chutes/1 (per instance), tinfoil/1, privatemode/1. Eligibility requires
+    /// matching provider, built-in verifier ID and complete validated material;
+    /// custom profiles have no evidence-independent reuse capability. The
+    /// configured verifier remains responsible for authenticating these facts.
     #[serde(default)]
     provider_claims: Option<serde_json::Value>,
     /// The channel boundary the verifier attests ("router" / "model" /
@@ -745,5 +754,68 @@ mod process_tests {
                 Some(libc::ESRCH)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod session_material_tests {
+    use super::*;
+    use crate::aggregator::service::reviewed_session_material;
+
+    #[test]
+    fn legacy_custom_and_incomplete_outputs_remain_accepted_but_evidence_sensitive() {
+        let verifier = ExternalProviderVerifier::with_command(
+            "near-ai",
+            AttestationScope::PerRouter,
+            vec!["unused".to_string()],
+            5,
+        )
+        .unwrap();
+        for claims in [
+            serde_json::json!({}),
+            serde_json::json!({"session_material_version": "custom/1"}),
+            serde_json::json!({"session_material_version": "near-ai/1"}),
+        ] {
+            let output: ExternalProviderVerifierOutput = serde_json::from_value(serde_json::json!({
+                "result": "verified", "verifier_id": "private-ai-verifier/near-ai-gateway/v1",
+                "attested_scope": "router", "provider_claims": claims,
+                "channel_bindings": [{"type": "tls_spki_sha256", "origin": "https://near.example", "spki_sha256": "ab".repeat(32)}],
+                "evidence": {"digest": crate::aci::digest::sha256_hex(b"evidence"), "data": "data:text/plain;base64,ZXZpZGVuY2U="},
+            })).unwrap();
+            let request = || UpstreamVerificationRequest {
+                upstream_name: "near".to_string(),
+                url_origin: Some("https://near.example".to_string()),
+                model_id: "model".to_string(),
+                forwarded_body_hash: String::new(),
+                required: true,
+            };
+            let event = verifier.event_from_output(request(), &output).unwrap();
+            assert_eq!(event.result, VerificationResult::Verified);
+            assert!(!reviewed_session_material(
+                event.provider_type.as_deref(),
+                &event.verifier_id,
+                event.provider_claims.as_ref().unwrap()
+            ));
+            let mut invalid = output;
+            invalid.evidence = None;
+            assert!(verifier.event_from_output(request(), &invalid).is_err());
+            invalid.channel_bindings.clear();
+            assert!(verifier.event_from_output(request(), &invalid).is_err());
+        }
+        let mut complete: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/session_material.json"
+        ))
+        .unwrap();
+        assert!(!reviewed_session_material(
+            Some("near-ai"),
+            "custom/verifier/v1",
+            &complete["near-ai"]
+        ));
+        complete["near-ai"]["tdx_report_sha256"] = Value::Null;
+        assert!(!reviewed_session_material(
+            Some("near-ai"),
+            "private-ai-verifier/near-ai-gateway/v1",
+            &complete["near-ai"]
+        ));
     }
 }

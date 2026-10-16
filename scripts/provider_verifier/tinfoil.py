@@ -29,6 +29,27 @@ def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
     return report_data
 
 
+def tinfoil_session_material(doc: Any) -> dict[str, Any]:
+    """Preserve the official verified document's measurements and register order."""
+
+    def measurement(value):
+        return {"type": value.type.value, "registers": list(value.registers)}
+
+    try:
+        hardware = doc.hardware_measurement
+        return {
+            "enclave_host": doc.enclave_host,
+            "enclave_fingerprint": doc.enclave_fingerprint,
+            "hpke_public_key": doc.hpke_public_key,
+            "code_measurement": measurement(doc.code_measurement),
+            "enclave_measurement": measurement(doc.enclave_measurement.measurement),
+            "hardware_measurement": None if hardware is None else {
+                "id": hardware.id, "mrtd": hardware.mrtd, "rtmr0": hardware.rtmr0,
+            },
+        }
+    except (AttributeError, TypeError, ValueError):
+        return {}
+
 
 async def verify_tinfoil(request: dict[str, Any]) -> None:
     # Verify with Tinfoil's official Python verifier. It performs the full reference
@@ -73,7 +94,9 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         }
         for name, state in (doc.steps or {}).items()
     }
+    material = tinfoil_session_material(doc)
     evidence_doc = {
+        **material,
         "config_repo": doc.config_repo,
         "enclave_host": doc.enclave_host,
         "release_digest": doc.release_digest,
@@ -137,6 +160,8 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 }
             ],
             "provider_claims": {
+                **material,
+                **({"session_material_version": "tinfoil/1"} if material else {}),
                 # Router channel scope — model-independent. The served model is
                 # deliberately NOT folded in: it would split one verified channel
                 # into a session per model, and it is recorded on the receipt.
