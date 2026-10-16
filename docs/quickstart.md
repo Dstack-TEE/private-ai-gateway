@@ -5,18 +5,19 @@ Verify a live ACI deployment yourself. The commands below run against
 that enforces TEE-only routing. Point `ACI_URL` at any ACI service to verify
 that instead.
 
-You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm
-and select the service:
+You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy with the
+native installer (macOS and Linux) and select the service:
 
 ```bash
-npm install --global private-ai-proxy
+curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
 pap --help
 export ACI_URL=https://tee.redpill.ai
 ```
 
-`pap curl` and the custody flags need 0.2.0 or later.
-`private-ai-proxy` is the full name of the same command. For Homebrew, native
-installers, and install scripts, see the [install guide](private-ai-proxy-install.md).
+If `pap` is not found, add `$HOME/.local/bin` to `PATH`. `pap curl` and the
+custody flags need 0.2.0 or later.
+`private-ai-proxy` is the full name of the same command. For Windows, Homebrew, npm,
+and the desktop app, see the [install guide](private-ai-proxy-install.md).
 From a source checkout, replace each `pap` command below with
 `cargo run --manifest-path apps/desktop/Cargo.toml --bin private-ai-proxy --`.
 

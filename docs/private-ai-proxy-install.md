@@ -12,27 +12,74 @@ The steps below install the stable release. `pap curl` and the key-custody
 flags (`--accept-subject` with `--accept-dstack-kms-root-public-key`) need
 0.2.0 or later.
 
-## npm
+## Native install (recommended)
+
+The official install scripts download the standalone CLI from GitHub Releases
+and need no Node.js or package manager.
+
+### macOS and Linux
+
+Run the official installer from the stable RedPill URL:
 
 ```sh
-npm install --global private-ai-proxy
-pap --help
+curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
 ```
 
-npm installs the native executables for the current operating system and CPU
-architecture as an optional dependency. Do not install with `--omit=optional`
-or `--no-optional`: without that dependency, `pap` only prints the reinstall
-command.
+To review the script or pass options, download it first:
 
-Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
-exact version such as `private-ai-proxy@0.2.0`. Do not use a prerelease range
-such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
-version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
-package.
+```sh
+curl -fsSLO https://redpill.ai/private-ai-proxy/install.sh
+sh install.sh
+```
 
-npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
-executables even on glibc systems. Upgrade npm if `pap` reports that they are
-missing.
+The script supports macOS and Linux on arm64 and x86_64. It installs without
+root, verifies the release archive against `SHA256SUMS`, validates its contents,
+stops the previous user backend during an upgrade, and atomically switches the
+three commands. It never edits shell startup files; if `$HOME/.local/bin` is
+not on `PATH`, the installer says so, and you add it yourself.
+
+Options:
+
+```text
+--channel stable|beta
+--version VERSION
+--install-dir PATH
+--bin-dir PATH
+```
+
+The defaults are `${XDG_DATA_HOME:-$HOME/.local/share}/private-ai-proxy` for
+versioned files and `$HOME/.local/bin` for commands.
+
+### Windows
+
+Run the official installer from PowerShell:
+
+```powershell
+irm https://redpill.ai/private-ai-proxy/install.ps1 | iex
+```
+
+To review the script or pass parameters, download it first:
+
+```powershell
+Invoke-WebRequest https://redpill.ai/private-ai-proxy/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The script supports Windows x64 and ARM64. It verifies the release ZIP against
+`SHA256SUMS`, validates every archive entry, stops the previous user backend,
+uses the CLI's ownership-aware registration to update the user PATH, and restores
+the previous installation if registration fails.
+
+PowerShell parameters:
+
+```text
+-Channel stable|beta
+-Version VERSION
+-InstallDir PATH
+```
+
+The default installation directory is
+`%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
 
 ## Homebrew
 
@@ -64,71 +111,30 @@ and removal for both the Formula and Cask installations.
 
 The tap carries stable releases only. It is updated by pull requests that the
 tap's own workflow opens after a stable release and a maintainer merges, so it
-can trail the latest GitHub release. Use npm or the install script for beta
+can trail the latest GitHub release. Use the native install script or npm for beta
 versions or when you need a release the tap does not have yet.
 
-## macOS and Linux install script
-
-Run the official installer from the stable RedPill URL:
+## npm
 
 ```sh
-curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
+npm install --global private-ai-proxy
+pap --help
 ```
 
-To review the script or pass options, download it first:
+npm installs the native executables for the current operating system and CPU
+architecture as an optional dependency. Do not install with `--omit=optional`
+or `--no-optional`: without that dependency, `pap` only prints the reinstall
+command.
 
-```sh
-curl -fsSLO https://redpill.ai/private-ai-proxy/install.sh
-sh install.sh
-```
+Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
+exact version such as `private-ai-proxy@0.2.0`. Do not use a prerelease range
+such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
+version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
+package.
 
-The script supports macOS and Linux on arm64 and x86_64. It installs without
-root, verifies the release archive against `SHA256SUMS`, validates its contents,
-stops the previous user backend during an upgrade, and atomically switches the
-three commands. It never edits shell startup files.
-
-Options:
-
-```text
---channel stable|beta
---version VERSION
---install-dir PATH
---bin-dir PATH
-```
-
-The defaults are `${XDG_DATA_HOME:-$HOME/.local/share}/private-ai-proxy` for
-versioned files and `$HOME/.local/bin` for commands.
-
-## Windows install script
-
-Run the official installer from PowerShell:
-
-```powershell
-irm https://redpill.ai/private-ai-proxy/install.ps1 | iex
-```
-
-To review the script or pass parameters, download it first:
-
-```powershell
-Invoke-WebRequest https://redpill.ai/private-ai-proxy/install.ps1 -OutFile install.ps1
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-The script supports Windows x64 and ARM64. It verifies the release ZIP against
-`SHA256SUMS`, validates every archive entry, stops the previous user backend,
-uses the CLI's ownership-aware registration to update the user PATH, and restores
-the previous installation if registration fails.
-
-PowerShell parameters:
-
-```text
--Channel stable|beta
--Version VERSION
--InstallDir PATH
-```
-
-The default installation directory is
-`%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
+npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
+executables even on glibc systems. Upgrade npm if `pap` reports that they are
+missing.
 
 ## Desktop app and native packages
 

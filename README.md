@@ -18,14 +18,15 @@ developer preview.
 
 ## Try it
 
-Install the Private AI Proxy CLI (macOS, Linux, or Windows):
+Install the Private AI Proxy CLI on macOS or Linux:
 
 ```bash
-npm install --global private-ai-proxy
+curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
 ```
 
-The [install guide](docs/private-ai-proxy-install.md) covers Homebrew, the
-desktop app, and the install scripts.
+On Windows, run `irm https://redpill.ai/private-ai-proxy/install.ps1 | iex` in
+PowerShell. The [install guide](docs/private-ai-proxy-install.md) covers
+Homebrew, npm, and the desktop app.
 You also need system `curl`.
 
 Then call Chat Completions as usual. Replace `YOUR_API_KEY` and `MODEL_ID`
