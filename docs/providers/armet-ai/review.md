@@ -1,6 +1,6 @@
 # ArmetAI Per-Model TDX Review
 
-Date: 2026-09-29 UTC. Updated: 2026-10-14 UTC.
+Date: 2026-09-29 UTC. Updated: 2026-10-15 UTC.
 
 > [!NOTE]
 > This is the provider's **self-assessment** against the
@@ -16,7 +16,8 @@ in-TD TLS proxy repositories with commits, to be listed before review).
 ## Verdict
 
 **Decision pending.** The adapter verifies the current live endpoint
-`ctf.armet.ai` (see [New endpoint](#new-endpoint-ctfarmetai-2026-10-14)), and
+`ctf.armet.ai` (see [New endpoint](#new-endpoint-ctfarmetai-2026-10-14) and
+the [2026-10-15 re-probe](#re-probe-after-redeploy-2026-10-15)), and
 earlier verified `poc1.armet.ai` (see [Live probe](#live-probe-2026-10-02) and
 re-probes on [2026-10-07](#re-probe-after-redeploy-2026-10-07) and
 [2026-10-09](#re-probe-after-redeploy-2026-10-09)). Source provenance, the
@@ -126,6 +127,10 @@ claim.
 - **Exec disabled:** as of 2026-10-07, `initdata.toml` disallows exec into the
   TD. The change produced a new `MRCONFIGID` and subject (see
   [Re-probe](#re-probe-after-redeploy-2026-10-07)).
+- **Hardened policy:** on 2026-10-15, `initdata.toml` was updated to harden
+  the TD's runtime policy, producing a new `MRCONFIGID` and subject (see
+  [Re-probe](#re-probe-after-redeploy-2026-10-15)). The specific changes will
+  be shown with the published `initdata.toml` in the review session.
 - **Provider evidence through live review session** We plan to show the following
   - the TD recomputes the hash of the `initdata.toml` it actually consumes and
     refuses to start unless it equals its own `MRCONFIGID`. Otherwise the host
@@ -188,9 +193,9 @@ Live:
 
 - A request for a model the TD does not serve (`GLM-5.3-Other`) was refused by
   the endpoint with `409`, and the verifier failed closed.
-- After the 2026-10-07, 2026-10-09 and 2026-10-14 relaunches changed
-  `MRCONFIGID`, the previous pin was rejected at the measurement step each
-  time.
+- After the 2026-10-07, 2026-10-09, 2026-10-14 and 2026-10-15 relaunches
+  changed `MRCONFIGID`, the previous pin was rejected at the measurement step
+  each time.
 
 The certificate-rotation and VM-shape checks are **TODO**.
 
@@ -391,6 +396,46 @@ End to end through a locally run gateway, pinned to the new subject:
 | Session claims | Unchanged: `tee_attested`, `tcb_up_to_date`, `serving_software_known_good`, `gpu_attested` asserted; `os_known_good`, `model_weights_provenance` unknown |
 
 The live E2E suite ran with the session-label fix merged upstream in #400.
+The new subject was pinned for this test only.
+
+## Re-probe after redeploy (2026-10-15)
+
+ArmetAI relaunched the TD on `ctf.armet.ai` with an `initdata.toml` updated to
+harden the runtime policy. The tests were rerun for `GLM-5.3-Flash` on the
+adapter rebased onto upstream `main` at `c98ec7b`, which includes the
+Privatemode provider and the verifier-cache session listing (#399).
+
+| Check | Result |
+| --- | --- |
+| Wire contract and `report_data` commitment | Pass |
+| Reported SPKI equals live certificate SPKI | Pass (`a2e07c25…bb2c`, new: a fresh in-TD key for the new launch) |
+| Certificate | Let's Encrypt `YE2`, issued 2026-10-16 02:27 UTC |
+| Previous pin (`b954e673…6420`) | Rejected at the measurement step |
+| New subject, pinned for the test | `verified`; TCB `UpToDate`, no advisories; NRAS 8 × GH100, every GPU nonce-matched |
+| Wrong model | `409` from the endpoint; verifier failed closed |
+| `cargo test -p private-ai-gateway --all-targets` | 621 passed, 0 failed |
+
+Changed values; MRTD, RTMR0-3, TD attributes, XFAM and the TDX module are
+unchanged:
+
+| Field | Value |
+| --- | --- |
+| MRCONFIGID | `bc080317…d039aa` (was `4937f0a5…0ecd63`) |
+| Subject | `tdx-measurement:sha256:da6f26e8c85dd6623946ab228f0f8f181a3b91b139c8277dcd6c79a8a13f0c8a` |
+
+End to end through a locally run gateway, pinned to the new subject:
+
+| Check | Result |
+| --- | --- |
+| Live E2E suite, quick profile | Pass |
+| Receipt audit (`pap audit`, offline) | Receipt, `upstream-1` and `upstream-2` (the cited session verifies against the receipt) pass; only `id-4`, the gateway's own source provenance, fails, as before |
+| `GET /v1/aci/sessions?model=armet-live` | Lists the current ArmetAI session |
+| Pinned to the listed session via `aci_session_ids` | `200` |
+| Pinned to a non-current `aci_session_ids` value | `412`, refused before forwarding |
+| Chat and streaming with `provider.aci_verified: true` | `200` with `X-Receipt-Id`; the stream terminated by `[DONE]` |
+| Tool calling, `tool_choice: auto` | Non-streaming, streaming and the tool-result follow-up turn pass |
+| Session claims | Unchanged |
+
 The new subject was pinned for this test only.
 
 ## Hard reject conditions
