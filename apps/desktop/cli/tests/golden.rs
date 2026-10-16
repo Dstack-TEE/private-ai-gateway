@@ -117,6 +117,56 @@ fn the_deprecated_os_flag_warns_without_changing_verification() {
 }
 
 #[test]
+fn the_deprecated_profile_os_flag_warns_without_changing_the_command() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec![
+            "profiles",
+            "add",
+            "--id",
+            "work",
+            "--name",
+            "Work",
+            "--url",
+            "https://example.com",
+            "--key-stdin",
+        ],
+        vec!["profiles", "edit", "work", "--name", "Work"],
+    ] {
+        let mut results = Vec::new();
+        for deprecated in [false, true] {
+            let mut command = std::process::Command::new(cargo_bin!("private-ai-proxy"));
+            command
+                .env(desktop_core::paths::HOME_OVERRIDE_ENV, home.path())
+                .args(["--non-interactive", "--json"])
+                .args(&args);
+            if deprecated {
+                command.arg("--allow-development-os");
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let stderr = if deprecated {
+                stderr.strip_prefix("warning: --allow-development-os is deprecated and has no effect; clients no longer appraise the OS image.\n").unwrap().to_owned()
+            } else {
+                stderr
+            };
+            results.push((output.stdout, stderr));
+        }
+        assert_eq!(results[0], results[1]);
+        let help = pap()
+            .args(["profiles", args[1], "--help"])
+            .output()
+            .unwrap();
+        assert!(help.status.success());
+        assert!(!String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--allow-development-os"));
+    }
+    assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+}
+
+#[test]
 fn help() {
     pap().assert().code(2).stdout_eq("").stderr_eq(str![[r#"
 Private AI Proxy: manage local protection and verify confidential AI services
@@ -214,7 +264,7 @@ Options:
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["e6ec947ef65d67525afeb8ca4edf5f41f353e9c7f913a597baa488aeafd7d8ef"]
+        str!["967133bee9001a48930d33f2f8963ff67fd0912d250f46d4d7633b67cbd2ba7a"]
     );
 }
 

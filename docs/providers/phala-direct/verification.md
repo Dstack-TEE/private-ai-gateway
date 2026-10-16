@@ -97,7 +97,7 @@ uv run python scripts/dstack_os_image.py <os_image_hash>
 ```
 
 The adapter records the classification and does not enforce it. A relying party that requires a production image must apply a claims policy.
-Clients do not appraise the OS image; production runs only production dstack images.
+This server-side classification is separate from the [client verification boundary](../../attested-confidential-inference.md#os-image-responsibility).
 
 ## Limitations
 

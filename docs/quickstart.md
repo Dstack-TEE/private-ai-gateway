@@ -94,7 +94,7 @@ for that app. It does not cover the TLS private key. That key stays inside the
 TEE only if the compose you reviewed runs the TLS terminator and keeps its key
 there.
 
-Clients do not appraise the OS image; production runs only production dstack images.
+See [OS image responsibility](attested-confidential-inference.md#os-image-responsibility).
 
 ## 2. Send a familiar API request over the verified channel
 

@@ -304,7 +304,11 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
+            allow_development_os,
         } => {
+            if *allow_development_os {
+                crate::warn_deprecated_os_flag("--allow-development-os");
+            }
             let profile = ConfidentialProfileInput {
                 id: id.clone(),
                 name: name.clone(),
@@ -350,7 +354,11 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
+            allow_development_os,
         } => {
+            if *allow_development_os {
+                crate::warn_deprecated_os_flag("--allow-development-os");
+            }
             let state = client.state()?;
             let saved = find(state.profiles, id)?;
             let profile = ConfidentialProfileInput {

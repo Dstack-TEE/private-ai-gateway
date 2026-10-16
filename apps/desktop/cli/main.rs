@@ -70,7 +70,7 @@ async fn main() {
         error.exit()
     });
     if require_production_os {
-        eprintln!("warning: --require-production-os is deprecated and has no effect; clients no longer appraise the OS image.");
+        warn_deprecated_os_flag("--require-production-os");
     }
     let json = global.json;
     let aci = |result: Result<i32, String>| result.map_err(CallError::Local);
@@ -103,6 +103,12 @@ async fn main() {
         failure_code
     });
     std::process::exit(code);
+}
+
+fn warn_deprecated_os_flag(flag: &str) {
+    eprintln!(
+        "warning: {flag} is deprecated and has no effect; clients no longer appraise the OS image."
+    );
 }
 
 /// Whether any of `flags` precedes a `--` in the raw arguments.

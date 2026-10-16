@@ -262,11 +262,15 @@ host. Policy flags narrow what it accepts:
 Without a custody policy, the CLI reports custody as skipped. The TypeScript
 verifier does not check custody.
 
-Clients do not appraise the OS image; production runs only production dstack images.
-
 Do not turn an unproven field into a stronger claim. A reported repository,
 commit, image, model ID, or TCB status remains a label until the applicable
 measurement and policy corroborate it.
+
+### OS image responsibility
+
+Clients do not check the OS image. Running a production (non-development)
+dstack image is the service operator's responsibility; the RedPill operator
+commits to this for its gateway.
 
 ## Non-goals and remaining exposure
 

@@ -391,7 +391,7 @@ pub fn credentials_path() -> Result<PathBuf, String> {
 #[derive(Debug, Default)]
 pub struct Parsed<T> {
     pub value: T,
-    /// `file:line:column: key.path: unknown key, ignored`.
+    /// Located warnings for unknown or removed settings.
     pub unknown: Vec<String>,
 }
 
@@ -438,9 +438,14 @@ pub fn parse_toml<T: DeserializeOwned>(
     let unknown = unknown
         .into_iter()
         .map(|path| {
+            let message = if file == CONFIG_FILE && path == ["require-production-os"] {
+                "removed setting, ignored; remove this key (clients no longer check the OS image)"
+            } else {
+                "unknown key, ignored"
+            };
             Invalid {
                 path,
-                message: "unknown key, ignored".into(),
+                message: message.into(),
             }
             .located(file, text)
         })
@@ -868,7 +873,7 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
             let parsed = parse(&format!("require-production-os = {required}\n")).unwrap();
             assert_eq!(parsed.value, Config::default());
             assert_eq!(parsed.unknown.len(), 1);
-            assert!(parsed.unknown[0].contains("require-production-os: unknown key, ignored"));
+            assert_eq!(parsed.unknown[0], "config.toml:1:25: require-production-os: removed setting, ignored; remove this key (clients no longer check the OS image)");
             assert!(!toml_edit::ser::to_string(&parsed.value)
                 .unwrap()
                 .contains("require-production-os"));

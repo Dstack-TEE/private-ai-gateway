@@ -38,7 +38,7 @@ phala deploy -n private-ai-gateway \
 
 When an SSH key is available, the Phala CLI selects a dev OS image by default.
 `--no-dev-os` with an explicit image selects the intended production image.
-Clients do not appraise the OS image; production runs only production dstack images.
+See [OS image responsibility](../docs/attested-confidential-inference.md#os-image-responsibility).
 
 Rendering puts the git commit, image digest, and the digests of the admin
 token and Privatemode API key into the measured Compose; the secrets themselves

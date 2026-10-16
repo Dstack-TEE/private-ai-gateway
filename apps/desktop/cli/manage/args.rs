@@ -250,6 +250,9 @@ pub enum Profiles {
         /// Read the credential from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         key_stdin: bool,
+        /// Deprecated compatibility flag; OS images are no longer appraised.
+        #[arg(long, hide = true)]
+        allow_development_os: bool,
     },
     /// Validate and save a profile, optionally replacing its credential.
     Verify {
@@ -278,6 +281,9 @@ pub enum Profiles {
         /// Read a replacement credential from stdin.
         #[arg(long)]
         key_stdin: bool,
+        /// Deprecated compatibility flag; OS images are no longer appraised.
+        #[arg(long, hide = true)]
+        allow_development_os: bool,
     },
     /// Make a saved profile active.
     #[command(

@@ -86,7 +86,7 @@ Verification failures return `{ ok: false, checks }`; malformed input throws.
 > Types Wrong, and publishes it with npm provenance from a `clients-v<version>`
 > GitHub Release.
 
-Clients do not appraise the OS image; production runs only production dstack images.
+See [OS image responsibility](../../docs/attested-confidential-inference.md#os-image-responsibility).
 
 ## Usage
 

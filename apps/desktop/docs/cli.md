@@ -71,7 +71,7 @@ anchor: nothing measured corroborates it (spec 4.1), so any app under the same
 KMS root could claim it. Without the custody flags id-5 is an honest skip; no
 trust anchors are built in.
 
-Clients do not appraise the OS image; production runs only production dstack images.
+See [OS image responsibility](../../../docs/attested-confidential-inference.md#os-image-responsibility).
 
 ### One pinned curl request
 

@@ -299,6 +299,29 @@ fn credential_identities_change_with_the_key_and_hide_it() {
 }
 
 #[test]
+fn the_removed_os_setting_warns_specifically_after_a_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    fs::write(
+        dir.path().join("config").join(CONFIG_FILE),
+        "require-production-os = true\n",
+    )
+    .unwrap();
+    settings.reload().unwrap();
+    let warnings = settings.files().warnings;
+    assert_eq!(warnings, ["config.toml:1:25: require-production-os: removed setting, ignored; remove this key (clients no longer check the OS image)"]);
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Dark;
+            Ok(())
+        })
+        .unwrap();
+    assert!(config_text(dir.path()).contains("require-production-os = true"));
+    assert_eq!(settings.config().unwrap().appearance, Appearance::Dark);
+    assert_eq!(settings.files().warnings, warnings);
+}
+
+#[test]
 fn unknown_keys_warn_and_the_rest_of_the_file_applies() {
     let dir = tempfile::tempdir().unwrap();
     let settings = open(dir.path());

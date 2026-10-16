@@ -249,7 +249,7 @@ unlocked OS keychain for a process running as you.
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
-- Clients do not appraise the OS image; production runs only production dstack images.
+- See [OS image responsibility](../../../docs/attested-confidential-inference.md#os-image-responsibility).
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to
