@@ -35,17 +35,6 @@ fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
     Middleware::new(PrefixHashKey::new([7; 32]), config)
 }
 
-fn temp_config_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-middleware-catalog-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
-}
-
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
@@ -61,8 +50,13 @@ fn runtime_options() -> UpstreamRuntimeOptions {
     }
 }
 
-fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
-    let path = temp_config_path();
+fn build_service() -> (
+    tempfile::TempDir,
+    Arc<AciService>,
+    Arc<UpstreamConfigManager>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     let manager = Arc::new(UpstreamConfigManager::load(&path, runtime_options()).unwrap());
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -76,7 +70,7 @@ fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
         )
         .unwrap(),
     );
-    (service, manager)
+    (directory, service, manager)
 }
 
 // Spawn a stub control plane that labels each catalog so the test can prove the
@@ -137,7 +131,7 @@ async fn relays_catalogs_from_control() {
         })
         .unwrap(),
     );
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
 
     let (status, body) = get_json(app.clone(), "/v1/models").await;
@@ -172,7 +166,7 @@ async fn relays_catalog_query_string_to_control() {
         })
         .unwrap(),
     );
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
 
     let (status, body) = get_json(app.clone(), "/v1/models?zdr=true").await;
@@ -201,7 +195,7 @@ async fn relays_catalog_query_string_to_control() {
 
 #[tokio::test]
 async fn direct_mode_sub_catalogs_remain_not_found() {
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin(service, manager, None);
 
     let (status, _) = get_json(app.clone(), "/v1/models/my-namespace").await;

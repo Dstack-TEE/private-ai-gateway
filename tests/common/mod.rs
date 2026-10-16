@@ -311,15 +311,8 @@ pub fn session_config(
     use private_ai_gateway::aggregator::upstream_config::{
         UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let directory = std::env::temp_dir().join(format!(
-        "pag-session-config-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&directory).unwrap();
-    let path = directory.join("upstreams.json");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     let manager = UpstreamConfigManager::load(
         &path,
@@ -336,7 +329,5 @@ pub fn session_config(
             privatemode_proxy: None,
         },
     );
-    std::fs::remove_file(&path).unwrap();
-    std::fs::remove_dir(&directory).unwrap();
     Arc::new(manager.unwrap())
 }

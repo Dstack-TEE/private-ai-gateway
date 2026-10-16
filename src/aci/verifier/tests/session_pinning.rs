@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -29,17 +28,6 @@ use crate::aggregator::upstream_config::{
 };
 use crate::http::{build_router_with_admin, build_router_with_admin_and_middleware};
 use crate::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
-
-struct TestDirectory(PathBuf);
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        for name in ["upstreams.json", "counter"] {
-            let _ = std::fs::remove_file(self.0.join(name));
-        }
-        let _ = std::fs::remove_dir(&self.0);
-    }
-}
 
 struct SessionKeys(SigningKey);
 
@@ -149,12 +137,9 @@ impl UpstreamBackend for FixtureBackend {
     }
 }
 
-fn manager(config: Value) -> (TestDirectory, Arc<UpstreamConfigManager>) {
-    let directory = TestDirectory(
-        std::env::temp_dir().join(format!("pag-route-list-test-{}", std::process::id())),
-    );
-    std::fs::create_dir(&directory.0).unwrap();
-    let path = directory.0.join("upstreams.json");
+fn manager(config: Value) -> (tempfile::TempDir, Arc<UpstreamConfigManager>) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
     let manager = UpstreamConfigManager::load(
         &path,
@@ -247,7 +232,7 @@ async fn session_listing_matches_pin_gate_across_routes() {
         {"name":"a", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"a":"provider-model", "shared":"x"}},
         {"name":"b", "provider":"tinfoil", "base_url":"https://provider.example", "models":{"provider-model":"y", "shared":"z"}},
     ]));
-    let counter = directory.0.join("counter");
+    let counter = directory.path().join("counter");
     let process = Arc::new(ProcessVerifier(ExternalProviderVerifier::with_command_and_cache(
         "tinfoil", AttestationScope::PerRouter,
         counting_provider_script(&counter, "tinfoil", "tinfoil/session-test/v1", json!({

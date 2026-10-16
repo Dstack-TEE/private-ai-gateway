@@ -20,17 +20,6 @@ use tower::ServiceExt;
 
 use common::{StaticKeyProvider, StubQuoter};
 
-fn temp_config_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-upstreams-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
-}
-
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
@@ -72,7 +61,8 @@ async fn call(
 
 #[tokio::test]
 async fn admin_can_replace_single_upstream_config_file_at_runtime() {
-    let path = temp_config_path();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     let manager = Arc::new(UpstreamConfigManager::load(&path, runtime_options()).unwrap());
     let keys = Arc::new(StaticKeyProvider::default());
     let service = Arc::new(
@@ -178,6 +168,4 @@ async fn admin_can_replace_single_upstream_config_file_at_runtime() {
     let (status, models) = call(app, "GET", "/v1/models", Vec::new(), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models["data"][0]["id"], "public-a");
-
-    let _ = std::fs::remove_file(path);
 }

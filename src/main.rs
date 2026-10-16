@@ -860,22 +860,17 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 -----END CERTIFICATE-----
 "#;
 
-    fn write_temp_cert() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "private-ai-gateway-test-cert-{}-{:?}.pem",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&path, TEST_CERT_PEM).unwrap();
-        path
+    fn write_temp_cert() -> tempfile::NamedTempFile {
+        use std::io::Write;
+
+        let mut cert = tempfile::NamedTempFile::new().unwrap();
+        cert.write_all(TEST_CERT_PEM.as_bytes()).unwrap();
+        cert
     }
 
     #[test]
     fn admin_token_file_is_trimmed_and_digest_bound() {
-        let path = temp_path("gateway-admin-token");
+        let (_path_dir, path) = temp_path("gateway-admin-token");
         std::fs::write(&path, "admin token\n").unwrap();
         let token = secret_file_non_empty(path.to_str().unwrap()).unwrap();
         assert_eq!(token, "admin token");
@@ -887,7 +882,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         std::fs::write(&path, " \n").unwrap();
         assert!(secret_file_non_empty(path.to_str().unwrap()).is_err());
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -907,20 +901,16 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert!(err.contains("expected 32 bytes"));
     }
 
-    fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "private-ai-gateway-{name}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    // Keep the directory guard in the caller, including for paths that start absent.
+    fn temp_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{name}.json"));
+        (directory, path)
     }
 
     #[test]
     fn gateway_config_parses_state_dir() {
-        let config_path = temp_path("gateway-config-state-dir");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-state-dir");
         std::fs::write(
             &config_path,
             r#"{
@@ -932,12 +922,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert_eq!(config.state_dir.as_deref(), Some("/gateway/state"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_parses_upstream_pull_without_debugging_its_token() {
-        let config_path = temp_path("gateway-config-upstream-pull");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-upstream-pull");
         std::fs::write(
             &config_path,
             r#"{
@@ -957,12 +946,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let debug = format!("{pull:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("pull-secret"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_parses_static_privatemode_proxy_policy() {
-        let config_path = temp_path("gateway-config-privatemode");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-privatemode");
         std::fs::write(
             &config_path,
             format!(
@@ -996,7 +984,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             proxy.proxy_image_digest,
             format!("sha256:{}", "22".repeat(32))
         );
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
@@ -1026,15 +1013,14 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 }"#,
             ),
         ] {
-            let config_path = temp_path(&format!("reused-pull-{name}"));
+            let (_config_path_dir, config_path) = temp_path(&format!("reused-pull-{name}"));
             std::fs::write(&config_path, body).unwrap();
             let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
             let err =
                 validate_pull_token_separation(&config, config.admin_token.as_deref()).unwrap_err();
             assert!(err.contains("must be distinct"));
-            let _ = std::fs::remove_file(config_path);
         }
-        let config_path = temp_path("reused-pull-env-admin");
+        let (_config_path_dir, config_path) = temp_path("reused-pull-env-admin");
         std::fs::write(
             &config_path,
             r#"{"upstream_pull":{"url":"https://service.example/config","token":"0123456789abcdef0123456789abcdef"}}"#,
@@ -1045,12 +1031,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             validate_pull_token_separation(&config, Some("0123456789abcdef0123456789abcdef"))
                 .is_err()
         );
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_parses_middleware_section() {
-        let config_path = temp_path("gateway-config-middleware");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-middleware");
         std::fs::write(
             &config_path,
             r#"{
@@ -1069,16 +1054,14 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert_eq!(middleware.control_token.as_deref(), Some("secret"));
         // Optional timeouts default to None and fall back inside the client.
         assert_eq!(middleware.control_timeout_ms, None);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_rejects_zero_verification_concurrency() {
-        let path = temp_path("verification-concurrency");
+        let (_path_dir, path) = temp_path("verification-concurrency");
         std::fs::write(&path, r#"{"upstream_verification_concurrency":0}"#).unwrap();
         let err = load_gateway_config(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("upstream_verification_concurrency must be greater than zero"));
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1102,7 +1085,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 r#"{"keyset_epoch_window_seconds": 1209600}"#,
             ),
         ] {
-            let config_path = temp_path(name);
+            let (_config_path_dir, config_path) = temp_path(name);
             std::fs::write(&config_path, body).unwrap();
 
             let err = load_gateway_config(config_path.to_str().unwrap())
@@ -1112,13 +1095,12 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 err.contains("unknown field"),
                 "unexpected parse error for {name}: {err}"
             );
-            let _ = std::fs::remove_file(config_path);
         }
     }
 
     #[test]
     fn source_provenance_parses_git_launcher_pin() {
-        let config_path = temp_path("git-launcher-config");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config");
         std::fs::write(
             &config_path,
             r#"
@@ -1143,12 +1125,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             Some("0123456789abcdef0123456789abcdef01234567")
         );
         assert!(provenance.image_digest.is_none());
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_rejects_incomplete_git_launcher_pin() {
-        let config_path = temp_path("git-launcher-config-missing-commit");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-missing-commit");
         std::fs::write(
             &config_path,
             "REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git\n",
@@ -1159,12 +1140,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             .expect_err("incomplete git-launcher config must fail startup");
 
         assert!(err.contains("COMMIT_SHA"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_rejects_non_full_git_launcher_commit_pin() {
-        let config_path = temp_path("git-launcher-config-short-commit");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-short-commit");
         std::fs::write(
             &config_path,
             r#"
@@ -1178,13 +1158,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             .expect_err("git-launcher config must pin a full commit hash");
 
         assert!(err.contains("full 40- or 64-character hexadecimal commit hash"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_is_unknown_when_git_launcher_pin_is_absent() {
-        let config_path = temp_path("git-launcher-config-missing");
-        let _ = std::fs::remove_file(&config_path);
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-missing");
 
         let provenance = source_provenance_from_git_launcher_config(&config_path).unwrap();
 
@@ -1212,7 +1190,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn gateway_config_parses_keyset_not_after_and_subject() {
-        let config_path = temp_path("gateway-config-keyset-not-after");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-keyset-not-after");
         std::fs::write(
             &config_path,
             r#"{ "keyset_not_after_seconds": 1209600, "subject": "app-id:0x1234" }"#,
@@ -1223,30 +1201,27 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         assert_eq!(config.keyset_not_after_seconds, Some(1_209_600));
         assert_eq!(config.subject.as_deref(), Some("app-id:0x1234"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_enables_e2ee_v2_by_default() {
-        let config_path = temp_path("gateway-config-default-e2ee");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-default-e2ee");
         std::fs::write(&config_path, "{}").unwrap();
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert!(config.enable_e2ee);
         assert_eq!(config.upstream_verification_concurrency, 4);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_allows_explicit_e2ee_opt_out() {
-        let config_path = temp_path("gateway-config-disable-e2ee");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-disable-e2ee");
         std::fs::write(&config_path, r#"{ "enable_e2ee": false }"#).unwrap();
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert!(!config.enable_e2ee);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
@@ -1367,8 +1342,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn seeds_upstream_config_when_target_missing() {
-        let target = temp_path("target");
-        let seed = temp_path("seed");
+        let (_target_dir, target) = temp_path("target");
+        let (_seed_dir, seed) = temp_path("seed");
         std::fs::write(
             &seed,
             r#"[{"name":"gpu-a","base_url":"https://gpu-a.example","models":{"public-a":"upstream-a"}}]"#,
@@ -1379,14 +1354,12 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         let seeded = std::fs::read_to_string(&target).unwrap();
         assert!(seeded.contains("\"public-a\""));
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
     fn seed_does_not_overwrite_existing_upstream_config() {
-        let target = temp_path("target-existing");
-        let seed = temp_path("seed-existing");
+        let (_target_dir, target) = temp_path("target-existing");
+        let (_seed_dir, seed) = temp_path("seed-existing");
         std::fs::write(
             &target,
             r#"[{"name":"kept","base_url":"https://kept.example","models":{"kept":"kept"}}]"#,
@@ -1403,21 +1376,18 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let kept = std::fs::read_to_string(&target).unwrap();
         assert!(kept.contains("\"kept\""));
         assert!(!kept.contains("\"seed\""));
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
     fn seed_rejects_invalid_upstream_config() {
-        let target = temp_path("target-invalid-seed");
-        let seed = temp_path("seed-invalid");
+        let (_target_dir, target) = temp_path("target-invalid-seed");
+        let (_seed_dir, seed) = temp_path("seed-invalid");
         std::fs::write(&seed, r#"[{"name":"","base_url":"","models":{}}]"#).unwrap();
 
         let err = seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap()))
             .expect_err("invalid seed must fail startup");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!target.exists());
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
@@ -1438,7 +1408,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     fn gateway_config_domain_certificates_parse_as_spki_digests() {
         let api_cert = write_temp_cert();
         let chat_cert = write_temp_cert();
-        let config_path = temp_path("gateway-config-domain-certificates");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-domain-certificates");
         std::fs::write(
             &config_path,
             format!(
@@ -1450,8 +1420,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                         ]
                     }}
                 }}"#,
-                api_cert.display(),
-                chat_cert.display()
+                api_cert.path().display(),
+                chat_cert.path().display()
             ),
         )
         .unwrap();
@@ -1466,15 +1436,13 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             parsed[0].spki_sha256_hex,
             "c6686007081874ef8a5e8f95b7620e16c0ff0c65235ff8efcf9350cd9c5cf9dd"
         );
-        let _ = std::fs::remove_file(api_cert);
-        let _ = std::fs::remove_file(chat_cert);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn rejects_duplicate_domain_tls_config_entries() {
         let cert = write_temp_cert();
-        let config_path = temp_path("gateway-config-domain-certificates-duplicate");
+        let (_config_path_dir, config_path) =
+            temp_path("gateway-config-domain-certificates-duplicate");
         std::fs::write(
             &config_path,
             format!(
@@ -1486,8 +1454,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                         ]
                     }}
                 }}"#,
-                cert.display(),
-                cert.display()
+                cert.path().display(),
+                cert.path().display()
             ),
         )
         .unwrap();
@@ -1496,7 +1464,5 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let err = resolve_tls_public_keys(&config.tls).unwrap_err();
 
         assert!(err.contains("duplicated"));
-        let _ = std::fs::remove_file(cert);
-        let _ = std::fs::remove_file(config_path);
     }
 }

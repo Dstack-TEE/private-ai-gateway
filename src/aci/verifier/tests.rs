@@ -675,11 +675,8 @@ async fn provider_external_verifier_rejects_verified_without_binding() {
 
 #[tokio::test]
 async fn external_provider_verifier_caches_verified_bindings() {
-    let counter_path = std::env::temp_dir().join(format!(
-        "private-ai-gateway-provider-cache-test-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&counter_path);
+    let directory = tempfile::tempdir().unwrap();
+    let counter_path = directory.path().join("counter");
     let verifier = ExternalProviderVerifier::with_command_and_cache(
         "tinfoil",
         AttestationScope::PerRouter,
@@ -729,7 +726,6 @@ async fn external_provider_verifier_caches_verified_bindings() {
         "2",
         "invalidating the provider verifier cache should force a fresh external verifier run"
     );
-    let _ = std::fs::remove_file(counter_path);
 }
 
 #[tokio::test]
@@ -770,11 +766,8 @@ count="$((count + 1))"
 printf '%s' "$count" > "$1"
 printf '%s' '{output}'"#
         );
-        let counter_path = std::env::temp_dir().join(format!(
-            "private-ai-gateway-router-cache-test-{}-{provider}",
-            std::process::id(),
-        ));
-        let _ = std::fs::remove_file(&counter_path);
+        let directory = tempfile::tempdir().unwrap();
+        let counter_path = directory.path().join("counter");
         let verifier = ExternalProviderVerifier::with_command_and_cache(
             provider,
             scope,
@@ -813,7 +806,6 @@ printf '%s' '{output}'"#
             "{provider}: external verifier runs (a router reuses one channel \
              verification across models; a per-model provider verifies each)"
         );
-        let _ = std::fs::remove_file(counter_path);
     }
 }
 
@@ -898,11 +890,8 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
 
 #[tokio::test]
 async fn external_provider_refresh_keeps_existing_cache_on_failure() {
-    let counter_path = std::env::temp_dir().join(format!(
-        "private-ai-gateway-provider-refresh-cache-test-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&counter_path);
+    let directory = tempfile::tempdir().unwrap();
+    let counter_path = directory.path().join("counter");
     let output = json!({
         "result": "verified",
         "verifier_id": "tinfoil/external-test/v1",
@@ -964,7 +953,6 @@ fi"#
         "2",
         "failed refresh must not remove the previous verified cache entry"
     );
-    let _ = std::fs::remove_file(counter_path);
 }
 
 #[test]
