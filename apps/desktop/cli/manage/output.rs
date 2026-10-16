@@ -282,12 +282,6 @@ fn status(value: &Value) -> String {
     {
         lines.push(format!("Settings warning: {}", safe(warning)));
     }
-    lines.extend(flag(
-        "Production OS",
-        &state["config"]["requireProductionOs"],
-        "Required",
-        "Development images allowed",
-    ));
     let identity = &state["identity"];
     if identity.is_object() {
         lines.push(format!(

@@ -134,18 +134,6 @@ impl DesktopRuntime {
         }
     }
 
-    pub fn set_require_production_os(&self, required: bool) -> Result<AppState, Error> {
-        let _operation = self.configuration_change()?;
-        self.recovery.cancel();
-        self.stop_with_reconnect(false)?;
-        self.update_config(|saved| {
-            saved.require_production_os = required;
-            Ok(())
-        })?;
-        self.publish_profiles()?;
-        Ok(self.state())
-    }
-
     pub fn stop(&self) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();

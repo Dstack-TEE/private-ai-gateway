@@ -57,8 +57,6 @@ pub struct Config {
     /// The profile protection uses. Defaults to the first profile.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub active_profile: String,
-    /// Refuse services whose attestation reports a development OS image.
-    pub require_production_os: bool,
     /// Protect on launch: start protection when the backend starts.
     pub connect_on_launch: bool,
     pub appearance: Appearance,
@@ -85,7 +83,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             active_profile: String::new(),
-            require_production_os: true,
             connect_on_launch: false,
             appearance: Appearance::default(),
             update_channel: None,
@@ -330,7 +327,6 @@ impl Config {
                 || crate::brand::SERVICE_DEFAULT_URL.to_string(),
                 |(_, profile)| profile.remote_url.clone(),
             ),
-            require_production_os: self.require_production_os,
         }
     }
 
@@ -772,7 +768,6 @@ mod tests {
     fn an_empty_file_is_the_default_settings() {
         let config = parse("").unwrap().value;
         assert_eq!(config, Config::default());
-        assert!(config.require_production_os);
         assert!(config.profiles.is_empty());
         assert_eq!(config.runtime_config().remote_url, "https://tee.redpill.ai");
         assert_eq!(config.local_api.port, 4180);
@@ -868,10 +863,22 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
     }
 
     #[test]
+    fn the_removed_os_policy_is_ignored_in_saved_settings() {
+        for required in [true, false] {
+            let parsed = parse(&format!("require-production-os = {required}\n")).unwrap();
+            assert_eq!(parsed.value, Config::default());
+            assert_eq!(parsed.unknown.len(), 1);
+            assert!(parsed.unknown[0].contains("require-production-os: unknown key, ignored"));
+            assert!(!toml_edit::ser::to_string(&parsed.value)
+                .unwrap()
+                .contains("require-production-os"));
+        }
+    }
+
+    #[test]
     fn every_setting_survives_a_round_trip_through_the_file() {
         let mut config = Config {
             active_profile: "work".into(),
-            require_production_os: false,
             connect_on_launch: true,
             appearance: Appearance::Dark,
             update_channel: Some(UpdateChannel::Beta),

@@ -240,7 +240,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   });
   const saveLogin = useMutation({
     mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
-      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, state.config.requireProductionOs, workspace);
+      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, workspace);
       setState(saved);
       account.consume();
       if (startAfterSave) setState(await desktopApi.start(saved.config));
@@ -278,7 +278,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
     mutationFn: async () => {
       if (running && profile?.id === state.activeProfileId && !await confirm(reconnectQuestion)) return;
       const key = authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined;
-      const saved = await desktopApi.saveConfiguration(draft, state.config.requireProductionOs, key);
+      const saved = await desktopApi.saveConfiguration(draft, key);
       setState(startAfterSave ? await desktopApi.start(saved.config) : saved);
       onClose();
     },

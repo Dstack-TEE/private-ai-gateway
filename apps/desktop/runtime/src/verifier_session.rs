@@ -94,7 +94,6 @@ pub enum VerifierEvent {
 #[derive(Clone, Debug)]
 pub struct VerifierConfig {
     pub remote_url: String,
-    pub require_production_os: bool,
 }
 
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
@@ -333,10 +332,7 @@ impl SessionManager {
             } else {
                 UsageSummary::default()
             },
-            config: StartConfig {
-                remote_url,
-                require_production_os: config.require_production_os,
-            },
+            config: StartConfig { remote_url },
             catalog: None,
             activity: if continuing {
                 runtime.state.activity.clone()
@@ -366,7 +362,6 @@ impl SessionManager {
         let task = self.launcher.spawn(
             VerifierConfig {
                 remote_url: config.remote_url.clone(),
-                require_production_os: config.require_production_os,
             },
             events,
             self.proxy.event_sender(),

@@ -115,7 +115,6 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                     VerifierOptions {
                         base_url: config.remote_url.clone(),
                         policy: VerifierPolicy::default(),
-                        require_production_os: config.require_production_os,
                         enforce_verified: true,
                         fixed_pins: Vec::new(),
                         required_claims: Vec::new(),

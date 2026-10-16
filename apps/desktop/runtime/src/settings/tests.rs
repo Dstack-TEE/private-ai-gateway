@@ -343,6 +343,40 @@ fn unknown_keys_warn_and_the_rest_of_the_file_applies() {
 }
 
 #[test]
+fn removed_os_policy_keys_load_and_are_dropped_on_the_next_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = open(dir.path());
+    let path = dir.path().join("config").join(CONFIG_FILE);
+    fs::write(
+        &path,
+        "require-production-os = false\n\
+         require_production_os = true\n\
+         [profiles.work]\n\
+         name = \"Work\"\n\
+         provider = \"custom\"\n\
+         remote-url = \"https://gateway.example\"\n\
+         require-production-os = true\n\
+         require_production_os = false\n",
+    )
+    .unwrap();
+    settings.reload().unwrap();
+    assert_eq!(settings.config().unwrap().profiles.len(), 1);
+    assert_eq!(settings.files().error, None);
+    assert_eq!(settings.files().warnings.len(), 4);
+
+    settings
+        .update_config(|config| {
+            config.appearance = Appearance::Dark;
+            Ok(())
+        })
+        .unwrap();
+    let text = config_text(dir.path());
+    assert!(!text.contains("require-production-os"), "{text}");
+    assert!(!text.contains("require_production_os"), "{text}");
+    assert!(!text.contains("requireProductionOs"), "{text}");
+}
+
+#[test]
 fn the_header_stays_on_top_and_key_comments_stay_with_their_keys() {
     let doc = |text: &str| text.parse::<DocumentMut>().unwrap();
     let edited = |text: Option<&str>, from: &str, to: &str| {

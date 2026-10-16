@@ -55,7 +55,6 @@ impl DesktopRuntime {
         operation_id: String,
         id: String,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         workspace_id: Option<i64>,
     ) -> Result<AccountSaveResult, Error> {
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
@@ -79,10 +78,7 @@ impl DesktopRuntime {
         // The operation belongs to the service, not to the lifetime of an IPC
         // request. A reconnect can read its final outcome without issuing again.
         tokio::spawn(async move {
-            let result = match runtime
-                .save_account_login(id, profile, require_production_os, workspace_id)
-                .await
-            {
+            let result = match runtime.save_account_login(id, profile, workspace_id).await {
                 Ok(state) => AccountSaveResult::Complete {
                     state: Box::new(state.into()),
                 },
@@ -120,7 +116,6 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         id: String,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         workspace_id: Option<i64>,
     ) -> Result<AppState, Error> {
         let mut slot = self.account_login.lock().await;
@@ -132,7 +127,6 @@ impl DesktopRuntime {
         let saved = self
             .persist_configuration(
                 profile,
-                require_production_os,
                 Some(credential.key.clone()),
                 Some(credential.auth),
                 false,

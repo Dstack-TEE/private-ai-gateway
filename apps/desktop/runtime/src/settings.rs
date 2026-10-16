@@ -431,8 +431,18 @@ pub(crate) fn write<T: Serialize>(
         |value: &T| toml_edit::ser::to_document(value).map_err(|_| format!("Cannot encode {name}"));
     let (from, to) = (encode(from)?, encode(to)?);
     let current = read(dir, name)?;
+    // These settings were accepted by older desktop releases but no longer
+    // have a client-side meaning. Remove them the next time config.toml is
+    // written, while preserving all other unknown keys and user formatting.
+    let editable_current = if name == CONFIG_FILE {
+        current
+            .as_deref()
+            .map(|text| remove_removed_os_policy_keys(text).unwrap_or_else(|| text.to_string()))
+    } else {
+        current.clone()
+    };
     // The file's own errors name it with a position; the user fixes them.
-    let text = edit(current.as_deref(), header, &from, &to).map_err(|()| {
+    let text = edit(editable_current.as_deref(), header, &from, &to).map_err(|()| {
         Error::invalid_state(match current.as_deref().map(parse) {
             Some(Err(error)) => format!("{error}. Fix {name} before changing settings."),
             _ => format!("{name} is not valid TOML. Fix it before changing settings."),
@@ -486,6 +496,31 @@ pub(crate) fn write<T: Serialize>(
         }
     })?;
     Ok(())
+}
+
+const REMOVED_OS_POLICY_KEYS: &[&str] = &[
+    "require-production-os",
+    "require_production_os",
+    "requireProductionOs",
+];
+
+fn remove_removed_os_policy_keys(text: &str) -> Option<String> {
+    let mut document: DocumentMut = text.parse().ok()?;
+    let remove = |table: &mut dyn TableLike| {
+        for key in REMOVED_OS_POLICY_KEYS {
+            table.remove(key);
+        }
+    };
+    let root = document.as_table_mut();
+    remove(root);
+    if let Some(profiles) = root.get_mut("profiles").and_then(Item::as_table_like_mut) {
+        for (_, profile) in profiles.iter_mut() {
+            if let Some(profile) = profile.as_table_like_mut() {
+                remove(profile);
+            }
+        }
+    }
+    Some(document.to_string())
 }
 
 /// Applies the change from `from` to `to` to a file (`None` when it does not
