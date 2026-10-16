@@ -2175,6 +2175,7 @@ async fn chutes_provider_interleaves_nonces_across_verified_instances() {
         .with_bearer_token("chutes-secret")
         .with_e2ee_api_base(base_url.clone());
     let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
         url_origin: Some(base_url),
         verifier_id: "fixture-chutes-verifier/v1".to_string(),
         evidence: Some(provider_evidence_fixture("chutes-attestation")),

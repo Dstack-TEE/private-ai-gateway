@@ -20,8 +20,12 @@ byte-identically, and the session id is their SHA-256 (spec §8). Sealing never
 calls the model and never sees user data.
 
 Background upstream verification refreshes the verifier cache. Listing and the
-pin gate seal sessions on demand through the same process-owned store. Request
-completion records the session actually served on the receipt's
+admission step seal sessions on demand through the same process-owned store.
+Every verified forwarding attempt, with or without pins, acquires a retention
+lease before calling the backend. The receipt cites the immutable session
+admitted for the committed attempt; its `served_at` is that admission time.
+Completion may occur after expiry. Response selection records the session
+actually served on the receipt's
 `upstream.verified` event. `tests/service.rs::verified_upstream_binding_creates_attested_session`
 covers the session created from a verified binding.
 
@@ -29,10 +33,22 @@ Two deadlines govern a stored session:
 
 - The document's `expires_at` is an upper bound for new forwarding decisions
   and listing, not a freshness guarantee. Replacement or expiry of the verifier
-  cache can stop acceptance sooner. The validity period reuses `receipt_ttl_seconds`.
+  cache can stop acceptance sooner. The validity period uses
+  `attested_session_ttl_seconds` (default 3600), independently of receipt
+  retention and verifier-cache TTL. Changes apply only to newly sealed documents.
 - The store's `retention_until` bounds how long the session is served by id.
   Each citing receipt pushes it forward without touching the sealed bytes, so
-  a session outlives every receipt that cites it (spec §8).
+  a session outlives every receipt that cites it (spec §8). Pending responses,
+  retained failover responses, streams and middleware drafts hold leases that
+  prevent eviction, including during compaction. Dropping the last owner releases
+  its lease. A retained expired session remains fetchable but cannot authorize
+  another admission.
+
+For non-Chutes events with several bindings, admission filters by pins and
+selects one alternative in canonical JSON order before forwarding. The receipt
+cites the binding actually enforced. Chutes keeps all admitted instances until
+the backend reports which instance served, then releases the sibling leases.
+A missing or unmatched Chutes instance identifier is an internal error.
 
 The audit trail runs:
 
@@ -91,11 +107,18 @@ again. It is never served. Receipt signatures link requests to session IDs.
 Backing up the log and keeping it private on disk are up to the deployment.
 
 The gateway locks a separate lock file so only one process can use the log.
-On startup and every hour after that, it writes the sessions that have not
-expired to a new file, flushes it to disk, and swaps it in with a single
-rename. This drops duplicate, expired, or damaged records and any bundle that
+On startup and every hour after that, it writes retained sessions, including
+expired sessions with outstanding leases, to a new file, flushes it to disk,
+and swaps it in with a single rename. This drops duplicate, unheld lapsed, or
+damaged records and any bundle that
 no remaining session uses. The file names and their `state_dir` location are
 listed in [Runtime state files](configuration-reference.md#runtime-state-files).
+
+Retention extensions update memory without appending records and are persisted
+by compaction. An uncompacted extension can be lost on restart; receipts and
+leases are process-local and are lost too. Replay preserves document IDs and
+expiry, but never warms the verifier cache. Existing pins can survive restart
+once the same current material is verified and their documents remain valid.
 
 ## How claims are derived
 

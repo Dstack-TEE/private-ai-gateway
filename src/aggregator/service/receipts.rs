@@ -72,14 +72,14 @@ impl AciService {
         let mut ids = HashSet::new();
         let mut sessions = Vec::new();
         for event in requests.iter().filter_map(|r| verifier.cached(r)) {
-            for sealed in self.record_attested_upstream_session(&event)? {
-                if !ids.insert(sealed.session_id.clone()) {
+            for sealed in self.record_attested_upstream_session(&event, now)? {
+                if !ids.insert(sealed.lease.session_id().to_string()) {
                     continue;
                 }
                 if let Some(session) = self
                     .session_store
-                    .get_session(&sealed.session_id, now)
-                    .filter(|s| now < s.document().expires_at)
+                    .get_session(sealed.lease.session_id(), now)
+                    .filter(|s| s.document().established_at <= now && now < s.document().expires_at)
                 {
                     sessions.push(session);
                 }
