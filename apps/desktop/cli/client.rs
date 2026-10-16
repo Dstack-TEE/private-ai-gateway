@@ -6,6 +6,7 @@
 //! per-hostname pin set, fail closed on mismatch.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use crate::aci::tls::{error_chain, error_chain_message, observing_spki_client, SpkiObservations};
 use desktop_core::endpoint;
@@ -15,6 +16,8 @@ use url::Url;
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Generous read timeout: chat responses stream for a while.
 const READ_TIMEOUT_SECONDS: u64 = 600;
+// Matches TS's 10-second artifact deadline, within desktop's 45/120-second budgets.
+const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(CONNECT_TIMEOUT_SECONDS);
 
 /// 32 fresh random bytes, hex-encoded — the attestation request nonce.
 pub fn random_nonce_hex() -> String {
@@ -253,7 +256,7 @@ impl AciClient {
         url: &str,
         bearer: Option<&str>,
     ) -> Result<HttpResult, reqwest::Error> {
-        let resp = self.send_get(url, bearer).await?;
+        let resp = self.get_request(url, bearer).send().await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = resp.bytes().await?.to_vec();
@@ -264,14 +267,18 @@ impl AciClient {
         })
     }
 
-    /// A GET whose body read stops with `GetError::TooLarge` past `limit` bytes.
+    /// A GET bounded by a total deadline and `GetError::TooLarge` past `limit` bytes.
     pub(crate) async fn get_limited(
         &self,
         url: &str,
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let mut resp = self.send_get(url, bearer).await?;
+        let mut resp = self
+            .get_request(url, bearer)
+            .timeout(ARTIFACT_TIMEOUT)
+            .send()
+            .await?;
         if resp
             .content_length()
             .is_some_and(|size| size > limit as u64)
@@ -294,16 +301,12 @@ impl AciClient {
         })
     }
 
-    async fn send_get(
-        &self,
-        url: &str,
-        bearer: Option<&str>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
+    fn get_request(&self, url: &str, bearer: Option<&str>) -> reqwest::RequestBuilder {
         let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
-        req.send().await
+        req
     }
 
     /// Fetch the attestation report with a bounded body before JSON decoding.
@@ -420,6 +423,57 @@ fn is_url_safe_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn artifact_deadline_stops_a_slow_trickle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n ")
+                .await
+                .unwrap();
+            server_sent.fetch_add(1, Ordering::Relaxed);
+            ready_tx.send(()).unwrap();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if stream.write_all(b" ").await.is_err() {
+                    break;
+                }
+                server_sent.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let client = AciClient::new().unwrap();
+        let request = tokio::spawn(async move { client.fetch_attestation(&url).await });
+        // Establish real loopback I/O before pausing to avoid auto-advancing
+        // the connect timeout while the OS is still accepting the connection.
+        ready_rx.await.unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(ARTIFACT_TIMEOUT + Duration::from_secs(1), request)
+            .await
+            .expect("artifact deadline must expire despite continuing body bytes")
+            .unwrap();
+        server.abort();
+        let _ = server.await;
+        let Err(GetError::Request(error)) = result else {
+            panic!("expected a request timeout");
+        };
+        assert!(error.is_timeout(), "unexpected error: {error}");
+        assert!(started.elapsed() <= ARTIFACT_TIMEOUT);
+        assert!(sent.load(Ordering::Relaxed) >= 2);
+    }
 
     #[tokio::test]
     async fn attestation_bodies_are_bounded_before_json_decoding() {

@@ -171,8 +171,8 @@ buffer that grows up to the cap. The cap allows JSON escaping of the bounded
 compose and log. A production response measured 53,676 bytes on October 16, 2026:
 30,220 bytes of compose and 7,357 bytes of event log (30 events).
 Offline desktop audits use the HTTP artifact limits before parsing files:
-32 MiB for reports/sessions and 64 KiB for receipts. The TS runtime's attestation
-request deadline includes reading the bounded response body.
+32 MiB for reports/sessions and 64 KiB for receipts. TS and desktop artifact GETs
+default to a 10-second total request deadline, including the bounded response body.
 Hex fields accept an optional lowercase `0x` prefix and either case for digits.
 
 ### 2. Before the gateway forwards data
