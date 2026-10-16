@@ -197,7 +197,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
         };
         assert_eq!(
             runtime
-                .save_account_login("login-test".into(), different_provider, true, None)
+                .save_account_login("login-test".into(), different_provider, None)
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -355,7 +355,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
         remote_url: "https://offline.invalid".into(),
     };
     let saved = executor
-        .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+        .block_on(runtime.save_configuration(profile, Some("test-key".into())))
         .unwrap();
     assert_eq!(saved.active_profile_id, "offline");
     assert_eq!(saved.status, VerificationStatus::Stopped);
@@ -385,7 +385,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
             remote_url: format!("https://{id}.invalid"),
         };
         executor
-            .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+            .block_on(runtime.save_configuration(profile, Some("test-key".into())))
             .unwrap();
     }
     runtime
@@ -457,7 +457,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
     };
     for (id, name) in [("other", "Other"), ("ready", "Ready")] {
         executor
-            .block_on(runtime.save_configuration(profile(id, name), true, Some("test-key".into())))
+            .block_on(runtime.save_configuration(profile(id, name), Some("test-key".into())))
             .unwrap();
     }
     let starting = AppState {
@@ -475,7 +475,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
         "Protection is starting on Ready; try again when it finishes."
     );
     let refused = executor
-        .block_on(runtime.save_configuration(profile("new", "New"), true, Some("key".into())))
+        .block_on(runtime.save_configuration(profile("new", "New"), Some("key".into())))
         .unwrap_err();
     assert_eq!(refused.code(), ErrorCode::Busy);
     assert_eq!(runtime.state().active_profile_id, "ready");
@@ -513,36 +513,11 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
             uuid::Uuid::new_v4().to_string(),
             "login-test".into(),
             profile,
-            true,
             None,
         )
         .unwrap();
     assert!(
         matches!(result, desktop_core::contracts::AccountSaveResult::Failed { error } if error.contains("Another save"))
-    );
-}
-
-#[test]
-fn the_production_os_policy_is_saved_for_the_next_start() {
-    let executor = tokio::runtime::Runtime::new().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let runtime = test_runtime(&executor, directory.path());
-    let state = runtime.set_require_production_os(false).unwrap();
-    assert!(!state.config.require_production_os);
-    assert!(
-        !runtime
-            .settings
-            .snapshot()
-            .unwrap()
-            .config
-            .require_production_os
-    );
-    assert!(
-        runtime
-            .set_require_production_os(true)
-            .unwrap()
-            .config
-            .require_production_os
     );
 }
 
@@ -564,7 +539,6 @@ fn returned_and_published_states_present_their_own_protection() {
     let admission = runtime.admission();
     for command in [
         desktop_core::protocol::Command::Stop {},
-        desktop_core::protocol::Command::SetRequireProductionOs { required: false },
         desktop_core::protocol::Command::GetState {},
     ] {
         presents_itself(
@@ -816,7 +790,6 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
         session_active: true,
         config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         },
         ..Default::default()
     };
@@ -1145,7 +1118,6 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
         },
         config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         },
         ..Default::default()
     });
@@ -1514,7 +1486,6 @@ fn an_address_change_reconnects_only_a_remote_service() {
         session_active: true,
         config: StartConfig {
             remote_url: remote_url.into(),
-            require_production_os: false,
         },
         ..Default::default()
     };
@@ -1722,6 +1693,7 @@ impl VerifierLauncher for UnreachableVerifier {
                 "Cannot reach tee.invalid.",
             )
             .into(),
+            verification: None,
         });
         Ok(Box::new(IdleTask))
     }
@@ -1760,7 +1732,7 @@ fn a_failed_profile_save_changes_nothing() {
     // Verification fails: its own error answers, and nothing is saved.
     let before = state();
     let error = executor
-        .block_on(runtime.verify_configuration(input("new"), true, Some("new-key".into())))
+        .block_on(runtime.verify_configuration(input("new"), Some("new-key".into())))
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::ServiceConnectionFailed);
     assert_eq!(error.to_string(), "Cannot reach tee.invalid.");
@@ -1770,7 +1742,7 @@ fn a_failed_profile_save_changes_nothing() {
 
     // A saved profile whose key is replaced.
     executor
-        .block_on(runtime.save_configuration(input("saved"), true, Some("old-key".into())))
+        .block_on(runtime.save_configuration(input("saved"), Some("old-key".into())))
         .unwrap();
     let before = state();
 
@@ -1780,8 +1752,10 @@ fn a_failed_profile_save_changes_nothing() {
         "active-profile = [",
     )
     .unwrap();
+    let mut edited = input("saved");
+    edited.name = "Renamed service".into();
     let error = executor
-        .block_on(runtime.save_configuration(input("saved"), false, Some("new-key".into())))
+        .block_on(runtime.save_configuration(edited, Some("new-key".into())))
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::InvalidState);
     assert!(error

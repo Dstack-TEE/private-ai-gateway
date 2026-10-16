@@ -76,8 +76,9 @@ impl CheckResult {
     }
 }
 
-/// `Offline` parses the quote and checks its binding, but never verifies it
-/// to the vendor root.
+/// `Online` verifies the quote to the vendor root with collateral from
+/// `pccs_url` alone. `Offline` parses the quote and checks its binding, but never
+/// verifies it to the vendor root.
 pub enum QuoteSource<'a> {
     Online { pccs_url: &'a str },
     Offline { reason: &'a str },
@@ -308,8 +309,8 @@ async fn appraise_quote(
             Ok(verified) => pass(
                 CheckId::Quote,
                 format!(
-                    "{} quote verified (TCB status {}) and binds report_data; collateral from {pccs_url}",
-                    verified.tee_type, verified.status
+                    "{} quote verified (TCB status {}) and binds report_data; collateral from {}",
+                    verified.tee_type, verified.status, pccs_url
                 ),
             ),
             Err(e) => failed(CheckId::Quote, e.into()),

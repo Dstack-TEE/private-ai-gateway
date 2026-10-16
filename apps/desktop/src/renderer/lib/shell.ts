@@ -27,7 +27,6 @@ export interface Shell {
   protectionPending: boolean;
   toggleProtection(): void;
   /** Asks first when protection must stop. */
-  changeRequireProductionOs(required: boolean): void;
   resetSettings(): void;
   /** A dialog request never replaces an open dialog, only one that is animating out. */
   openDialog(dialog: AppDialog): void;

@@ -180,8 +180,6 @@ pub struct ProxyState {
     /// The verifier policy (§1.3), applied on the startup verify and on every
     /// keyset-change re-verify.
     policy: VerifierPolicy,
-    /// Apply the production dstack OS-image policy on startup and re-verification.
-    require_production_os: bool,
     /// Receipt audits that run at once; later ones wait for a slot.
     audits: tokio::sync::Semaphore,
     /// Seconds since the Unix epoch, for keyset expiry (§3.4): the system
@@ -223,7 +221,6 @@ impl ProxyState {
         host: String,
         enforce_verified: bool,
         policy: VerifierPolicy,
-        require_production_os: bool,
         fixed_pins: Vec<String>,
         required_claims: Vec<RequiredClaim>,
         report: AttestationReport,
@@ -238,7 +235,6 @@ impl ProxyState {
             host,
             enforce_verified,
             policy,
-            require_production_os,
             audits: tokio::sync::Semaphore::new(16),
             now_secs: desktop_core::now_secs,
             trusted: Mutex::new(TrustedIdentity::new(
@@ -404,7 +400,6 @@ impl ProxyState {
                 &self.base_url,
                 None,
                 &self.policy,
-                self.require_production_os,
                 false,
             ) => result?,
         };
@@ -447,9 +442,9 @@ impl ProxyState {
     }
 }
 
-pub async fn run(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
+pub async fn run(args: ServeArgs) -> Result<i32, String> {
     let json_events = args.json_events;
-    match run_inner(args, require_production_os).await {
+    match run_inner(args).await {
         Ok(code) => Ok(code),
         Err(error) if json_events => {
             write_json_event(&json!({"type": "fatal", "message": error}))?;
@@ -465,7 +460,7 @@ const DEFAULT_CONTROL: &str = "127.0.0.1:4183";
 /// Connections each listener holds open at once; later ones wait to be accepted.
 const MAX_CONNECTIONS: usize = 128;
 
-async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, String> {
+async fn run_inner(args: ServeArgs) -> Result<i32, String> {
     let reporter: Reporter = if args.json_events {
         Arc::new(json_reporter)
     } else {
@@ -480,7 +475,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
         VerifierOptions {
             base_url: args.base_url.clone(),
             policy: args.policy.verifier_policy()?,
-            require_production_os,
             enforce_verified: !args.allow_unverified,
             fixed_pins: args.sessions.clone(),
             required_claims: args.require_claims.clone(),
@@ -518,7 +512,6 @@ async fn run_inner(args: ServeArgs, require_production_os: bool) -> Result<i32, 
                 "remote_url": base_url,
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
-                    "require_production_os": require_production_os,
                     "accepted_composes": args.policy.accepted_composes,
                     "accepted_subjects": args.policy.accepted_subjects,
                     "accepted_dstack_kms_root_public_keys":
@@ -581,7 +574,6 @@ struct VerifierOptions {
     base_url: String,
     /// The verifier policy (§1.3) for the startup verify and every re-verify.
     policy: VerifierPolicy,
-    require_production_os: bool,
     /// Demand verified attested-session serving on every inference (§5.3).
     enforce_verified: bool,
     /// `--session`: a fixed §5.3 accepted set.
@@ -598,22 +590,13 @@ async fn initialize(
     event_sink: VerifierEventSink,
     shutdown: CancellationToken,
 ) -> Result<(Arc<ProxyState>, IdentityEvent, String), VerifyError> {
-    let verification = verify_service(
-        &options.base_url,
-        None,
-        &options.policy,
-        options.require_production_os,
-        false,
-    )
-    .await?;
+    let verification = verify_service(&options.base_url, None, &options.policy, false).await?;
     if options.print_progress {
         println!("== service verification: {} ==", verification.base_url);
         print!("{}", verification.transcript.render_human());
     }
     if !verification.transcript.verified() {
-        return Err(VerifyError::Failed(
-            "service verification failed; refusing to start the proxy (fail closed)".to_string(),
-        ));
+        return Err(VerifyError::Rejected(verification.transcript));
     }
 
     let verification_summary = verification.transcript.to_json();
@@ -643,7 +626,6 @@ async fn initialize(
         host,
         options.enforce_verified,
         options.policy,
-        options.require_production_os,
         options.fixed_pins,
         options.required_claims,
         report,

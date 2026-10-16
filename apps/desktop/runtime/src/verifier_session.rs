@@ -21,7 +21,7 @@ use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::Error;
 use aci_protocol::types::ServiceCapabilities;
-use agent_bridge::catalog::{Catalog, EndpointInventory};
+use agent_bridge::catalog::{Catalog, EndpointInventory, Surface};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::config as settings_config;
 use desktop_core::contracts::{
@@ -79,10 +79,12 @@ pub enum VerifierEvent {
         code: Option<String>,
         reason: String,
     },
-    /// Verification cannot run. An `Error::Api` is authored for the user
-    /// and answers a waiting caller as it is.
+    /// Verification cannot run or did not pass. An `Error::Api` is authored
+    /// for the user and answers a waiting caller as it is. A failed
+    /// verification carries its transcript, whose checks say what failed.
     Fatal {
         error: Error,
+        verification: Option<Value>,
     },
     Terminated {
         error: Option<String>,
@@ -92,7 +94,6 @@ pub enum VerifierEvent {
 #[derive(Clone, Debug)]
 pub struct VerifierConfig {
     pub remote_url: String,
-    pub require_production_os: bool,
 }
 
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
@@ -174,12 +175,22 @@ impl RuntimeState {
     fn identify(&mut self, identity: &IdentityEvent) {
         self.state.identity = Some(parse_identity(identity));
         self.state.checks = parse_checks(Some(&identity.verification));
+        self.state.verification_failed = false;
         self.state.error = None;
         self.identity_ready = true;
         self.epoch += 1;
         self.state.status = VerificationStatus::Verifying;
         self.state.progress = Some("Reading the verified model list".to_string());
         self.state.catalog = None;
+    }
+
+    /// A failure that is not a verification result ends a failed
+    /// verification a retry carried: its checks no longer explain the error.
+    fn end_failed_verification(&mut self) {
+        if self.state.verification_failed {
+            self.state.verification_failed = false;
+            self.state.checks.clear();
+        }
     }
 }
 
@@ -302,6 +313,11 @@ impl SessionManager {
         if reset_catalog_history {
             runtime.last_catalog = None;
         }
+        // A retry keeps showing the failed verification it retries until its
+        // own result replaces it.
+        let retried_failure =
+            (continuing && !verification_only && runtime.state.verification_failed)
+                .then(|| (runtime.state.checks.clone(), runtime.state.error.clone()));
         runtime.state = AppState {
             status: VerificationStatus::Verifying,
             configuration_verification: verification_only,
@@ -316,10 +332,7 @@ impl SessionManager {
             } else {
                 UsageSummary::default()
             },
-            config: StartConfig {
-                remote_url,
-                require_production_os: config.require_production_os,
-            },
+            config: StartConfig { remote_url },
             catalog: None,
             activity: if continuing {
                 runtime.state.activity.clone()
@@ -328,6 +341,11 @@ impl SessionManager {
             },
             ..Self::carried(&runtime.state)
         };
+        if let Some((checks, error)) = retried_failure {
+            runtime.state.verification_failed = true;
+            runtime.state.checks = checks;
+            runtime.state.error = error;
+        }
         drop(runtime);
 
         self.publish_unverified(generation, 0, Some(session_id.clone()));
@@ -344,7 +362,6 @@ impl SessionManager {
         let task = self.launcher.spawn(
             VerifierConfig {
                 remote_url: config.remote_url.clone(),
-                require_production_os: config.require_production_os,
             },
             events,
             self.proxy.event_sender(),
@@ -894,6 +911,7 @@ impl SessionManager {
                 Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
                 None => "Verifier stopped unexpectedly".to_string(),
             });
+            runtime.end_failed_verification();
         }
         self.end_verifier(runtime, generation, None);
         Ok(())
@@ -917,6 +935,7 @@ impl SessionManager {
         }
         let task = runtime.task.take();
         runtime.state.error = Some(message);
+        runtime.end_failed_verification();
         runtime.failure = None;
         self.end_verifier(runtime, generation, task);
         Ok(())
@@ -982,29 +1001,47 @@ pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.
 fn catalog_summary(catalog: &Catalog, previous: Option<&CatalogSummary>) -> CatalogSummary {
+    let inventory_surfaces = [
+        Surface::ChatCompletions,
+        Surface::Messages,
+        Surface::Responses,
+    ];
     let models: Vec<ModelSummary> = catalog
         .models
         .iter()
-        .map(|model| ModelSummary {
-            id: model.id().to_string(),
-            name: model.display_name().to_string(),
-            supported_endpoints: model.supported_surfaces.as_ref().map(|surfaces| {
-                surfaces
-                    .iter()
-                    .map(|surface| surface.path().to_string())
-                    .collect()
-            }),
-            context_length: model.remote.context_length,
-            max_output_length: model.remote.max_output_length,
-            is_tee: model.bool_field("is_tee"),
-            input_price_per_million: model.price_per_million("prompt"),
-            output_price_per_million: model.price_per_million("completion"),
-            cache_read_price_per_million: model.price_per_million("input_cache_read"),
-            cache_write_price_per_million: model.price_per_million("input_cache_write"),
-            input_modalities: model.string_array("input_modalities"),
-            output_modalities: model.string_array("output_modalities"),
-            capabilities: model.string_array("supported_features"),
-            description: model.string_field("description"),
+        .map(|model| {
+            let supported_endpoints: Vec<String> = inventory_surfaces
+                .iter()
+                .copied()
+                .filter(|surface| model.supports(*surface))
+                .map(|surface| surface.path().to_string())
+                .collect();
+            // Preserve no-inventory semantics for models that pass every text
+            // surface; an explicit empty list prevents decisions-only models
+            // from falling through the renderer's legacy `None` behavior.
+            let supported_endpoints = if model.supported_surfaces.is_none()
+                && supported_endpoints.len() == inventory_surfaces.len()
+            {
+                None
+            } else {
+                Some(supported_endpoints)
+            };
+            ModelSummary {
+                id: model.id().to_string(),
+                name: model.display_name().to_string(),
+                supported_endpoints,
+                context_length: model.remote.context_length,
+                max_output_length: model.remote.max_output_length,
+                is_tee: model.bool_field("is_tee"),
+                input_price_per_million: model.price_per_million("prompt"),
+                output_price_per_million: model.price_per_million("completion"),
+                cache_read_price_per_million: model.price_per_million("input_cache_read"),
+                cache_write_price_per_million: model.price_per_million("input_cache_write"),
+                input_modalities: model.string_array("input_modalities"),
+                output_modalities: model.string_array("output_modalities"),
+                capabilities: model.string_array("supported_features"),
+                description: model.string_field("description"),
+            }
         })
         .collect();
     // Carry forward ids that disappeared until the service lists them

@@ -156,12 +156,10 @@ commands! {
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     } -> AppStateWire;
     SaveConfiguration {
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     } -> AppStateWire;
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
@@ -170,7 +168,6 @@ commands! {
         operation_id: String,
         id: String,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         workspace_id: Option<i64>,
     } -> AccountSaveResult;
     AccountSaveResult { operation_id: String } -> AccountSaveResult;
@@ -214,9 +211,6 @@ commands! {
         revision: String,
         options: ConnectOptions,
     } -> AgentStatus;
-    /// Stops protection and saves whether it requires a production OS image;
-    /// the next start uses the saved policy.
-    SetRequireProductionOs { required: bool } -> AppStateWire;
     /// Connects or disconnects an agent with the configuration a preview
     /// would show, in one step.
     SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
@@ -353,6 +347,9 @@ pub enum ErrorCode {
     /// The Confidential AI service could not be reached or is not one; the
     /// message names the host and the reason.
     ServiceConnectionFailed,
+    /// The service answered but failed verification, so protection stays off
+    /// (fail closed); the message names the failing checks and what to do.
+    ServiceVerificationFailed,
     /// The backend kept running; its log has the reason (errdefs System, INTERNAL).
     ShutdownRefused,
     /// An unexpected failure whose details stay in the service (errdefs System, INTERNAL).
@@ -392,7 +389,9 @@ impl ErrorCode {
             | Self::RevisionConflict => 409,
             Self::UnsupportedMediaType => 415,
             Self::TooManyRequests => 429,
-            Self::AccountError | Self::ServiceConnectionFailed => 502,
+            Self::AccountError
+            | Self::ServiceConnectionFailed
+            | Self::ServiceVerificationFailed => 502,
             Self::Busy => 503,
             Self::ShutdownRefused
             | Self::OperationFailed
@@ -482,11 +481,10 @@ mod tests {
                 Command::Start {
                     config: StartConfig {
                         remote_url: "https://tee.example".into(),
-                        require_production_os: true,
                     },
                 },
                 "start",
-                json!({"config": {"remoteUrl": "https://tee.example", "requireProductionOs": true}}),
+                json!({"config": {"remoteUrl": "https://tee.example"}}),
             ),
             (
                 Command::Shutdown {

@@ -32,7 +32,11 @@ export class AciConnectionError extends AciError {
 }
 
 export interface AciPolicy {
-  /** Appraise the measured dstack OS hash against the production allowlist. */
+  /**
+   * @deprecated This option is accepted for compatibility and ignored. Clients
+   * do not check whether the gateway runs a production or development dstack
+   * OS image.
+   */
   requireProductionOs?: boolean;
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this client. Empty or

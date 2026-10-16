@@ -1,0 +1,46 @@
+name: Install asc
+description: Install the pinned App Store Connect CLI release
+runs:
+  using: composite
+  steps:
+    - name: Install asc 5.14.3
+      shell: bash
+      run: | # zizmor: ignore[github-env] the downloaded path is created locally and contains only the pinned binary
+        set -euo pipefail
+        version=5.14.3
+        # SHA-256 values from the release's asc_5.14.3_checksums.txt.
+        case "${RUNNER_OS}:${RUNNER_ARCH}" in
+          macOS:ARM64)
+            platform=macOS
+            arch=arm64
+            sha256=8445a2110c4472e926bac69cf90ebcec91a28e4eb142b6d2c81fc4addb16aaae
+            ;;
+          macOS:X64)
+            platform=macOS
+            arch=amd64
+            sha256=82d5ce6c0ad63a9eacf56d618a4d3a0f9d6a10ae684a5b58cc2b89760f22311c
+            ;;
+          Linux:ARM64)
+            platform=linux
+            arch=arm64
+            sha256=64a3b31677fd46754518f9ceb258935144be765c509e4f33b190ebe085060beb
+            ;;
+          Linux:X64)
+            platform=linux
+            arch=amd64
+            sha256=c8e964528c3861a476b0d257d357533d8431b362fab2a7db078cc450ef48b6e9
+            ;;
+          *)
+            echo "Unsupported runner: ${RUNNER_OS}:${RUNNER_ARCH}" >&2
+            exit 1
+            ;;
+        esac
+        tool_directory="$RUNNER_TEMP/asc"
+        mkdir -p "$tool_directory"
+        curl --fail --silent --show-error --location --retry 3 \
+          "https://github.com/rorkai/App-Store-Connect-CLI/releases/download/$version/asc_${version}_${platform}_${arch}" \
+          --output "$tool_directory/asc"
+        printf '%s  %s\n' "$sha256" "$tool_directory/asc" | shasum -a 256 --check
+        chmod 755 "$tool_directory/asc"
+        echo "$tool_directory" >> "$GITHUB_PATH"
+        "$tool_directory/asc" version

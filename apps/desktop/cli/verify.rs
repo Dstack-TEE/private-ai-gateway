@@ -5,8 +5,7 @@
 //! fetched, observed channel bound.
 
 use crate::aci::types::AttestationReport;
-use crate::aci::verifier::DEFAULT_DCAP_PCCS_URL;
-
+use crate::aci::verifier::DEFAULT_PCCS_URL;
 use crate::args::VerifyArgs;
 use crate::checks::{
     run_report_checks, ChannelEvidence, EstablishedIdentity, QuoteSource, ReportCheckContext,
@@ -17,13 +16,16 @@ use crate::client::{
 };
 use crate::transcript::Transcript;
 
-/// Why a verification could not run: the service could not be reached or is
-/// not an ACI service (authored for the user), or another failure whose
+/// Why a verification could not run or did not pass: the service could not
+/// be reached or is not an ACI service (authored for the user), its verdict
+/// was not VERIFIED (the transcript says why), or another failure whose
 /// detail is for the log.
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error(transparent)]
     Service(#[from] ServiceError),
+    #[error("service verification failed; refusing to start the proxy (fail closed)")]
+    Rejected(Transcript),
     #[error("{0}")]
     Failed(String),
 }
@@ -62,7 +64,6 @@ pub async fn verify_service(
     base_url: &str,
     nonce_arg: Option<&str>,
     policy: &VerifierPolicy,
-    require_production_os: bool,
     explain: bool,
 ) -> Result<ServiceVerification, VerifyError> {
     let base_url = normalize_base_url(base_url);
@@ -105,11 +106,10 @@ pub async fn verify_service(
             now_secs: desktop_core::now_secs(),
             expiry_skipped: false,
             quote: QuoteSource::Online {
-                pccs_url: DEFAULT_DCAP_PCCS_URL,
+                pccs_url: DEFAULT_PCCS_URL,
             },
             channel,
             policy,
-            require_production_os,
             explain,
         },
     )
@@ -127,12 +127,11 @@ pub async fn verify_service(
     })
 }
 
-pub async fn run(args: VerifyArgs, require_production_os: bool) -> Result<i32, String> {
+pub async fn run(args: VerifyArgs) -> Result<i32, String> {
     let verification = verify_service(
         &args.base_url,
         args.nonce.as_deref(),
         &args.policy.verifier_policy()?,
-        require_production_os,
         args.explain,
     )
     .await?;

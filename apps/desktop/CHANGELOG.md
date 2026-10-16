@@ -1,5 +1,75 @@
 # Changelog
 
+## [0.5.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0...desktop-v0.5.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **ci:** include beta changes in App Store What's New ([#435](https://github.com/Dstack-TEE/private-ai-gateway/issues/435)) ([3d5aaa0](https://github.com/Dstack-TEE/private-ai-gateway/commit/3d5aaa06e2d534a37c82a850e2d9c47b21ce7b11))
+* **desktop:** remove Intel PCS collateral fallback ([#437](https://github.com/Dstack-TEE/private-ai-gateway/issues/437)) ([45b1273](https://github.com/Dstack-TEE/private-ai-gateway/commit/45b1273083d4043680735ab7c2f5111385dc6d90))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.5.1 ([#438](https://github.com/Dstack-TEE/private-ai-gateway/issues/438)) ([b3b17af](https://github.com/Dstack-TEE/private-ai-gateway/commit/b3b17af3880c6a3be94185ed089439c94ef6bd89))
+
+## [0.5.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.4...desktop-v0.5.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* **desktop:** clarify status during failed verification retries ([#432](https://github.com/Dstack-TEE/private-ai-gateway/issues/432)) ([1b8286f](https://github.com/Dstack-TEE/private-ai-gateway/commit/1b8286f3e796eea5a05f6dcc083be9ad5c9628a2))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.5.0 ([#434](https://github.com/Dstack-TEE/private-ai-gateway/issues/434)) ([2efdeda](https://github.com/Dstack-TEE/private-ai-gateway/commit/2efdeda11954706f6a9458f130124d6c4df4aed4))
+
+## [0.5.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.3...desktop-v0.5.0-beta.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **desktop:** fetch DCAP collateral reliably and explain why it failed ([#428](https://github.com/Dstack-TEE/private-ai-gateway/issues/428)) ([1c48f3c](https://github.com/Dstack-TEE/private-ai-gateway/commit/1c48f3c98ef276db2dfa2dc4501ef1df353af6ac))
+
+## [0.5.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.2...desktop-v0.5.0-beta.3) (2026-10-14)
+
+
+### Features
+
+* **desktop:** highlight the Local API examples with Shiki ([#421](https://github.com/Dstack-TEE/private-ai-gateway/issues/421)) ([3ba2c50](https://github.com/Dstack-TEE/private-ai-gateway/commit/3ba2c5030456423d80c86527b6ebd21f314cf816))
+* **desktop:** use the TypeSafe SDKs in the Decisions examples ([#420](https://github.com/Dstack-TEE/private-ai-gateway/issues/420)) ([442a362](https://github.com/Dstack-TEE/private-ai-gateway/commit/442a3620e6f1397d293e1a460337e88b82b9d712))
+
+
+### Bug Fixes
+
+* **desktop:** explain service verification failures, still fail closed ([#425](https://github.com/Dstack-TEE/private-ai-gateway/issues/425)) ([8a8ce77](https://github.com/Dstack-TEE/private-ai-gateway/commit/8a8ce77d39f6c0b434141bd91c42de1d76cd4073))
+
+## [0.5.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0-beta.1...desktop-v0.5.0-beta.2) (2026-10-13)
+
+
+### Features
+
+* **ci:** add guarded Mac App Store review workflow ([#418](https://github.com/Dstack-TEE/private-ai-gateway/issues/418)) ([d6a7fcc](https://github.com/Dstack-TEE/private-ai-gateway/commit/d6a7fcc16e2dc8626f7e70f7536edd19cffbbe1f))
+* **desktop:** add a Decisions tab to the Local API examples ([#415](https://github.com/Dstack-TEE/private-ai-gateway/issues/415)) ([4a562b7](https://github.com/Dstack-TEE/private-ai-gateway/commit/4a562b7e001dca6086c2d8da16b3a41d6caa6fa6))
+
+
+### Bug Fixes
+
+* **desktop-e2e:** install Oh My Pi from npm ([#419](https://github.com/Dstack-TEE/private-ai-gateway/issues/419)) ([0337126](https://github.com/Dstack-TEE/private-ai-gateway/commit/03371260b10e98c1032667b65e7d8df10c0d70c6))
+
+## [0.5.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.4.0...desktop-v0.5.0-beta.1) (2026-10-13)
+
+
+### Features
+
+* **desktop:** relay System One through local API ([#411](https://github.com/Dstack-TEE/private-ai-gateway/issues/411)) ([ee735ac](https://github.com/Dstack-TEE/private-ai-gateway/commit/ee735ac64fcb701fe7ad707cff424ec220f339ba))
+
+
+### Bug Fixes
+
+* **desktop:** skip non-text models in endpoint probes ([#413](https://github.com/Dstack-TEE/private-ai-gateway/issues/413)) ([f3c2d06](https://github.com/Dstack-TEE/private-ai-gateway/commit/f3c2d06e7a8f47dda7eff9263bf624161a4b2c4c))
+
 ## [0.4.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.3.0...desktop-v0.4.0) (2026-10-07)
 
 Private AI Proxy 0.4.0 signs in to RedPill with a device code, the way Phala sign-in already works.

@@ -237,7 +237,7 @@ pub enum Profiles {
     },
     /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
     Login(AccountLoginOptions),
-    /// Save a new profile and credential; protection verifies it when started.
+    /// Verify a new profile's service with its credential, then save and select it. Nothing is saved when verification fails.
     Add {
         #[arg(long, help = "Unique profile ID")]
         id: String,
@@ -250,8 +250,8 @@ pub enum Profiles {
         /// Read the credential from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         key_stdin: bool,
-        /// Permit a verified development OS image for this profile.
-        #[arg(long)]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         allow_development_os: bool,
     },
     /// Validate and save a profile, optionally replacing its credential.
@@ -281,11 +281,11 @@ pub enum Profiles {
         /// Read a replacement credential from stdin.
         #[arg(long)]
         key_stdin: bool,
-        /// Permit a verified development OS image; otherwise retain the current global policy.
-        #[arg(long, conflicts_with = "require_production_os")]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         allow_development_os: bool,
-        /// Require a production OS image; otherwise retain the current global policy.
-        #[arg(long, conflicts_with = "allow_development_os")]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         require_production_os: bool,
     },
     /// Make a saved profile active.

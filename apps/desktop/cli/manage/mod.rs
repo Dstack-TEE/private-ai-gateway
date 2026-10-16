@@ -11,7 +11,7 @@ use clap::CommandFactory;
 use desktop_core::{
     client::{CallError, Client, Watched},
     contracts::*,
-    protocol::{export_path, rpc, NotificationKind, Preference},
+    protocol::{self, export_path, rpc, NotificationKind, Preference},
     usage::UsageQuery,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -27,7 +27,20 @@ mod output;
 pub use args::Action;
 use args::*;
 
+pub fn has_profile_require_production_os(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Profiles {
+            command: Profiles::Edit {
+                require_production_os: true,
+                ..
+            },
+        }
+    )
+}
+
 pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
+    warn_deprecated_os_flags(action);
     let client = Client::new();
     let value = match action {
         Action::Status { watch: true } => return watch_status(global),
@@ -112,6 +125,38 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         }
     };
     output::print(action, global, &value)
+}
+
+fn warn_deprecated_os_flags(action: &Action) {
+    let warning = |flag: &str| {
+        eprintln!(
+            "warning: {flag} is deprecated and has no effect; clients no longer check the gateway OS image."
+        );
+    };
+    let (allow_development_os, require_production_os) = match action {
+        Action::Profiles {
+            command:
+                Profiles::Add {
+                    allow_development_os,
+                    ..
+                },
+        } => (*allow_development_os, false),
+        Action::Profiles {
+            command:
+                Profiles::Edit {
+                    allow_development_os,
+                    require_production_os,
+                    ..
+                },
+        } => (*allow_development_os, *require_production_os),
+        _ => return,
+    };
+    if allow_development_os {
+        warning("--allow-development-os");
+    }
+    if require_production_os {
+        warning("--require-production-os");
+    }
 }
 
 /// `status --watch`: the current state, then each change. Human output skips
@@ -223,16 +268,32 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
                 return value(AppStateWire::from(state))
             }
             VerificationStatus::Verifying => {}
-            _ => {
-                return Err(
-                    "Protection did not become verified. Inspect private-ai-proxy status.".into(),
-                )
-            }
+            _ => return Err(unverified(&state)),
         }
         if Instant::now() >= deadline {
             return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Why `start` ended without verified protection: the backend's reason,
+/// typed as a verification failure when the service did not pass.
+fn unverified(state: &AppState) -> CallError {
+    let Some(error) = &state.error else {
+        return "Protection did not become verified. Inspect private-ai-proxy status.".into();
+    };
+    let mut message = format!("Protection did not become verified. {error}");
+    if state.reconnecting {
+        message.push_str(" The backend retries in the background until private-ai-proxy stop.");
+    }
+    if state.verification_failed {
+        CallError::Api(protocol::Error::new(
+            protocol::ErrorCode::ServiceVerificationFailed,
+            message,
+        ))
+    } else {
+        message.into()
     }
 }
 
@@ -288,7 +349,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
+            ..
         } => {
             let profile = ConfidentialProfileInput {
                 id: id.clone(),
@@ -309,7 +370,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = read_key(global, *key_stdin)?;
             value(client.call(rpc::Verify {
                 profile,
-                require_production_os: !allow_development_os,
                 key: Some(key),
             })?)
         }
@@ -327,7 +387,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                     provider: profile.provider,
                     remote_url: profile.remote_url,
                 },
-                require_production_os: state.config.require_production_os,
                 key,
             })?)
         }
@@ -337,8 +396,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
-            require_production_os,
+            ..
         } => {
             let state = client.state()?;
             let saved = find(state.profiles, id)?;
@@ -358,12 +416,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = (*key_stdin || target_changed || !saved.credential_saved)
                 .then(|| read_key(global, *key_stdin))
                 .transpose()?;
-            value(client.call(rpc::Verify {
-                profile,
-                require_production_os: !allow_development_os
-                    && (*require_production_os || state.config.require_production_os),
-                key,
-            })?)
+            value(client.call(rpc::Verify { profile, key })?)
         }
         Profiles::Use { id } => {
             confirm(global, "Switch the active profile?")?;
@@ -1037,6 +1090,28 @@ fn value(input: impl Serialize) -> Result<Value, CallError> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn a_failed_verification_fails_start_with_its_reason() {
+        let mut state = AppState {
+            status: VerificationStatus::Error,
+            reconnecting: true,
+            verification_failed: true,
+            error: Some("Service verification failed: id-6 … protection stays off.".into()),
+            ..AppState::default()
+        };
+        let CallError::Api(error) = unverified(&state) else {
+            panic!("a failed check is a typed API error");
+        };
+        assert_eq!(error.code, protocol::ErrorCode::ServiceVerificationFailed);
+        assert_eq!(
+            error.message,
+            "Protection did not become verified. Service verification failed: id-6 … protection stays off. The backend retries in the background until private-ai-proxy stop."
+        );
+        // A connection failure is not a verification result.
+        state.verification_failed = false;
+        assert!(matches!(unverified(&state), CallError::Local(_)));
+    }
 
     #[test]
     fn automation_modes_never_prompt_or_imply_consent() {

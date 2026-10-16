@@ -555,9 +555,6 @@ async function establishIdentity(
     transcript = await reportTranscript(report, nonce, {
       online: true,
       ...(options.pccsUrl === undefined ? {} : { pccsUrl: options.pccsUrl }),
-      ...(options.policy?.requireProductionOs === undefined
-        ? {}
-        : { requireProductionOs: options.policy.requireProductionOs }),
       ...(options.policy?.acceptedComposeHashes === undefined
         ? {}
         : { acceptedComposeHashes: options.policy.acceptedComposeHashes }),
@@ -571,7 +568,6 @@ async function establishIdentity(
   }
 
   const required = ['id-1', 'id-2', 'id-3', 'id-4'];
-  if (options.policy?.requireProductionOs) required.push('policy-os');
   const failed = required
     .map((id) => ({ id, line: transcript.lines.find((line) => line.id === id) }))
     .filter(({ line }) => line?.status !== 'pass');

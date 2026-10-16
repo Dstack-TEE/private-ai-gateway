@@ -85,12 +85,10 @@ export interface DesktopApi {
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   start(config: StartConfig): UiResult<"start">;
-  /** Stops protection and saves the OS policy the next start uses. */
-  setRequireProductionOs(required: boolean): UiResult<"set_require_production_os">;
-  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): UiResult<"save_configuration">;
+  saveConfiguration(profile: ConfidentialProfileInput, key?: string): UiResult<"save_configuration">;
   beginAccountLogin(profile: ConfidentialProfileInput): UiResult<"begin_account_login">;
   pollAccountLogin(id: string): UiResult<"poll_account_login">;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): UiResult<"save_account_login">;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, workspaceId?: number): UiResult<"save_account_login">;
   getAccountDetails(profileId: string): UiResult<"get_account_details">;
   getAccountBalance(target: AccountBalanceTarget): UiResult<"get_account_balance">;
   openOrganization(organizationSlug: string): Promise<void>;

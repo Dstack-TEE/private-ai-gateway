@@ -37,6 +37,10 @@ pub enum ProtectionPhase {
     LocalApiUnavailable,
     VerifyingConfiguration,
     Verifying,
+    /// The service answered but did not pass verification; the state's
+    /// `checks` and `error` say why. Protection stays off, also while a retry
+    /// runs.
+    VerificationFailed,
     Blocked,
     Interrupted,
     ProfileRequired,
@@ -93,6 +97,7 @@ impl Protection {
             ProtectionPhase::LocalApiUnavailable => ("Local API unavailable", Tone::Danger),
             ProtectionPhase::VerifyingConfiguration => ("Verifying configuration…", Tone::Neutral),
             ProtectionPhase::Verifying => ("Verifying…", Tone::Neutral),
+            ProtectionPhase::VerificationFailed => ("Verification failed", Tone::Danger),
             ProtectionPhase::Blocked => ("Protection blocked", Tone::Danger),
             ProtectionPhase::Interrupted => ("Protection interrupted", Tone::Danger),
             ProtectionPhase::ProfileRequired | ProtectionPhase::NotProtected => {
@@ -100,9 +105,6 @@ impl Protection {
             }
             ProtectionPhase::ConfigurationVerified => ("Configuration verified", Tone::Neutral),
             ProtectionPhase::ApiKeyRequired => ("API key needed", Tone::Warning),
-            ProtectionPhase::Protected if !state.config.require_production_os => {
-                ("Protected (Dev mode)", Tone::Warning)
-            }
             ProtectionPhase::Protected => ("Protected", Tone::Success),
         };
         let verifying =
@@ -142,7 +144,11 @@ fn phase(state: &AppState) -> ProtectionPhase {
         return ProtectionPhase::Starting;
     }
     if state.reconnecting {
-        return ProtectionPhase::Reconnecting;
+        return if state.verification_failed {
+            ProtectionPhase::VerificationFailed
+        } else {
+            ProtectionPhase::Reconnecting
+        };
     }
     if state.endpoint_error.is_some() {
         return ProtectionPhase::LocalApiUnavailable;
@@ -153,6 +159,9 @@ fn phase(state: &AppState) -> ProtectionPhase {
         }
         VerificationStatus::Verifying => ProtectionPhase::Verifying,
         VerificationStatus::Blocked => ProtectionPhase::Blocked,
+        VerificationStatus::Error if state.verification_failed => {
+            ProtectionPhase::VerificationFailed
+        }
         VerificationStatus::Error => ProtectionPhase::Interrupted,
         VerificationStatus::Verified if state.configuration_verification => {
             ProtectionPhase::ConfigurationVerified
@@ -289,6 +298,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_verification_is_shown_instead_of_reconnecting() {
+        let mut state = state(VerificationStatus::Error, true);
+        state.session_active = true;
+        state.reconnecting = true;
+        assert_eq!(Protection::of(&state).phase, ProtectionPhase::Reconnecting);
+        state.verification_failed = true;
+        let protection = Protection::of(&state);
+        assert_eq!(protection.phase, ProtectionPhase::VerificationFailed);
+        assert_eq!(protection.title, "Verification failed");
+        assert_eq!(protection.tone, Tone::Danger);
+        assert_eq!(protection.action.label, "Cancel Reconnection");
+        // A retry in progress still shows the failure it retries.
+        state.status = VerificationStatus::Verifying;
+        assert_eq!(
+            Protection::of(&state).phase,
+            ProtectionPhase::VerificationFailed
+        );
+        // Without a session to resume, the failure is final.
+        state.status = VerificationStatus::Error;
+        state.reconnecting = false;
+        assert_eq!(Protection::of(&state).title, "Verification failed");
+    }
+
+    #[test]
     fn verification_can_be_cancelled_while_the_local_api_is_down() {
         let mut state = state(VerificationStatus::Verifying, true);
         state.endpoint_error = Some("Port in use".into());
@@ -296,14 +329,5 @@ mod tests {
         assert_eq!(protection.phase, ProtectionPhase::LocalApiUnavailable);
         assert_eq!(protection.action.label, "Cancel Verification");
         assert!(protection.action.enabled);
-    }
-
-    #[test]
-    fn development_os_protection_says_so() {
-        let mut state = state(VerificationStatus::Verified, true);
-        state.config.require_production_os = false;
-        let protection = Protection::of(&state);
-        assert_eq!(protection.title, "Protected (Dev mode)");
-        assert_eq!(protection.tone, Tone::Warning);
     }
 }

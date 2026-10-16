@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "type": "appStoreVersions",
+      "id": "f42e78ba-3f88-4ff3-b5a4-32b2f77bd9c0",
+      "attributes": {
+        "platform": "MAC_OS",
+        "versionString": "0.5.0",
+        "releaseType": "AFTER_APPROVAL"
+      }
+    }
+  ],
+  "links": {},
+  "meta": {}
+}

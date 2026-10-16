@@ -147,7 +147,7 @@ control plane over HTTP or HTTPS and then calls the ACI service in-process.
 | `middleware.control_timeout_ms` | integer | `60000` | Timeout for pre-consult and catalog requests. A failed pre-consult denies the inference request. |
 | `middleware.control_post_timeout_ms` | integer | `10000` | Timeout for post-request usage reports. Failure does not change a served response. |
 | `middleware.sse_keepalive_ms` | integer | `5000` | Interval for pre-header processing comments and post-header idle heartbeats. Zero disables both. See [Streaming keepalives and early commit](#streaming-keepalives-and-early-commit). |
-| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional prefix hash keyed with a gateway key derived from dstack KMS. No prompt text is sent. Set false to omit the `request` block. |
+| `middleware.send_request_features` | boolean | `true` | Send content-derived features in pre-consult: a low-biased token estimate, closed-enum modalities, tool and response-format flags, reasoning intent, and an optional cache-affinity key (`prefixHash` with `sessionKind`): an HMAC, under a gateway key derived from dstack KMS, of the client's `prompt_cache_key` or of the conversation's opening two messages. No prompt text is sent. Set false to omit the `request` block. |
 | `middleware.tee_only_domains` | string array | `[]` | Hostnames that serve TEE models only, matched against the normalized HTTP `Host`. See [TEE-only hostnames](#tee-only-hostnames). |
 
 The control plane must implement the
@@ -241,6 +241,7 @@ client-observed body and the provider-facing body.
 | `secret-ai` | TEE | SecretVM CPU, GPU, workload, and inference-SPKI verifier. |
 | `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
 | `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
+| `armet-ai` | TEE | Per-model non-dstack Intel TDX endpoint: DCAP quote, report_data bound to nonce, TLS SPKI, GPU evidence and model, measurement pin, mandatory NRAS GPU check, and TLS-SPKI enforcement through the Python bridge. |
 
 TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at
@@ -252,12 +253,13 @@ request time.
 | --- | --- | --- | --- |
 | `name` | string | required | Unique non-empty upstream name. |
 | `provider` | enum | `openai-compatible` | One provider value from the table above. |
-| `base_url` | string | required | Non-empty provider origin. `secret-ai` requires a root HTTPS URL without user info, path, query, or fragment. |
+| `base_url` | string | required | Non-empty provider origin. `secret-ai` and `armet-ai` require a root HTTPS URL without user info, path, query, or fragment. |
 | `path` | string | unset | Upstream path for chat requests. Leading `/` is added when missing. See [Chat request path](#chat-request-path). |
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
+| `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
-| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, or optional SecretAI measured-workload pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. |
+| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
 | `accepted_dstack_kms_root_public_keys` | string array | unset | ACI-service accepted dstack KMS root public keys. |
 | `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service DCAP verifier. |
@@ -366,7 +368,7 @@ manifest-history volume, restart policy, and private network. Mutable routes
 must match the static origin and cannot set `bearer_token` or `path`; all share
 the measured Compose credential. The gateway validates the credential digest, requires the proxy's
 `/readyz` readiness probe to succeed, reports the latest fetched manifest as explicitly
-unbound metadata, and forwards only to the encrypted v1.48 handlers. Separate
+unbound metadata, and forwards only to the encrypted v1.59 handlers. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 
@@ -406,3 +408,29 @@ The repository entrypoint and deployment manifest also use:
 Provider credentials belong in the upstream config or the deployment mechanism
 that renders it. The live test harness reads its own provider key variables; see
 the [testing guide](live-e2e-test-suite.md).
+
+### Streaming usage policy
+
+Set `streaming_usage` on an upstream entry through the existing admin upstream
+configuration API. It applies to every model mapped by that entry, independently
+of its provider name. Enable `continuous` only after checking that the endpoint
+accepts the flag; acceptance does not guarantee partial usage frames.
+
+The policy preserves unrelated client stream options and forces the requested
+booleans true. `final` does not remove a continuous flag supplied by the client.
+Neither mode adds flags to nonstream requests, Responses, embeddings, or native
+Anthropic messages. When `path` is configured alongside the policy, it must end
+in `/chat/completions` or `/completions`. The usage the upstream sends reaches
+the client whether or not the client asked for it. With direct forwarding,
+`final` adds a closing chunk with an empty `choices` array, and `continuous`
+adds `usage` to every chunk.
+
+Existing configurations without this field keep their behavior: middleware
+continues requesting `include_usage`, while direct forwarding adds no new flags.
+Removing the field restores that behavior.
+
+Upgrade every gateway before sending this field. An older gateway rejects a
+configuration that contains it and keeps its previous configuration. The gateway
+also saves the configuration it receives, and an older gateway cannot start from
+a saved configuration that contains the field. Before rolling a gateway back,
+remove the field and wait until every gateway has picked up the change.

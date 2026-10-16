@@ -1,0 +1,17 @@
+{
+  "hasMore": false,
+  "items": [
+    {
+      "type": "appStoreVersions",
+      "id": "0f9bf8a7-5be6-4ce2-9db5-e4f7dbdd5678",
+      "attributes": {
+        "platform": "MAC_OS",
+        "versionString": "0.4.0",
+        "appStoreState": "READY_FOR_DISTRIBUTION",
+        "appVersionState": "READY_FOR_DISTRIBUTION",
+        "releaseType": "AFTER_APPROVAL"
+      }
+    }
+  ],
+  "totalCount": 1
+}

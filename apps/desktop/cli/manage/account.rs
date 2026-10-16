@@ -97,7 +97,6 @@ pub(super) fn login(
         operation_id: operation_id.clone(),
         id: login.id,
         profile,
-        require_production_os: state.config.require_production_os,
         workspace_id,
     });
     // Once submitted, an uncertain response must be reconciled by operation ID.

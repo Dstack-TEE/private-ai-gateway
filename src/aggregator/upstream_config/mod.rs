@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use crate::aci::digest;
 use crate::aci::receipt::VerificationResult;
 use crate::aci::upstream::{
-    ChutesSessionStore, PrivatemodeProxyDeployment, UpstreamBackend, UpstreamError, UpstreamRequest,
+    ChutesSessionStore, PrivatemodeProxyDeployment, StreamingUsage, UpstreamBackend, UpstreamError,
+    UpstreamRequest,
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -56,6 +57,8 @@ pub struct UpstreamConfig {
     /// surfaces use the downstream path verbatim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_usage: Option<StreamingUsage>,
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
@@ -99,6 +102,8 @@ pub struct PublicUpstreamConfig {
     pub base_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub streaming_usage: Option<StreamingUsage>,
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     pub basic_auth: bool,
@@ -139,6 +144,7 @@ impl UpstreamConfig {
             provider: self.provider,
             base_url: self.base_url.clone(),
             path: self.path.clone(),
+            streaming_usage: self.streaming_usage,
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
             basic_auth: self.basic_auth,
@@ -176,6 +182,10 @@ pub enum UpstreamProvider {
     SecretAi,
     Privatemode,
     PhalaDirect,
+    /// A per-model Intel TDX endpoint outside dstack, pinned by its measured TD
+    /// (`accepted_subjects`), with mandatory NRAS-verified GPU evidence, and
+    /// bound to its attested TLS SPKI.
+    ArmetAi,
 }
 
 impl UpstreamProvider {
@@ -188,7 +198,7 @@ impl UpstreamProvider {
             | UpstreamProvider::SecretAi
             | UpstreamProvider::Privatemode => AttestationScope::PerRouter,
             UpstreamProvider::Chutes => AttestationScope::PerInstance,
-            UpstreamProvider::PhalaDirect => AttestationScope::PerModel,
+            UpstreamProvider::PhalaDirect | UpstreamProvider::ArmetAi => AttestationScope::PerModel,
             // Plain cloud APIs (OpenAI-compatible, Anthropic) have no verifier
             // and ACI service uses its own, so for all of these this only tunes
             // refresh probe granularity. Per-model is the safe default — it

@@ -125,6 +125,50 @@ test("plain streaming is checked separately when a tool request is rejected", as
   assert.equal(report.results[0].checks.tools.reason, "request_rejected");
 });
 
+test("non-text catalog models are unavailable without inference requests or stale capability evidence", async () => {
+  const catalog = [
+    { id: "decisions-model", output_modalities: ["decisions"] },
+    { id: "empty-model", output_modalities: [] },
+    { id: "text-model", output_modalities: ["text", "decisions"] },
+    { id: "legacy-model" },
+  ];
+  const previousInventory = {
+    schemaVersion: 2, endpoint: "https://tee.redpill.ai", checkedAt: "2026-09-15T00:00:00Z",
+    results: surfaces.map(surface => ({
+      model: "decisions-model", endpoint: `/v1/${surface}`, status: "supported", reason: "valid_response", httpStatus: 200,
+      checks: {
+        streaming: { status: "supported", reason: "valid_event_stream", httpStatus: 200 },
+        tools: { status: "supported", reason: "valid_streamed_tool_call", httpStatus: 200 },
+        toolResult: { status: "supported", reason: "valid_tool_result_response", httpStatus: 200 },
+      },
+    })),
+  };
+  const calls = [];
+  const report = await probe({
+    endpoint: previousInventory.endpoint, key: "test-key", previousInventory,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/models")) return Response.json({ data: catalog });
+      const body = JSON.parse(options.body);
+      calls.push(body.model);
+      assert.ok(["text-model", "legacy-model"].includes(body.model));
+      return Response.json({ error: { code: "rate_limit" } }, { status: 429 });
+    },
+  });
+  assert.equal(calls.length, 12);
+  assert.equal(report.results.length, catalog.length * 3);
+  for (const result of report.results) {
+    if (["text-model", "legacy-model"].includes(result.model)) {
+      assert.equal(result.status, "supported");
+      continue;
+    }
+    const unavailable = { status: "unavailable", reason: "no_text_output" };
+    assert.deepEqual(result, {
+      model: result.model, endpoint: result.endpoint, ...unavailable,
+      checks: { streaming: unavailable, tools: unavailable, toolResult: unavailable },
+    });
+  }
+});
+
 test("an auth failure during streaming stops further requests and leaves checks inconclusive", async () => {
   let requests = 0;
   const report = await probe({

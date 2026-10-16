@@ -165,6 +165,9 @@ applies. This is Cargo's "unused config key" warning, collected the same way
 (with `serde_ignored`), and matches Alacritty and VS Code, which also warn about
 unknown settings instead of rejecting the file.
 
+The removed `require-production-os` key, at the top level or in a profile,
+is silently ignored and dropped on the next settings write.
+
 An edit that does not parse or validate is not applied: the previous settings
 stay in effect, and the error, with file, line and column
 (`config.toml:3:8: invalid type: string "x", expected u16`), is shown in
@@ -249,12 +252,10 @@ unlocked OS keychain for a process running as you.
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
-- **The production OS check relies on the service's own report.** It
-  compares the OS image hash that the service records in its RTMR3 event log
-  with a reviewed allowlist. It does not rebuild the MRTD and RTMR0-2 boot
-  measurements from the OS image, so it does not prove on its own which
-  image booted. For that assurance, run a dstack verifier over the same quote
-  (see the [CLI README](../cli/README.md)).
+- Clients do not check whether the gateway runs a production or development dstack
+  OS image. A development image permits operator access to the gateway. Users who
+  need assurance about the OS image should verify the quote, event log, and VM
+  configuration with an independent dstack verifier.
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to

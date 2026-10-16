@@ -56,7 +56,7 @@ the relying party checks independently.
 | Local client or agent | Plaintext prompt and response | API key and all local context |
 | Attested gateway workload | Plaintext after TLS or E2EE termination | Requested model, credential, routing constraints, and provider response |
 | Accepted provider workload or route | Plaintext needed for routing or inference | Gateway-side provider credential and request metadata |
-| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a prefix hash, usage, and status metadata |
+| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a cache-affinity key, usage, and status metadata |
 | Cloud host and workload operator | Not through the accepted TEE memory boundary | Network timing, addresses, sizes, and operational metadata |
 
 ### What leaves the request path
@@ -68,8 +68,8 @@ against the code:
 
 | Destination | Contents | Defined in |
 | --- | --- | --- |
-| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and `prefixHash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
-| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and `prefixHash` | `PostReport` in `src/middleware/types.rs` |
+| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and the cache-affinity key (`prefixHash`, with `sessionKind`) | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make this checkable:
@@ -93,11 +93,15 @@ that fails partway (`stream_abort`, the one line that carries a request ID).
 Such a line can name the requested model or the request host. It never carries
 request or response content.
 
-`prefixHash` is derived from content: an HMAC-SHA256 of the conversation's
-first 4 KiB, truncated to 32 hex characters, used for cache-affinity routing.
-The gateway derives the HMAC key from dstack KMS, so the key never leaves the
-TEE. The control plane can see when two requests share a prefix, but it cannot
-test a guessed prefix against the hash. See the
+`prefixHash` is the key for cache-affinity routing: an HMAC-SHA256, truncated
+to 32 hex characters, of either the client's `prompt_cache_key` or, failing
+one, the conversation's opening two messages. The gateway derives the HMAC key
+from dstack KMS, so the key never leaves the TEE. The control plane can see
+when two requests share a cache key or an opening — identical openings map to
+one key — but it cannot test a guessed key or opening against the hash, and it
+never receives either. `prompt_cache_key` is only a routing hint: it does not
+select, pin or verify an attested session. To pin one, use
+`provider.aci_session_ids` with `provider.aci_verified`. See the
 [control-plane contract](control-plane-contract.md) for every field.
 
 Provider workloads can have their own internal routing, telemetry, or storage
@@ -254,12 +258,14 @@ host. Policy flags narrow what it accepts:
 | --- | --- |
 | `--accept-compose <hash>` | Workload release |
 | `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
-| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
 
-Without a custody policy, the CLI reports custody as skipped. It does not
-reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a
-dstack verifier run over the same quote, event log, and VM configuration. The
-TypeScript verifier does not check custody.
+Without a custody policy, the CLI reports custody as skipped. The TypeScript
+verifier does not check custody.
+
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
 Do not turn an unproven field into a stronger claim. A reported repository,
 commit, image, model ID, or TCB status remains a label until the applicable

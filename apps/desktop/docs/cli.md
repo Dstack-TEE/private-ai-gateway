@@ -36,6 +36,11 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
+Online verification fetches the quote's DCAP collateral only from the Phala
+PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
+to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
+fetch failed, including the underlying transport or HTTP error.
+
 The pinned channel uses the TLS keys the verified report declares for the
 host: every attested TLS key when none is domain-scoped, otherwise only the
 entry its `downstream_tls_binding` names (spec 4.2). A failed verification or a
@@ -57,7 +62,6 @@ policy flags:
 | `--accept-compose <hex>` | Compose hash to accept; repeatable. Without it the compose measurement is verified and reported, and you appraise its provenance yourself. |
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
-| `--require-production-os` | Require the attested OS image to be a reviewed production image. |
 
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
@@ -67,18 +71,10 @@ anchor: nothing measured corroborates it (spec 4.1), so any app under the same
 KMS root could claim it. Without the custody flags id-5 is an honest skip; no
 trust anchors are built in.
 
-Under `--require-production-os`, the client reads the RTMR3-bound
-`os-image-hash` and requires it to be in the verifier's reviewed
-production-image allowlist. Development and unknown hashes fail closed.
-Updating the allowlist requires a verifier release.
-
-This option is an appraisal step, not a dstack boot verifier. The client
-verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
-RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
-dstack verifier over the same quote, event log, and VM configuration, and
-require `is_valid: true`; that result establishes `os_image_hash` from those
-boot measurements. See
-[How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
 ### One pinned curl request
 
@@ -254,8 +250,8 @@ restored from disk.
 ## Status
 
 Human `status` summarizes the backend PID/version, active profile and service,
-saved credential presence, a settings file error, Local API exposure, production OS
-policy, TEE identity/checks, catalog size and current-session usage. Retained
+saved credential presence, a settings file error, Local API exposure, TEE
+identity/checks, catalog size and current-session usage. Retained
 catalogs are labeled cached when protection is inactive. Reported costs are
 session totals, not a billing reconciliation. Request contents and tokens are
 never included in this summary. `--json` retains the full existing state shape.
@@ -267,6 +263,37 @@ presentation derived from them (`phase`, such as `protected` or
 `profileRequired`; `title`; `tone`; and `action`, the operation the
 protection switch offers). `protection` is additive and always describes the
 state it accompanies.
+
+When the service answers but fails a verification check, such as a TLS key
+that is not in its attested keyset (id-6), protection stays off (fail closed).
+`start` exits `1` with code `service_verification_failed` and a message naming
+each failed check, its spec section and detail, and what to do. The protection
+session stays on, so the backend keeps retrying with backoff until `stop`.
+`status` keeps the reason visible, also while a retry runs:
+
+```text
+Not protected (verification failed; retrying)
+…
+Checks: 5 passed, 1 failed, 0 skipped
+  Failed: id-6 the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)]
+…
+Retry: verifying again (attempt in progress)
+Error: Service verification failed: id-6 … [9.1(6)] — observed SPKI sha256:… is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off.
+```
+
+While a retry is in progress, human output replaces transient verifier progress
+with `Retry: verifying again (attempt in progress)`.
+
+In JSON, `gateway.verificationFailed` is `true`, `gateway.protection.phase` is
+`verificationFailed`, `gateway.checks` holds the transcript with the failed
+check's `status` `fail`, and `gateway.error` holds the message. While a retry
+runs they stay until its result replaces them. A verdict without a failed
+check, such as PARTIAL or an incomplete report, is reported the same way and
+names the verdict. The desktop app shows **Verification failed**, with
+**Retrying…** while it retries, the failed check and the start of its reason;
+the privacy dialog shows the full message.
+The service log records it at warn level. `pap verify URL` prints the full
+transcript without the backend.
 
 Read-only commands do not start a missing backend. A successful `status` means
 the query succeeded, not that protection is active: inspect `gateway.status`
@@ -305,9 +332,9 @@ invalid edits and unknown keys; see [Editing](configuration.md#editing).
 
 `pap settings reset --yes` stops protection, disconnects managed agents, and
 returns every setting in `config.toml` except the profiles and the active
-profile to its default (including the Local API listener and the production OS
-policy), and replaces the web UI password with a new generated one. Profiles,
-their API keys, the local client key and usage history are kept.
+profile to its default (including the Local API listener), and replaces the
+web UI password with a new generated one. Profiles, their API keys, the local
+client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop app, which
 also disables Open at Login. CLI installation and system notification permission
 are unchanged. Failures are reported; retry after resolving the reported conflict.
@@ -522,7 +549,6 @@ instead.
 ```sh
 pap profiles show work
 pap profiles edit work --name "Work gateway"
-pap profiles edit work --require-production-os
 pap profiles verify work
 pap profiles export --output profiles.json
 pap profiles import profiles.json --yes
@@ -530,7 +556,9 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe. Credentials use a hidden prompt
+restart protection; it is not a read-only probe. The service is verified with
+the credential before anything is saved: when verification fails, nothing is
+saved and the command exits `1` with the reason, as `start` reports it. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
@@ -541,9 +569,7 @@ that status may still be reconnecting or show why protection could not start
 or verify. A profile without a credential is refused while protection is on,
 and neither the active profile nor protection changes.
 
-`--key-stdin` is for a pipe or redirected file, not a terminal. The production
-OS requirement is a shared current policy, not a separate preference per profile;
-`edit --require-production-os` restores the strict policy.
+`--key-stdin` is for a pipe or redirected file, not a terminal.
 
 ## Automation
 

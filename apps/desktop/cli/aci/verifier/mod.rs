@@ -1,7 +1,5 @@
 //! ACI relying-party appraisal used by the CLI and local proxy.
 
-pub const DEFAULT_DCAP_PCCS_URL: &str = dcap_qvl::PHALA_PCCS_URL;
-
 mod appraisal;
 mod dstack;
 mod policy;
@@ -16,7 +14,7 @@ pub use appraisal::{
 };
 pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, VerifiedEventLog};
 pub use policy::{CustodyPolicy, CustodyPolicyError};
-pub use quote::QuoteStepError;
+pub use quote::{QuoteStepError, DEFAULT_PCCS_URL};
 
 fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
     match report {

@@ -1112,9 +1112,9 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
             "response.in_progress",
             "response.output_item.added",
             "response.function_call_arguments.delta",
-            "response.output_item.added",
             "response.function_call_arguments.done",
             "response.output_item.done",
+            "response.output_item.added",
             "response.custom_tool_call_input.delta",
             "response.custom_tool_call_input.done",
             "response.output_item.done",
@@ -1177,6 +1177,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                 "type": "function",
                 "function": {
                     "name": "mcp__example___lookup",
+                    "description": "Optional plugin tools",
                     "parameters": { "type": "object" }
                 }
             },
@@ -1184,7 +1185,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                 "type": "function",
                 "function": {
                     "name": "shell",
-                    "description": "Run shell input",
+                    "description": "Run shell input\n\nThis tool takes freeform text. Put the complete raw text in the \"input\" argument.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1193,7 +1194,8 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
                                 "description": "The raw input for this tool, passed through verbatim."
                             }
                         },
-                        "required": ["input"]
+                        "required": ["input"],
+                        "additionalProperties": false
                     }
                 }
             }
@@ -1637,7 +1639,9 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
 }
 
 #[tokio::test]
-async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome() {
+async fn responses_tool_arguments_are_delivered_or_marked_incomplete() {
+    // A malformed call from a model that finished reaches the client as the
+    // model wrote it; only one cut off mid-way is incomplete.
     for (arguments, finish_reason, expected_status, expected_input) in [
         (
             r#"{"input":"pwd"}"#,
@@ -1646,11 +1650,26 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
             Some("pwd"),
         ),
         (r#"{"input":""}"#, Some("tool_calls"), "completed", Some("")),
-        ("{}", Some("tool_calls"), "failed", None),
-        (r#"{"input":42}"#, Some("tool_calls"), "failed", None),
-        (r#"{"input":"pwd"#, Some("tool_calls"), "failed", None),
+        ("{}", Some("tool_calls"), "completed", Some("{}")),
+        (
+            r#"{"input":42}"#,
+            Some("tool_calls"),
+            "completed",
+            Some(r#"{"input":42}"#),
+        ),
+        (
+            r#"{"input":"pwd"#,
+            Some("tool_calls"),
+            "completed",
+            Some(r#"{"input":"pwd"#),
+        ),
         (r#"{"input":"pwd"#, Some("length"), "incomplete", None),
-        (r#"{"input":"pwd"#, None, "failed", None),
+        (
+            r#"{"input":"pwd"#,
+            None,
+            "completed",
+            Some(r#"{"input":"pwd"#),
+        ),
     ] {
         for streaming in [false, true] {
             let (control_url, posts) = spawn_control_capturing(
@@ -1702,13 +1721,9 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
                 let events = sse_events(&wire);
                 if expected_input.is_none() {
                     assert!(
-                        !events.iter().any(|event| matches!(
-                            event["type"].as_str(),
-                            Some(
-                                "response.custom_tool_call_input.done"
-                                    | "response.output_item.done"
-                            )
-                        )),
+                        !events
+                            .iter()
+                            .any(|event| event["type"] == "response.custom_tool_call_input.done"),
                         "{wire}"
                     );
                 }
@@ -1720,7 +1735,15 @@ async fn responses_tool_argument_failures_preserve_usage_and_meter_the_outcome()
             assert_eq!(body["usage"]["cost"], 5);
             match expected_input {
                 Some(value) => assert_eq!(body["output"][0]["input"], value),
-                None => assert_eq!(body["output"], json!([])),
+                // An unexecutable call is reported incomplete, with no input to run.
+                None => assert_eq!(
+                    body["output"],
+                    json!([{
+                        "id": "ctc_call_shell", "type": "custom_tool_call", "call_id": "call_shell",
+                        "name": "shell", "input": "", "status": "incomplete"
+                    }]),
+                    "{wire}"
+                ),
             }
             let report = wait_for_post(&posts, |_| true).await;
             assert_eq!(
@@ -2083,6 +2106,7 @@ async fn meter_stream_injects_cost_classifies_completed_and_reports() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2145,6 +2169,145 @@ async fn malformed_2xx_body_returns_502_upstream() {
 
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
     assert_eq!(report["status"].as_i64(), Some(502));
+}
+
+// Anthropic thinking reaches a Chat route in that route's reasoning dialect,
+// and the client sees the reasoning as thinking only when it asked to.
+#[tokio::test]
+async fn messages_thinking_is_bridged_both_ways() {
+    let chunk = json!({
+        "id": "u", "model": "m",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "reasoning_content": "plan", "content": "hi" },
+            "delta": { "reasoning_content": "plan", "content": "hi" },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+    });
+    for streaming in [false, true] {
+        for thinking in [
+            json!({ "type": "enabled", "budget_tokens": 2048 }),
+            Value::Null,
+        ] {
+            let control_url = spawn_control(
+                200,
+                json!({
+                    "allow": true,
+                    "candidates": [{
+                        "routeId": "vllm:m", "format": "openai", "reasoningFormat": "reasoning_effort"
+                    }]
+                }),
+            )
+            .await;
+            let (wire, content_type) = if streaming {
+                (
+                    format!("data: {chunk}\n\ndata: [DONE]\n\n"),
+                    "text/event-stream",
+                )
+            } else {
+                (chunk.to_string(), "application/json")
+            };
+            let (service, requests) = build_recording_service(200, wire.into_bytes(), content_type);
+            let mut input = messages_input(streaming);
+            if !thinking.is_null() {
+                input.params["thinking"] = thinking.clone();
+            }
+            input.received_body = serde_json::to_vec(&input.params).unwrap();
+            let response = middleware(control_url)
+                .handle_completion(&service, input)
+                .await;
+            assert_eq!(response.status(), 200);
+            let (_, body) = raw_body(response).await;
+
+            let upstream = requests.lock().unwrap()[0].body.clone();
+            assert!(upstream.get("thinking").is_none(), "{upstream}");
+            let thinking_shown = if streaming {
+                sse_events(&body)
+                    .iter()
+                    .any(|event| event["delta"]["thinking"] == "plan")
+            } else {
+                serde_json::from_str::<Value>(&body).unwrap()["content"][0]
+                    == json!({ "type": "thinking", "thinking": "plan", "signature": "" })
+            };
+            if thinking.is_null() {
+                assert!(upstream.get("reasoning_effort").is_none(), "{upstream}");
+                assert!(!thinking_shown, "{body}");
+            } else {
+                assert_eq!(upstream["reasoning_effort"], "medium", "{upstream}");
+                assert!(thinking_shown, "{body}");
+            }
+            assert!(body.contains("hi"), "{body}");
+        }
+    }
+}
+
+// A malformed success after a failover is reported on the route and attempt
+// that produced it, after the attempt that failed over.
+#[tokio::test]
+async fn malformed_chat_success_after_failover_keeps_attempts() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    // Route a is out of capacity; route b answers 200 with no message.
+    let (service, forwarded, _) = build_sequenced_service(vec![503, 200]);
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, messages_input(false))
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "api_error");
+    assert_eq!(*forwarded.lock().unwrap(), ["a:gpt-test", "b:gpt-test"]);
+
+    let failover = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(0)).await;
+    assert_eq!(failover["selectedRouteId"], "a:gpt-test");
+    assert_eq!(failover["status"], 503);
+    let malformed = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(1)).await;
+    assert_eq!(malformed["selectedRouteId"], "b:gpt-test");
+    assert_eq!(malformed["status"], 502);
+    assert_eq!(malformed["errorSource"], "upstream");
+    assert_eq!(malformed["errorMessage"], "upstream_malformed_response");
+}
+
+// A converted stream that ends in an in-band error still reports what the
+// upstream spent, on the route that spent it.
+#[tokio::test]
+async fn messages_bridge_stream_failure_keeps_route_and_usage() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let chunk = json!({
+        "id": "u", "model": "m",
+        "choices": [{ "index": 0, "delta": { "content": "partial" } }],
+        "usage": { "prompt_tokens": 3, "completion_tokens": 4 }
+    });
+    let error = json!({ "error": { "message": "engine failed" } });
+    let (service, _) = build_recording_service(
+        200,
+        format!("data: {chunk}\n\ndata: {error}\n\ndata: [DONE]\n\n").into_bytes(),
+        "text/event-stream",
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, messages_input(true))
+        .await;
+    assert_eq!(response.status(), 200);
+    let (_, body) = raw_body(response).await;
+    assert_eq!(sse_events(&body).last().unwrap()["type"], "error", "{body}");
+
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["selectedRouteId"], "openai:gpt");
+    assert_eq!(report["usage"]["input_tokens"], 3, "{report}");
+    assert_eq!(report["usage"]["output_tokens"], 4, "{report}");
 }
 
 #[tokio::test]
@@ -2758,6 +2921,7 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2824,6 +2988,7 @@ async fn downstream_abort_after_settle_does_not_double_report() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: downstream_abort.clone(),
         settled: settled.clone(),
@@ -3284,8 +3449,6 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
         br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
     );
 
-    // Long enough to fill the 4KB prefix cap — sub-cap conversations emit no
-    // affinity hash on purpose (worthless to key, and dictionary-guessable).
     let mut input = chat_input();
     input.params["messages"][0]["content"] = json!("s".repeat(5000));
     let response = mw.handle_completion(&service, input).await;
@@ -3302,13 +3465,61 @@ async fn consult_pre_carries_request_features_and_post_echoes_prefix_hash() {
     assert_eq!(features["inputModalities"], json!(["text"]));
     let hash = features["prefixHash"]
         .as_str()
-        .expect("prefix hash")
+        .expect("session key")
         .to_string();
     assert_eq!(hash.len(), 32);
+    // No prompt_cache_key: the key is inferred from the opening.
+    assert_eq!(features["sessionKind"], json!("inferred"));
 
-    // The post report echoes the hash — billing keys cache affinity on it.
+    // The post report echoes the key and its kind — billing keys cache
+    // affinity on them.
     let report = wait_for_post(&posts, |r| r["selectedRouteId"].is_string()).await;
     assert_eq!(report["prefixHash"].as_str(), Some(hash.as_str()));
+    assert_eq!(report["sessionKind"], json!("inferred"));
+}
+
+#[tokio::test]
+async fn prompt_cache_key_is_explicit_and_outranks_the_opening() {
+    let (control_url, pres, posts) = spawn_control_capturing_pre(json!({
+        "allow": true,
+        "candidates": [{ "routeId": "acme:model-a", "format": "openai" }],
+        "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
+    }))
+    .await;
+    let mw = middleware(control_url);
+    let service = build_service_with_upstream(
+        200,
+        br#"{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+    );
+
+    // Same opening twice: once with a prompt_cache_key, once without. The
+    // key names the session, so the two keys differ.
+    let mut named = chat_input();
+    named.params["prompt_cache_key"] = json!("sess-42");
+    assert_eq!(
+        mw.handle_completion(&service, named)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    assert_eq!(
+        mw.handle_completion(&service, chat_input())
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+
+    let pres = pres.lock().unwrap().clone();
+    assert_eq!(pres[0]["request"]["sessionKind"], json!("explicit"));
+    assert_eq!(pres[1]["request"]["sessionKind"], json!("inferred"));
+    assert_ne!(
+        pres[0]["request"]["prefixHash"],
+        pres[1]["request"]["prefixHash"]
+    );
+    let report = wait_for_post(&posts, |r| r["sessionKind"] == json!("explicit")).await;
+    assert_eq!(report["prefixHash"], pres[0]["request"]["prefixHash"]);
 }
 
 #[tokio::test]
@@ -3567,6 +3778,7 @@ async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3759,6 +3971,7 @@ async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself(
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: abort.clone(),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4115,6 +4328,7 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
         attempt_index: 0,
         upstream_status: 200,
         prefix_hash: None,
+        session_kind: None,
         started: std::time::Instant::now(),
         downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4131,4 +4345,104 @@ async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     assert_eq!(report["status"], json!(502));
     assert_eq!(report["errorMessage"], json!("stream_inband_error"));
     assert_canary_absent(&posts, "probe-canary-inband");
+}
+
+struct PartialUsageUpstream {
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+#[async_trait]
+impl UpstreamBackend for PartialUsageUpstream {
+    fn name(&self) -> &str {
+        "partial-usage-fixture"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        None
+    }
+    async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!()
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&req.request.body).unwrap());
+        let events = [3,7].map(|n| Ok(Bytes::from(format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"x\"}}}}],\"usage\":{{\"prompt_tokens\":11,\"completion_tokens\":{n},\"total_tokens\":{}}}}}\n\n",11+n))));
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers: HashMap::from([("content-type".into(), "text/event-stream".into())]),
+            body: Box::pin(
+                futures_util::stream::iter(events).chain(futures_util::stream::pending()),
+            ),
+            served_instance_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend, StreamingUsage};
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,
+        "candidates":[{"routeId":"endpoint:gpt-test","format":"openai"}]}),
+    )
+    .await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "gpt-test",
+                "actual-model",
+                Arc::new(PartialUsageUpstream {
+                    requests: requests.clone(),
+                }),
+                "endpoint:gpt-test",
+            )
+            .unwrap()
+            .with_streaming_usage(Some(StreamingUsage::Continuous)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let mut input = chat_input();
+    input.stream = true;
+    input.params["stream"] = json!(true);
+    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body().into_data_stream();
+    let mut received = String::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !received.contains("\"completion_tokens\":7") {
+            received.push_str(std::str::from_utf8(&body.next().await.unwrap().unwrap()).unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["status"] == json!(499)).await;
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(report["usage"]["prompt_tokens"], 11);
+    assert_eq!(report["usage"]["total_tokens"], 18);
+    assert_eq!(
+        requests.lock().unwrap()[0]["stream_options"],
+        json!({"include_usage":true,"continuous_usage_stats":true})
+    );
+    assert_eq!(
+        posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r["status"] == json!(499))
+            .count(),
+        1
+    );
 }

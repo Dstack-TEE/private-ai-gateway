@@ -305,7 +305,6 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let identity = identity_event(serde_json::json!({
@@ -373,7 +372,6 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
         .begin_verification(
             StartConfig {
                 remote_url: "https://unreachable.invalid".into(),
-                require_production_os: true,
             },
             false,
         )
@@ -387,6 +385,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
             proxy.session().generation,
             VerifierEvent::Fatal {
                 error: failure.clone().into(),
+                verification: None,
             },
         )
         .unwrap();
@@ -401,6 +400,127 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     assert_eq!(
         manager.snapshot().error.as_deref(),
         Some(failure.message.as_str())
+    );
+    manager.stop().unwrap();
+}
+
+/// A service that answers but fails a check, here channel binding (id-6),
+/// keeps forwarding closed and is retried; the state names the failed check
+/// and the authored reason, which also answers a waiting caller. A retry
+/// keeps showing them until a verified identity replaces them.
+#[tokio::test]
+async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
+    use desktop_core::protection::{Protection, ProtectionPhase};
+    use desktop_core::protocol::{self, ErrorCode};
+
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+        })
+        .unwrap();
+    let failure = protocol::Error::new(
+        ErrorCode::ServiceVerificationFailed,
+        "Service verification failed: id-6 … protection stays off.",
+    );
+    let verification = serde_json::json!({"checks": [
+        {"id": "id-2", "section": "9.1(2)", "title": "binding chain", "status": "pass", "detail": "ok"},
+        {"id": "id-6", "section": "9.1(6)", "title": "channel bound to the attested keyset", "status": "fail",
+         "detail": "observed SPKI sha256:ab is NOT an attested entry clients pin"},
+    ]});
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Fatal {
+                error: failure.clone().into(),
+                verification: Some(verification),
+            },
+        )
+        .unwrap();
+
+    let error = manager
+        .wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(protocol::Error::from(error), failure);
+    let state = manager.snapshot();
+    assert_eq!(state.status, VerificationStatus::Error);
+    assert!(state.verification_failed);
+    assert_eq!(state.error.as_deref(), Some(failure.message.as_str()));
+    let failed: Vec<_> = state
+        .checks
+        .iter()
+        .filter(|check| check.status == "fail")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].id.as_str(), failed[0].section.as_str()),
+        ("id-6", "9.1(6)")
+    );
+    assert!(!proxy.session().verified);
+    assert!(crate::recovery::should_retry(&state));
+    assert_eq!(
+        Protection::of(&state).phase,
+        ProtectionPhase::VerificationFailed
+    );
+
+    // The verifier ends; a retry in progress still shows the failure.
+    let generation = proxy.session().generation;
+    manager
+        .terminated(generation, Some("rejected".into()))
+        .unwrap();
+    manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+        })
+        .unwrap();
+    let retrying = manager.snapshot();
+    assert_eq!(retrying.status, VerificationStatus::Verifying);
+    assert!(retrying.reconnecting && retrying.verification_failed);
+    assert_eq!(retrying.error.as_deref(), Some(failure.message.as_str()));
+    assert!(retrying.checks.iter().any(|check| check.id == "id-6"));
+    assert_eq!(
+        Protection::of(&retrying).phase,
+        ProtectionPhase::VerificationFailed
+    );
+    assert!(!proxy.session().verified);
+
+    // A verified identity replaces it.
+    let identity = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:keyset",
+        "keyset_not_after": 2_000_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {"serving": "aggregator", "supported_e2ee_versions": []},
+        "verification": {"checks": [
+            {"id": "id-6", "section": "9.1(6)", "title": "channel", "status": "pass", "detail": "ok"},
+        ]},
+    }));
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::IdentityUpdated { identity },
+        )
+        .unwrap();
+    let identified = manager.snapshot();
+    assert!(!identified.verification_failed && identified.error.is_none());
+    assert!(identified.checks.iter().all(|check| check.status == "pass"));
+    assert_eq!(
+        Protection::of(&identified).phase,
+        ProtectionPhase::Reconnecting
     );
     manager.stop().unwrap();
 }
@@ -420,7 +540,6 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let generation = proxy.session().generation;
@@ -460,7 +579,6 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let state = manager.stop().unwrap();
@@ -484,7 +602,6 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.start(config.clone()).unwrap();
     tokio::task::yield_now().await;
@@ -530,7 +647,6 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     manager
@@ -566,7 +682,6 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         ));
         let config = StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         };
         manager.start(config.clone()).unwrap();
         if verification_only {
@@ -602,6 +717,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 generation,
                 VerifierEvent::Fatal {
                     error: "task failed".into(),
+                    verification: None,
                 },
             )
             .unwrap();
@@ -635,7 +751,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.restore_snapshot(AppState {
         status: VerificationStatus::Verified,
@@ -683,7 +798,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     manager.stop_with_reconnect(true).unwrap();
     let candidate = StartConfig {
         remote_url: "https://tee.redpill.ai".into(),
-        ..config.clone()
     };
     let verification = manager.begin_verification(candidate.clone(), true).unwrap();
     assert_eq!(verification.session_id, resumed.session_id);
@@ -966,7 +1080,6 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let stopped = manager.stop().unwrap();
@@ -1005,7 +1118,6 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     let revoked = |epoch| {
         let session = proxy.session();
@@ -1091,6 +1203,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         session_id: Some("session".into()),
         protected_since: Some(100),
         reconnecting: true,
+        verification_failed: true,
         session_active: true,
         session_usage: UsageSummary {
             requests: 3,
@@ -1100,7 +1213,6 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         error: Some("Verification failed".into()),
         config: StartConfig {
             remote_url: "https://tee.example".into(),
-            require_production_os: false,
         },
         profiles: vec![ConfidentialProfile {
             id: "profile".into(),
@@ -1145,6 +1257,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         "checks",
         "protectedSince",
         "reconnecting",
+        "verificationFailed",
         "error",
     ];
     let json = |state: &AppState| serde_json::to_value(state).unwrap();
@@ -1153,7 +1266,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         json(&SessionManager::carried(&previous)),
         json(&AppState::default()),
     );
-    assert_eq!(fixture.as_object().unwrap().len(), 31);
+    assert_eq!(fixture.as_object().unwrap().len(), 32);
     for (field, value) in fixture.as_object().unwrap() {
         // Differs from its default, so keeping it is observable.
         assert_ne!(Some(value), defaults.get(field), "{field}");
@@ -1164,4 +1277,31 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         };
         assert_eq!(carried.get(field), expected, "{field}");
     }
+}
+
+#[test]
+fn catalog_summary_gates_chat_endpoints_by_output_modality() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "kev-4b", "output_modalities": ["decisions"] },
+            { "id": "chat", "output_modalities": ["text"] },
+            { "id": "legacy" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let summary = catalog_summary(&catalog, None);
+
+    let endpoints = |id| {
+        summary
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap()
+            .supported_endpoints
+            .clone()
+    };
+    assert_eq!(endpoints("kev-4b"), Some(Vec::new()));
+    assert_eq!(endpoints("chat"), None);
+    assert_eq!(endpoints("legacy"), None);
 }

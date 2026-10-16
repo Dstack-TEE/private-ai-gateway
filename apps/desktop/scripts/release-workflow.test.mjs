@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -7,9 +9,31 @@ import { load } from "js-yaml";
 import { publishedRelease, releaseChannel } from "./release-channel.mjs";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const reviewFixtureRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures/app-store-review");
 
 async function readWorkflow(name) {
   return load(await readFile(path.join(repositoryRoot, ".github/workflows", name), "utf8"));
+}
+
+async function extractWhatsNew(version, { override = "", changelog } = {}) {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  const step = review.jobs.review.steps.find((step) => step.name === "Extract What's New from the desktop changelog");
+  assert.ok(step, "missing What's New extraction step");
+  const directory = await mkdtemp(path.join(tmpdir(), "app-store-review-"));
+  try {
+    if (changelog !== undefined) {
+      await mkdir(path.join(directory, "apps/desktop"), { recursive: true });
+      await writeFile(path.join(directory, "apps/desktop/CHANGELOG.md"), changelog);
+    }
+    execFileSync("bash", ["-c", step.run], {
+      cwd: changelog === undefined ? repositoryRoot : directory,
+      env: { ...process.env, REVIEW_VERSION: version, REVIEW_WHATS_NEW: override, ASC_REVIEW_ROOT: directory },
+      stdio: "pipe",
+    });
+    return await readFile(path.join(directory, "whats-new.txt"), "utf8");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test("only release tags publish, after every package, in order", async () => {
@@ -80,7 +104,7 @@ test("only a release tag's call uploads to App Store Connect", async () => {
   const appStore = await readWorkflow("desktop-mac-app-store.yml");
   const steps = appStore.jobs.package.steps;
   const validate = steps.findIndex((step) => step.run?.includes("altool --validate-app"));
-  const uploads = steps.flatMap((step, index) => (step.run?.includes("--upload-app") ? [index] : []));
+  const uploads = steps.flatMap((step, index) => (step.run?.includes("asc builds upload") ? [index] : []));
   assert.notEqual(validate, -1);
   assert.equal(steps[validate].if, undefined);
   // Only desktop-native.yml passes a build number; a manual run has none, so
@@ -89,6 +113,123 @@ test("only a release tag's call uploads to App Store Connect", async () => {
   assert.equal(steps[uploads[0]].if, "inputs.build_number != ''");
   assert.equal(appStore.on.workflow_dispatch.inputs?.build_number, undefined);
   assert.ok(validate < uploads[0]);
+});
+
+test("App Store review workflow is protected and manual", async () => {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  assert.deepEqual(Object.keys(review.on), ["workflow_dispatch"]);
+  assert.deepEqual(Object.keys(review.on.workflow_dispatch.inputs).sort(), ["build_number", "dry_run", "version", "whats_new"]);
+  assert.equal(review.on.workflow_dispatch.inputs.whats_new.required, false);
+  assert.equal(review.on.workflow_dispatch.inputs.whats_new.type, "string");
+  const job = review.jobs.review;
+  assert.equal(job.environment, "app-store-review");
+  assert.deepEqual(job.permissions, { contents: "read" });
+  assert.match(JSON.stringify(review.concurrency), /cancel-in-progress/);
+  assert.equal(review.concurrency.group, "desktop-mac-app-store-review-${{ inputs.version }}");
+  assert.equal(job["timeout-minutes"], 30);
+  const workflowText = JSON.stringify(review);
+  assert.match(workflowText, /refs\/heads\/main/);
+  assert.doesNotMatch(workflowText, /APPLE_API_/);
+});
+
+test("App Store What's New includes 0.5.0 desktop changes from every beta", async () => {
+  assert.equal(await extractWhatsNew("0.5.0"), [
+    "• clarify status during failed verification retries",
+    "• fetch DCAP collateral reliably and explain why it failed",
+    "• highlight the Local API examples with Shiki",
+    "• use the TypeSafe SDKs in the Decisions examples",
+    "• explain service verification failures, still fail closed",
+    "• add a Decisions tab to the Local API examples",
+    "• relay System One through local API",
+    "• skip non-text models in endpoint probes",
+    "",
+  ].join("\n"));
+});
+
+test("App Store What's New handles a stable release with no prerelease sections", async () => {
+  assert.equal(await extractWhatsNew("0.2.1"), [
+    "• OpenCode 2. OpenCode 2 reads the configuration Private AI Proxy writes, so connecting works as before. A native OpenCode 2 providers.private-ai-proxy entry could override the proxy's endpoint while the app still showed Connected; it is now reported as a conflict and the connection stays closed.",
+    "• Uninstall restores agents. pap stop --offline ends the protection session and restores every agent's own configuration without a running backend. The Windows uninstaller runs it (never during in-app updates); if the restore fails it explains why and lets you keep the restore data. On macOS and Linux, choose Stop All and Quit, or run pap stop --offline, before removing the app.",
+    "• Reduce Motion. With Reduce Motion on, every animation on the protection card stops.",
+    "",
+  ].join("\n"));
+});
+
+test("App Store What's New filters scopes and categories, strips metadata and deduplicates", async () => {
+  const changelog = `## [2.1.0]
+### Features
+* **desktop:** newer release
+## [2.0.0]
+### Features
+* **desktop:** add [examples](https://example.com) with \`pap\` ([#123](https://example.com/issues/123)) ([abcdef0](https://example.com/commit/abcdef0))
+* **ci:** internal workflow
+* **desktop-e2e:** internal test
+* **server:** internal service
+### Documentation
+* **desktop:** documentation
+### Miscellaneous Chores
+* **desktop:** release 2.0.0
+## [2.0.0-beta.1]
+* **desktop:** outside a category
+### Bug Fixes
+* add examples with pap
+* fix **startup**
+* keep \`~/.config/profile_name\` and _formatting_
+## [1.0.0]
+### Features
+* **desktop:** previous release
+`;
+  assert.equal(await extractWhatsNew("2.0.0", { changelog }), "• add examples with pap\n• fix startup\n• keep ~/.config/profile_name and formatting\n");
+});
+
+test("App Store What's New override preserves text and normalizes dispatch separators", async () => {
+  // The override also works without a matching changelog version.
+  for (const [override, expected] of [
+    [" \n**Use `pap`**\nKeep $HOME and $(example) literal\n ", "**Use `pap`**\nKeep $HOME and $(example) literal\n"],
+    [" First change\\nSecond change ", "First change\nSecond change\n"],
+    [" First change • Second change ", "First change\nSecond change\n"],
+  ]) {
+    assert.equal(await extractWhatsNew("9.9.9", { override }), expected);
+  }
+});
+
+test("App Store What's New rejects missing or empty notes and enforces the character limit", async () => {
+  await assert.rejects(extractWhatsNew("9.9.9"), /No changelog section found/);
+  await assert.rejects(extractWhatsNew("0.5.0", { override: " \\n • " }), /What's New must not be empty/);
+  await assert.rejects(extractWhatsNew("1.0.0", { changelog: "## [1.0.0]\n### Features\n* **ci:** internal only\n" }), /What's New must not be empty/);
+  assert.equal(await extractWhatsNew("0.5.0", { override: "a".repeat(4000) }), `${"a".repeat(4000)}\n`);
+  await assert.rejects(extractWhatsNew("0.5.0", { override: "a".repeat(4001) }), /4000-character limit/);
+  await assert.rejects(extractWhatsNew("1.0.0", { changelog: `## [1.0.0]\n### Features\n* ${"a".repeat(3999)}\n` }), /4000-character limit/);
+});
+
+test("App Store review jq selectors match captured asc response shapes", async () => {
+  const review = await readWorkflow("desktop-mac-app-store-review.yml");
+  const resolveStep = review.jobs.review.steps.find((step) => step.name === "Resolve app, valid build and previous live version");
+  assert.ok(resolveStep, "missing review resolution step");
+  const fixture = (name) => path.join(reviewFixtureRoot, name);
+  const jq = (variable, name, { raw = false, args = [] } = {}) => execFileSync(
+    "jq",
+    ["-e", ...(raw ? ["-r"] : []), ...args, resolveStep.env[variable], fixture(name)],
+    { encoding: "utf8" },
+  ).trim();
+
+  const buildId = jq("JQ_BUILD_ID", "builds-list.json", { raw: true });
+  assert.equal(buildId, "168c235e-f446-46fb-93ce-756dc6385675");
+
+  const previousVersion = jq("JQ_PREVIOUS_VERSION", "live-versions.json", { raw: true });
+  assert.equal(previousVersion, "0.4.0");
+
+  const versionId = jq("JQ_VERSION_ID", "target-version.json", { raw: true });
+  assert.equal(versionId, "f42e78ba-3f88-4ff3-b5a4-32b2f77bd9c0");
+
+  assert.equal(jq("JQ_LOCALIZATIONS", "localizations-list.json"), "true");
+  assert.equal(jq("JQ_RELEASE_TYPE_UPDATE", "release-type-update.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq("JQ_RELEASE_TYPE_VERIFY", "release-type-verify.json", {
+    args: ["--arg", "version_id", versionId],
+  }), "true");
+  assert.equal(jq("JQ_DOCTOR", "review-doctor.json"), "true");
 });
 
 test("npm publishes the channel wrapper after its platform versions", async () => {

@@ -44,7 +44,7 @@ services:
     restart: unless-stopped
 
   privatemode-proxy:
-    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307
+    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff
     labels:
       ai.private-gateway.privatemode-credential-sha256: ${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}
     command:
@@ -54,6 +54,7 @@ services:
       - "8080"
       - --apiKey
       - "@/run/secrets/privatemode-api-key"
+      - --api-key-fallback=always
       - --nvidiaOCSPAllowUnknown=false
       - --nvidiaOCSPRevokedGracePeriod=0
     tmpfs:
@@ -85,7 +86,7 @@ configs:
           "manifest_log_path": "/run/privatemode-manifests/log.txt",
           "credential_path": "/run/secrets/privatemode-api-key",
           "credential_sha256": "${PRIVATEMODE_CREDENTIAL_SHA256:?set PRIVATEMODE_CREDENTIAL_SHA256 to the API credential digest}",
-          "proxy_image_digest": "sha256:ff900b263a51a437633d15da809e7893a31fa4b1f4acfa4e526c075682d84307"
+          "proxy_image_digest": "sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff"
         }
       }
 

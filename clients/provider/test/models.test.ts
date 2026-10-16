@@ -41,6 +41,12 @@ test("filters non-TEE and disallowed models", () => {
   assert.equal(mapAciModel({ id: "other/model", is_tee: true }, config), undefined);
 });
 
+test("filters models without text output before validating their metadata", () => {
+  for (const output_modalities of [["decisions"], ["embeddings"], ["image"], []]) {
+    assert.equal(mapAciModel({ output_modalities }, config), undefined);
+  }
+});
+
 test("does not advertise capabilities that the catalog does not declare", () => {
   const model = mapAciModel(
     {
@@ -63,9 +69,42 @@ test("rejects malformed catalog facts instead of inventing defaults", () => {
     /context_length must be a positive safe integer/,
   );
   assert.throws(
-    () => mapAciModel({ ...catalogModel, output_modalities: ["embeddings"] }, config),
+    () => mapAciModel({ ...catalogModel, output_modalities: ["text", "embeddings"] }, config),
     /output_modalities must be an array of supported modalities/,
   );
+  for (const output_modalities of [undefined, "text"]) {
+    assert.throws(
+      () => mapAciModel({ ...catalogModel, output_modalities }, config),
+      /output_modalities must be a non-empty array of supported modalities/,
+    );
+  }
+});
+
+test("discovers chat models when the catalog also contains a System One model", async () => {
+  const systemOneModel = {
+    id: "jaredpalmer/kev-4b",
+    name: "Jared Palmer: Kev 4B",
+    is_tee: true,
+    context_length: 8192,
+    max_output_length: 8192,
+    input_modalities: ["text"],
+    output_modalities: ["decisions"],
+    supported_parameters: [],
+    supported_sampling_parameters: [],
+    supported_features: [],
+    pricing: { prompt: "0.000000042", completion: "0" },
+  };
+  const data = [systemOneModel, catalogModel];
+  const catalog = await discoverAciModelCatalog({
+    config: resolveAciProviderConfig(profile),
+    fetch: async () => Response.json({ data }),
+  });
+
+  assert.deepEqual(
+    catalog.models.map((model) => model.id),
+    [catalogModel.id],
+  );
+  assert.deepEqual(catalog.raw, data);
 });
 
 test("discovers the public model catalog without an authorization header", async () => {

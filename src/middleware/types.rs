@@ -5,6 +5,7 @@
 //! hand-built JSON. Pricing is carried as an opaque value, interpreted by the
 //! cost computation.
 
+use super::request_features::SessionKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -445,10 +446,13 @@ pub struct PostReport {
     /// Serialized as `errorMessage`: the class's fixed token, never free text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<ErrorClass>,
-    /// Echo of the pre-consult request features' prefix hash, so billing can
-    /// record which deployment actually served this prefix (cache affinity).
+    /// Echo of the pre-consult request features' session key, so billing can
+    /// record which deployment actually served this session (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
+    /// Echo of how that key was obtained (see `SessionKind`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_kind: Option<SessionKind>,
 }
 
 #[cfg(test)]

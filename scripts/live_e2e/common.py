@@ -42,6 +42,7 @@ class Provider:
     chutes_e2ee_discovery_interval_seconds: int | None
     privatemode_manifest_log_path: str | None
     privatemode_proxy_image_digest: str | None
+    accepted_subjects: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -74,6 +75,7 @@ class Provider:
             privatemode_proxy_image_digest=optional_str(
                 value, "privatemode_proxy_image_digest"
             ),
+            accepted_subjects=tuple(value.get("accepted_subjects") or ()),
         )
 
     def has_capability(self, capability: str) -> bool:

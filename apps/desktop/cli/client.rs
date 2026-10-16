@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::aci::tls::{error_chain, observing_spki_client, SpkiObservations};
+use crate::aci::tls::{error_chain, error_chain_message, observing_spki_client, SpkiObservations};
 use desktop_core::endpoint;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -237,7 +237,7 @@ impl AciClient {
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
         self.read_get(url, bearer)
             .await
-            .map_err(|e| format!("GET {url} failed: {e}"))
+            .map_err(|e| format!("GET {url} failed: {}", error_chain_message(&e)))
     }
 
     /// A GET read whole, failing with the request's own error.
@@ -264,10 +264,9 @@ impl AciClient {
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let resp = self
-            .send_get(url, bearer)
-            .await
-            .map_err(|e| GetError::Failed(format!("GET {url} failed: {e}")))?;
+        let resp = self.send_get(url, bearer).await.map_err(|e| {
+            GetError::Failed(format!("GET {url} failed: {}", error_chain_message(&e)))
+        })?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = Limited::new(reqwest::Body::from(resp), limit)
@@ -277,7 +276,10 @@ impl AciClient {
                 if error.is::<LengthLimitError>() {
                     GetError::TooLarge(limit)
                 } else {
-                    GetError::Failed(format!("GET {url}: failed to read body: {error}"))
+                    GetError::Failed(format!(
+                        "GET {url}: failed to read body: {}",
+                        error_chain_message(&*error)
+                    ))
                 }
             })?
             .to_bytes()
@@ -372,13 +374,14 @@ impl AciClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("POST {url} failed: {e}"))?;
+            .map_err(|e| format!("POST {url} failed: {}", error_chain_message(&e)))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let mut wire = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("POST {url}: stream error: {e}"))?;
+            let chunk = chunk
+                .map_err(|e| format!("POST {url}: stream error: {}", error_chain_message(&e)))?;
             wire.extend_from_slice(&chunk);
             on_chunk(&chunk);
         }

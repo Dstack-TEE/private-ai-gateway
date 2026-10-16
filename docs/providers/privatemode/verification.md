@@ -32,16 +32,54 @@ Clients reach Privatemode routes as they reach any other provider. The
 gateway's client-facing channel, including any E2EE v2 support, is the same for
 every route.
 
+## Why the proxy origin and credential are not in the route
+
+For Tinfoil, NEAR AI, Chutes, Phala direct, and SecretAI, the route carries
+`base_url` and `bearer_token` in mutable
+[upstream configuration](../../configuration-reference.md#upstream-fields),
+supplied through the admin API or `upstream_pull` and controlled outside the TEE.
+The gateway verifies the provider's attestation and enforces its
+[`tls_spki_sha256` or `e2ee_public_key_sha256` binding](../README.md#provider-matrix)
+on the actual connection. An endpoint without that attested binding cannot
+receive the prompt. The token provides access and billing; the binding protects
+prompts even when the route's origin changes.
+
+Privatemode delegates attestation and E2EE to the official proxy. The gateway
+sends it plaintext over private HTTP and cannot distinguish the real proxy from
+an arbitrary plaintext HTTP server by that connection alone. A route-supplied
+origin would let whoever controls mutable configuration redirect plaintext
+prompts. The origin, image digest, and credential digest therefore belong in
+the measured static
+[`privatemode_proxy` policy](../../configuration-reference.md#privatemode-proxy).
+The route's `base_url` must match that origin; `bearer_token` and `path` are
+rejected.
+
+The proxy reads its credential once at startup through `--apiKey @file` for
+its attested secret exchange and outbound authentication, with
+`--api-key-fallback=always`. The key is delivered to the proxy as a Compose
+secret. Its measured digest identifies the Privatemode account credential used
+in the session's [proxy-image binding](../../../spec/proxy-image-binding.md).
+Rotating it requires a measured redeployment.
+
+| Provider group | Who verifies the provider | Endpoint | Credential |
+| --- | --- | --- | --- |
+| Tinfoil, NEAR AI, Chutes, Phala direct, SecretAI | Gateway | Route `base_url`, with attested binding enforced | Route `bearer_token` for access and billing |
+| Privatemode | Official co-deployed proxy | Measured static origin | Compose secret with measured digest |
+
+A native gateway implementation of Privatemode's protocol would remove the
+sidecar and allow route-supplied endpoints and keys like the other providers;
+this is not planned.
+
 ## What the manifest observation proves
 
-Privatemode v1.48 writes every fetched manifest to
+Privatemode v1.59 writes every fetched manifest to
 `<workspace>/manifests/log.txt`, the manifest history its documentation
 describes for audit. The documentation does not specify the line format; the
-gateway parses the v1.48 format (`<RFC 3339 time> <path>/<N>.json`, from
-`internal/manifestlog` in the tagged source) and resolves `<N>.json` next to
-the log. Recheck that format whenever the pinned proxy image changes. The
-gateway reads the latest version from the shared read-only manifest-history
-volume and reports:
+gateway parses the v1.59 format (`<RFC 3339 time> <path>/<N>.json`, from
+[`internal/manifestlog`][manifestlog-source] in the tagged source) and resolves
+`<N>.json` next to the log. Recheck that format whenever the pinned proxy image
+changes. The gateway reads the latest version from the shared read-only
+manifest-history volume and reports:
 
 - `observed_manifest_sha256`
 - `manifest_observed_at`
@@ -50,7 +88,7 @@ volume and reports:
 
 This is useful update visibility, but it is not a channel binding. The proxy
 writes the history entry before Coordinator verification and before secret
-exchange completes. The v1.48 API does not expose the manifest associated with
+exchange completes. The v1.59 API does not expose the manifest associated with
 the secret used for a request. A receipt therefore must not use the observation
 to assert manifest-specific GPU, OS, serving-software, or model-weight claims.
 
@@ -79,8 +117,10 @@ For route verification, the gateway:
 With `--apiKey` set, the proxy starts listening only after its initial Contrast
 verification and secret exchange succeed, so a readiness answer corroborates
 startup and liveness. It does not use or identify the current inference secret.
+The refresh loop now retries failed background updates with bounded backoff;
+`LatestSecret` still fails closed if an expired secret cannot be refreshed.
 
-For inference, the gateway permits only these v1.48 handlers, all of which the
+For inference, the gateway permits only these v1.59 handlers, all of which the
 proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
 unstructured handlers, which the gateway does not expose; it forwards
 `/v1/models` unencrypted.
@@ -90,7 +130,14 @@ unstructured handlers, which the gateway does not expose; it forwards
 - `/v1/embeddings`
 
 The gateway sends no internal Bearer token. The proxy applies its measured
-startup credential outbound. The forwarding client rejects redirects and
+startup credential outbound because the Compose explicitly sets
+`--api-key-fallback=always`. Upstream v1.59 warns that the default will change
+to `never` in a future release; the explicit flag preserves this behavior.
+The Compose's `--apiKey`, `--nvidiaOCSPAllowUnknown`, and
+`--nvidiaOCSPRevokedGracePeriod` flags remain supported as deprecated aliases
+for the kebab-case spellings introduced in v1.58. The proxy supports
+`--listen-address`; its default remains `0.0.0.0`, appropriate for the private
+Compose network. The forwarding client rejects redirects and
 ignores HTTP proxy environment variables.
 
 Plain HTTP is intentional on the internal hop. Both services and the private
@@ -178,3 +225,5 @@ To test a Phala deployment, follow the
 - [Privatemode proxy configuration](https://docs.privatemode.ai/api/proxy-configuration/)
 - [Privatemode TCB source](https://github.com/edgelesssys/privatemode-public)
 - [Contrast source](https://github.com/edgelesssys/contrast)
+
+[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go

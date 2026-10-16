@@ -1,28 +1,28 @@
 {
   "schemaVersion": 2,
   "endpoint": "https://tee.redpill.ai",
-  "checkedAt": "2026-09-18T06:37:10.721Z",
+  "checkedAt": "2026-10-13T07:33:15.905Z",
   "results": [
     {
       "model": "deepseek/deepseek-v4-flash-0731",
       "endpoint": "/v1/chat/completions",
       "status": "supported",
-      "reason": "valid_response",
+      "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
       "httpStatus": 200,
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "valid_event_stream",
+          "reason": "retained_previous_supported_after_not_probed",
           "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "valid_streamed_tool_call",
+          "reason": "retained_previous_supported_after_not_probed",
           "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "valid_tool_result_response",
+          "reason": "retained_previous_supported_after_not_probed",
           "httpStatus": 200
         }
       }
@@ -30,1182 +30,6 @@
     {
       "model": "deepseek/deepseek-v4-flash-0731",
       "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "deepseek/deepseek-v4-flash-0731",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta-llama/llama-3.3-70b-instruct",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta-llama/llama-3.3-70b-instruct",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta-llama/llama-3.3-70b-instruct",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.8-27b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.8-27b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.8-27b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta/muse-glimmer-30b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta/muse-glimmer-30b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "meta/muse-glimmer-30b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.2",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.2",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.2",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-397b-a17b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-397b-a17b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-397b-a17b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-27b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-27b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.5-27b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "retained_previous_supported_after_missing_stream_delta_or_completion",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3-flash",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3-flash",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3-flash",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "nvidia/nemotron-3.5-lightning",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "nvidia/nemotron-3.5-lightning",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "nvidia/nemotron-3.5-lightning",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "z-ai/glm-5.3",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.6-27b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.6-27b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "qwen/qwen3.6-27b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "deepseek/deepseek-v4-flash",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "deepseek/deepseek-v4-flash",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "deepseek/deepseek-v4-flash",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/qwen3.8-27b-uncensored",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/qwen3.8-27b-uncensored",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/qwen3.8-27b-uncensored",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "openai/gpt-oss-120b",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "openai/gpt-oss-120b",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "openai/gpt-oss-120b",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/gemma-4-26b-a4b-uncensored",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/gemma-4-26b-a4b-uncensored",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "phala/gemma-4-26b-a4b-uncensored",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "moonshotai/kimi-k2.6",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "moonshotai/kimi-k2.6",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "moonshotai/kimi-k2.6",
-      "endpoint": "/v1/messages",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "google/gemma-4-31b-it",
-      "endpoint": "/v1/chat/completions",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "google/gemma-4-31b-it",
-      "endpoint": "/v1/responses",
-      "status": "supported",
-      "reason": "valid_response",
-      "httpStatus": 200,
-      "checks": {
-        "streaming": {
-          "status": "supported",
-          "reason": "valid_event_stream",
-          "httpStatus": 200
-        },
-        "tools": {
-          "status": "supported",
-          "reason": "valid_streamed_tool_call",
-          "httpStatus": 200
-        },
-        "toolResult": {
-          "status": "supported",
-          "reason": "valid_tool_result_response",
-          "httpStatus": 200
-        }
-      }
-    },
-    {
-      "model": "google/gemma-4-31b-it",
-      "endpoint": "/v1/messages",
       "status": "supported",
       "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
       "httpStatus": 200,
@@ -1228,6 +52,1026 @@
       }
     },
     {
+      "model": "deepseek/deepseek-v4-flash-0731",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_not_probed",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.2",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.2",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.2",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-397b-a17b",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-397b-a17b",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-397b-a17b",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-27b",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-27b",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_stream_error_or_incomplete",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_stream_error_or_incomplete",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_not_probed",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-27b",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_missing_stream_delta_or_completion",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_missing_stream_delta_or_completion",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "retained_previous_supported_after_not_probed",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3-flash",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "z-ai/glm-5.3",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/qwen3.8-27b-uncensored",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/qwen3.8-27b-uncensored",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/qwen3.8-27b-uncensored",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "jaredpalmer/kev-4b",
+      "endpoint": "/v1/chat/completions",
+      "status": "unavailable",
+      "reason": "no_text_output",
+      "checks": {
+        "streaming": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "tools": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "toolResult": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        }
+      }
+    },
+    {
+      "model": "jaredpalmer/kev-4b",
+      "endpoint": "/v1/responses",
+      "status": "unavailable",
+      "reason": "no_text_output",
+      "checks": {
+        "streaming": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "tools": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "toolResult": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        }
+      }
+    },
+    {
+      "model": "jaredpalmer/kev-4b",
+      "endpoint": "/v1/messages",
+      "status": "unavailable",
+      "reason": "no_text_output",
+      "checks": {
+        "streaming": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "tools": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        },
+        "toolResult": {
+          "status": "unavailable",
+          "reason": "no_text_output"
+        }
+      }
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "moonshotai/kimi-k2.6",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/gemma-4-26b-a4b-uncensored",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/gemma-4-26b-a4b-uncensored",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "phala/gemma-4-26b-a4b-uncensored",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "google/gemma-4-31b-it",
+      "endpoint": "/v1/chat/completions",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "google/gemma-4-31b-it",
+      "endpoint": "/v1/responses",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
+      "model": "google/gemma-4-31b-it",
+      "endpoint": "/v1/messages",
+      "status": "supported",
+      "reason": "valid_response",
+      "httpStatus": 200,
+      "checks": {
+        "streaming": {
+          "status": "supported",
+          "reason": "valid_event_stream",
+          "httpStatus": 200
+        },
+        "tools": {
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
+        },
+        "toolResult": {
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
+        }
+      }
+    },
+    {
       "model": "qwen/qwen3-32b",
       "endpoint": "/v1/chat/completions",
       "status": "supported",
@@ -1283,18 +1127,19 @@
       "httpStatus": 200,
       "checks": {
         "streaming": {
-          "status": "inconclusive",
-          "reason": "missing_stream_delta_or_completion",
+          "status": "supported",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         },
         "tools": {
-          "status": "inconclusive",
-          "reason": "missing_stream_delta_or_completion",
+          "status": "supported",
+          "reason": "valid_streamed_tool_call",
           "httpStatus": 200
         },
         "toolResult": {
-          "status": "inconclusive",
-          "reason": "not_probed"
+          "status": "supported",
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
         }
       }
     },
@@ -1307,17 +1152,17 @@
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_missing_stream_delta_or_completion",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_missing_stream_delta_or_completion",
+          "reason": "valid_streamed_tool_call",
           "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_tool_result_response",
           "httpStatus": 200
         }
       }
@@ -1398,23 +1243,23 @@
       "model": "z-ai/glm-5.1",
       "endpoint": "/v1/responses",
       "status": "supported",
-      "reason": "temporary_server_error",
-      "httpStatus": 502,
+      "reason": "valid_response",
+      "httpStatus": 200,
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "temporary_server_error",
-          "httpStatus": 502
+          "reason": "valid_event_stream",
+          "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "temporary_server_error",
-          "httpStatus": 502
+          "reason": "valid_streamed_tool_call",
+          "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "temporary_server_error",
-          "httpStatus": 502
+          "reason": "valid_tool_result_response",
+          "httpStatus": 200
         }
       }
     },
@@ -1422,22 +1267,22 @@
       "model": "z-ai/glm-5.1",
       "endpoint": "/v1/messages",
       "status": "supported",
-      "reason": "retained_previous_supported_after_network_timeout_or_invalid_response",
+      "reason": "valid_response",
       "httpStatus": 200,
       "checks": {
         "streaming": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_event_stream",
           "httpStatus": 200
         },
         "tools": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_streamed_tool_call",
           "httpStatus": 200
         },
         "toolResult": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_not_probed",
+          "reason": "valid_tool_result_response",
           "httpStatus": 200
         }
       }
@@ -1674,7 +1519,7 @@
         },
         "toolResult": {
           "status": "supported",
-          "reason": "retained_previous_supported_after_no_tool_result_text",
+          "reason": "valid_tool_result_response",
           "httpStatus": 200
         }
       }

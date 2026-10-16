@@ -37,20 +37,27 @@ missing.
 ## Homebrew
 
 Install the CLI Formula, or the Cask with the desktop app for macOS, directly
-from the official tap:
+from the official tap. On Homebrew 6+, each fully qualified command
+automatically taps the repository and trusts only the item being installed:
 
 ```sh
 brew install dstack-tee/private-ai/private-ai-proxy
 brew install --cask dstack-tee/private-ai/private-ai-proxy
 ```
 
-To use the shorter commands after tapping once:
+To use short names such as `brew install private-ai-proxy` or `brew upgrade
+private-ai-proxy`, trust the whole tap first:
 
 ```sh
 brew tap dstack-tee/private-ai
+brew trust dstack-tee/private-ai
 brew install private-ai-proxy
 brew install --cask private-ai-proxy
 ```
+
+Trust for an item installed by its fully qualified name persists, so later
+upgrades continue to work. Older Homebrew versions do not have tap trust; the
+fully qualified one-line commands still work there.
 
 The Formula exposes `pap`, `private-ai-proxy`, and `aci`. Homebrew owns upgrades
 and removal for both the Formula and Cask installations.
