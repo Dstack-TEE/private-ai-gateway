@@ -6,7 +6,7 @@ import { AciError } from './errors.js';
 export const MAX_ATTESTATION_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 /** Bound response bytes before UTF-8 and JSON decoding. */
-export async function readAciJson(response: Response): Promise<unknown> {
+export async function readAciJson(response: Response, signal?: AbortSignal): Promise<unknown> {
   const tooLarge = () => new AciError('ACI artifact response exceeds maximum byte size (32 MiB)');
   if (Number(response.headers.get('content-length')) > MAX_ATTESTATION_RESPONSE_BYTES) {
     await response.body?.cancel();
@@ -16,9 +16,15 @@ export async function readAciJson(response: Response): Promise<unknown> {
   if (!reader) throw new AciError('ACI artifact response has no body');
   let bytes = new Uint8Array(8192);
   let size = 0;
+  // Custom fetch implementations may not propagate request aborts to the body.
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
   try {
+    signal?.throwIfAborted();
     while (true) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       const required = size + value.byteLength;
       if (required > MAX_ATTESTATION_RESPONSE_BYTES) {
@@ -38,6 +44,7 @@ export async function readAciJson(response: Response): Promise<unknown> {
       size = required;
     }
   } finally {
+    signal?.removeEventListener('abort', abort);
     reader.releaseLock();
   }
   return JSON.parse(new TextDecoder().decode(bytes.subarray(0, size)));

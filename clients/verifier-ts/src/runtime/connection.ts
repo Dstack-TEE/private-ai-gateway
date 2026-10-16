@@ -616,7 +616,7 @@ async function fetchAttestation(
 ): Promise<AttestationReport> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', nonce);
-  const response = await timedFetch(
+  return timedFetch(
     options.bootstrapFetch ?? globalThis.fetch,
     url,
     {
@@ -625,24 +625,26 @@ async function fetchAttestation(
       },
     },
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    async (response, signal) => {
+      if (!response.ok) {
+        throw new AciConnectionError(
+          'attestation_fetch',
+          `ACI attestation endpoint returned HTTP ${response.status}`,
+        );
+      }
+      try {
+        return await readAciJson(response, signal) as AttestationReport;
+      } catch (error) {
+        throw new AciConnectionError(
+          'attestation_fetch',
+          error instanceof AciError
+            ? error.message
+            : 'ACI attestation endpoint returned invalid JSON',
+          { cause: error },
+        );
+      }
+    },
   );
-  if (!response.ok) {
-    throw new AciConnectionError(
-      'attestation_fetch',
-      `ACI attestation endpoint returned HTTP ${response.status}`,
-    );
-  }
-  try {
-    return await readAciJson(response) as AttestationReport;
-  } catch (error) {
-    throw new AciConnectionError(
-      'attestation_fetch',
-      error instanceof AciError
-        ? error.message
-        : 'ACI attestation endpoint returned invalid JSON',
-      { cause: error },
-    );
-  }
 }
 
 async function probePinnedChannel(
@@ -652,7 +654,7 @@ async function probePinnedChannel(
 ): Promise<void> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', randomBytes(32).toString('hex'));
-  const response = await timedFetch(
+  await timedFetch(
     transport.fetch,
     url,
     {
@@ -661,30 +663,34 @@ async function probePinnedChannel(
       },
     },
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) {
+        throw new AciConnectionError(
+          'channel_binding',
+          `pinned ACI channel probe returned HTTP ${response.status}`,
+        );
+      }
+      await response.body?.cancel();
+    },
   );
-  if (!response.ok) {
-    throw new AciConnectionError(
-      'channel_binding',
-      `pinned ACI channel probe returned HTTP ${response.status}`,
-    );
-  }
-  await response.body?.cancel();
 }
 
-async function timedFetch(
+async function timedFetch<T>(
   fetchImpl: AciFetch,
   input: RequestInfo | URL,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+  consume: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
   }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new AciError('ACI request timed out')), timeoutMs);
   timeout.unref();
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal });
+    const response = await fetchImpl(input, { ...init, signal: controller.signal });
+    return await consume(response, controller.signal);
   } catch (error) {
     if (error instanceof AciConnectionError) throw error;
     throw new AciConnectionError(

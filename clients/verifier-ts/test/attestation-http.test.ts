@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { MAX_ATTESTATION_RESPONSE_BYTES, readAciJson } from '../src/attestation-http.js';
 import { verifyService } from '../src/index.js';
@@ -8,6 +10,42 @@ import { connectAci } from '../src/node/index.js';
 test('bounded attestation reader accepts recorded evidence', async () => {
   const text = readFileSync(new URL('../../test/fixtures/aci_report.json', import.meta.url), 'utf8');
   assert.deepEqual(await readAciJson(new Response(text)), JSON.parse(text));
+});
+
+test('aborting a stalled body cancels the bounded reader', async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    cancel() { cancelled = true; },
+  }));
+  const controller = new AbortController();
+  const reading = readAciJson(response, controller.signal);
+  controller.abort(new Error('stalled body aborted'));
+  await assert.rejects(reading, /stalled body aborted/);
+  assert.equal(cancelled, true);
+  assert.equal(response.body?.locked, false);
+});
+
+test('attestation deadline remains active after headers arrive', { timeout: 2000 }, async (t) => {
+  let headersSent = false;
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{'); // Headers arrive immediately; the body never finishes.
+    headersSent = true;
+  });
+  t.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeAllConnections();
+  }));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  await assert.rejects(connectAci({
+    baseURL: 'https://gateway.example',
+    timeoutMs: 100,
+    bootstrapFetch: (_input, init) => fetch(`http://127.0.0.1:${address.port}`, init),
+  }), /timed out/);
+  assert.equal(headersSent, true);
 });
 
 test('many one-byte chunks decode correctly and still enforce the body cap', async () => {
