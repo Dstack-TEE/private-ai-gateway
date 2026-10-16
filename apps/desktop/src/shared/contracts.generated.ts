@@ -143,7 +143,7 @@ export type AccountLoginDetails = { auth: ProfileAuth, workspaces: Array<Account
 export type AccountBalance = { balanceUsd: string, canTopUp: boolean, organizationId: string | null, grantedUsd: string | null, scope: AccountScope, };
 export type AccountBalanceTarget = { "kind": "login", id: string, } | { "kind": "profile", profileId: string, };
 export type LoginPresentation = { id: string, url: string, userCode: string | null, };
-export type StartConfig = { remoteUrl: string, requireProductionOs: boolean, };
+export type StartConfig = { remoteUrl: string, osRegistryRpcUrls?: Array<string>, requireProductionOs: boolean, };
 /**
  * A TCP listener shared by the Local API and the web UI. Non-loopback
  * addresses require `allow_network_access`; see [`crate::listen::resolve`].

@@ -331,6 +331,7 @@ impl Config {
 
     pub fn runtime_config(&self) -> StartConfig {
         StartConfig {
+            os_registry_rpc_urls: self.os_registry_rpc_urls.clone(),
             remote_url: self.active().map_or_else(
                 || crate::brand::SERVICE_DEFAULT_URL.to_string(),
                 |(_, profile)| profile.remote_url.clone(),
@@ -674,6 +675,9 @@ pub fn resolve_profile(
 }
 
 pub fn resolve_runtime_config(mut config: StartConfig) -> Result<StartConfig, String> {
+    if let Some(urls) = &config.os_registry_rpc_urls {
+        validate_os_registry_rpc_urls(urls)?;
+    }
     config.remote_url = normalize_url(&config.remote_url)?;
     Ok(config)
 }
@@ -885,6 +889,43 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
             let error = parse(&format!("os-registry-rpc-urls = {urls}")).unwrap_err();
             assert!(error.contains("os-registry-rpc-urls"));
             assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn os_registry_settings_follow_saved_config_into_the_runtime() {
+        let defaults = Config::default().runtime_config();
+        assert!(defaults.require_production_os);
+        assert!(defaults.os_registry_rpc_urls.is_none());
+        let configured =
+            parse("os-registry-rpc-urls = ['https://a.example/rpc', 'https://b.example/rpc']")
+                .unwrap()
+                .value;
+        let runtime = resolve_runtime_config(configured.runtime_config()).unwrap();
+        assert_eq!(
+            runtime.os_registry_rpc_urls,
+            configured.os_registry_rpc_urls
+        );
+        assert!(runtime.require_production_os);
+    }
+
+    #[test]
+    fn runtime_os_registry_settings_reject_invalid_overrides() {
+        for urls in [
+            vec![],
+            vec!["https://a.example".into()],
+            vec!["https://a.example".into(), "http://b.example".into()],
+            vec![
+                "https://a.example/rpc".into(),
+                "https://a.example/other".into(),
+            ],
+            vec!["https://a.example".into(), "not a URL".into()],
+        ] {
+            assert!(resolve_runtime_config(StartConfig {
+                os_registry_rpc_urls: Some(urls),
+                ..StartConfig::default()
+            })
+            .is_err());
         }
     }
 

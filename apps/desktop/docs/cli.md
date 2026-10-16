@@ -77,6 +77,9 @@ provenance (id-4) pass, the client decodes the measured `os-image-hash` as
 32 bytes and calls `DstackKms.allowedOsImages(bytes32)` on Ethereum mainnet
 (chain 1, `0xd343a3f5593b93D8056aB5D60c433622d7D65a80`). These policy
 constants are pinned by the client, never supplied by the gateway.
+Offline `pap audit --require-production-os` cannot pass this policy: the quote
+is not verified to the vendor root, so id-1 remains unevaluable and the
+registry is not queried.
 
 The default independent RPC providers are PublicNode
 (`https://ethereum-rpc.publicnode.com`) and dRPC (`https://eth.drpc.org`).
@@ -84,8 +87,9 @@ Each must report chain ID `0x1` and return an exact ABI `true` at block tag
 `finalized`. A denial, disagreement, malformed response, network failure or
 10-second request timeout fails closed. Redirects are refused. Approvals are
 read anew on every verification; there is no approval cache. Registry changes
-take effect once finalized, so newly approved dstack versions need no client
-release and approvals can be revoked.
+take effect once finalized, and approvals can be revoked. New dstack OS versions
+need no client release as long as dstack registers the hash in the Ethereum
+mainnet KMS registry and the `os-image-hash` event format stays the same.
 
 This trusts the owner-approved dstack governance registry and the RPC
 providers' answers. Requiring all independent providers to agree mitigates

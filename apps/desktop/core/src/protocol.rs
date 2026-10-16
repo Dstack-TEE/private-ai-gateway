@@ -486,6 +486,7 @@ mod tests {
             (
                 Command::Start {
                     config: StartConfig {
+                        os_registry_rpc_urls: None,
                         remote_url: "https://tee.example".into(),
                         require_production_os: true,
                     },

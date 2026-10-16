@@ -88,6 +88,7 @@ impl DesktopRuntime {
             None => return Err(Error::invalid_state("Enter an API key for this profile")),
         };
         let config = StartConfig {
+            os_registry_rpc_urls: saved.config.os_registry_rpc_urls.clone(),
             remote_url: candidate.remote_url.clone(),
             require_production_os,
         };

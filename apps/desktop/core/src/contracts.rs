@@ -602,6 +602,9 @@ impl Default for ListenConfig {
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     pub remote_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub os_registry_rpc_urls: Option<Vec<String>>,
     pub require_production_os: bool,
 }
 
@@ -609,6 +612,7 @@ impl Default for StartConfig {
     fn default() -> Self {
         Self {
             remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
+            os_registry_rpc_urls: None,
             require_production_os: true,
         }
     }

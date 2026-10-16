@@ -815,6 +815,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
         api_key_saved: true,
         session_active: true,
         config: StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         },
@@ -1144,6 +1145,7 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
             ..Default::default()
         },
         config: StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         },
@@ -1513,6 +1515,7 @@ fn an_address_change_reconnects_only_a_remote_service() {
         session_id: Some("address-session".into()),
         session_active: true,
         config: StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: remote_url.into(),
             require_production_os: false,
         },

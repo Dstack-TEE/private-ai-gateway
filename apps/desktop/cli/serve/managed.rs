@@ -114,7 +114,10 @@ impl VerifierLauncher for InProcessVerifierLauncher {
                 result = initialize(
                     VerifierOptions {
                         base_url: config.remote_url.clone(),
-                        policy: VerifierPolicy::default(),
+                        policy: VerifierPolicy {
+                            os_registry_rpc_urls: config.os_registry_rpc_urls.clone(),
+                            ..VerifierPolicy::default()
+                        },
                         require_production_os: config.require_production_os,
                         enforce_verified: true,
                         fixed_pins: Vec::new(),

@@ -61,6 +61,7 @@ pub struct VerifierPolicy {
     pub accepted_composes: Vec<String>,
     /// The §9.1(5) custody policy. Without one, id-5 is an honest skip.
     pub custody: Option<CustodyPolicy>,
+    pub os_registry_rpc_urls: Option<Vec<String>>,
 }
 
 /// The workload identity a verified report establishes (§9.1): the keyset
@@ -158,7 +159,12 @@ pub async fn run_report_checks(
                 .any(|result| result.id == *id && result.passed())
         });
         if prerequisites_verified {
-            run_production_os_policy(transcript, report).await;
+            run_production_os_policy(
+                transcript,
+                report,
+                cx.policy.os_registry_rpc_urls.as_deref(),
+            )
+            .await;
         } else {
             transcript.fail(
                 POLICY_OS,
@@ -175,7 +181,11 @@ pub async fn run_report_checks(
     })
 }
 
-async fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
+async fn run_production_os_policy(
+    transcript: &mut Transcript,
+    report: &AttestationReport,
+    rpc_urls: Option<&[String]>,
+) {
     let result = async {
         let event_log = report.attestation.evidence["event_log"]
             .as_str()
@@ -189,8 +199,8 @@ async fn run_production_os_policy(transcript: &mut Transcript, report: &Attestat
         let mut hash = [0u8; 32];
         hex::decode_to_slice(&event.event_payload, &mut hash)
             .map_err(|_| "os-image-hash must decode to exactly 32 bytes")?;
-        crate::os_registry::check(&hash).await?;
-        Ok::<_, &str>(hex::encode(hash))
+        crate::os_registry::check(&hash, rpc_urls).await?;
+        Ok::<_, String>(hex::encode(hash))
     }
     .await;
 
@@ -868,6 +878,7 @@ mod tests {
     static NO_POLICY: VerifierPolicy = VerifierPolicy {
         accepted_composes: Vec::new(),
         custody: None,
+        os_registry_rpc_urls: None,
     };
 
     fn offline_cx<'a>(nonce: Option<&'a str>, now_secs: u64) -> ReportCheckContext<'a> {
@@ -923,7 +934,7 @@ mod tests {
             .to_string()
             .into();
             let mut t = Transcript::default();
-            run_production_os_policy(&mut t, &report).await;
+            run_production_os_policy(&mut t, &report, None).await;
             assert_eq!(status_of(&t, "policy-os"), Status::Fail);
             assert!(t.checks[0].detail.contains("exactly 32 bytes"));
         }

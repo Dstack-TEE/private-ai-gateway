@@ -107,6 +107,7 @@ impl PolicyArgs {
         Ok(VerifierPolicy {
             accepted_composes: self.accepted_composes.clone(),
             custody,
+            os_registry_rpc_urls: None,
         })
     }
 }

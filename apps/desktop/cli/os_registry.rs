@@ -3,7 +3,7 @@
 
 use std::{future::Future, time::Duration};
 
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use serde_json::{json, Value};
 
 // DstackKms.allowedOsImages(bytes32), Ethereum mainnet (chain id 1).
@@ -14,29 +14,27 @@ const DEFAULT_RPC_URLS: [&str; 2] = [
     "https://ethereum-rpc.publicnode.com",
     "https://eth.drpc.org",
 ];
-const RPC_URLS_ENV: &str = "PRIVATE_AI_PROXY_OS_REGISTRY_RPC_URLS";
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 4096;
 const REQUEST_FAILED: &str =
     "OS registry provider request failed or timed out; approval could not be established";
 
-pub async fn check(hash: &[u8; 32]) -> Result<(), &'static str> {
-    // Resolve on every verification: neither positive nor negative approvals
-    // are cached, because the registry owner can revoke them.
-    let urls = match std::env::var(RPC_URLS_ENV) {
-        Ok(raw) => serde_json::from_str::<Vec<String>>(&raw).map_err(|_| {
-            "OS registry RPC environment override must be a JSON array of HTTPS URLs"
-        })?,
-        Err(std::env::VarError::NotPresent) => desktop_core::config::load()
-            .map_err(|_| "Cannot read OS registry RPC settings")?
-            .os_registry_rpc_urls
-            .unwrap_or_else(|| DEFAULT_RPC_URLS.iter().map(|url| (*url).into()).collect()),
-        Err(_) => return Err("Cannot read OS registry RPC environment override"),
-    };
+fn rpc_urls(configured: Option<&[String]>) -> Result<Vec<String>, &'static str> {
+    let urls = configured.map_or_else(
+        || DEFAULT_RPC_URLS.iter().map(|url| (*url).into()).collect(),
+        <[String]>::to_vec,
+    );
+    desktop_core::config::validate_os_registry_rpc_urls(&urls)?;
+    Ok(urls)
+}
+
+pub async fn check(hash: &[u8; 32], configured: Option<&[String]>) -> Result<(), String> {
+    // Configuration is passed by the caller, never read from disk here.
+    // Every verification reads approvals anew because they can be revoked.
+    let urls = rpc_urls(configured)?;
     let client = reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(RPC_TIMEOUT)
         .timeout(RPC_TIMEOUT)
         .build()
         .map_err(|_| "Cannot initialize OS registry HTTPS client")?;
@@ -47,32 +45,22 @@ fn call_data(hash: &[u8; 32]) -> String {
     format!("0x{SELECTOR}{}", hex::encode(hash))
 }
 
-/// The injected request executor keeps policy tests offline, including a
-/// stalled transport. The deadline covers the executor and response body.
-async fn check_with_rpc<F, Fut>(
-    hash: &[u8; 32],
-    urls: &[String],
-    mut request: F,
-) -> Result<(), &'static str>
+/// The injected executor keeps policy tests offline; reqwest owns the deadline.
+async fn check_with_rpc<F, Fut>(hash: &[u8; 32], urls: &[String], request: F) -> Result<(), String>
 where
-    F: FnMut(String, Value) -> Fut,
+    F: Fn(String, Value) -> Fut,
     Fut: Future<Output = Result<Value, &'static str>>,
 {
-    desktop_core::config::validate_os_registry_rpc_urls(urls)?;
-    for url in urls {
+    let approvals = join_all(urls.iter().map(|url| async {
         let chain = json!({"jsonrpc":"2.0", "id":1, "method":"eth_chainId", "params":[]});
-        let chain = tokio::time::timeout(RPC_TIMEOUT, request(url.clone(), chain))
-            .await
-            .map_err(|_| REQUEST_FAILED)??;
+        let chain = request(url.clone(), chain).await?;
         if rpc_result(&chain, 1)? != "0x1" {
             return Err("OS registry provider is not on Ethereum mainnet (chain 1)");
         }
         let call = json!({"jsonrpc":"2.0", "id":2, "method":"eth_call", "params":[
             {"to":CONTRACT, "data":call_data(hash)}, "finalized"
         ]});
-        let result = tokio::time::timeout(RPC_TIMEOUT, request(url.clone(), call))
-            .await
-            .map_err(|_| REQUEST_FAILED)??;
+        let result = request(url.clone(), call).await?;
         let result = rpc_result(&result, 2)?;
         let mut word = [0u8; 32];
         let encoded = result
@@ -83,9 +71,22 @@ where
         if word[..31] != [0u8; 31] || word[31] > 1 {
             return Err("OS registry returned a malformed ABI boolean");
         }
-        if word[31] == 0 {
-            return Err("os-image-hash is not approved by every provider in the dstack KMS registry (chain 1)");
-        }
+        Ok(word[31] == 1)
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    if approvals.iter().any(|approved| *approved) && approvals.iter().any(|approved| !*approved) {
+        return Err(format!(
+            "OS registry providers disagree about os-image-hash {} (chain 1)",
+            hex::encode(hash)
+        ));
+    }
+    if !approvals.iter().all(|approved| *approved) {
+        return Err(format!(
+            "os-image-hash {} is not approved in the dstack KMS registry (chain 1)",
+            hex::encode(hash)
+        ));
     }
     Ok(())
 }
@@ -155,10 +156,11 @@ mod tests {
 
     #[tokio::test]
     async fn every_provider_must_approve_at_finalized_and_each_run_rechecks() {
-        let mut calls = 0;
-        for _ in 0..2 {
-            check_with_rpc(&[42; 32], &urls(), |url, body| {
-                calls += 1;
+        let calls = std::cell::Cell::new(0);
+        let providers = urls();
+        for run in 0..2 {
+            let verification = check_with_rpc(&[42; 32], &providers, |url, body| {
+                calls.set(calls.get() + 1);
                 assert!(urls().contains(&url));
                 let result = if body["method"] == "eth_chainId" {
                     assert_eq!(body["params"], json!([]));
@@ -171,12 +173,18 @@ mod tests {
                     );
                     response(2, &boolean(true))
                 };
-                std::future::ready(Ok(result))
-            })
-            .await
-            .unwrap();
+                async move {
+                    tokio::task::yield_now().await;
+                    Ok(result)
+                }
+            });
+            futures_util::pin_mut!(verification);
+            assert!(futures_util::poll!(verification.as_mut()).is_pending());
+            // Both chain requests start before the first provider responds.
+            assert_eq!(calls.get(), run * 4 + 2);
+            verification.await.unwrap();
         }
-        assert_eq!(calls, 8);
+        assert_eq!(calls.get(), 8);
     }
 
     #[tokio::test]
@@ -209,11 +217,27 @@ mod tests {
             }))
         })
         .await;
-        assert!(outcome.is_err());
+        assert!(outcome.unwrap_err().contains("providers disagree"));
+        let denied = check_with_rpc(&[0xab; 32], &urls(), |_, body| {
+            std::future::ready(Ok(if body["id"] == 1 {
+                response(1, "0x1")
+            } else {
+                response(2, &boolean(false))
+            }))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            denied,
+            format!(
+                "os-image-hash {} is not approved in the dstack KMS registry (chain 1)",
+                "ab".repeat(32)
+            )
+        );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn network_errors_and_stalled_requests_fail_closed() {
+    #[tokio::test]
+    async fn transport_failures_including_timeouts_fail_closed() {
         assert!(
             check_with_rpc(&[0; 32], &urls(), |_, _| std::future::ready(Err(
                 REQUEST_FAILED
@@ -221,19 +245,22 @@ mod tests {
             .await
             .is_err()
         );
-        assert!(
-            check_with_rpc(&[0; 32], &urls(), |_, _| std::future::pending())
-                .await
-                .is_err()
-        );
-        assert!(check_with_rpc(&[0; 32], &urls(), |_, body| async move {
-            if body["id"] == 1 {
-                Ok(response(1, "0x1"))
-            } else {
-                std::future::pending().await
-            }
-        })
-        .await
+    }
+
+    #[test]
+    fn rpc_configuration_uses_defaults_or_the_explicit_setting() {
+        assert_eq!(rpc_urls(None).unwrap(), urls());
+        let configured = vec![
+            "https://a.example/rpc".into(),
+            "https://b.example/rpc".into(),
+        ];
+        assert_eq!(rpc_urls(Some(&configured)).unwrap(), configured);
+        // An explicitly empty or invalid setting must not silently use defaults.
+        assert!(rpc_urls(Some(&[])).is_err());
+        assert!(rpc_urls(Some(&[
+            "https://a.example".into(),
+            "http://b.example".into()
+        ]))
         .is_err());
     }
 

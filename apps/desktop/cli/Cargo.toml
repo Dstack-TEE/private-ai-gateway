@@ -76,7 +76,6 @@ regex = "1"
 sha3 = "0.12"
 snapbox = { version = "1", features = ["cmd", "regex"] }
 tempfile = "3"
-tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unused_must_use = "deny"

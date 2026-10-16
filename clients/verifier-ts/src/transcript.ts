@@ -135,14 +135,14 @@ export async function measuredDstackOs(report: AttestationReport): Promise<strin
       throw new Error('verified event log carries multiple os-image-hash events');
     }
     measurement = {
-      hash: event.event_payload.toLowerCase(),
+      hash: event.event_payload,
       digest: event.digest.toLowerCase(),
     };
   }
   if (measurement === undefined) throw new Error('verified event log carries no os-image-hash event');
 
   const { hash, digest } = measurement;
-  if (!/^[0-9a-f]{64}$/.test(hash)) {
+  if (hash.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hash)) {
     throw new Error('os-image-hash must decode to exactly 32 bytes');
   }
   // Bind the payload to the digest replayed into RTMR3; the registry must
@@ -151,11 +151,12 @@ export async function measuredDstackOs(report: AttestationReport): Promise<strin
   const prefix = new Uint8Array([1, 0, 0, 8, ...new TextEncoder().encode(':os-image-hash:')]);
   const preimage = new Uint8Array(prefix.length + 32);
   preimage.set(prefix);
-  preimage.set(fromHex(hash), prefix.length);
+  const hashBytes = fromHex(hash);
+  preimage.set(hashBytes, prefix.length);
   if (digest !== toHex(await sha384(preimage))) {
     throw new Error('os-image-hash payload does not match its RTMR3 event digest');
   }
-  return hash;
+  return toHex(hashBytes);
 }
 
 const ID_TITLES: Record<string, [section: string, title: string]> = {

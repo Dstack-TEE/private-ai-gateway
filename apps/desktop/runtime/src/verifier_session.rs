@@ -94,6 +94,7 @@ pub enum VerifierEvent {
 #[derive(Clone, Debug)]
 pub struct VerifierConfig {
     pub remote_url: String,
+    pub os_registry_rpc_urls: Option<Vec<String>>,
     pub require_production_os: bool,
 }
 
@@ -334,6 +335,7 @@ impl SessionManager {
                 UsageSummary::default()
             },
             config: StartConfig {
+                os_registry_rpc_urls: config.os_registry_rpc_urls.clone(),
                 remote_url,
                 require_production_os: config.require_production_os,
             },
@@ -365,6 +367,7 @@ impl SessionManager {
         });
         let task = self.launcher.spawn(
             VerifierConfig {
+                os_registry_rpc_urls: config.os_registry_rpc_urls.clone(),
                 remote_url: config.remote_url.clone(),
                 require_production_os: config.require_production_os,
             },

@@ -304,6 +304,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     ));
     let started = manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -372,6 +373,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     let started = manager
         .begin_verification(
             StartConfig {
+                os_registry_rpc_urls: None,
                 remote_url: "https://unreachable.invalid".into(),
                 require_production_os: true,
             },
@@ -426,6 +428,7 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     ));
     let started = manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://tee.example".into(),
             require_production_os: true,
         })
@@ -485,6 +488,7 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
         .unwrap();
     manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://tee.example".into(),
             require_production_os: true,
         })
@@ -543,6 +547,7 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     ));
     manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -583,6 +588,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     ));
     manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -607,6 +613,7 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
         AppState::default(),
     ));
     let config = StartConfig {
+        os_registry_rpc_urls: None,
         remote_url: "https://inference.phala.com".into(),
         require_production_os: true,
     };
@@ -653,6 +660,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     ));
     manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -689,6 +697,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             AppState::default(),
         ));
         let config = StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         };
@@ -759,6 +768,7 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
         AppState::default(),
     ));
     let config = StartConfig {
+        os_registry_rpc_urls: None,
         remote_url: "https://inference.phala.com".into(),
         require_production_os: true,
     };
@@ -1090,6 +1100,7 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     let initial = manager.snapshot();
     let started = manager
         .start(StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://inference.phala.com".into(),
             require_production_os: true,
         })
@@ -1129,6 +1140,7 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
         AppState::default(),
     ));
     let config = StartConfig {
+        os_registry_rpc_urls: None,
         remote_url: "https://inference.phala.com".into(),
         require_production_os: true,
     };
@@ -1225,6 +1237,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         usage_revision: 4,
         error: Some("Verification failed".into()),
         config: StartConfig {
+            os_registry_rpc_urls: None,
             remote_url: "https://tee.example".into(),
             require_production_os: false,
         },
