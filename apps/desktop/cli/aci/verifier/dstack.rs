@@ -42,11 +42,7 @@ pub(super) fn verify_dstack_kms_receipt_custody(
 }
 
 fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> {
-    match report {
-        dcap_qvl::quote::Report::TD10(report) => Some(&report.rt_mr3),
-        dcap_qvl::quote::Report::TD15(report) => Some(&report.base.rt_mr3),
-        dcap_qvl::quote::Report::SgxEnclave(_) => None,
-    }
+    report.as_td10().map(|report| &report.rt_mr3)
 }
 
 #[cfg(test)]
