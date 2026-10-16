@@ -131,6 +131,41 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+async fn oversized_reports_are_rejected_before_json_or_http_error_decoding() {
+    use axum::{body::Body, http::Response, routing::get, Router};
+    use bytes::Bytes;
+
+    for status in [200, 500] {
+        for with_length in [false, true] {
+            let app = Router::new().route(
+                "/v1/aci/attestation",
+                get(move || async move {
+                    let mut response = Response::builder().status(status);
+                    if with_length {
+                        response =
+                            response.header("content-length", (33 * 1024 * 1024).to_string());
+                    }
+                    let chunks = futures_util::stream::iter((0..33).map(|_| {
+                        Ok::<_, std::io::Error>(Bytes::from_static(&[b'x'; 1024 * 1024]))
+                    }));
+                    response.body(Body::from_stream(chunks)).unwrap()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = verifier(&origin).verify(request(&origin)).await;
+            server.abort();
+            assert_eq!(result.result, VerificationResult::Failed);
+            assert!(result
+                .reason
+                .unwrap()
+                .contains("attestation response exceeds maximum byte size"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn public_cold_verification_is_single_flight_and_refresh_shares_the_lock() {
     let fixture = Fixture::new(u64::MAX).await;
     let initial = {

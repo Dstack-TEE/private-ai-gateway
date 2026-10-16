@@ -161,8 +161,11 @@ escaped equivalents, and lone surrogates in compose or event strings are rejecte
 
 Event logs are limited to 1 MiB of UTF-8 and 16 nested containers, including the
 root array; `app_compose` is limited to 4 MiB of UTF-8 before processing.
-Both clients cap attestation HTTP bodies at 32 MiB before JSON decoding, checking
-Content-Length and streaming bytes. This allows JSON escaping of the bounded
+The gateway and clients cap attestation HTTP bodies at 32 MiB before JSON decoding,
+checking Content-Length and streaming bytes. The gateway also caps legacy reports
+and Chutes discovery, instance and quote/GPU evidence responses. Desktop
+session-evidence fetches use the same limit. TS copies incoming chunks into one
+buffer that grows up to the cap. The cap allows JSON escaping of the bounded
 compose and log. A production response measured 53,676 bytes on October 16, 2026:
 30,220 bytes of compose and 7,357 bytes of event log (30 events).
 Hex fields accept an optional lowercase `0x` prefix and either case for digits.

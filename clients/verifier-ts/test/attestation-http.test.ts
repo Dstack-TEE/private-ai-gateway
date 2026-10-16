@@ -10,6 +10,35 @@ test('bounded attestation reader accepts recorded evidence', async () => {
   assert.deepEqual(await readAttestationReport(new Response(text)), JSON.parse(text));
 });
 
+test('many one-byte chunks decode correctly and still enforce the body cap', async () => {
+  const expected = { padding: 'x'.repeat(256 * 1024), unicode: 'é🚀' };
+  const encoded = new TextEncoder().encode(JSON.stringify(expected));
+  for (const overflow of [false, true]) {
+    let position = 0;
+    let cancelled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (position < encoded.length) {
+          controller.enqueue(encoded.slice(position, position + 1));
+          position++;
+        } else if (overflow && position === encoded.length) {
+          position++;
+          controller.enqueue(new Uint8Array(MAX_ATTESTATION_RESPONSE_BYTES - encoded.length + 1));
+        } else {
+          controller.close();
+        }
+      },
+      cancel() { cancelled = true; },
+    }));
+    if (overflow) {
+      await assert.rejects(readAttestationReport(response), /response exceeds maximum byte size/);
+      assert.equal(cancelled, true);
+    } else {
+      assert.deepEqual(await readAttestationReport(response), expected);
+    }
+  }
+});
+
 test('both attestation fetch paths reject oversized Content-Length before decoding', async () => {
   let cancellations = 0;
   const fetchImpl = Object.assign(

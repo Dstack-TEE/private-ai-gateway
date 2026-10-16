@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{stream, Stream};
 
+use crate::aci::attestation_http::AttestationBodyError;
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
 mod chutes;
@@ -114,6 +115,15 @@ pub enum UpstreamError {
     /// response body has no place.
     #[error("upstream rejected request with status {status}")]
     Upstream { status: u16 },
+}
+
+impl From<AttestationBodyError> for UpstreamError {
+    fn from(error: AttestationBodyError) -> Self {
+        match error {
+            AttestationBodyError::Transport(error) => transport_error(error),
+            error => Self::Transport(error.to_string()),
+        }
+    }
 }
 
 /// Classify a reqwest failure. `is_timeout` walks the error's source chain,

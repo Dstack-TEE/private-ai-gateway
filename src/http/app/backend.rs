@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde_json::Value;
 
+use crate::aci::attestation_http::read_attestation_body;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
@@ -414,9 +415,11 @@ async fn fetch_report_nvidia_payload(
         tracing::warn!(upstream = %target.upstream_name, status = %resp.status(), "upstream attestation report non-2xx");
         return None;
     }
-    let body: Value = resp
-        .json()
+    let bytes = read_attestation_body(resp)
         .await
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "read upstream attestation report"))
+        .ok()?;
+    let body: Value = serde_json::from_slice(&bytes)
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "parse upstream attestation report"))
         .ok()?;
     match target.provider {

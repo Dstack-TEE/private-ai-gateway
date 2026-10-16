@@ -23,6 +23,7 @@ use super::{
     current_unix_secs, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
 };
+use crate::aci::attestation_http::read_attestation_body;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
@@ -444,8 +445,7 @@ impl AciServiceUpstreamVerifier {
             .await
             .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         let status = response.status().as_u16();
-        let body = response
-            .bytes()
+        let body = read_attestation_body(response)
             .await
             .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         if !(200..300).contains(&status) {

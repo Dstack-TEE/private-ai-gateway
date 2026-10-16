@@ -341,7 +341,9 @@ impl AciClient {
             return Err(format!("session id {session_id:?} is not a URL-safe id"));
         }
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
-        self.get(url.as_str(), None).await
+        self.get_limited(url.as_str(), None, MAX_ATTESTATION_RESPONSE_BYTES)
+            .await
+            .map_err(String::from)
     }
 
     pub async fn fetch_models(

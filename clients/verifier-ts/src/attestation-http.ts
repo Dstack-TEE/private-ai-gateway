@@ -14,27 +14,31 @@ export async function readAttestationReport(response: Response): Promise<Attesta
   }
   const reader = response.body?.getReader();
   if (!reader) throw new AciError('attestation response has no body');
-  const chunks: Uint8Array[] = [];
+  let bytes = new Uint8Array(8192);
   let size = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      size += value.byteLength;
-      if (size > MAX_ATTESTATION_RESPONSE_BYTES) {
+      const required = size + value.byteLength;
+      if (required > MAX_ATTESTATION_RESPONSE_BYTES) {
         await reader.cancel();
         throw tooLarge();
       }
-      chunks.push(value);
+      if (required > bytes.length) {
+        let capacity = bytes.length;
+        while (capacity < required) {
+          capacity = Math.min(capacity * 2, MAX_ATTESTATION_RESPONSE_BYTES);
+        }
+        const grown = new Uint8Array(capacity);
+        grown.set(bytes.subarray(0, size));
+        bytes = grown;
+      }
+      bytes.set(value, size);
+      size = required;
     }
   } finally {
     reader.releaseLock();
   }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return JSON.parse(new TextDecoder().decode(bytes)) as AttestationReport;
+  return JSON.parse(new TextDecoder().decode(bytes.subarray(0, size))) as AttestationReport;
 }
