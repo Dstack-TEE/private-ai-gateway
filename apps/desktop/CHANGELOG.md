@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.1...desktop-v0.6.0) (2026-10-16)
+
+
+### Features
+
+* **desktop:** release Mac App Store versions automatically after approval ([#448](https://github.com/Dstack-TEE/private-ai-gateway/issues/448)) ([e20027c](https://github.com/Dstack-TEE/private-ai-gateway/commit/e20027cf8abd5c2b024707accf8e2900d9ad121a))
+* **desktop:** remove the production OS policy ([#446](https://github.com/Dstack-TEE/private-ai-gateway/issues/446)) ([493cdc3](https://github.com/Dstack-TEE/private-ai-gateway/commit/493cdc3b3ef7b1b9a6f5390ba3ece0e8004c34f2))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.6.0 ([#450](https://github.com/Dstack-TEE/private-ai-gateway/issues/450)) ([d2b7f10](https://github.com/Dstack-TEE/private-ai-gateway/commit/d2b7f10ffb54f6b90552f17ef4adce01690f4ed8))
+
 ## [0.5.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.0...desktop-v0.5.1) (2026-10-14)
 
 
