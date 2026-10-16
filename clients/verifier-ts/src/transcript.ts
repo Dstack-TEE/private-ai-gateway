@@ -10,7 +10,7 @@ import { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 import { verifyReceipt, checkRequestBodyHash, checkResponseBodyHash, findEvent } from './receipt.js';
 import { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 import { AciError } from './errors.js';
-import { readAttestationReport } from './attestation-http.js';
+import { readAciJson } from './attestation-http.js';
 import type {
   AttestationReport,
   ReceiptEnvelope,
@@ -176,7 +176,7 @@ export async function verifyService(
   if (!res.ok) {
     throw new AciError(`attestation fetch failed: HTTP ${res.status}`);
   }
-  const report = await readAttestationReport(res);
+  const report = await readAciJson(res) as AttestationReport;
   return reportTranscript(report, nonce, {
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.pccsUrl !== undefined ? { pccsUrl: options.pccsUrl } : {}),

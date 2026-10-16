@@ -1,19 +1,19 @@
 import { AciError } from './errors.js';
-import type { AttestationReport } from './types.js';
 
-// Shared by verifyService and the Node/Bun bootstrap path. Allows JSON escaping
-// of the 4 MiB compose and 1 MiB log; production responses are about 54 KB.
+// Shared by attestation, receipt and session fetches. Allows JSON escaping of
+// the 4 MiB compose and 1 MiB log; production reports are about 54 KB and the
+// largest of 21 measured production sessions was 1,428,775 bytes.
 export const MAX_ATTESTATION_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 /** Bound response bytes before UTF-8 and JSON decoding. */
-export async function readAttestationReport(response: Response): Promise<AttestationReport> {
-  const tooLarge = () => new AciError('attestation response exceeds maximum byte size (32 MiB)');
+export async function readAciJson(response: Response): Promise<unknown> {
+  const tooLarge = () => new AciError('ACI artifact response exceeds maximum byte size (32 MiB)');
   if (Number(response.headers.get('content-length')) > MAX_ATTESTATION_RESPONSE_BYTES) {
     await response.body?.cancel();
     throw tooLarge();
   }
   const reader = response.body?.getReader();
-  if (!reader) throw new AciError('attestation response has no body');
+  if (!reader) throw new AciError('ACI artifact response has no body');
   let bytes = new Uint8Array(8192);
   let size = 0;
   try {
@@ -40,5 +40,5 @@ export async function readAttestationReport(response: Response): Promise<Attesta
   } finally {
     reader.releaseLock();
   }
-  return JSON.parse(new TextDecoder().decode(bytes.subarray(0, size))) as AttestationReport;
+  return JSON.parse(new TextDecoder().decode(bytes.subarray(0, size)));
 }

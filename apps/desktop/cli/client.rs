@@ -55,8 +55,9 @@ pub fn host_of(url: &str) -> Result<String, String> {
 /// in memory and saves with usage.
 pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 
-/// Bounds attestation JSON before decoding; allows JSON escaping of the
-/// 4 MiB compose and 1 MiB event log. Production responses are about 54 KB.
+/// Bounds attestation and session JSON before decoding; allows JSON escaping
+/// of the 4 MiB compose and 1 MiB log. Production reports are about 54 KB;
+/// a 21-session listing was 38,995 bytes and full sessions reached 1,428,775 bytes.
 pub const MAX_ATTESTATION_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Why a bounded GET produced no response.
@@ -264,7 +265,7 @@ impl AciClient {
     }
 
     /// A GET whose body read stops with `GetError::TooLarge` past `limit` bytes.
-    async fn get_limited(
+    pub(crate) async fn get_limited(
         &self,
         url: &str,
         bearer: Option<&str>,

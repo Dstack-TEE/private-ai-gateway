@@ -163,8 +163,10 @@ Event logs are limited to 1 MiB of UTF-8 and 16 nested containers, including the
 root array; `app_compose` is limited to 4 MiB of UTF-8 before processing.
 The gateway and clients cap attestation HTTP bodies at 32 MiB before JSON decoding,
 checking Content-Length and streaming bytes. The gateway also caps legacy reports
-and Chutes discovery, instance and quote/GPU evidence responses. Desktop
-session-evidence fetches use the same limit. TS copies incoming chunks into one
+and Chutes discovery, instance and quote/GPU evidence responses. TS receipt and
+session fetches and desktop session listings/records use the same limit. A live
+21-session listing measured 38,995 bytes; its largest full record was 1,428,775
+bytes on October 16, 2026. TS copies incoming chunks into one
 buffer that grows up to the cap. The cap allows JSON escaping of the bounded
 compose and log. A production response measured 53,676 bytes on October 16, 2026:
 30,220 bytes of compose and 7,357 bytes of event log (30 events).

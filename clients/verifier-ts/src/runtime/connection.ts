@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readAttestationReport } from '../attestation-http.js';
+import { readAciJson } from '../attestation-http.js';
 import { AciError } from '../errors.js';
 
 import {
@@ -319,10 +319,12 @@ class RuntimeAciConnection implements AciConnection {
     if (!response.ok) {
       throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
     }
-    const value: unknown = await response.json().catch((error: unknown) => {
-      throw new AciConnectionError('receipt_fetch', 'ACI artifact endpoint returned invalid JSON', {
-        cause: error,
-      });
+    const value = await readAciJson(response).catch((error: unknown) => {
+      throw new AciConnectionError(
+        'receipt_fetch',
+        error instanceof AciError ? error.message : 'ACI artifact endpoint returned invalid JSON',
+        { cause: error },
+      );
     });
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       throw new AciConnectionError('receipt_verification', 'ACI artifact is not a JSON object');
@@ -631,7 +633,7 @@ async function fetchAttestation(
     );
   }
   try {
-    return await readAttestationReport(response);
+    return await readAciJson(response) as AttestationReport;
   } catch (error) {
     throw new AciConnectionError(
       'attestation_fetch',

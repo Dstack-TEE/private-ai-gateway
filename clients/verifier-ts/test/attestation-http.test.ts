@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { MAX_ATTESTATION_RESPONSE_BYTES, readAttestationReport } from '../src/attestation-http.js';
+import { MAX_ATTESTATION_RESPONSE_BYTES, readAciJson } from '../src/attestation-http.js';
 import { verifyService } from '../src/index.js';
 import { connectAci } from '../src/node/index.js';
 
 test('bounded attestation reader accepts recorded evidence', async () => {
   const text = readFileSync(new URL('../../test/fixtures/aci_report.json', import.meta.url), 'utf8');
-  assert.deepEqual(await readAttestationReport(new Response(text)), JSON.parse(text));
+  assert.deepEqual(await readAciJson(new Response(text)), JSON.parse(text));
 });
 
 test('many one-byte chunks decode correctly and still enforce the body cap', async () => {
@@ -31,10 +31,10 @@ test('many one-byte chunks decode correctly and still enforce the body cap', asy
       cancel() { cancelled = true; },
     }));
     if (overflow) {
-      await assert.rejects(readAttestationReport(response), /response exceeds maximum byte size/);
+      await assert.rejects(readAciJson(response), /response exceeds maximum byte size/);
       assert.equal(cancelled, true);
     } else {
-      assert.deepEqual(await readAttestationReport(response), expected);
+      assert.deepEqual(await readAciJson(response), expected);
     }
   }
 });
@@ -69,7 +69,7 @@ test('attestation body cap also stops streams with absent or understated lengths
       }),
       headers ? { headers } : {},
     );
-    await assert.rejects(readAttestationReport(response), /response exceeds maximum byte size/);
+    await assert.rejects(readAciJson(response), /response exceeds maximum byte size/);
     assert.equal(cancelled, true);
   }
 });

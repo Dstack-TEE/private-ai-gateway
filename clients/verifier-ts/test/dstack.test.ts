@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import crypto, { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { syncBuiltinESMExports } from 'node:module';
 import { test } from 'node:test';
 import {
   reportTranscript,
@@ -10,7 +11,10 @@ import {
   AciFormatError,
   type AttestationReport,
 } from '../src/index.js';
-import { makeMeasuredComposeReport } from './fixtures.js';
+import { MAX_ATTESTATION_RESPONSE_BYTES } from '../src/attestation-http.js';
+import { connectAciWithTransport } from '../src/runtime/connection.js';
+import { AciConnectionError } from '../src/runtime/types.js';
+import { ENVELOPE, makeMeasuredComposeReport } from './fixtures.js';
 
 interface Event {
   imr: number;
@@ -188,6 +192,65 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
       assert.match(result.verdict.line, /^NOT VERIFIED/);
     });
   }
+
+  await t.test('receipt and session fetches are bounded with and without Content-Length', async (t) => {
+    // Reuse the recorded nonce so the real quote and binding checks pass offline.
+    const nonceMock = t.mock.method(crypto, 'randomBytes', () => Buffer.from(recorded.nonce, 'hex'));
+    syncBuiltinESMExports();
+    t.after(() => {
+      nonceMock.mock.restore();
+      syncBuiltinESMExports();
+    });
+    const chunk = new Uint8Array(1024 * 1024).fill(32);
+    for (const artifact of ['receipts', 'sessions']) {
+      for (const withLength of [false, true]) {
+        let cancelled = false;
+        const connection = await connectAciWithTransport({
+          baseURL: 'https://tee.redpill.ai',
+          pccsUrl: options.pccsUrl,
+          bootstrapFetch: async () => Response.json(recorded.report),
+        }, ({ spkiPins }) => ({
+          observedSpkiSha256: () => spkiPins[0],
+          close: async () => {},
+          fetch: async (input) => {
+            const path = new Request(input).url;
+            if (path.includes(`/${artifact}/`)) {
+              let remaining = 34;
+              return new Response(new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  if (remaining-- > 0) controller.enqueue(chunk);
+                  else controller.close();
+                },
+                cancel() { cancelled = true; },
+              }), withLength ? {
+                headers: { 'content-length': String(MAX_ATTESTATION_RESPONSE_BYTES + 1) },
+              } : {});
+            }
+            if (path.includes('/receipts/')) return Response.json(ENVELOPE);
+            return new Response('{}', { headers: { 'x-receipt-id': 'test-receipt' } });
+          },
+        }));
+        try {
+          await connection.fetch('https://tee.redpill.ai/v1/chat/completions', {
+            method: 'POST',
+            body: '{}',
+          });
+          if (artifact === 'receipts') {
+            await assert.rejects(connection.verifyReceipt(), (error: unknown) =>
+              error instanceof AciConnectionError && error.code === 'receipt_fetch' &&
+              /response exceeds maximum byte size/.test(error.message));
+          } else {
+            const audit = await connection.verifyReceipt();
+            assert.equal(audit.transcript.verdict.verified, false);
+            assert.equal(audit.transcript.lines.find((line) => line.id === 'upstream-2')?.status, 'fail');
+          }
+          assert.equal(cancelled, true, `${artifact}, Content-Length: ${withLength}`);
+        } finally {
+          await connection.close();
+        }
+      }
+    }
+  });
 });
 
 test('runtime digest mismatches return failed measurements without throwing', async () => {
