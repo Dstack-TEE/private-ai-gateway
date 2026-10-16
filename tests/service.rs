@@ -44,18 +44,32 @@ struct StubUpstream {
 struct FailingSessionStore;
 
 impl SessionStore for FailingSessionStore {
-    fn current_or_seal(
+    fn put_session(
         &self,
         _fingerprint: &str,
+        _session: AttestedSession,
         _retention_until: u64,
         _now: u64,
-        _seal: &mut dyn FnMut() -> std::io::Result<AttestedSession>,
-    ) -> std::io::Result<String> {
+    ) -> std::io::Result<u64> {
         Err(std::io::Error::other("session store unavailable"))
     }
 
     fn get_session(&self, _session_id: &str, _now: u64) -> Option<AttestedSession> {
         None
+    }
+
+    fn current_session(
+        &self,
+        _fingerprint: &str,
+        _retention_until: u64,
+        _now: u64,
+    ) -> Option<AttestedSession> {
+        // Always a miss, so the caller falls through to the failing `put_session`.
+        None
+    }
+
+    fn list_sessions(&self, _provider: Option<&str>, _now: u64) -> Vec<AttestedSession> {
+        Vec::new()
     }
 }
 

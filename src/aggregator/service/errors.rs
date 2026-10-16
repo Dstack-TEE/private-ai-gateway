@@ -15,6 +15,11 @@ pub enum ServiceError {
          runtime source provenance is loaded from git-launcher or omitted when unknown"
     )]
     InvalidSourceProvenance,
+    #[error(
+        "invalid retention config: session_retention_seconds ({session}) must be at least \
+         receipt_ttl_seconds ({receipt}); a session must outlive the receipts citing it (aci/1 §8)"
+    )]
+    InvalidRetentionConfig { session: u64, receipt: u64 },
     #[error("upstream verification failed: {0}")]
     UpstreamVerification(#[from] UpstreamVerificationError),
     #[error("failed to seal workload keyset: {0}")]
