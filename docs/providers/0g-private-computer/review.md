@@ -1,19 +1,25 @@
 # 0G Private Computer admission review
 
-Review date: 2026-10-14 UTC. Status: draft, documentation-only assessment.
+Review date: 2026-10-14 UTC; updated 2026-10-16 UTC against the latest source.
+Status: draft, documentation-only assessment.
 
 Provider: [0G Private Computer](https://pc.0g.ai/).
 Public client/gateway source: [`0gfoundation/0g-pc-e2ee`][source].
-Reviewed source: `e320272f41c7cb349e8d3c1c3c4dfa9a8570414b`.
+Reviewed source: `4208145aaae06541568251f3f65b8987a10fe84f` (`main`, updated
+from `e320272f41c7cb349e8d3c1c3c4dfa9a8570414b`).
 Reviewed gateway release: `release-2026.09.28.1`, commit
-`5de8d865bd0f69168fed76711f065a898a6015c6`.
+`5de8d865bd0f69168fed76711f065a898a6015c6`; it remains the latest release.
+The cited resolver, per-model sealing dispatch, stream handling and
+`ZG_GATEWAY_SEAL_MODELS` default are unchanged on `main`. `main` also adds
+sealed asynchronous image generation, which is outside this chat-completions
+review.
 PAG integration seams were inspected at
 `57477f5d9caced1f95ffd2562e7ba421849a0d7e`.
 
 ## Decision and scope
 
 **Not acceptable for strict verified-provider admission at the reviewed
-revision.** The OpenAI-compatible API and public encryption client provide a
+revisions.** The OpenAI-compatible API and public encryption client provide a
 practical integration path. Admission requires an enforced, reviewed provider
 application identity and a verifiable per-model sealing policy.
 
@@ -58,24 +64,39 @@ signer. It reads the app-compose for a container display; missing, mismatched or
 unreadable Compose data yields an empty display while key use remains possible.
 See [`verifyQuoteAt` and `containersOf`][route-compose].
 
-The application baseline contains `services: []` ([baseline source][baseline]).
-The provider's [trust-chain documentation][application-gap] explicitly describes
-the empty baseline and the remaining work to wire application checks into the
-sealing path. OS admission, signer registration and application admission are
-separate checks.
+Since the first revision of this review, 0G has added application checks to its
+offline `pcverify -provider` tool:
+
+- The [application baseline][baseline] now records two reviewed deployments,
+  compared per service and per top-level section.
+- Broker images may change only to releases with signed SLSA provenance from the
+  broker release workflow at or above a minimum version.
+- An RTMR3 event-log replay checks that the image swapped in after boot is an
+  accepted release bound to the quote's keys.
+
+These checks are not in the sealing path. The provider's
+[trust-chain documentation][application-gap] states that wiring them in waits
+on runtime upstream rules and on the fleet moving to an accepted broker release;
+it reports that enforcing today would refuse every mainnet provider, which run
+unreleased builds swapped in after boot. A provider without a recorded deployment
+is reported as not compared rather than failed, and recording a deployment is
+not approval of its manifest. OS admission, signer registration and application
+admission remain separate checks.
 
 **Conditional malicious-provider scenario:** a registered operator boots an
 accepted OS and runs a modified broker that copies decrypted prompts. The
 application commitment changes, while genuine CPU attestation and signer
-registration can still pass. The current resolver permits this application
-identity to supply a sealing key.
+registration can still pass. The resolver at both reviewed revisions permits
+this application identity to supply a sealing key.
 
 **Done when:** public source/build provenance covers the plaintext-handling
 broker and serving path; reviewed policy covers images, startup commands,
 mounts, logging, controllers and administrative access; an application
 allowlist gates key use before prompt encryption. Missing, changed or
 unapproved application evidence must reject the candidate. Policy must also
-cover mutable files and configuration consumed after boot.
+cover mutable files, configuration and image swaps after boot. The baseline,
+release-provenance and RTMR3 checks now in `pcverify` are a basis for this gate
+once they run in the sealing path with an enforce switch.
 
 ### 2. Sealing must be enforced for the admitted model
 
@@ -173,12 +194,12 @@ requiring a final signed proof before consuming content can use buffering.
 - [ ] Publish candidate release measurements/policy before rollout and define
       refresh, revocation and rollback behavior.
 
-[source]: https://github.com/0gfoundation/0g-pc-e2ee/tree/e320272f41c7cb349e8d3c1c3c4dfa9a8570414b
+[source]: https://github.com/0gfoundation/0g-pc-e2ee/tree/4208145aaae06541568251f3f65b8987a10fe84f
 [gateway-verification]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/docs/verifying-the-gateway.md
 [trust-controls]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/docs/design/trust-chain.md#L225-L238
 [route-compose]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/route/route.go#L1122-L1220
-[baseline]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/evidence/brokercompose.json
-[application-gap]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/docs/design/trust-chain.md#L313-L338
+[baseline]: https://github.com/0gfoundation/0g-pc-e2ee/blob/4208145aaae06541568251f3f65b8987a10fe84f/client/evidence/brokercompose.json
+[application-gap]: https://github.com/0gfoundation/0g-pc-e2ee/blob/4208145aaae06541568251f3f65b8987a10fe84f/docs/design/trust-chain.md#L332-L387
 [release-compose]: https://github.com/0gfoundation/0g-pc-e2ee/releases/download/release-2026.09.28.1/docker-compose.release.yml
 [sealing-policy]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/cmd/gateway/main.go#L1130-L1195
 [privacy-mode]: https://docs.0g.ai/developer-hub/building-on-0g/compute-network/router/privacy
