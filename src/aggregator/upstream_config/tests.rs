@@ -236,11 +236,8 @@ fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_stat
 
 #[test]
 fn privatemode_route_must_match_the_static_proxy_deployment() {
-    let manifest_log_path = std::env::temp_dir().join(format!(
-        "private-ai-gateway-privatemode-manifest-log-{}-{}.txt",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
+    let directory = tempfile::tempdir().unwrap();
+    let manifest_log_path = directory.path().join("manifest-log.txt");
     let credential_path = manifest_log_path.with_extension("credential");
     std::fs::write(&credential_path, b"secret").unwrap();
     let deployment = Arc::new(
@@ -253,7 +250,6 @@ fn privatemode_route_must_match_the_static_proxy_deployment() {
         )
         .unwrap(),
     );
-    let _ = std::fs::remove_file(credential_path);
 
     let mut route = test_upstream_config(
         "privatemode",

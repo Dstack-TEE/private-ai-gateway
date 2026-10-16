@@ -37,9 +37,14 @@ fn verifier_bridge_contract_holds() {
 
     // Always check the vendored package (clear any external override) so the test
     // is hermetic and reflects what actually ships.
+    // uv leaves a temporary lock file; keep it inside this test's directory.
+    let directory = tempfile::tempdir().unwrap();
     let out = Command::new("uv")
         .args(["run", "python", "scripts/contract_verifier_bridge.py"])
         .current_dir(repo_root())
+        .env("TMPDIR", directory.path())
+        .env("TMP", directory.path())
+        .env("TEMP", directory.path())
         .env_remove("PRIVATE_AI_VERIFIER_DIR")
         .output()
         .expect("failed to invoke contract_verifier_bridge.py via uv");

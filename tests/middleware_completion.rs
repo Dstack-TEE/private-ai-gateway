@@ -381,17 +381,6 @@ fn build_recording_service(
     (service, requests)
 }
 
-fn temp_config_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-middleware-completion-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
-}
-
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
         verifier_mode: UpstreamVerifierMode::Preverified,
@@ -407,8 +396,10 @@ fn runtime_options() -> UpstreamRuntimeOptions {
     }
 }
 
+// The service retains the in-memory backend and verifier, so it no longer needs the file.
 fn build_service() -> Arc<AciService> {
-    let path = temp_config_path();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     let manager = Arc::new(UpstreamConfigManager::load(&path, runtime_options()).unwrap());
     Arc::new(
         AciService::new_with_upstream_verifier(

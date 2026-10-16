@@ -398,7 +398,7 @@ async fn serve_counted_readiness_fixture() -> (String, Arc<AtomicUsize>) {
 
 struct PrivatemodeTestDeployment {
     base_url: String,
-    manifest_dir: PathBuf,
+    manifest_dir: tempfile::TempDir,
     manifest_log_path: PathBuf,
     credential_path: PathBuf,
     manifest_digest: String,
@@ -416,11 +416,10 @@ impl PrivatemodeTestDeployment {
             }
         }))
         .unwrap();
-        let manifest_dir = temp_config_path();
-        std::fs::create_dir(&manifest_dir).unwrap();
-        let manifest_log_path = manifest_dir.join("log.txt");
-        let manifest_path = manifest_dir.join("1.json");
-        let credential_path = temp_config_path();
+        let manifest_dir = tempfile::tempdir().unwrap();
+        let manifest_log_path = manifest_dir.path().join("log.txt");
+        let manifest_path = manifest_dir.path().join("1.json");
+        let credential_path = manifest_dir.path().join("credential");
         let credential = b"provider-secret";
         std::fs::write(&manifest_path, &manifest).unwrap();
         std::fs::write(
@@ -500,13 +499,6 @@ impl PrivatemodeTestDeployment {
             }],
             ..Default::default()
         }
-    }
-}
-
-impl Drop for PrivatemodeTestDeployment {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.manifest_dir);
-        let _ = std::fs::remove_file(&self.credential_path);
     }
 }
 
@@ -739,14 +731,11 @@ async fn serve_chutes_provider_fixture_with_instances_and_lookup(
     )
 }
 
-fn temp_config_path() -> std::path::PathBuf {
-    let mut bytes = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-provider-e2e-{}-{}.json",
-        std::process::id(),
-        hex::encode(bytes)
-    ))
+// Return the directory guard so config rewrites and sibling files are cleaned up.
+fn temp_config_path() -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
+    (directory, path)
 }
 
 fn runtime_options(mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
@@ -970,7 +959,7 @@ fn gzip_decompress(compressed: &[u8]) -> Vec<u8> {
 #[tokio::test]
 async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
     let (base_url, provider_calls) = serve_openai_provider_fixture().await;
-    let path = temp_config_path();
+    let (_path_dir, path) = temp_config_path();
     let manager = Arc::new(
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
             .unwrap(),
@@ -1012,14 +1001,12 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
         calls[0].authorization.as_deref(),
         Some("Basic scoped-credential")
     );
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
 async fn openai_compatible_provider_e2e_via_runtime_config() {
     let (base_url, provider_calls) = serve_openai_provider_fixture().await;
-    let path = temp_config_path();
+    let (_path_dir, path) = temp_config_path();
     let manager = Arc::new(
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
             .unwrap(),
@@ -1124,7 +1111,6 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(&calls[1].body)
     );
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
@@ -1334,7 +1320,11 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
         }
     }))
     .unwrap();
-    std::fs::write(fixture.manifest_dir.join("2.json"), &updated_manifest).unwrap();
+    std::fs::write(
+        fixture.manifest_dir.path().join("2.json"),
+        &updated_manifest,
+    )
+    .unwrap();
     std::fs::write(
         &fixture.manifest_log_path,
         concat!(
@@ -1402,7 +1392,7 @@ async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_writt
     let pending = verifier.verify(fixture.verification_request("m")).await;
     assert_eq!(observed(&pending), fixture.manifest_digest);
 
-    let manifest_path = fixture.manifest_dir.join("2.json");
+    let manifest_path = fixture.manifest_dir.path().join("2.json");
     std::fs::write(&manifest_path, br#"{"Policies":{"#).unwrap();
     let partial = verifier.verify(fixture.verification_request("m")).await;
     assert_eq!(observed(&partial), fixture.manifest_digest);
@@ -1426,7 +1416,7 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
         serve_privatemode_provider_fixture().await;
     let fixture = PrivatemodeTestDeployment::new(base_url.clone());
 
-    let config_path = temp_config_path();
+    let (_config_path_dir, config_path) = temp_config_path();
     let mut options = runtime_options(UpstreamVerifierMode::None);
     options.privatemode_proxy = Some(fixture.deployment.clone());
     let manager = Arc::new(UpstreamConfigManager::load(&config_path, options).unwrap());
@@ -1507,8 +1497,6 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     for call in calls.iter() {
         assert!(call.authorization.is_none());
     }
-
-    let _ = std::fs::remove_file(config_path);
 }
 
 #[tokio::test]
@@ -1517,7 +1505,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
         let (base_url, provider_calls, readiness_checks) =
             serve_privatemode_capacity_fixture().await;
         let fixture = PrivatemodeTestDeployment::new(base_url.clone());
-        let config_path = temp_config_path();
+        let (_config_path_dir, config_path) = temp_config_path();
         let mut options = runtime_options(UpstreamVerifierMode::None);
         options.privatemode_proxy = Some(fixture.deployment.clone());
         let manager = Arc::new(UpstreamConfigManager::load(&config_path, options).unwrap());
@@ -1618,15 +1606,13 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
             assert_eq!(forwarded["model"], "provider-model");
             assert_eq!(forwarded["stream"], stream);
         }
-
-        let _ = std::fs::remove_file(config_path);
     }
 }
 
 #[tokio::test]
 async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     let (base_url, provider_calls) = serve_openai_provider_fixture().await;
-    let path = temp_config_path();
+    let (_path_dir, path) = temp_config_path();
     let manager = Arc::new(
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::Preverified))
             .unwrap(),
@@ -1717,14 +1703,12 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
         "no enforceable verified binding"
     );
     assert!(upstream_verified.get("session_id").is_none());
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
 async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backend() {
     let (base_url, _provider_calls) = serve_openai_provider_fixture().await;
-    let path = temp_config_path();
+    let (_path_dir, path) = temp_config_path();
     let manager =
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None)).unwrap();
     manager
@@ -1783,8 +1767,6 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         "{err}"
     );
     assert!(!err.contains("dynamic-upstream-config"), "{err}");
-
-    let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]

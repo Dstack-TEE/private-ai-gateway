@@ -751,22 +751,6 @@ mod tests {
     use crate::aggregator::session::SessionClaims;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_path() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("pag-sess-{}-{}.jsonl", std::process::id(), n))
-    }
-
-    /// Remove the log and the sibling files a store leaves beside it (the lock
-    /// file and any stale compaction temp), so a test does not litter the temp
-    /// directory.
-    fn cleanup(path: &Path) {
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(lock_path_for(path));
-        let _ = std::fs::remove_file(path.with_extension("jsonl.tmp"));
-    }
-
     /// Open a store, retrying briefly on `WouldBlock`. Other tests in this binary
     /// spawn child processes (the external-verifier tests); during their
     /// fork→exec window a child transiently inherits this store's advisory-lock
@@ -859,7 +843,8 @@ mod tests {
     /// boot from — and never reaches the index.
     #[test]
     fn replay_drops_lapsed_records_before_loading_them() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         {
             let store = open_store(&path);
             let live = session("live", 0, 9_000);
@@ -891,7 +876,8 @@ mod tests {
     /// everything, so a caller that does not care still replays the whole log.
     #[test]
     fn replay_keeps_everything_when_nothing_has_lapsed() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         {
             let store = open_store(&path);
             store
@@ -907,7 +893,8 @@ mod tests {
 
     #[test]
     fn current_or_seal_extends_retention_without_a_log_append() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let store = open_store(&path);
         let s = session("https://x", 1_000, 2_000);
         let id = s.session_id().to_string();
@@ -924,8 +911,6 @@ mod tests {
         // ...but the record keeps serving by id until its retention deadline.
         assert!(store.get_session(&id, 5_000).is_some());
         assert!(store.get_session(&id, 9_000).is_none());
-
-        cleanup(&path);
     }
 
     #[test]
@@ -979,7 +964,8 @@ mod tests {
 
     #[test]
     fn replay_rebuilds_byte_identical_records_and_continues_seq() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let a = session("https://node-7.example.net", 1_000, 5_000);
         let b = session("https://node-9.example.net", 1_001, 5_000);
         {
@@ -1001,14 +987,12 @@ mod tests {
         );
         let next = session("https://node-7.example.net", 1_002, 5_000);
         assert_eq!(store.put_session("fp-c", next, 5_000, 1_002).unwrap(), 3);
-
-        drop(store);
-        cleanup(&path);
     }
 
     #[test]
     fn compact_collapses_history_to_the_retained_set() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let live = session("https://node-7.example.net", 1_000, 9_000);
         let lapsed = session("https://node-9.example.net", 1_000, 4_000);
         let now = 5_000;
@@ -1041,12 +1025,12 @@ mod tests {
         let reopened = open_store(&path);
         assert_eq!(reopened.get_session(live.session_id(), now), Some(live));
         drop(reopened);
-        cleanup(&path);
     }
 
     #[test]
     fn malformed_lines_are_skipped_on_replay() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let good = session("https://node-7.example.net", 1_000, 5_000);
         {
             let store = open_store(&path);
@@ -1061,14 +1045,12 @@ mod tests {
         let store = open_store(&path);
         assert_eq!(store.get_session(good.session_id(), 2_000), Some(good));
         assert_eq!(store.index.lock().unwrap().by_id.len(), 1);
-
-        drop(store);
-        cleanup(&path);
     }
 
     #[test]
     fn second_open_is_locked_out_while_the_first_writer_lives() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let first = open_store(&path);
 
         let blocked = JsonlSessionStore::open(&path, 0);
@@ -1080,8 +1062,6 @@ mod tests {
         drop(first);
         let reopened = open_store(&path); // panics if it cannot re-acquire
         drop(reopened);
-
-        cleanup(&path);
     }
 
     #[test]
@@ -1100,7 +1080,8 @@ mod tests {
 
     #[test]
     fn a_shared_bundle_is_stored_once_and_dropped_with_its_last_citer() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let store = open_store(&path);
         for (i, endpoint) in ["https://a", "https://b", "https://c"].iter().enumerate() {
             let s = session(endpoint, 1_000, 2_000);
@@ -1114,14 +1095,12 @@ mod tests {
         store.compact(5_000).unwrap();
         assert!(store.index.lock().unwrap().bundles.is_empty());
         assert_eq!(count_lines(&path), 0);
-
-        drop(store);
-        cleanup(&path);
     }
 
     #[test]
     fn older_record_types_are_skipped_on_replay() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let old = session("https://x", 1_000, 9_000);
         let line = serde_json::json!({
             "seq": 0, "ts": 1_000, "type": "session", "fingerprint": "fp",
@@ -1134,14 +1113,12 @@ mod tests {
         assert!(reuse_only(&store, "fp", 9_000, 2_000).is_err());
         let next = session("https://y", 2_000, 9_000);
         assert_eq!(store.put_session("fp", next, 9_000, 2_000).unwrap(), 2);
-
-        drop(store);
-        cleanup(&path);
     }
 
     #[test]
     fn a_session_citing_a_tampered_bundle_is_skipped_on_replay() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let s = session("https://x", 1_000, 9_000);
         open_store(&path)
             .put_session("fp", s.clone(), 9_000, 1_000)
@@ -1153,14 +1130,12 @@ mod tests {
 
         let store = open_store(&path);
         assert!(store.get_session(s.session_id(), 2_000).is_none());
-
-        drop(store);
-        cleanup(&path);
     }
 
     #[test]
     fn compaction_keeps_the_newest_session_current_across_restart() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let old = session("https://x", 1_000, 2_000);
         let new = session("https://x", 2_500, 9_000);
         {
@@ -1174,9 +1149,6 @@ mod tests {
             reuse_only(&store, "fp", 9_000, 3_000).unwrap(),
             new.session_id()
         );
-
-        drop(store);
-        cleanup(&path);
     }
 
     fn concurrently_seal(store: &dyn SessionStore) -> String {
@@ -1218,7 +1190,8 @@ mod tests {
 
     #[test]
     fn concurrent_current_or_seal_writes_one_replayable_jsonl_record() {
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let store = open_store(&path);
         let id = concurrently_seal(&store);
         assert_eq!(count_lines(&path), 2, "the bundle and one session");
@@ -1231,15 +1204,14 @@ mod tests {
             .unwrap();
         assert_eq!(current, id);
         assert_eq!(count_lines(&path), 2);
-        drop(replayed);
-        cleanup(&path);
     }
 
     #[test]
     fn put_session_errors_instead_of_overflowing_seq() {
         // A replayed `seq` of u64::MAX - 1 leaves `next_seq` at u64::MAX; the
         // next append must return an error rather than overflow `seq + 1`.
-        let path = temp_path();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
         let seeded = evidence_line(u64::MAX - 1, 1_000, FLEET_BUNDLE).unwrap();
         std::fs::write(&path, seeded).unwrap();
 
@@ -1247,8 +1219,5 @@ mod tests {
         let next = session("https://node-9.example.net", 2_000, 9_000);
         let err = store.put_session("fp2", next, 9_000, 2_000).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-
-        drop(store);
-        cleanup(&path);
     }
 }

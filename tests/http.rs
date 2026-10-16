@@ -885,15 +885,9 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
     }
 }
 
-fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
-    // Unique per call: a coarse system clock can hand concurrent tests the same
-    // nanos, so an atomic counter guarantees distinct temp paths.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "pag-http-upstreams-{}-{}.json",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    ));
+fn setup_with_config(config_json: &str) -> (tempfile::TempDir, Arc<AciService>, Router) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     std::fs::write(&path, config_json).unwrap();
     let manager = Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap());
     let keys = Arc::new(StaticKeyProvider::default());
@@ -910,7 +904,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         .unwrap(),
     );
     let app = build_router_with_admin(service.clone(), manager, None);
-    (service, app)
+    (directory, service, app)
 }
 
 /// Records the query string and `Authorization` header the stub received.
@@ -985,7 +979,7 @@ async fn attestation_report_extracts_nearai_nvidia_payload_by_model_name() {
     let config = format!(
         r#"[{{"name":"nearai-a","provider":"near-ai","base_url":"{base}","models":{{"near/glm":"zai-org/GLM-X"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1017,7 +1011,7 @@ async fn attestation_report_merges_upstream_nvidia_payload() {
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1071,7 +1065,7 @@ async fn attestation_report_plumbs_nvidia_payload_through_aci_service_upstream()
     let config = format!(
         r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1109,7 +1103,7 @@ async fn attestation_report_stops_aci_service_forwarding_at_depth_zero() {
     let config = format!(
         r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1147,7 +1141,7 @@ async fn attestation_report_generates_nonce_and_merges_when_client_omits_nonce()
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1179,7 +1173,7 @@ async fn attestation_report_degrades_to_empty_nvidia_on_upstream_error() {
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1234,7 +1228,7 @@ async fn attestation_report_chutes_multi_instance_shape() {
     let config = format!(
         r#"[{{"name":"chutes-a","provider":"chutes","base_url":"{base}","models":{{"chutes/m":"m-up"}},"bearer_token":"tok","chutes_e2ee_api_base":"{base}","chutes_chute_ids":{{"m-up":"00000000-0000-0000-0000-0000000c1234"}}}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
