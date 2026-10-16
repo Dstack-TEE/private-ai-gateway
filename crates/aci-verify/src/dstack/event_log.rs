@@ -7,10 +7,7 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 // Keep in sync with clients/verifier-ts/src/dstack-event-log.ts.
 pub(super) const MAX_EVENT_LOG_BYTES: usize = 1024 * 1024;
-pub(super) const MAX_APP_COMPOSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_EVENT_FIELD_BYTES: usize = 128 * 1024;
 const MAX_EVENT_LOG_DEPTH: usize = 16;
-const MAX_EVENT_LOG_ENTRIES: usize = 1024;
 
 pub(super) fn preflight(input: &str) -> Result<(), String> {
     if input.len() > MAX_EVENT_LOG_BYTES {
@@ -50,7 +47,6 @@ impl<'de> Visitor<'de> for CheckedJson {
         }
         let mut keys = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            check_string::<M::Error>(&key)?;
             if !keys.insert(key.clone()) {
                 return Err(de::Error::custom("duplicate dstack event_log object key"));
             }
@@ -76,23 +72,18 @@ impl<'de> Visitor<'de> for CheckedJson {
                 "dstack event_log exceeds maximum nesting depth",
             ));
         }
-        let mut count = 0;
         while seq
             .next_element_seed(CheckedJson {
                 depth: self.depth + 1,
             })?
             .is_some()
-        {
-            count += 1;
-            if self.depth == 1 && count > MAX_EVENT_LOG_ENTRIES {
-                return Err(de::Error::custom("dstack event_log has too many entries"));
-            }
-        }
+        {}
         Ok(())
     }
 
-    fn visit_str<E: de::Error>(self, value: &str) -> Result<(), E> {
-        check_string(value)
+    fn visit_str<E: de::Error>(self, _value: &str) -> Result<(), E> {
+        // serde_json's decoder already rejects lone surrogate escapes.
+        Ok(())
     }
 
     fn visit_bool<E: de::Error>(self, _value: bool) -> Result<(), E> {
@@ -110,15 +101,4 @@ impl<'de> Visitor<'de> for CheckedJson {
     fn visit_unit<E: de::Error>(self) -> Result<(), E> {
         Ok(())
     }
-}
-
-fn check_string<E: de::Error>(value: &str) -> Result<(), E> {
-    // Rust strings and serde_json's string decoder already reject unpaired
-    // UTF-16 surrogates; len() counts the actual UTF-8 bytes.
-    if value.len() > MAX_EVENT_FIELD_BYTES {
-        return Err(de::Error::custom(
-            "dstack event field exceeds maximum byte size",
-        ));
-    }
-    Ok(())
 }

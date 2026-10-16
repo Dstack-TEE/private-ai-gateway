@@ -64,14 +64,11 @@ evidence) exactly as observed.
 
 ## Current limits
 
-- **dstack v1 runtime events only.** Runtime-event names and payloads are
-  checked against their digests before replaying RTMR3. An absent `version`
-  field or integer token `1` means v1. All other version values, including opt-in
-  dstack 0.6 v2 events, are rejected.
-- **Bounded dstack evidence.** RTMR3 accepts runtime events only, with lowercase
-  kebab-case names. Parsing rejects duplicate keys, non-integer field tokens,
-  ill-formed Unicode, and evidence exceeding the shared
-  [TS/Rust policy limits](../../docs/dstack-event-log-policy.md).
+- **dstack v1 runtime events only.** RTMR3 digests are recomputed and checked;
+  version must be absent or integer `1`, and names must be lowercase kebab case.
+- **Strict dstack evidence.** Duplicate keys, non-u32 integer tokens and lone
+  surrogates are rejected; event logs are limited to 1 MiB and depth 16. See the
+  [shared TS/Rust policy](../../docs/attested-confidential-inference.md#dstack-compose-measurement-91-check-4).
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3 only.
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not

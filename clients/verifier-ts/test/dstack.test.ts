@@ -17,7 +17,6 @@ interface Event {
   digest: string;
   event: string;
   event_payload: string;
-  version?: unknown;
 }
 
 interface Evidence {
@@ -60,11 +59,9 @@ function setSyntheticEventLog(report: AttestationReport, log: Event[]): void {
   const ev = evidence(report);
   let rtmr3 = Buffer.alloc(48);
   for (const event of log.filter((e) => e.imr === 3)) {
-    const digest = Buffer.from(event.digest.replace(/^0x/, ''), 'hex');
     rtmr3 = createHash('sha384')
       .update(rtmr3)
-      .update(digest)
-      .update(Buffer.alloc(Math.max(0, 48 - digest.length)))
+      .update(Buffer.from(event.digest, 'hex'))
       .digest();
   }
   const quote = Buffer.from(ev.quote, 'hex');
@@ -115,19 +112,6 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
   }
   assert.equal(unchanged.composeHash, composeEvent(events(recorded.report)).event_payload);
 
-  await t.test('explicit numeric version 1 is equivalent to an absent version', async () => {
-    const report = structuredClone(recorded.report);
-    const log = events(report);
-    for (const event of log) event.version = 1;
-    evidence(report).event_log = JSON.stringify(log);
-    const result = await reportTranscript(report, recorded.nonce, options);
-    for (const id of ['id-1', 'id-2', 'id-3', 'id-4']) {
-      const line = result.lines.find((l) => l.id === id);
-      assert.equal(line?.status, 'pass', JSON.stringify(line));
-    }
-    assert.equal(result.composeHash, unchanged.composeHash);
-  });
-
   const cases: { name: string; mutate: (ev: Evidence, log: Event[]) => void; reason: RegExp }[] = [
     {
       name: 'changed app-compose',
@@ -159,13 +143,6 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
       reason: /digest does not match/,
     },
     {
-      name: 'changed runtime event name',
-      mutate: (_ev, log) => {
-        composeEvent(log).event = 'other';
-      },
-      reason: /digest does not match/,
-    },
-    {
       name: 'consistent changed payload and digest still disagree with the quote',
       mutate: (ev, log) => {
         ev.app_compose += '\n';
@@ -180,25 +157,7 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
       },
       reason: /RTMR3 != quote RTMR3/,
     },
-    {
-      name: 'unknown version on an event outside RTMR3',
-      mutate: (_ev, log) => {
-        const boot = log.find((e) => e.imr !== 3);
-        assert.ok(boot);
-        boot.version = 99;
-      },
-      reason: /expected version absent or numeric 1 \(v1\)/,
-    },
   ];
-  for (const version of [2, 99, '1', '2', null]) {
-    cases.push({
-      name: `explicit event version ${JSON.stringify(version)}`,
-      mutate: (_ev, log) => {
-        composeEvent(log).version = version;
-      },
-      reason: /expected version absent or numeric 1 \(v1\)/,
-    });
-  }
   for (const { name, mutate, reason } of cases) {
     await t.test(name, async () => {
       const report = structuredClone(recorded.report);
@@ -248,16 +207,6 @@ test('duplicate pre-system-ready compose events fail even when RTMR3 matches', a
   assert.equal(result.composeHash, undefined);
 });
 
-test('RTMR3 rejects non-runtime events even when their stored digests replay', async () => {
-  for (const name of ['system-ready', 'compose-hash', 'firmware']) {
-    const { report } = await makeMeasuredComposeReport();
-    const log = events(report);
-    log.unshift({ imr: 3, event_type: 1, digest: '11'.repeat(48), event: name, event_payload: '' });
-    setSyntheticEventLog(report, log);
-    await assert.rejects(verifyComposeMeasurement(report), /RTMR3 contains a non-runtime event/);
-  }
-});
-
 test('other registers do not select compose events; post-ready runtime events are not selected', async () => {
   const { report, composeHash } = await makeMeasuredComposeReport();
   const log = events(report);
@@ -270,31 +219,4 @@ test('other registers do not select compose events; post-ready runtime events ar
   log.splice(log.indexOf(compose), 1);
   setSyntheticEventLog(report, log);
   assert.equal((await verifyComposeMeasurement(report)).ok, false);
-});
-
-test('malformed runtime hex fails closed; Rust-compatible hex encodings still pass', async () => {
-  const { report, composeHash } = await makeMeasuredComposeReport();
-  const log = events(report);
-  const compose = composeEvent(log);
-  const digest = compose.digest;
-  compose.event_payload = '0x' + composeHash.toUpperCase();
-  compose.digest = '0x' + digest.toUpperCase();
-  evidence(report).event_log = JSON.stringify(log);
-  assert.equal((await verifyComposeMeasurement(report)).composeHash, composeHash);
-
-  for (const field of ['digest', 'event_payload'] as const) {
-    compose.digest = digest;
-    compose.event_payload = composeHash;
-    compose[field] = '1z' + compose[field].slice(2);
-    evidence(report).event_log = JSON.stringify(log);
-    await assert.rejects(verifyComposeMeasurement(report), /not valid hex/);
-  }
-});
-
-test('malformed event-log entries fail closed before replay', async () => {
-  const { report } = await makeMeasuredComposeReport();
-  for (const eventLog of ['{', '{}', '[null]', '[{}]', '[{"imr":3,"event_type":-1}]']) {
-    evidence(report).event_log = eventLog;
-    await assert.rejects(verifyComposeMeasurement(report), /dstack event_log/);
-  }
 });

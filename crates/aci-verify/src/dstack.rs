@@ -145,9 +145,6 @@ pub fn verify_dstack_app_compose(
         .get("app_compose")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing dstack app_compose evidence".to_string())?;
-    if app_compose.len() > event_log::MAX_APP_COMPOSE_BYTES {
-        return Err("dstack app_compose exceeds maximum byte size".into());
-    }
     let actual_compose_hash: [u8; 32] = Sha256::digest(app_compose.as_bytes()).into();
     if &actual_compose_hash != measured_compose_hash {
         return Err(

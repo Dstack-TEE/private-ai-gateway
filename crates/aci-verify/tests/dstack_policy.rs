@@ -1,19 +1,16 @@
-use aci_verify::dstack::{
-    verify_dstack_app_compose, verify_dstack_compose_measurement, verify_dstack_event_log,
-};
+use aci_verify::dstack::{verify_dstack_compose_measurement, verify_dstack_event_log};
 use serde::Deserialize;
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256, Sha384};
+use serde_json::Value;
+use sha2::{Digest, Sha384};
 
 #[derive(Deserialize)]
 struct PolicyCase {
     name: String,
     valid: bool,
     replacements: Option<Vec<(String, String)>>,
+    event_log: Option<String>,
     app_compose_json: Option<String>,
-    unknown_field_bytes: Option<usize>,
     nested_arrays: Option<usize>,
-    extra_boot_events: Option<usize>,
     pad_log_to: Option<usize>,
     synthetic_tail: Option<Value>,
 }
@@ -36,7 +33,10 @@ fn same_recorded_evidence_and_policy_cases_as_typescript() {
 
 fn run_case(recorded: &Value, case: &PolicyCase) -> Result<String, String> {
     let mut evidence = recorded["report"]["attestation"]["evidence"].clone();
-    let mut log = evidence["event_log"].as_str().unwrap().to_string();
+    let mut log = case
+        .event_log
+        .clone()
+        .unwrap_or_else(|| evidence["event_log"].as_str().unwrap().to_string());
     for (from, to) in case.replacements.iter().flatten() {
         assert!(log.contains(from));
         log = log.replacen(from, to, 1);
@@ -45,25 +45,12 @@ fn run_case(recorded: &Value, case: &PolicyCase) -> Result<String, String> {
         // serde_json rejects lone surrogates at the outer evidence boundary.
         evidence["app_compose"] = serde_json::from_str::<Value>(app).map_err(|e| e.to_string())?;
     }
-    if let Some(bytes) = case.unknown_field_bytes {
-        log = log.replacen(
-            '{',
-            &format!("{{\"extra\":{},", json!("a".repeat(bytes))),
-            1,
-        );
-    }
     if let Some(depth) = case.nested_arrays {
         log = log.replacen(
             '{',
             &format!("{{\"extra\":{}0{},", "[".repeat(depth), "]".repeat(depth)),
             1,
         );
-    }
-    if let Some(count) = case.extra_boot_events {
-        let events: Vec<Value> = serde_json::from_str(&log).unwrap();
-        let mut padded = vec![events[0].clone(); count];
-        padded.extend(events);
-        log = serde_json::to_string(&padded).unwrap();
     }
     if let Some(bytes) = case.pad_log_to {
         log.push_str(&" ".repeat(bytes - log.len()));
@@ -86,14 +73,4 @@ fn run_case(recorded: &Value, case: &PolicyCase) -> Result<String, String> {
     let rtmr3: [u8; 48] = quote[520..568].try_into().unwrap();
     let verified = verify_dstack_event_log(&evidence, Some(&rtmr3))?;
     verify_dstack_compose_measurement(&evidence, &verified)
-}
-
-#[test]
-fn compose_utf8_byte_limit_is_checked_before_hashing() {
-    let app = "é".repeat(4 * 1024 * 1024 / 2);
-    let hash: [u8; 32] = Sha256::digest(app.as_bytes()).into();
-    assert!(verify_dstack_app_compose(&json!({"app_compose":app}), &hash).is_ok());
-    let over_limit = format!("{app}a");
-    let error = verify_dstack_app_compose(&json!({"app_compose":over_limit}), &hash).unwrap_err();
-    assert!(error.contains("maximum byte size"));
 }

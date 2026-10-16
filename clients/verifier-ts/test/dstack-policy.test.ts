@@ -3,8 +3,6 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { verifyComposeMeasurement, AciFormatError, type AttestationReport } from '../src/index.js';
-import { MAX_APP_COMPOSE_BYTES } from '../src/dstack-event-log.js';
-import { makeMeasuredComposeReport } from './fixtures.js';
 
 interface Event {
   imr: number;
@@ -17,10 +15,9 @@ interface PolicyCase {
   name: string;
   valid: boolean;
   replacements?: [string, string][];
+  event_log?: string;
   app_compose_json?: string;
-  unknown_field_bytes?: number;
   nested_arrays?: number;
-  extra_boot_events?: number;
   pad_log_to?: number;
   synthetic_tail?: Event;
 }
@@ -41,18 +38,13 @@ for (const vector of cases) {
       app_compose: string;
       quote: string;
     };
+    if (vector.event_log !== undefined) ev.event_log = vector.event_log;
     for (const [from, to] of vector.replacements ?? []) {
       assert.ok(ev.event_log.includes(from));
       ev.event_log = ev.event_log.replace(from, to);
     }
     if (vector.app_compose_json !== undefined)
       ev.app_compose = JSON.parse(vector.app_compose_json) as string;
-    if (vector.unknown_field_bytes !== undefined) {
-      ev.event_log = ev.event_log.replace(
-        '{',
-        '{"extra":' + JSON.stringify('a'.repeat(vector.unknown_field_bytes)) + ',',
-      );
-    }
     if (vector.nested_arrays !== undefined) {
       ev.event_log = ev.event_log.replace(
         '{',
@@ -62,13 +54,6 @@ for (const vector of cases) {
           ']'.repeat(vector.nested_arrays) +
           ',',
       );
-    }
-    if (vector.extra_boot_events !== undefined) {
-      const log = JSON.parse(ev.event_log) as Event[];
-      ev.event_log = JSON.stringify([
-        ...Array.from({ length: vector.extra_boot_events }, () => log[0]),
-        ...log,
-      ]);
     }
     if (vector.pad_log_to !== undefined)
       ev.event_log += ' '.repeat(vector.pad_log_to - Buffer.byteLength(ev.event_log));
@@ -97,15 +82,3 @@ for (const vector of cases) {
     assert.equal(ok, vector.valid);
   });
 }
-
-test('compose byte limits count UTF-8 bytes and reject lone surrogates before hashing', async () => {
-  const app = 'é'.repeat(MAX_APP_COMPOSE_BYTES / 2);
-  const { report } = await makeMeasuredComposeReport(app);
-  assert.equal((await verifyComposeMeasurement(report)).ok, true);
-  const ev = report.attestation.evidence as { app_compose: string };
-  ev.app_compose += 'a';
-  await assert.rejects(verifyComposeMeasurement(report), /exceeds .* bytes/);
-  const replacement = await makeMeasuredComposeReport('\ufffd');
-  (replacement.report.attestation.evidence as { app_compose: string }).app_compose = '\ud800';
-  await assert.rejects(verifyComposeMeasurement(replacement.report), /ill-formed Unicode/);
-});

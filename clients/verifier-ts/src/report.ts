@@ -15,7 +15,6 @@ import {
   checkDstackString,
   parseDstackEventLog,
   DSTACK_RUNTIME_EVENT_TYPE,
-  MAX_APP_COMPOSE_BYTES,
   type DstackEvent,
 } from './dstack-event-log.js';
 import type { AttestationReport, Check, ReportVerification, WorkloadKeyset } from './types.js';
@@ -128,7 +127,7 @@ export async function verifyComposeMeasurement(
   if (typeof eventLog !== 'string' || typeof appCompose !== 'string' || typeof quote !== 'string') {
     throw new AciFormatError('evidence needs string event_log, app_compose, and quote');
   }
-  checkDstackString(appCompose, 'dstack app_compose', MAX_APP_COMPOSE_BYTES);
+  checkDstackString(appCompose, 'dstack app_compose');
   const events = parseDstackEventLog(eventLog);
 
   // The event log must replay to the RTMR3 the raw quote states (v4 TDX offset).
@@ -157,7 +156,7 @@ export async function verifyComposeMeasurement(
   }
   const duplicated = preSystemReady.length > 1;
   const measuredEvent = duplicated ? undefined : preSystemReady[0];
-  const measured = measuredEvent ? toHex(eventBytes(measuredEvent.event_payload)) : undefined;
+  const measured = measuredEvent ? toHex(fromHex(measuredEvent.event_payload)) : undefined;
   const recomputed = await sha256Hex(new TextEncoder().encode(appCompose));
   const composeOk = !duplicated && measured === recomputed;
 
@@ -182,15 +181,6 @@ export async function verifyComposeMeasurement(
   };
 }
 
-function eventBytes(hex: string): Uint8Array {
-  // Reject partially parsed bytes while preserving Rust's optional 0x prefix.
-  const value = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (!/^(?:[0-9a-fA-F]{2})*$/.test(value)) {
-    throw new AciFormatError('dstack event digest or payload is not valid hex');
-  }
-  return fromHex(value);
-}
-
 /** Replay the validated dstack event log's `imr==3` runtime events to RTMR3.
  *  Runtime events use the v1 preimage defined by
  *  dstack/cc-eventlog/src/runtime_events.rs. The parser rejects non-runtime
@@ -200,25 +190,22 @@ async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array | null> {
   let mr: Uint8Array = new Uint8Array(48);
   for (const e of events) {
     if (e.imr !== 3) continue;
-    let digest = eventBytes(e.digest);
-    if (e.event_type === DSTACK_RUNTIME_EVENT_TYPE) {
-      const name = new TextEncoder().encode(e.event);
-      const payload = eventBytes(e.event_payload);
-      const preimage = new Uint8Array(4 + 1 + name.length + 1 + payload.length);
-      new DataView(preimage.buffer).setUint32(0, e.event_type, true);
-      preimage[4] = 0x3a;
-      preimage.set(name, 5);
-      preimage[5 + name.length] = 0x3a;
-      preimage.set(payload, 6 + name.length);
-      const recomputed = await sha384(preimage);
-      if (digest.length !== recomputed.length || !digest.every((b, i) => b === recomputed[i])) {
-        return null;
-      }
-      digest = recomputed;
+    const digest = fromHex(e.digest);
+    const name = new TextEncoder().encode(e.event);
+    const payload = fromHex(e.event_payload);
+    const preimage = new Uint8Array(4 + 1 + name.length + 1 + payload.length);
+    new DataView(preimage.buffer).setUint32(0, e.event_type, true);
+    preimage[4] = 0x3a;
+    preimage.set(name, 5);
+    preimage[5 + name.length] = 0x3a;
+    preimage.set(payload, 6 + name.length);
+    const recomputed = await sha384(preimage);
+    if (digest.length !== recomputed.length || !digest.every((b, i) => b === recomputed[i])) {
+      return null;
     }
-    const buf = new Uint8Array(48 + Math.max(digest.length, 48));
+    const buf = new Uint8Array(96);
     buf.set(mr);
-    buf.set(digest, 48);
+    buf.set(recomputed, 48);
     mr = await sha384(buf);
   }
   return mr;

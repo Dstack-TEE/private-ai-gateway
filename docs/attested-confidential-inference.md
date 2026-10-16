@@ -137,6 +137,31 @@ The browser verifier can check the quote, binding chain, measurement, receipts,
 and sessions. Browser APIs do not expose the peer certificate, so browser-only
 code cannot enforce the TLS SPKI pin.
 
+#### dstack compose measurement (§9.1 check 4)
+
+The TS verifier and Rust `aci-verify` replay the event log against the quote's
+RTMR3, then require `sha256(app_compose)` to equal its single pre-system-ready
+`compose-hash` measurement. Digest mismatches fail the measurement check.
+The quote must separately verify to the vendor root (check 1).
+
+Under the dstack policy, RTMR3 contains only runtime events (`0x08000001`), as in
+the [v0.5.9 emitter](https://github.com/Dstack-TEE/dstack/blob/v0.5.9/dstack-attest/src/lib.rs#L17)
+and [v0.6.1 emitter](https://github.com/Dstack-TEE/dstack/blob/v0.6.1/dstack/dstack-attest/src/lib.rs#L190).
+Every RTMR3 digest is recomputed as
+`SHA384(u32le(event_type) || ":" || UTF8(event) || ":" || payload bytes)`
+and must equal the stored digest before replay. Other registers do not supply
+compose measurements or system-ready boundaries.
+
+Runtime names follow `[a-z][a-z0-9]*(?:-[a-z0-9]+)*`, accepting the upstream
+built-in names while excluding `:`, which makes the v1 name/payload boundary
+ambiguous. Version must be absent (v1) or the integer token `1`; opt-in v2 and
+all other values are rejected. Integer fields must be unsigned u32 JSON tokens,
+without float or exponent spellings. Duplicate decoded object keys, including
+escaped equivalents, and lone surrogates in compose or event strings are rejected.
+
+Event logs are limited to 1 MiB of UTF-8 and 16 nested containers, including the
+root array. Production evidence currently has about 30 events in a 7.2 KiB log.
+
 ### 2. Before the gateway forwards data
 
 For a request that requires verified serving, the attested gateway verifies

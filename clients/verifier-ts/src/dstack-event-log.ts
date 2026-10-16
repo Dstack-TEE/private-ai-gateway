@@ -3,10 +3,7 @@ import { AciFormatError } from './errors.js';
 
 // Keep these limits in sync with aci-verify/src/dstack/event_log.rs.
 export const MAX_EVENT_LOG_BYTES = 1024 * 1024;
-export const MAX_APP_COMPOSE_BYTES = 4 * 1024 * 1024;
-export const MAX_EVENT_FIELD_BYTES = 128 * 1024;
 export const MAX_EVENT_LOG_DEPTH = 16;
-export const MAX_EVENT_LOG_ENTRIES = 1024;
 export const DSTACK_RUNTIME_EVENT_TYPE = 0x08000001;
 
 export interface DstackEvent {
@@ -17,37 +14,21 @@ export interface DstackEvent {
   event_payload: string;
 }
 
-/** Count UTF-8 bytes without encoding or allocating a replacement for lone surrogates. */
-export function checkDstackString(value: string, label: string, maxBytes: number): void {
-  let bytes = 0;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(++i);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) {
-        throw new AciFormatError(`${label} contains ill-formed Unicode`);
-      }
-      bytes += 4;
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new AciFormatError(`${label} contains ill-formed Unicode`);
-    } else {
-      bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
-    }
-    if (bytes > maxBytes) throw new AciFormatError(`${label} exceeds ${maxBytes} bytes`);
-  }
+/** Reject lone surrogates before UTF-8 encoding could replace them. */
+export function checkDstackString(value: string, label: string): void {
+  if (/\p{Cs}/u.test(value)) throw new AciFormatError(`${label} contains ill-formed Unicode`);
 }
 
 export function parseDstackEventLog(eventLog: string): DstackEvent[] {
-  checkDstackString(eventLog, 'dstack event_log', MAX_EVENT_LOG_BYTES);
-  const frames: (Set<string> | null)[] = [];
-  let entries = 0;
-  function valueAt(path: (string | number)[]): void {
-    if (path.length === 1 && typeof path[0] === 'number' && ++entries > MAX_EVENT_LOG_ENTRIES) {
-      throw new AciFormatError('dstack event_log has too many entries');
-    }
+  checkDstackString(eventLog, 'dstack event_log');
+  if (
+    eventLog.length > MAX_EVENT_LOG_BYTES ||
+    new TextEncoder().encode(eventLog).length > MAX_EVENT_LOG_BYTES
+  ) {
+    throw new AciFormatError('dstack event_log exceeds maximum byte size');
   }
-  function begin(keys: Set<string> | null, path: (string | number)[]): void {
-    valueAt(path);
+  const frames: (Set<string> | null)[] = [];
+  function begin(keys: Set<string> | null): void {
     if (frames.length >= MAX_EVENT_LOG_DEPTH) {
       throw new AciFormatError('dstack event_log exceeds maximum nesting depth');
     }
@@ -58,8 +39,8 @@ export function parseDstackEventLog(eventLog: string): DstackEvent[] {
   visit(
     eventLog,
     {
-      onObjectBegin: (_offset, _length, _line, _column, path) => begin(new Set(), path()),
-      onArrayBegin: (_offset, _length, _line, _column, path) => begin(null, path()),
+      onObjectBegin: () => begin(new Set()),
+      onArrayBegin: () => begin(null),
       onObjectEnd: () => {
         frames.pop();
       },
@@ -67,7 +48,7 @@ export function parseDstackEventLog(eventLog: string): DstackEvent[] {
         frames.pop();
       },
       onObjectProperty: (key) => {
-        checkDstackString(key, 'dstack event field', MAX_EVENT_FIELD_BYTES);
+        checkDstackString(key, 'dstack event field');
         const keys = frames[frames.length - 1];
         if (!keys || keys.has(key))
           throw new AciFormatError('duplicate dstack event_log object key');
@@ -75,9 +56,7 @@ export function parseDstackEventLog(eventLog: string): DstackEvent[] {
       },
       onLiteralValue: (value: unknown, offset, length, _line, _column, pathSupplier) => {
         const path = pathSupplier();
-        valueAt(path);
-        if (typeof value === 'string')
-          checkDstackString(value, 'dstack event field', MAX_EVENT_FIELD_BYTES);
+        if (typeof value === 'string') checkDstackString(value, 'dstack event field');
         if (typeof value !== 'number') return;
         if (!Number.isFinite(value)) throw new AciFormatError('invalid dstack event_log number');
         if (path.length === 2 && ['imr', 'event_type', 'version'].includes(String(path[1]))) {
@@ -116,13 +95,7 @@ export function parseDstackEventLog(eventLog: string): DstackEvent[] {
     }
     if (
       typeof imr !== 'number' ||
-      !Number.isInteger(imr) ||
-      imr < 0 ||
-      imr > 0xffffffff ||
       typeof eventType !== 'number' ||
-      !Number.isInteger(eventType) ||
-      eventType < 0 ||
-      eventType > 0xffffffff ||
       typeof digest !== 'string' ||
       typeof event !== 'string' ||
       typeof payload !== 'string'
