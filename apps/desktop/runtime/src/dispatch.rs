@@ -25,23 +25,11 @@ pub(crate) async fn dispatch(
         Command::Shutdown { .. } => {
             respond::<rpc::Shutdown, _>(Err("Shutdown requires lifecycle admission"))
         }
-        Command::Verify {
-            profile,
-            require_production_os,
-            key,
-        } => respond_state::<rpc::Verify, _>(
-            runtime
-                .verify_configuration(profile, require_production_os, key)
-                .await,
-        ),
-        Command::SaveConfiguration {
-            profile,
-            require_production_os,
-            key,
-        } => respond_state::<rpc::SaveConfiguration, _>(
-            runtime
-                .save_configuration(profile, require_production_os, key)
-                .await,
+        Command::Verify { profile, key } => {
+            respond_state::<rpc::Verify, _>(runtime.verify_configuration(profile, key).await)
+        }
+        Command::SaveConfiguration { profile, key } => respond_state::<rpc::SaveConfiguration, _>(
+            runtime.save_configuration(profile, key).await,
         ),
         Command::BeginAccountLogin { profile } => {
             respond::<rpc::BeginAccountLogin, _>(runtime.begin_account_login(profile).await)
@@ -50,13 +38,11 @@ pub(crate) async fn dispatch(
             operation_id,
             id,
             profile,
-            require_production_os,
             workspace_id,
         } => respond::<rpc::BeginAccountSave, _>(runtime.begin_account_save(
             operation_id,
             id,
             profile,
-            require_production_os,
             workspace_id,
         )),
         Command::AccountSaveResult { operation_id } => {
@@ -144,11 +130,6 @@ pub(crate) async fn dispatch(
             options,
         } => {
             respond::<rpc::ApplyAgent, _>(runtime.apply_agent(agent_id, connect, revision, options))
-        }
-        Command::SetRequireProductionOs { required } => {
-            respond_state::<rpc::SetRequireProductionOs, _>(
-                runtime.set_require_production_os(required),
-            )
         }
         Command::SetAgentConnection { agent_id, connect } => {
             respond::<rpc::SetAgentConnection, _>(runtime.set_agent_connection(agent_id, connect))

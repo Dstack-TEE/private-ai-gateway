@@ -156,12 +156,10 @@ commands! {
     Shutdown { instance_id: String, mode: ShutdownMode } -> ();
     Verify {
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     } -> AppStateWire;
     SaveConfiguration {
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     } -> AppStateWire;
     BeginAccountLogin { profile: ConfidentialProfileInput } -> LoginPresentation;
@@ -170,7 +168,6 @@ commands! {
         operation_id: String,
         id: String,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         workspace_id: Option<i64>,
     } -> AccountSaveResult;
     AccountSaveResult { operation_id: String } -> AccountSaveResult;
@@ -214,9 +211,6 @@ commands! {
         revision: String,
         options: ConnectOptions,
     } -> AgentStatus;
-    /// Stops protection and saves whether it requires a production OS image;
-    /// the next start uses the saved policy.
-    SetRequireProductionOs { required: bool } -> AppStateWire;
     /// Connects or disconnects an agent with the configuration a preview
     /// would show, in one step.
     SetAgentConnection { agent_id: String, connect: bool } -> AgentStatus;
@@ -487,11 +481,10 @@ mod tests {
                 Command::Start {
                     config: StartConfig {
                         remote_url: "https://tee.example".into(),
-                        require_production_os: true,
                     },
                 },
                 "start",
-                json!({"config": {"remoteUrl": "https://tee.example", "requireProductionOs": true}}),
+                json!({"config": {"remoteUrl": "https://tee.example"}}),
             ),
             (
                 Command::Shutdown {

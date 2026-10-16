@@ -31,7 +31,6 @@
     "allow-set-launch-preference",
     "allow-start",
     "allow-stop",
-    "allow-set-require-production-os",
     "allow-begin-account-login",
     "allow-poll-account-login",
     "allow-save-account-login",

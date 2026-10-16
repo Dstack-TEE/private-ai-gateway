@@ -62,7 +62,6 @@ policy flags:
 | `--accept-compose <hex>` | Compose hash to accept; repeatable. Without it the compose measurement is verified and reported, and you appraise its provenance yourself. |
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
-| `--require-production-os` | Require the attested OS image to be a reviewed production image. |
 
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
@@ -72,18 +71,10 @@ anchor: nothing measured corroborates it (spec 4.1), so any app under the same
 KMS root could claim it. Without the custody flags id-5 is an honest skip; no
 trust anchors are built in.
 
-Under `--require-production-os`, the client reads the RTMR3-bound
-`os-image-hash` and requires it to be in the verifier's reviewed
-production-image allowlist. Development and unknown hashes fail closed.
-Updating the allowlist requires a verifier release.
-
-This option is an appraisal step, not a dstack boot verifier. The client
-verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
-RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
-dstack verifier over the same quote, event log, and VM configuration, and
-require `is_valid: true`; that result establishes `os_image_hash` from those
-boot measurements. See
-[How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
 ### One pinned curl request
 
@@ -259,8 +250,8 @@ restored from disk.
 ## Status
 
 Human `status` summarizes the backend PID/version, active profile and service,
-saved credential presence, a settings file error, Local API exposure, production OS
-policy, TEE identity/checks, catalog size and current-session usage. Retained
+saved credential presence, a settings file error, Local API exposure, TEE
+identity/checks, catalog size and current-session usage. Retained
 catalogs are labeled cached when protection is inactive. Reported costs are
 session totals, not a billing reconciliation. Request contents and tokens are
 never included in this summary. `--json` retains the full existing state shape.
@@ -341,9 +332,9 @@ invalid edits and unknown keys; see [Editing](configuration.md#editing).
 
 `pap settings reset --yes` stops protection, disconnects managed agents, and
 returns every setting in `config.toml` except the profiles and the active
-profile to its default (including the Local API listener and the production OS
-policy), and replaces the web UI password with a new generated one. Profiles,
-their API keys, the local client key and usage history are kept.
+profile to its default (including the Local API listener), and replaces the
+web UI password with a new generated one. Profiles, their API keys, the local
+client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop app, which
 also disables Open at Login. CLI installation and system notification permission
 are unchanged. Failures are reported; retry after resolving the reported conflict.
@@ -558,7 +549,6 @@ instead.
 ```sh
 pap profiles show work
 pap profiles edit work --name "Work gateway"
-pap profiles edit work --require-production-os
 pap profiles verify work
 pap profiles export --output profiles.json
 pap profiles import profiles.json --yes
@@ -579,9 +569,7 @@ that status may still be reconnecting or show why protection could not start
 or verify. A profile without a credential is refused while protection is on,
 and neither the active profile nor protection changes.
 
-`--key-stdin` is for a pipe or redirected file, not a terminal. The production
-OS requirement is a shared current policy, not a separate preference per profile;
-`edit --require-production-os` restores the strict policy.
+`--key-stdin` is for a pipe or redirected file, not a terminal.
 
 ## Automation
 

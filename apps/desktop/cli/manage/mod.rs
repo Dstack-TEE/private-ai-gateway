@@ -27,7 +27,20 @@ mod output;
 pub use args::Action;
 use args::*;
 
+pub fn has_profile_require_production_os(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Profiles {
+            command: Profiles::Edit {
+                require_production_os: true,
+                ..
+            },
+        }
+    )
+}
+
 pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
+    warn_deprecated_os_flags(action);
     let client = Client::new();
     let value = match action {
         Action::Status { watch: true } => return watch_status(global),
@@ -112,6 +125,38 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         }
     };
     output::print(action, global, &value)
+}
+
+fn warn_deprecated_os_flags(action: &Action) {
+    let warning = |flag: &str| {
+        eprintln!(
+            "warning: {flag} is deprecated and has no effect; clients no longer check the gateway OS image."
+        );
+    };
+    let (allow_development_os, require_production_os) = match action {
+        Action::Profiles {
+            command:
+                Profiles::Add {
+                    allow_development_os,
+                    ..
+                },
+        } => (*allow_development_os, false),
+        Action::Profiles {
+            command:
+                Profiles::Edit {
+                    allow_development_os,
+                    require_production_os,
+                    ..
+                },
+        } => (*allow_development_os, *require_production_os),
+        _ => return,
+    };
+    if allow_development_os {
+        warning("--allow-development-os");
+    }
+    if require_production_os {
+        warning("--require-production-os");
+    }
 }
 
 /// `status --watch`: the current state, then each change. Human output skips
@@ -304,7 +349,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
+            ..
         } => {
             let profile = ConfidentialProfileInput {
                 id: id.clone(),
@@ -325,7 +370,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = read_key(global, *key_stdin)?;
             value(client.call(rpc::Verify {
                 profile,
-                require_production_os: !allow_development_os,
                 key: Some(key),
             })?)
         }
@@ -343,7 +387,6 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                     provider: profile.provider,
                     remote_url: profile.remote_url,
                 },
-                require_production_os: state.config.require_production_os,
                 key,
             })?)
         }
@@ -353,8 +396,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             url,
             provider,
             key_stdin,
-            allow_development_os,
-            require_production_os,
+            ..
         } => {
             let state = client.state()?;
             let saved = find(state.profiles, id)?;
@@ -374,12 +416,7 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let key = (*key_stdin || target_changed || !saved.credential_saved)
                 .then(|| read_key(global, *key_stdin))
                 .transpose()?;
-            value(client.call(rpc::Verify {
-                profile,
-                require_production_os: !allow_development_os
-                    && (*require_production_os || state.config.require_production_os),
-                key,
-            })?)
+            value(client.call(rpc::Verify { profile, key })?)
         }
         Profiles::Use { id } => {
             confirm(global, "Switch the active profile?")?;

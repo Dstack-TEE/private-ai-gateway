@@ -104,7 +104,6 @@ export function SettingsPage(): React.JSX.Element {
   const launch = useLaunchPreferences();
   const locked = shell.applying || shell.agents.changing;
   const profile = activeProfile(state);
-  const required = state.config.requireProductionOs;
   const starting = state.protection.phase === "starting";
   return (
     <div className="mx-auto min-h-full max-w-230">
@@ -135,7 +134,6 @@ export function SettingsPage(): React.JSX.Element {
         <CollapsibleTrigger render={<Button variant="ghost" className="mb-2" />}><ChevronRight className="group-aria-expanded/button:rotate-90" size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={locked} onToggle={() => shell.changeRequireProductionOs(!required)} />
           {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
           {state.configFiles.configPath && <SettingsItem>

@@ -43,7 +43,7 @@ export function ProtectionStatus({ state, variant }: { state: AppState; variant:
   );
 }
 
-/** The protection switch; its action is the tray's protection item. The overview card also labels development mode. */
+/** The protection switch; its action is the tray's protection item. */
 export function ProtectedControl({
   state,
   pending,
@@ -59,11 +59,9 @@ export function ProtectedControl({
   onToggle(): void;
 }): React.JSX.Element {
   const { action } = state.protection;
-  const developmentMode = !state.config.requireProductionOs;
   const card = variant === "card";
   return (
     <div className={cn("flex items-center gap-2.5 text-xs font-semibold", !card && "max-[440px]:gap-1.5 max-[440px]:pl-1.75", className)}>
-      {developmentMode && card && <span className="text-xs font-semibold text-warning">Dev mode</span>}
       <SwitchControl
         size="default"
         className={card ? "transition-colors duration-200 ease-out" : undefined}
@@ -71,7 +69,6 @@ export function ProtectedControl({
         label={action.label}
         disabled={!action.enabled || pending}
         aria-busy={pending}
-        developmentMode={developmentMode}
         onToggle={onToggle}
       />
     </div>
