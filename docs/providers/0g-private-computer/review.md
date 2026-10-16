@@ -65,7 +65,7 @@ unreadable Compose data yields an empty display while key use remains possible.
 See [`verifyQuoteAt` and `containersOf`][route-compose].
 
 Since the first revision of this review, 0G has added application checks to its
-offline `pcverify -provider` tool:
+standalone `pcverify -provider` verifier, which runs outside the request path:
 
 - The [application baseline][baseline] now records two reviewed deployments,
   compared per service and per top-level section.
@@ -102,8 +102,8 @@ once they run in the sealing path with an enforce switch.
 
 The [release Compose][release-compose] defaults `ZG_GATEWAY_SEAL_MODELS` to
 `0gm-1.0-35b-a3b`. The application permits an injected environment override of
-that list. The [gateway implementation][sealing-policy] forwards models outside
-the selected sealing set through its unsealed router path. Public policy shape
+that list. The [gateway's per-model dispatch][sealing-policy] forwards models
+outside the selected sealing set through its unsealed router path. Public policy shape
 alone leaves the injected model list unknown.
 
 `X-0G-Provider-Trust-Mode: private` selects the documented TeeML provider tier.
@@ -171,12 +171,20 @@ attestation cryptography.
 
 ## Streaming and receipt semantics
 
+Responses are sealed with HPKE base mode to the client's ephemeral public key,
+which the request carries readably. Base mode does not authenticate the sender:
+an intermediary that reads that key can produce response frames the client
+opens successfully. Upstream [documents this][response-auth]; only the provider
+signature binds response bytes to the admitted provider, and response
+verification is off by default.
+
 In the inspected [stream implementation][stream], each frame passes HPKE/AEAD
-opening before delivery. The aggregate provider signature is fetched and
-verified at stream completion. Treat early frames as channel-authenticated,
-with final signed-proof status pending. Propagate final verification failure
-and issue a success receipt only after all required checks complete. A client
-requiring a final signed proof before consuming content can use buffering.
+opening before delivery, and the aggregate provider signature is fetched and
+verified at stream completion. Early frames are therefore provisional and not
+authenticated to the provider. Admission requires response verification for
+buffered and streamed responses. Propagate final verification failure and issue
+a success receipt only after all required checks complete. Buffer the response
+when authenticated content is required before consumption or tool execution.
 
 ## Implementation acceptance checklist
 
@@ -188,7 +196,8 @@ requiring a final signed proof before consuming content can use buffering.
       sending plaintext or sealing to an unapproved key.
 - [ ] Exercise buffered chat and complete SSE with real provider inference.
 - [ ] Test corrupted ciphertext, reordered/truncated frames, disconnects,
-      signature-fetch failure and invalid final signature.
+      signature-fetch failure, invalid final signature, and well-formed
+      responses sealed by a party other than the admitted provider.
 - [ ] Verify model mapping, request parameters, usage accounting and the
       receipt/session evidence contract.
 - [ ] Publish candidate release measurements/policy before rollout and define
@@ -201,6 +210,7 @@ requiring a final signed proof before consuming content can use buffering.
 [baseline]: https://github.com/0gfoundation/0g-pc-e2ee/blob/4208145aaae06541568251f3f65b8987a10fe84f/client/evidence/brokercompose.json
 [application-gap]: https://github.com/0gfoundation/0g-pc-e2ee/blob/4208145aaae06541568251f3f65b8987a10fe84f/docs/design/trust-chain.md#L332-L387
 [release-compose]: https://github.com/0gfoundation/0g-pc-e2ee/releases/download/release-2026.09.28.1/docker-compose.release.yml
-[sealing-policy]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/cmd/gateway/main.go#L1130-L1195
+[sealing-policy]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/cmd/gateway/sealmodels.go#L211-L242
 [privacy-mode]: https://docs.0g.ai/developer-hub/building-on-0g/compute-network/router/privacy
+[response-auth]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/core/resmeta.go#L28-L43
 [stream]: https://github.com/0gfoundation/0g-pc-e2ee/blob/5de8d865bd0f69168fed76711f065a898a6015c6/client/core/stream.go#L180-L320
