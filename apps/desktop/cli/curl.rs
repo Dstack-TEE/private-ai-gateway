@@ -18,12 +18,12 @@ use crate::verify::verify_service;
 /// codes stay below it and signals map above it.
 pub const PAP_FAILURE_EXIT_CODE: i32 = 125;
 
-pub async fn run(args: CurlArgs, require_production_os: bool) -> Result<i32, String> {
+pub async fn run(args: CurlArgs) -> Result<i32, String> {
     let (url, origin) = request_url_and_origin(&args.url)?;
     validate_curl_args(&args.curl_args)?;
     let policy = args.policy.verifier_policy()?;
 
-    let verification = verify_service(&origin, None, &policy, require_production_os, false).await?;
+    let verification = verify_service(&origin, None, &policy, false).await?;
     // stdout belongs to curl's response, so the transcript goes to stderr.
     if args.json {
         let transcript = serde_json::to_string(&verification.transcript.to_json())

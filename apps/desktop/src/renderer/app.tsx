@@ -75,17 +75,6 @@ function Window(): React.JSX.Element {
     reportFailure("Could not register the pap command", new AuthoredError(cliStartupError));
   }, [cliStartupError, reportFailure]);
 
-  const osPolicy = useMutation({
-    mutationFn: async (required: boolean) => {
-      if (state.protection.action.operation === "stop" && !await confirm({
-        title: required ? "Require production OS?" : "Allow development OS?",
-        message: "Protection stops before the policy changes.",
-        confirmLabel: "Stop and Change",
-      })) return;
-      setState(await desktopApi.setRequireProductionOs(required));
-    },
-    meta: { errorTitle: "Could not change the OS policy" },
-  });
   const reset = useMutation({
     mutationFn: () => desktopApi.resetSettings(),
     onSuccess: setState,
@@ -102,7 +91,7 @@ function Window(): React.JSX.Element {
     meta: { errorTitle: "Could not start the background service" },
   });
   /** A settings change is applying; controls that change settings wait. */
-  const applying = osPolicy.isPending || reset.isPending;
+  const applying = reset.isPending;
 
   // Protection needs a usable profile first: create one, or `repair` the active one.
   const starting = state.protection.phase === "starting";
@@ -153,9 +142,6 @@ function Window(): React.JSX.Element {
       if (!action.enabled || protection.isPending) return;
       if (action.operation === "setUpProfile") openProfiles(true);
       else protection.mutate(action.operation);
-    },
-    changeRequireProductionOs: (required) => {
-      if (!applying) osPolicy.mutate(required);
     },
     resetSettings: () => void resetSettings(),
     openDialog,

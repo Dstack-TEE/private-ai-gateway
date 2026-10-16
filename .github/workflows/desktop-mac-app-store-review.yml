@@ -129,7 +129,7 @@ jobs:
           JQ_RELEASE_TYPE_VERIFY: |
             (.data | type) == "array" and (.data | length) == 1
             and .data[0].id == $version_id
-            and .data[0].attributes.releaseType == "MANUAL"
+            and .data[0].attributes.releaseType == "AFTER_APPROVAL"
           JQ_DOCTOR: '(.summary | type == "object") and (.summary.blocking == 0) and (.summary.errors == 0)'
         run: |
           set -euo pipefail
@@ -294,14 +294,14 @@ jobs:
             jq -e --arg id "$localization_id" '.data.id == $id' "$output" >/dev/null
           done < <(jq -er '.data[].id' "$ASC_REVIEW_ROOT/localizations.json")
 
-      - name: Set release after approval
+      - name: Release automatically after approval
         if: inputs.dry_run != true
         shell: bash
         env: *asc-review-auth
         run: |
           set -euo pipefail
           asc versions update --version-id "$ASC_REVIEW_VERSION_ID" \
-            --release-type MANUAL --output json > "$ASC_REVIEW_ROOT/release-type.json"
+            --release-type AFTER_APPROVAL --output json > "$ASC_REVIEW_ROOT/release-type.json"
           jq -e --arg version_id "$ASC_REVIEW_VERSION_ID" "$JQ_RELEASE_TYPE_UPDATE" "$ASC_REVIEW_ROOT/release-type.json" >/dev/null
           asc --read-only versions list --app "$ASC_REVIEW_APP_ID" --platform MAC_OS \
             --version "$ASC_REVIEW_VERSION" --paginate --output json > "$ASC_REVIEW_ROOT/release-type-verify.json"

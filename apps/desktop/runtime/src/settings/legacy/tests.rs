@@ -167,7 +167,6 @@ fn read_credentials(config_dir: &Path) -> Credentials {
 fn assert_fully_migrated(config_dir: &Path, data: &Path, keychain: &FakeKeychain) {
     let config = read_config(config_dir);
     assert_eq!(config.active_profile, "home");
-    assert!(!config.require_production_os);
     assert!(config.connect_on_launch);
     assert_eq!(config.appearance, Appearance::Dark);
     assert_eq!(config.update_channel, Some(UpdateChannel::Beta));

@@ -16,15 +16,9 @@ use crate::verify::verify_service;
 use desktop_core::endpoint;
 use desktop_core::now_secs;
 
-pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32, String> {
-    let verification = verify_service(
-        &args.base_url,
-        None,
-        &args.policy.verifier_policy()?,
-        require_production_os,
-        false,
-    )
-    .await?;
+pub async fn run(args: SessionsArgs) -> Result<i32, String> {
+    let verification =
+        verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
     if !args.json {
         println!("== service verification: {} ==", verification.base_url);
         print!("{}", verification.transcript.render_human());

@@ -602,14 +602,12 @@ impl Default for ListenConfig {
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     pub remote_url: String,
-    pub require_production_os: bool,
 }
 
 impl Default for StartConfig {
     fn default() -> Self {
         Self {
             remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
-            require_production_os: true,
         }
     }
 }

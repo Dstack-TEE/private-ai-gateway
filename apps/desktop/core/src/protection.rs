@@ -105,9 +105,6 @@ impl Protection {
             }
             ProtectionPhase::ConfigurationVerified => ("Configuration verified", Tone::Neutral),
             ProtectionPhase::ApiKeyRequired => ("API key needed", Tone::Warning),
-            ProtectionPhase::Protected if !state.config.require_production_os => {
-                ("Protected (Dev mode)", Tone::Warning)
-            }
             ProtectionPhase::Protected => ("Protected", Tone::Success),
         };
         let verifying =
@@ -332,14 +329,5 @@ mod tests {
         assert_eq!(protection.phase, ProtectionPhase::LocalApiUnavailable);
         assert_eq!(protection.action.label, "Cancel Verification");
         assert!(protection.action.enabled);
-    }
-
-    #[test]
-    fn development_os_protection_says_so() {
-        let mut state = state(VerificationStatus::Verified, true);
-        state.config.require_production_os = false;
-        let protection = Protection::of(&state);
-        assert_eq!(protection.title, "Protected (Dev mode)");
-        assert_eq!(protection.tone, Tone::Warning);
     }
 }

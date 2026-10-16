@@ -254,10 +254,11 @@ The protected `app-store-review` environment must contain the separate App
 Store Connect App Manager key as `ASC_REVIEW_KEY_ID`, `ASC_REVIEW_ISSUER_ID`,
 and `ASC_REVIEW_PRIVATE_KEY`. Do not reuse the upload workflow's Developer key.
 The required environment reviewer must approve the non-dry run. That run sets
-What's New for every version localization, sets release type to manual after
-approval, checks `asc review doctor`, and submits the prepared version for App
-Review. App Store release remains manual after Apple approves it; this workflow
-does not publish automatically.
+What's New for every version localization, sets the release type to release
+automatically after approval, checks `asc review doctor`, and submits the
+prepared version for App Review. Apple publishes the version as soon as it
+approves it; to hold an approved build, change the release type in ASC before
+review completes.
 
 If the dry-run plan is correct, rerun with dry run disabled. Keep the workflow
 summary and ASC review status with the release audit. The workflow refuses
