@@ -5,6 +5,7 @@
 //! production, upstream verification, and transport behavior.
 
 pub use aci_protocol::{digest, types};
+pub(crate) mod attestation_http;
 pub mod e2ee;
 pub mod identity;
 pub mod keys;

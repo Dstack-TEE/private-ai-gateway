@@ -137,6 +137,44 @@ The browser verifier can check the quote, binding chain, measurement, receipts,
 and sessions. Browser APIs do not expose the peer certificate, so browser-only
 code cannot enforce the TLS SPKI pin.
 
+#### dstack compose measurement (§9.1 check 4)
+
+The TS verifier and Rust `aci-verify` replay the event log against the quote's
+RTMR3, then require `sha256(app_compose)` to equal its single pre-system-ready
+`compose-hash` measurement. Digest mismatches fail the measurement check.
+The quote must separately verify to the vendor root (check 1).
+
+Under the dstack policy, RTMR3 contains only runtime events (`0x08000001`), as in
+the [v0.5.9 emitter](https://github.com/Dstack-TEE/dstack/blob/v0.5.9/dstack-attest/src/lib.rs#L17)
+and [v0.6.1 emitter](https://github.com/Dstack-TEE/dstack/blob/v0.6.1/dstack/dstack-attest/src/lib.rs#L190).
+Every RTMR3 digest is recomputed as
+`SHA384(u32le(event_type) || ":" || UTF8(event) || ":" || payload bytes)`
+and must equal the stored digest before replay. Other registers do not supply
+compose measurements or system-ready boundaries.
+
+Runtime names follow `[a-z][a-z0-9]*(?:-[a-z0-9]+)*`, accepting the upstream
+built-in names while excluding `:`, which makes the v1 name/payload boundary
+ambiguous. Version must be absent (v1) or the integer token `1`; opt-in v2 and
+all other values are rejected. Integer fields must be unsigned u32 JSON tokens,
+without float or exponent spellings. Duplicate decoded object keys, including
+escaped equivalents, and lone surrogates in compose or event strings are rejected.
+
+Event logs are limited to 1 MiB of UTF-8 and 16 nested containers, including the
+root array; `app_compose` is limited to 4 MiB of UTF-8 before processing.
+The gateway and clients cap attestation HTTP bodies at 32 MiB before JSON decoding,
+checking Content-Length and streaming bytes. The gateway also caps legacy reports
+and Chutes discovery, instance and quote/GPU evidence responses. TS receipt and
+session fetches and desktop session listings/records use the same limit. A live
+21-session listing measured 38,995 bytes; its largest full record was 1,428,775
+bytes on October 16, 2026. TS copies incoming chunks into one
+buffer that grows up to the cap. The cap allows JSON escaping of the bounded
+compose and log. A production response measured 53,676 bytes on October 16, 2026:
+30,220 bytes of compose and 7,357 bytes of event log (30 events).
+Offline desktop audits use the HTTP artifact limits before parsing files:
+32 MiB for reports/sessions and 64 KiB for receipts. TS and desktop artifact GETs
+default to a 10-second total request deadline, including the bounded response body.
+Hex fields accept an optional lowercase `0x` prefix and either case for digits.
+
 ### 2. Before the gateway forwards data
 
 For a request that requires verified serving, the attested gateway verifies

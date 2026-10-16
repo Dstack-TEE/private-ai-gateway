@@ -6,16 +6,18 @@
 //! per-hostname pin set, fail closed on mismatch.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use crate::aci::tls::{error_chain, error_chain_message, observing_spki_client, SpkiObservations};
 use desktop_core::endpoint;
 use futures_util::StreamExt;
-use http_body_util::{BodyExt, LengthLimitError, Limited};
 use url::Url;
 
 const CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Generous read timeout: chat responses stream for a while.
 const READ_TIMEOUT_SECONDS: u64 = 600;
+// Matches TS's 10-second artifact deadline, within desktop's 45/120-second budgets.
+const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(CONNECT_TIMEOUT_SECONDS);
 
 /// 32 fresh random bytes, hex-encoded — the attestation request nonce.
 pub fn random_nonce_hex() -> String {
@@ -56,10 +58,18 @@ pub fn host_of(url: &str) -> Result<String, String> {
 /// in memory and saves with usage.
 pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 
+/// Bounds attestation and session JSON before decoding; allows JSON escaping
+/// of the 4 MiB compose and 1 MiB log. Production reports are about 54 KB;
+/// a 21-session listing was 38,995 bytes and full sessions reached 1,428,775 bytes.
+pub const MAX_ATTESTATION_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Why a bounded GET produced no response.
 #[derive(Debug, thiserror::Error)]
 pub enum GetError {
-    /// The request or its body read failed.
+    /// The HTTP request or its body read failed.
+    #[error("request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    /// The URL or identifier is invalid.
     #[error("{0}")]
     Failed(String),
     /// The body exceeded this many bytes.
@@ -246,7 +256,7 @@ impl AciClient {
         url: &str,
         bearer: Option<&str>,
     ) -> Result<HttpResult, reqwest::Error> {
-        let resp = self.send_get(url, bearer).await?;
+        let resp = self.get_request(url, bearer).send().await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = resp.bytes().await?.to_vec();
@@ -257,33 +267,33 @@ impl AciClient {
         })
     }
 
-    /// A GET whose body read stops with `GetError::TooLarge` past `limit` bytes.
-    async fn get_limited(
+    /// A GET bounded by a total deadline and `GetError::TooLarge` past `limit` bytes.
+    pub(crate) async fn get_limited(
         &self,
         url: &str,
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let resp = self.send_get(url, bearer).await.map_err(|e| {
-            GetError::Failed(format!("GET {url} failed: {}", error_chain_message(&e)))
-        })?;
+        let mut resp = self
+            .get_request(url, bearer)
+            .timeout(ARTIFACT_TIMEOUT)
+            .send()
+            .await?;
+        if resp
+            .content_length()
+            .is_some_and(|size| size > limit as u64)
+        {
+            return Err(GetError::TooLarge(limit));
+        }
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let body = Limited::new(reqwest::Body::from(resp), limit)
-            .collect()
-            .await
-            .map_err(|error| {
-                if error.is::<LengthLimitError>() {
-                    GetError::TooLarge(limit)
-                } else {
-                    GetError::Failed(format!(
-                        "GET {url}: failed to read body: {}",
-                        error_chain_message(&*error)
-                    ))
-                }
-            })?
-            .to_bytes()
-            .to_vec();
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if chunk.len() > limit - body.len() {
+                return Err(GetError::TooLarge(limit));
+            }
+            body.extend_from_slice(&chunk);
+        }
         Ok(HttpResult {
             status,
             headers,
@@ -291,22 +301,18 @@ impl AciClient {
         })
     }
 
-    async fn send_get(
-        &self,
-        url: &str,
-        bearer: Option<&str>,
-    ) -> Result<reqwest::Response, reqwest::Error> {
+    fn get_request(&self, url: &str, bearer: Option<&str>) -> reqwest::RequestBuilder {
         let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
-        req.send().await
+        req
     }
 
-    /// Fetch the attestation report. The caller classifies a failure with
-    /// [`ServiceError::from_request`].
-    pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, reqwest::Error> {
-        self.read_get(url.as_str(), None).await
+    /// Fetch the attestation report with a bounded body before JSON decoding.
+    pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, GetError> {
+        self.get_limited(url.as_str(), None, MAX_ATTESTATION_RESPONSE_BYTES)
+            .await
     }
 
     pub async fn fetch_receipt(
@@ -339,7 +345,9 @@ impl AciClient {
             return Err(format!("session id {session_id:?} is not a URL-safe id"));
         }
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
-        self.get(url.as_str(), None).await
+        self.get_limited(url.as_str(), None, MAX_ATTESTATION_RESPONSE_BYTES)
+            .await
+            .map_err(String::from)
     }
 
     pub async fn fetch_models(
@@ -415,6 +423,108 @@ fn is_url_safe_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn artifact_deadline_stops_a_slow_trickle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let server_sent = sent.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n ")
+                .await
+                .unwrap();
+            server_sent.fetch_add(1, Ordering::Relaxed);
+            ready_tx.send(()).unwrap();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if stream.write_all(b" ").await.is_err() {
+                    break;
+                }
+                server_sent.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let client = AciClient::new().unwrap();
+        let request = tokio::spawn(async move { client.fetch_attestation(&url).await });
+        // Establish real loopback I/O before pausing to avoid auto-advancing
+        // the connect timeout while the OS is still accepting the connection.
+        ready_rx.await.unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(ARTIFACT_TIMEOUT + Duration::from_secs(1), request)
+            .await
+            .expect("artifact deadline must expire despite continuing body bytes")
+            .unwrap();
+        server.abort();
+        let _ = server.await;
+        let Err(GetError::Request(error)) = result else {
+            panic!("expected a request timeout");
+        };
+        assert!(error.is_timeout(), "unexpected error: {error}");
+        assert!(started.elapsed() <= ARTIFACT_TIMEOUT);
+        assert!(sent.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test]
+    async fn attestation_bodies_are_bounded_before_json_decoding() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let client = AciClient::new().unwrap();
+        for (headers, bytes, too_large) in [
+            (
+                format!("Content-Length: {}\r\n", MAX_ATTESTATION_RESPONSE_BYTES + 1),
+                0,
+                true,
+            ),
+            (String::new(), MAX_ATTESTATION_RESPONSE_BYTES + 1, true),
+            (String::new(), 2, false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(stream.read_u8().await.unwrap());
+                }
+                stream
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{headers}\r\n").as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let chunk = [b' '; 8192];
+                let mut remaining = bytes;
+                while remaining > 0 {
+                    let size = remaining.min(chunk.len());
+                    if stream.write_all(&chunk[..size]).await.is_err() {
+                        break; // An over-limit reader closes without draining.
+                    }
+                    remaining -= size;
+                }
+            });
+            let result = client.fetch_attestation(&url).await;
+            server.await.unwrap();
+            if too_large {
+                assert!(matches!(
+                    result,
+                    Err(GetError::TooLarge(MAX_ATTESTATION_RESPONSE_BYTES))
+                ));
+            } else {
+                assert_eq!(result.unwrap().body, b"  ");
+            }
+        }
+    }
 
     #[test]
     fn nonce_is_32_random_bytes_hex() {

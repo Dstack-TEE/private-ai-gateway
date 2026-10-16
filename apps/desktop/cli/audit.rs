@@ -3,7 +3,8 @@
 //! Offline, quote collateral and the live TLS channel are honestly
 //! unavailable — those checks skip (never pass) rather than assume.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read};
 
 use crate::aci::types::AttestationReport;
 
@@ -12,10 +13,25 @@ use crate::checks::{
     established_identity, parse_receipt_document, run_report_checks, run_response_checks,
     BodyDigest, ChannelEvidence, QuoteSource, ReportCheckContext, UpstreamContext,
 };
+use crate::client::{MAX_ATTESTATION_RESPONSE_BYTES, MAX_RECEIPT_BYTES};
 use crate::transcript::Transcript;
 
+fn read_artifact(path: &str, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("artifact exceeds maximum byte size ({limit})"),
+        ));
+    }
+    Ok(bytes)
+}
+
 pub async fn run(args: AuditArgs) -> Result<i32, String> {
-    let report_bytes = fs::read(&args.report)
+    let report_bytes = read_artifact(&args.report, MAX_ATTESTATION_RESPONSE_BYTES)
         .map_err(|e| format!("failed to read report {}: {e}", args.report))?;
     let report: AttestationReport = serde_json::from_slice(&report_bytes)
         .map_err(|e| format!("failed to parse report JSON: {e}"))?;
@@ -41,8 +57,8 @@ pub async fn run(args: AuditArgs) -> Result<i32, String> {
     .await?;
 
     if let Some(receipt_path) = &args.receipt {
-        let raw =
-            fs::read(receipt_path).map_err(|e| format!("failed to read {receipt_path}: {e}"))?;
+        let raw = read_artifact(receipt_path, MAX_RECEIPT_BYTES)
+            .map_err(|e| format!("failed to read {receipt_path}: {e}"))?;
         let envelope = serde_json::from_slice(&raw)
             .map_err(|e| format!("failed to parse receipt JSON {receipt_path}: {e}"))?;
         let receipt = parse_receipt_document(envelope)?;
@@ -62,7 +78,10 @@ pub async fn run(args: AuditArgs) -> Result<i32, String> {
         let session = args
             .session
             .as_deref()
-            .map(|path| fs::read(path).map_err(|e| format!("failed to read {path}: {e}")))
+            .map(|path| {
+                read_artifact(path, MAX_ATTESTATION_RESPONSE_BYTES)
+                    .map_err(|e| format!("failed to read {path}: {e}"))
+            })
             .transpose()?;
         let request_digest = request_body.as_deref().map(BodyDigest::of);
         let response_digest = response_body.as_deref().map(BodyDigest::of);
@@ -84,4 +103,24 @@ pub async fn run(args: AuditArgs) -> Result<i32, String> {
     }
 
     transcript.print(args.json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_files_are_bounded_before_parsing() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+        fs::write(path, b"{}").unwrap();
+        assert_eq!(read_artifact(path, MAX_RECEIPT_BYTES).unwrap(), b"{}");
+        for limit in [MAX_RECEIPT_BYTES, MAX_ATTESTATION_RESPONSE_BYTES] {
+            file.as_file().set_len(limit as u64 + 1).unwrap();
+            assert!(read_artifact(path, limit)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds maximum byte size"));
+        }
+    }
 }

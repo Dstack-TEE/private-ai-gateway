@@ -13,7 +13,11 @@ use sha3::Keccak256;
 
 use crate::decode_hex;
 
+mod event_log;
+
 const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
+// Keep in sync with clients/verifier-ts/src/report.ts.
+const MAX_APP_COMPOSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// One entry of dstack's event log, in the wire shape of the dstack SDK's
 /// `EventLog`.
@@ -49,8 +53,18 @@ pub fn verify_dstack_event_log(
         .get("event_log")
         .and_then(Value::as_str)
         .ok_or("missing dstack event_log evidence")?;
+    event_log::preflight(event_log)?;
     let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
         .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
+    for event in &events {
+        if event.imr == 3 && event.event_type != DSTACK_RUNTIME_EVENT_TYPE {
+            return Err("dstack RTMR3 contains a non-runtime event".into());
+        }
+        if event.event_type == DSTACK_RUNTIME_EVENT_TYPE && !valid_runtime_event_name(&event.event)
+        {
+            return Err("invalid dstack runtime event name".into());
+        }
+    }
     let rtmr3 = replay_dstack_rtmr(&events, 3).map_err(|e| e.to_string())?;
     let quote_rtmr3 = quote_rtmr3.ok_or("dstack event log verification requires a TDX quote")?;
     if rtmr3.as_slice() != quote_rtmr3 {
@@ -133,6 +147,9 @@ pub fn verify_dstack_app_compose(
         .get("app_compose")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing dstack app_compose evidence".to_string())?;
+    if app_compose.len() > MAX_APP_COMPOSE_BYTES {
+        return Err("dstack app_compose exceeds maximum byte size (4 MiB)".into());
+    }
     let actual_compose_hash: [u8; 32] = Sha256::digest(app_compose.as_bytes()).into();
     if &actual_compose_hash != measured_compose_hash {
         return Err(
@@ -146,6 +163,13 @@ fn replay_dstack_rtmr(events: &[DstackEventLog], imr: u32) -> Result<[u8; 48], I
     let mut mr = vec![0u8; 48];
     for event in events.iter().filter(|event| event.imr == imr) {
         let mut digest = dstack_event_digest(event)?;
+        if event.event_type == DSTACK_RUNTIME_EVENT_TYPE
+            && decode_hex(&event.digest).map_err(InvalidEventLog)? != digest
+        {
+            return Err(InvalidEventLog(
+                "dstack runtime event digest does not match event and payload".into(),
+            ));
+        }
         if digest.len() < 48 {
             digest.resize(48, 0);
         }
@@ -164,12 +188,23 @@ fn dstack_event_digest(event: &DstackEventLog) -> Result<Vec<u8>, InvalidEventLo
 
     let payload = decode_hex(&event.event_payload).map_err(InvalidEventLog)?;
     let mut hasher = Sha384::new();
-    hasher.update(event.event_type.to_ne_bytes());
+    hasher.update(event.event_type.to_le_bytes());
     hasher.update(b":");
     hasher.update(event.event.as_bytes());
     hasher.update(b":");
     hasher.update(payload);
     Ok(hasher.finalize().to_vec())
+}
+
+fn valid_runtime_event_name(name: &str) -> bool {
+    // Same lowercase kebab-case grammar as TS; ':' is ambiguous in v1.
+    name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -324,6 +359,18 @@ pub fn compressed_k256_public_key_hex(public_key_hex: &str) -> Result<String, St
 mod tests {
     use super::*;
 
+    #[test]
+    fn app_compose_is_bounded_by_utf8_bytes_before_hashing() {
+        let compose = "é".repeat(MAX_APP_COMPOSE_BYTES / 2);
+        let hash: [u8; 32] = Sha256::digest(compose.as_bytes()).into();
+        let mut evidence = serde_json::json!({"app_compose": compose});
+        assert!(verify_dstack_app_compose(&evidence, &hash).is_ok());
+        evidence["app_compose"] = Value::String(format!("{compose}é"));
+        assert!(verify_dstack_app_compose(&evidence, &hash)
+            .unwrap_err()
+            .contains("app_compose exceeds maximum byte size"));
+    }
+
     fn runtime_event(event: &str, payload: &[u8]) -> DstackEventLog {
         let mut event = DstackEventLog {
             imr: 3,
@@ -340,12 +387,12 @@ mod tests {
     fn replay_recomputes_runtime_event_digest_from_semantic_fields() {
         let measured = runtime_event("app-id", &[0x11; 20]);
         let expected_rtmr = replay_dstack_rtmr(std::slice::from_ref(&measured), 3).unwrap();
+        let evidence = serde_json::json!({"event_log": serde_json::to_string(std::slice::from_ref(&measured)).unwrap()});
+        assert!(verify_dstack_event_log(&evidence, Some(&expected_rtmr)).is_ok());
 
         let mut tampered = runtime_event("compose-hash", &[0x22; 32]);
         tampered.digest = measured.digest;
-        let tampered_rtmr = replay_dstack_rtmr(&[tampered], 3).unwrap();
-
-        assert_ne!(tampered_rtmr, expected_rtmr);
+        assert!(replay_dstack_rtmr(&[tampered], 3).is_err());
     }
 
     #[test]

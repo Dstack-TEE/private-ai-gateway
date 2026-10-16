@@ -12,7 +12,8 @@ use crate::checks::{
     ReportOutcome, VerifierPolicy,
 };
 use crate::client::{
-    attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError,
+    attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, GetError,
+    ServiceError,
 };
 use crate::transcript::Transcript;
 
@@ -80,7 +81,12 @@ pub async fn verify_service(
     let resp = client
         .fetch_attestation(&url)
         .await
-        .map_err(|error| ServiceError::from_request(&error, &host))?;
+        .map_err(|error| match error {
+            GetError::Request(error) => {
+                VerifyError::from(ServiceError::from_request(&error, &host))
+            }
+            error => VerifyError::from(error.to_string()),
+        })?;
     if !(200..300).contains(&resp.status) {
         return Err(ServiceError::from_status(&host, resp.status).into());
     }

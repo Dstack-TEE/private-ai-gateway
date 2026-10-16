@@ -10,6 +10,7 @@ import { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 import { verifyReceipt, checkRequestBodyHash, checkResponseBodyHash, findEvent } from './receipt.js';
 import { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 import { AciError } from './errors.js';
+import { DEFAULT_TIMEOUT_MS, readAciJson, timedFetch } from './attestation-http.js';
 import type {
   AttestationReport,
   ReceiptEnvelope,
@@ -155,6 +156,8 @@ export interface VerifyServiceOptions extends TranscriptOptions {
   nonce?: string;
   /** Fetch implementation; the global `fetch` by default. */
   fetchImpl?: typeof fetch;
+  /** Attestation HTTP timeout, including the response body. Default: 10 seconds. */
+  timeoutMs?: number;
 }
 
 /**
@@ -171,11 +174,18 @@ export async function verifyService(
   const nonce = options.nonce ?? randomNonceHex();
   const doFetch = options.fetchImpl ?? fetch;
   const url = `${baseUrl.replace(/\/+$/, '')}/v1/aci/attestation?nonce=${encodeURIComponent(nonce)}`;
-  const res = await doFetch(url);
-  if (!res.ok) {
-    throw new AciError(`attestation fetch failed: HTTP ${res.status}`);
-  }
-  const report = (await res.json()) as AttestationReport;
+  const report = await timedFetch(
+    doFetch,
+    url,
+    {},
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    async (response, signal) => {
+      if (!response.ok) {
+        throw new AciError(`attestation fetch failed: HTTP ${response.status}`);
+      }
+      return await readAciJson(response, signal) as AttestationReport;
+    },
+  );
   return reportTranscript(report, nonce, {
     ...(options.now !== undefined ? { now: options.now } : {}),
     ...(options.pccsUrl !== undefined ? { pccsUrl: options.pccsUrl } : {}),

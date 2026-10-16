@@ -5,6 +5,7 @@
  * and signing live only in tests — `src/` never handles private keys.
  */
 
+import { createHash } from 'node:crypto';
 import {
   toHex,
   toBase64,
@@ -21,7 +22,6 @@ import {
   type SessionRecord,
   type WorkloadKeyset,
 } from '../src/index.js';
-import { sha384 } from '../src/crypto.js';
 
 const subtle = globalThis.crypto.subtle;
 const enc = new TextEncoder();
@@ -126,22 +126,28 @@ export async function makeMeasuredComposeReport(
   appCompose = 'services:\n  gateway:\n    image: demo\n',
 ): Promise<{ report: AttestationReport; composeHash: string }> {
   const composeHash = await sha256Hex(enc.encode(appCompose));
-  const digests = ['11'.repeat(48), '22'.repeat(48)];
+  const events = [
+    { imr: 3, event_type: 0x08000001, digest: '', event: 'compose-hash', event_payload: composeHash },
+    { imr: 3, event_type: 0x08000001, digest: '', event: 'system-ready', event_payload: '' },
+  ];
   let rtmr3: Uint8Array = new Uint8Array(48);
-  for (const digest of digests) {
-    const input = new Uint8Array(96);
-    input.set(rtmr3);
-    input.set(fromHex(digest), 48);
-    rtmr3 = await sha384(input);
+  for (const event of events) {
+    // Independent Node crypto construction of the upstream v1 runtime preimage:
+    // u32le(0x08000001), ':', UTF-8 name, ':', decoded payload.
+    const digest = createHash('sha384')
+      .update(Buffer.from('010000083a', 'hex'))
+      .update(event.event)
+      .update(':')
+      .update(Buffer.from(event.event_payload, 'hex'))
+      .digest();
+    event.digest = digest.toString('hex');
+    rtmr3 = createHash('sha384').update(rtmr3).update(digest).digest();
   }
   const quote = new Uint8Array(568);
   quote.set(rtmr3, 520);
   const report = structuredClone(REPORT) as AttestationReport;
   report.attestation.evidence = {
-    event_log: JSON.stringify([
-      { imr: 3, digest: digests[0], event: 'compose-hash', event_payload: composeHash },
-      { imr: 3, digest: digests[1], event: 'system-ready', event_payload: '' },
-    ]),
+    event_log: JSON.stringify(events),
     app_compose: appCompose,
     quote: toHex(quote),
   };
