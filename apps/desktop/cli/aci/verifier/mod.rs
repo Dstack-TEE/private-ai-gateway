@@ -21,5 +21,6 @@ fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
         dcap_qvl::quote::Report::SgxEnclave(report) => &report.report_data,
         dcap_qvl::quote::Report::TD10(report) => &report.report_data,
         dcap_qvl::quote::Report::TD15(report) => &report.base.report_data,
+        dcap_qvl::quote::Report::TD15Ex(report) => &report.base.base.report_data,
     }
 }
