@@ -4,6 +4,29 @@ This page explains when the gateway verifies an upstream, how long a verified re
 
 For field definitions and defaults, see [Configuration reference](configuration-reference.md). For the resulting audit record, see [Attested sessions](attested-session-system.md).
 
+## Verification freshness and session validity
+
+The verifier cache TTL, `attested_session_ttl_seconds` (default 3600), and
+`receipt_ttl_seconds` govern different lifetimes. A failed proactive refresh may
+keep a still-valid cached result, but cannot extend its cache deadline (#399).
+Without usable verification, forwarding fails closed even if historical sessions
+are retained. A session expiring does not force network verification: a still-usable
+cached result can establish a replacement with older evidence.
+
+Before each forwarding attempt the gateway owns the admitted immutable session and
+retention lease. Binding retries acquire a new admission. The committed receipt cites
+that attempt's admitted session, with `served_at` equal to its admission time; later
+verification cannot substitute a newer snapshot. Streams, pending middleware and
+retained responses keep the snapshot available, and receipt publication extends
+retention through its receipt deadline without extending session validity.
+
+Complete reviewed profiles can revalidate equal material under an unexpired snapshot,
+retaining its original ID and evidence. Failure alone does not revoke history;
+equal recovery and A → B → A may reuse the original unexpired A. ArmetAI, SecretAI,
+custom verifiers and incomplete profiles retain evidence-sensitive dedup. See
+[the profile and migration contract](attested-session-system.md#reviewed-material-and-snapshot-evidence).
+Session creation, cache freshness and evidence collection time must not be conflated.
+
 ## Security property
 
 A request fails closed only when it requires ACI verification, as defined in

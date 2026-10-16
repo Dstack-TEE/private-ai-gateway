@@ -14,6 +14,7 @@ from .common import (
     json_evidence_bundle,
     model_dump,
     verifier_id_for,
+    tdx_session_material,
 )
 
 
@@ -106,6 +107,27 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         "gateway_tls_spki_sha256": spki,
         "tcb_status": gateway_tcb_status,
     }
+
+    # Only the replayed, authenticated event-log identity is eligible. Supplied
+    # info.compose_hash is metadata, not the measured compose identity.
+    compose_hash = (
+        (gateway_dstack.get("details") or {}).get("app_info") or {}
+    ).get("compose_hash")
+    gpu = (gateway_result.get("details") or {}).get("gpu")
+    provider_claims.update(
+        {
+            "signing_address": gateway.get("signing_address"),
+            "compose_hash": compose_hash,
+            "gateway_gpu_check": {
+                "present": bool(gateway.get("nvidia_payload")),
+                "accepted": isinstance(gpu, dict) and gpu.get("model_verified") is True,
+            },
+        }
+    )
+    material = tdx_session_material(gateway.get("intel_quote"))
+    if material and compose_hash:
+        provider_claims.update(material)
+        provider_claims["session_material_version"] = "near-ai/1"
 
     emit(
         {

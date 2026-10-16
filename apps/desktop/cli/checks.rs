@@ -232,10 +232,8 @@ fn event_by_type<'a>(payload: &'a Value, event_type: &str) -> Option<&'a Value> 
     events(payload).find(|event| event["type"].as_str() == Some(event_type))
 }
 
-/// The `session_id` the serving (verified) `upstream.verified` event commits
-/// to — the handle for the §9.3 deep audit. Filtering on the verified result
-/// keeps the fetch and upstream-2 on the same session upstream-1 blessed, even when §7.5
-/// prior-attempt events are also present.
+/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
+/// The session id admitted for the committed forwarding attempt.
 pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
     events(payload)
         .filter(|event| {
@@ -245,10 +243,8 @@ pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
         .find_map(|event| event["session_id"].as_str().map(str::to_string))
 }
 
-/// Fetch the attested session record the receipt commits to — the live
-/// artifact source for the upstream-2 deep audit. Returns the raw 2xx response (the
-/// document hashes to the session id, §8) and otherwise the reason
-/// upstream-2 cites for skipping.
+/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
+/// Fetch the cited snapshot, returning its raw 2xx response or a reason.
 pub async fn fetch_live_session(
     client: &AciClient,
     base_url: &str,
@@ -666,10 +662,7 @@ fn check_upstream_event(
     }
 }
 
-/// upstream-2 — deep audit of the attested session record: the parsed document's
-/// JCS form hashes to the cited id (§8), the receipt's served_at falls in
-/// the session's validity window, and the evidence data hashes to its
-/// digest.
+/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
 fn check_session_audit(
     transcript: &mut Transcript,
     payload: &Value,
@@ -791,7 +784,7 @@ fn claims_summary(claims: Option<&Value>) -> String {
 
 /// §9.2(2): `evidence.data` decodes and hashes to `evidence.digest` (§8.2:
 /// a record whose data does not match its digest MUST be rejected). Missing
-/// or malformed evidence rejects too — the deep audit never assumes.
+/// or malformed evidence rejects too — integrity checks never assume.
 fn evidence_check(evidence: Option<&Value>) -> Result<(), String> {
     let (Some(digest), Some(data_uri)) = (
         evidence.and_then(|e| e["digest"].as_str()),

@@ -326,22 +326,31 @@ async fn verified_upstream_binding_creates_attested_session() {
     );
 }
 
-/// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
-/// changes every round even when an instance's own material does not. The
-/// bundle therefore stays out of the dedup fingerprint — sealing it in would
-/// mint a fresh session per instance per round, growing the store without
-/// bound — but the establishing round's evidence must persist in the
-/// document: an empty `evidence` breaks §8.2 deep audit, and relying parties
-/// (§9.2 check 2) reject the record, which made every Chutes-routed model
-/// fail receipt verification.
+/// Only a complete reviewed Chutes profile may reuse its establishing snapshot
+/// across nonce-bound evidence rounds. Legacy output remains evidence-sensitive.
 #[tokio::test]
 async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     use base64::Engine as _;
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
+    let profiles: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    let own = &profiles["chutes"];
+    let claims = serde_json::json!({
+        "session_material_version": "chutes/1", "trust_boundary": "model_instance",
+        "evidence_scope": "model_instance", "chute_id": "chute", "canonical_model_id": "model",
+        "instance_tdx_reports": {"instance-1": own["tdx_report"]},
+        "instance_tdx_report_sha256": {"instance-1": own["tdx_report_sha256"]},
+        "instance_advisory_ids": {"instance-1": own["advisory_ids"]},
+        "instance_measurements": {"instance-1": own["measurement"]},
+        "instance_tcb_statuses": {"instance-1": own["tcb_status"]},
+        "instance_gpu": {"instance-1": {"gpu_verified": false, "gpu_evidence_present": false,
+            "gpu_evidence_nonce_matched": null, "gpu_arch": null}},
+    });
     let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        provider_claims: Some(claims.clone()),
         // §8.2: the digest is over the decoded evidence bytes.
         evidence: Some(serde_json::json!({
             "digest": private_ai_gateway::aci::digest::sha256_hex(

@@ -27,8 +27,8 @@ use super::helpers::{
 };
 use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
 use super::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo, ForwardResult,
-    GatewayRequestContext, ReceiptOwner, ServiceError, StreamingForwardResult,
+    reviewed_session_material, AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo,
+    ForwardResult, GatewayRequestContext, ReceiptOwner, ServiceError, StreamingForwardResult,
     StreamingForwardStream, StreamingUpstreamError, UpstreamVerificationError,
     UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
 };
@@ -142,12 +142,17 @@ pub(super) fn attested_route_eligible(is_tee: Option<bool>) -> bool {
 /// new document per request. Never served; carries no protocol meaning.
 #[derive(Serialize)]
 struct ChannelMaterial<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_type: Option<&'a str>,
     upstream_name: &'a str,
     endpoint: &'a Option<String>,
     verifier_id: &'a str,
     identity: &'a Option<WorkloadIdentityRef>,
     channel_binding: &'a [ChannelBinding],
     claims: &'a SessionClaims,
+    #[serde(skip_serializing_if = "Option::is_none")]
     evidence_digest: Option<&'a str>,
 }
 
@@ -156,7 +161,10 @@ impl ChannelMaterial<'_> {
         // JCS form: `claims.extra` holds provider JSON whose member order
         // follows the parse, so a plain serialization would fingerprint the
         // same material differently across rounds.
-        let value = serde_json::to_value(self)?;
+        let mut value = serde_json::to_value(self)?;
+        if self.schema.is_none() && self.evidence_digest.is_none() {
+            value["evidence_digest"] = Value::Null;
+        }
         let bytes = digest::jcs_bytes(&value).map_err(serde::ser::Error::custom)?;
         Ok(digest::sha256_hex(&bytes))
     }
@@ -761,16 +769,12 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // Chutes evidence changes every round, so an instance session
-            // leaves it out of the fingerprint and keeps re-verification on
-            // the same session.
             let lease = self.seal_attested_session(
                 event,
                 identity.clone(),
                 vec![binding.clone()],
                 claims,
                 now,
-                instance.is_none(),
             )?;
             sealed.push(SealedSession {
                 instance_key: instance.map(str::to_string),
@@ -903,24 +907,37 @@ impl AciService {
         channel_bindings: Vec<ChannelBinding>,
         claims: SessionClaims,
         now: u64,
-        fingerprint_includes_evidence: bool,
     ) -> Result<SessionLease, ServiceError> {
         let evidence = event.evidence.as_ref();
-        let evidence_digest = match evidence {
-            Some(evidence) if fingerprint_includes_evidence => evidence["digest"].as_str(),
-            _ => None,
-        };
-        let fingerprint = ChannelMaterial {
+        let projected = serde_json::to_value(&claims.extra)
+            .map_err(|err| ServiceError::SessionStore(err.to_string()))?;
+        let reviewed = reviewed_session_material(
+            event.provider_type.as_deref(),
+            &event.verifier_id,
+            &projected,
+        );
+        let material = ChannelMaterial {
+            schema: reviewed.then_some("aci-session-material/1"),
+            provider_type: if reviewed {
+                event.provider_type.as_deref()
+            } else {
+                None
+            },
             upstream_name: &event.upstream_name,
             endpoint: &event.url_origin,
             verifier_id: &event.verifier_id,
             identity: &identity,
             channel_binding: &channel_bindings,
             claims: &claims,
-            evidence_digest,
-        }
-        .fingerprint()
-        .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
+            evidence_digest: if reviewed {
+                None
+            } else {
+                evidence.and_then(|e| e["digest"].as_str())
+            },
+        };
+        let fingerprint = material
+            .fingerprint()
+            .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
 
         // Initial retention covers validity and at least one receipt TTL.
         let retention_until = now.saturating_add(self.config.receipt_ttl_seconds);
@@ -988,5 +1005,55 @@ impl AciService {
                 Some(&event.upstream_name),
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_format_is_preserved_and_reviewed_material_has_a_separate_domain() {
+        let claims = SessionClaims::default();
+        let endpoint = Some("https://up.example".to_string());
+        let identity = None;
+        let bindings = vec![];
+        let mut material = ChannelMaterial {
+            schema: None,
+            provider_type: None,
+            upstream_name: "up",
+            endpoint: &endpoint,
+            verifier_id: "custom/v1",
+            identity: &identity,
+            channel_binding: &bindings,
+            claims: &claims,
+            evidence_digest: Some("sha256:evidence"),
+        };
+        let mut legacy = json!({
+            "upstream_name": "up", "endpoint": endpoint, "verifier_id": "custom/v1",
+            "identity": null, "channel_binding": [], "claims": claims,
+            "evidence_digest": "sha256:evidence",
+        });
+        assert_eq!(
+            material.fingerprint().unwrap(),
+            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
+        );
+        material.evidence_digest = None;
+        legacy["evidence_digest"] = Value::Null;
+        assert_eq!(
+            material.fingerprint().unwrap(),
+            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
+        );
+        material.schema = Some("aci-session-material/1");
+        material.provider_type = Some("near-ai");
+        legacy.as_object_mut().unwrap().remove("evidence_digest");
+        legacy["schema"] = json!("aci-session-material/1");
+        legacy["provider_type"] = json!("near-ai");
+        let reviewed = material.fingerprint().unwrap();
+        assert_eq!(
+            reviewed,
+            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
+        );
     }
 }

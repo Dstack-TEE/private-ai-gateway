@@ -14,8 +14,8 @@ pub(super) trait ProviderClaimMapper {
 }
 
 /// Route a provider *type* to its claim mapper; an absent/unknown type gets
-/// the generic mapper. This is the only place that branches on the provider
-/// type string — the per-provider logic lives in the `ProviderClaimMapper` impls.
+/// the generic mapper. Typed per-provider logic lives in the
+/// `ProviderClaimMapper` implementations.
 pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn ProviderClaimMapper {
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
@@ -43,6 +43,232 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
         }
     }
     claims
+}
+
+/// Reviewed adapter capability, never inferred from a provider name alone.
+/// Shape validation does not authenticate facts: the configured verifier still
+/// owns that responsibility. Unknown/incomplete output remains usable with
+/// evidence-sensitive dedup, including legacy Chutes output.
+pub(crate) fn reviewed_session_material(
+    provider: Option<&str>,
+    verifier_id: &str,
+    claims: &Value,
+) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    let expected_id = match provider {
+        "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
+        "phala-direct" | "chutes" | "tinfoil" => format!("private-ai-verifier/{provider}/v1"),
+        "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+        _ => return false,
+    };
+    if verifier_id != expected_id
+        || claims["session_material_version"].as_str() != Some(format!("{provider}/1").as_str())
+    {
+        return false;
+    }
+    let string = |key: &str| claims[key].as_str().is_some_and(|s| !s.is_empty());
+    let boolean = |key: &str| claims[key].is_boolean();
+    let nullable_string = |key: &str| {
+        claims
+            .get(key)
+            .is_some_and(|v| v.is_null() || v.is_string())
+    };
+    let nullable_bool = |key: &str| {
+        claims
+            .get(key)
+            .is_some_and(|v| v.is_null() || v.is_boolean())
+    };
+    let strings = |keys: &[&str]| keys.iter().all(|k| string(k));
+    match provider {
+        "near-ai" => {
+            valid_tdx_material(claims)
+                && strings(&[
+                    "trust_boundary",
+                    "signing_address",
+                    "compose_hash",
+                    "gateway_tls_spki_sha256",
+                ])
+                && lower_hex(&claims["compose_hash"], 32)
+                && signing_address(&claims["signing_address"])
+                && lower_hex(&claims["gateway_tls_spki_sha256"], 32)
+                && claims["gateway_verified"] == true
+                && nullable_string("tcb_status")
+                && claims["gateway_gpu_check"]["present"].is_boolean()
+                && claims["gateway_gpu_check"]["accepted"].is_boolean()
+        }
+        "phala-direct" => {
+            valid_tdx_material(claims)
+                && strings(&[
+                    "trust_boundary",
+                    "evidence_scope",
+                    "canonical_model_id",
+                    "signing_address",
+                    "compose_hash",
+                ])
+                && lower_hex(&claims["compose_hash"], 32)
+                && signing_address(&claims["signing_address"])
+                && claims["attestation_version"] == 2
+                && claims["tls_spki_from_report_data"] == true
+                && claims["report_data_nonce_matched"] == true
+                && claims["compose_hash_verified"] == true
+                && claims["tdx_debug_mode"] == false
+                && [
+                    "os_image_hash",
+                    "os_image_version",
+                    "gpu_arch",
+                    "tcb_status",
+                ]
+                .iter()
+                .all(|k| nullable_string(k))
+                && [
+                    "os_image_is_dev",
+                    "production_os_image",
+                    "gpu_evidence_nonce_matched",
+                ]
+                .iter()
+                .all(|k| nullable_bool(k))
+                && boolean("gpu_verified")
+                && boolean("gpu_evidence_present")
+        }
+        "chutes" => {
+            valid_tdx_material(claims)
+                && strings(&[
+                    "trust_boundary",
+                    "evidence_scope",
+                    "chute_id",
+                    "canonical_model_id",
+                    "instance_id",
+                    "measurement",
+                ])
+                && nullable_string("tcb_status")
+                && claims["advisory_ids"].as_array().is_some_and(|ids| {
+                    ids.iter().all(Value::is_string)
+                        && ids
+                            .windows(2)
+                            .all(|pair| pair[0].as_str() < pair[1].as_str())
+                })
+                && boolean("gpu_verified")
+                && boolean("gpu_evidence_present")
+                && nullable_string("gpu_arch")
+                && nullable_bool("gpu_evidence_nonce_matched")
+        }
+        "tinfoil" => {
+            strings(&[
+                "trust_boundary",
+                "evidence_scope",
+                "config_repo",
+                "release_digest",
+                "code_fingerprint",
+                "enclave_host",
+                "enclave_fingerprint",
+            ]) && claims["used_router"] == true
+                && claims["tls_spki_from_report_data"] == true
+                && claims["hpke_public_key"].is_string()
+                && valid_tinfoil_measurement(&claims["code_measurement"])
+                && valid_tinfoil_measurement(&claims["enclave_measurement"])
+                && claims["verification_steps"]
+                    .as_object()
+                    .is_some_and(|steps| {
+                        !steps.is_empty()
+                            && steps.values().all(|v| {
+                                matches!(
+                                    v.as_str(),
+                                    Some("pending" | "success" | "failed" | "skipped")
+                                )
+                            })
+                    })
+                && claims.get("hardware_measurement").is_some_and(|hardware| {
+                    hardware.is_null()
+                        || (hardware["id"].as_str().is_some_and(|s| !s.is_empty())
+                            && lower_hex(&hardware["mrtd"], 48)
+                            && lower_hex(&hardware["rtmr0"], 48))
+                })
+        }
+        "privatemode" => {
+            strings(&[
+                "trust_boundary",
+                "attestation_scope",
+                "request_encryption",
+                "success_response_authentication",
+                "inference_secret_policy",
+                "manifest_mode",
+                "manifest_observation",
+            ]) && lower_hex(&claims["observed_manifest_sha256"], 32)
+                && string("manifest_observed_at")
+                && claims["manifest_bound_to_active_secret"] == false
+        }
+        _ => false,
+    }
+}
+
+fn signing_address(value: &Value) -> bool {
+    value.as_str().is_some_and(|s| {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+fn lower_hex(value: &Value, bytes: usize) -> bool {
+    value.as_str().is_some_and(|s| {
+        s.len() == bytes * 2
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
+fn valid_tdx_material(claims: &Value) -> bool {
+    let report = &claims["tdx_report"];
+    let extra_fields: &[(&str, usize)] = match report["report_format"].as_str() {
+        Some("td10") => &[],
+        Some("td15") => &[("tee_tcb_svn2", 16), ("mr_service_td", 48)],
+        _ => return false,
+    };
+    let fields = [
+        ("tee_tcb_svn", 16),
+        ("mr_seam", 48),
+        ("mr_signer_seam", 48),
+        ("seam_attributes", 8),
+        ("td_attributes", 8),
+        ("xfam", 8),
+        ("mr_td", 48),
+        ("mr_config_id", 48),
+        ("mr_owner", 48),
+        ("mr_owner_config", 48),
+        ("rt_mr0", 48),
+        ("rt_mr1", 48),
+        ("rt_mr2", 48),
+        ("rt_mr3", 48),
+    ];
+    // Exact shape prevents unsupported report additions from sharing this version.
+    if !report
+        .as_object()
+        .is_some_and(|m| m.len() == 1 + fields.len() + extra_fields.len())
+        || !fields
+            .iter()
+            .chain(extra_fields)
+            .all(|(key, len)| lower_hex(&report[key], *len))
+    {
+        return false;
+    }
+    crate::aci::digest::jcs_bytes(report).is_ok_and(|bytes| {
+        claims["tdx_report_sha256"].as_str()
+            == Some(crate::aci::digest::sha256_hex(&bytes).as_str())
+    })
+}
+
+fn valid_tinfoil_measurement(value: &Value) -> bool {
+    let count = match value["type"].as_str() {
+        Some("https://tinfoil.sh/predicate/sev-snp-guest/v2") => 1,
+        Some("https://tinfoil.sh/predicate/tdx-guest/v2") => 5,
+        Some("https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1") => 3,
+        _ => return false,
+    };
+    value.as_object().is_some_and(|m| m.len() == 2)
+        && value["registers"].as_array().is_some_and(|registers| {
+            registers.len() == count && registers.iter().all(|r| lower_hex(r, 48))
+        })
 }
 
 /// The instance a binding attests (a Chutes instance id or a 0G provider
@@ -88,18 +314,19 @@ pub(super) fn per_instance_session_claims(
 }
 
 /// One instance's slice of the Chutes `provider_claims` — that instance's own
-/// attestation facts, so its session binds its CPU and GPU evidence while staying
+/// attestation facts, so its session retains CPU material and GPU outcomes while staying
 /// stable under fleet churn. Everything fleet-shaped is dropped (the lists, the
 /// per-instance maps, and the *fleet-aggregate* GPU scalars — `all`/`any` over
 /// instances). What is kept is per-instance and nonce-free: the matched CPU
-/// measurement profile, this instance's TCB status, and this instance's GPU
-/// verification outcome (verified / arch). The raw nonce-bound quotes stay out.
+/// measurements and profile, this instance's TCB/advisories, and this instance's
+/// supplemental GPU outcome. The raw nonce-bound quotes stay out.
 fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Value {
     let mut pc = serde_json::Map::new();
     let Some(Value::Object(map)) = full else {
         return Value::Object(pc);
     };
     for key in [
+        "session_material_version",
         "trust_boundary",
         "evidence_scope",
         "chute_id",
@@ -132,6 +359,18 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
     {
         pc.extend(instance.clone());
     }
+    for (map_key, slice_key) in [
+        ("instance_tdx_reports", "tdx_report"),
+        ("instance_tdx_report_sha256", "tdx_report_sha256"),
+        ("instance_advisory_ids", "advisory_ids"),
+    ] {
+        if let Some(value) = map
+            .get(map_key)
+            .and_then(|instances| instances.get(instance_id))
+        {
+            pc.insert(slice_key.to_string(), value.clone());
+        }
+    }
     // This instance's own GPU outcome (NOT the fleet aggregate), lifted to the
     // top of the slice so `gpu_attested` reflects this instance and the slice
     // stays stable when a sibling instance's GPU does not.
@@ -139,7 +378,12 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
         .get("instance_gpu")
         .and_then(|instances| instances.get(instance_id))
     {
-        for key in ["gpu_verified", "gpu_arch", "gpu_evidence_present"] {
+        for key in [
+            "gpu_verified",
+            "gpu_arch",
+            "gpu_evidence_present",
+            "gpu_evidence_nonce_matched",
+        ] {
             if let Some(value) = gpu.get(key) {
                 pc.insert(key.to_string(), value.clone());
             }
@@ -328,13 +572,10 @@ pub(super) fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
-/// GPU attestation from the provider's NVIDIA confidential-computing evidence.
-/// When `gpu_verified` is set, the GPU's own attestation report was
-/// cryptographically verified and nonce-bound to this verification round, so we
-/// **assert** it — but as `VerifierDerived`, not `HardwareProven`: it attests a
-/// genuine CC GPU, not (on its own) that this GPU is bound to the CPU TEE that
-/// served the request. Absent GPU evidence (or a provider that doesn't supply
-/// it) leaves the claim Unknown — we never assert it by policy.
+/// Supplemental GPU check outcome, recorded as verifier-derived metadata. The
+/// current NVIDIA paths decode JWTs without signature verification and do not
+/// bind GPU identity to the serving CPU. This claim establishes no authenticated
+/// device identity or continued use of a particular GPU.
 pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
     let claims = event.provider_claims.as_ref();
     let verified = claims
@@ -347,17 +588,17 @@ pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
                 .and_then(Value::as_str);
             let reason = match arch {
                 Some(arch) => format!(
-                    "NVIDIA confidential-computing GPU attestation verified and nonce-bound \
-                     (arch {arch}); attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                    "Supplemental NVIDIA GPU check accepted and nonce-matched \
+                     (arch {arch}); does not authenticate GPU identity or bind it to the serving CPU TEE"
                 ),
-                None => "NVIDIA confidential-computing GPU attestation verified and nonce-bound; \
-                         attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                None => "Supplemental NVIDIA GPU check accepted and nonce-matched; \
+                         does not authenticate GPU identity or bind it to the serving CPU TEE"
                     .to_string(),
             };
             Claim::asserted(ClaimSource::VerifierDerived, reason)
         }
         // `false` is ambiguous (no evidence vs. a swallowed verify error), so we
-        // do not refute — only assert on a genuine, nonce-bound verification.
+        // do not refute — only record an accepted, nonce-matched outcome.
         _ => Claim::unknown(),
     }
 }
@@ -483,6 +724,162 @@ mod claim_mapping_tests {
             }],
             provider_claims,
             ..Default::default()
+        }
+    }
+
+    fn profiles() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/session_material.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_complete_matching_reviewed_profiles_are_eligible() {
+        for (provider, claims) in profiles().as_object().unwrap() {
+            let id = match provider.as_str() {
+                "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
+                "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+                _ => format!("private-ai-verifier/{provider}/v1"),
+            };
+            assert!(
+                super::reviewed_session_material(Some(provider), &id, claims),
+                "{provider}"
+            );
+            assert!(!super::reviewed_session_material(
+                Some(provider),
+                "custom/v1",
+                claims
+            ));
+            for key in claims.as_object().unwrap().keys() {
+                let mut malformed = claims.clone();
+                malformed[key] = json!({"invalid": true});
+                assert!(
+                    !super::reviewed_session_material(Some(provider), &id, &malformed),
+                    "{provider}: malformed {key}"
+                );
+                let mut incomplete = claims.clone();
+                incomplete.as_object_mut().unwrap().remove(key);
+                assert!(
+                    !super::reviewed_session_material(Some(provider), &id, &incomplete),
+                    "{provider}: missing {key}"
+                );
+            }
+            let mut unknown = claims.clone();
+            unknown["session_material_version"] = json!(format!("{provider}/2"));
+            assert!(!super::reviewed_session_material(
+                Some(provider),
+                &id,
+                &unknown
+            ));
+            for wrong in ["armet-ai", "secret-ai", "custom"] {
+                assert!(!super::reviewed_session_material(Some(wrong), &id, claims));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_tdx_projections_and_digests_cannot_enable_reuse() {
+        let base = profiles()["near-ai"].clone();
+        let id = "private-ai-verifier/near-ai-gateway/v1";
+        for key in base["tdx_report"].as_object().unwrap().keys() {
+            let mut changed = base.clone();
+            changed["tdx_report"][key] = json!("bad");
+            // Recompute so field validation, not just digest mismatch, is tested.
+            changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+            ));
+            assert!(
+                !super::reviewed_session_material(Some("near-ai"), id, &changed),
+                "{key}"
+            );
+        }
+        let mut changed = base.clone();
+        changed["tdx_report_sha256"] = json!(format!("sha256:{}", "00".repeat(32)));
+        assert!(!super::reviewed_session_material(
+            Some("near-ai"),
+            id,
+            &changed
+        ));
+        changed = base.clone();
+        changed["tdx_report"]["report_format"] = json!("td15");
+        assert!(!super::reviewed_session_material(
+            Some("near-ai"),
+            id,
+            &changed
+        ));
+        changed["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
+        changed["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
+        changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+            &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+        ));
+        assert!(super::reviewed_session_material(
+            Some("near-ai"),
+            id,
+            &changed
+        ));
+        for key in ["tee_tcb_svn2", "mr_service_td"] {
+            let mut malformed = changed.clone();
+            malformed["tdx_report"][key] = json!("zz");
+            assert!(!super::reviewed_session_material(
+                Some("near-ai"),
+                id,
+                &malformed
+            ));
+        }
+    }
+
+    #[test]
+    fn chutes_slice_keeps_own_security_state_and_ignores_sibling_churn() {
+        let own = profiles()["chutes"].clone();
+        let mut full = json!({
+            "session_material_version": "chutes/1", "trust_boundary": "model_instance",
+            "evidence_scope": "model_instance", "chute_id": "chute", "canonical_model_id": "model",
+            "instance_measurements": {"instance-a": own["measurement"]},
+            "instance_tcb_statuses": {"instance-a": own["tcb_status"]},
+            "instance_tdx_reports": {"instance-a": own["tdx_report"]},
+            "instance_tdx_report_sha256": {"instance-a": own["tdx_report_sha256"]},
+            "instance_advisory_ids": {"instance-a": own["advisory_ids"]},
+            "instance_gpu": {"instance-a": {
+                "gpu_verified": false, "gpu_arch": null, "gpu_evidence_present": false,
+                "gpu_evidence_nonce_matched": null,
+            }},
+        });
+        let slice = super::per_instance_provider_claims(Some(&full), "instance-a");
+        assert_eq!(slice, own);
+        full["instance_tdx_reports"]["sibling"] = json!({"mr_td": "changed"});
+        full["instance_gpu"]["sibling"] = json!({"gpu_verified": true});
+        full["failed_instance_ids"] = json!(["sibling"]);
+        full["nonce_expires_in"] = json!(10);
+        assert_eq!(
+            slice,
+            super::per_instance_provider_claims(Some(&full), "instance-a")
+        );
+        for (map, key, changed) in [
+            ("instance_tcb_statuses", None, json!("OutOfDate")),
+            (
+                "instance_tdx_reports",
+                Some("mr_td"),
+                json!("ff".repeat(48)),
+            ),
+            ("instance_gpu", Some("gpu_verified"), json!(true)),
+            (
+                "instance_gpu",
+                Some("gpu_evidence_nonce_matched"),
+                json!(false),
+            ),
+            ("instance_advisory_ids", None, json!(["SA-C"])),
+        ] {
+            let mut updated = full.clone();
+            match key {
+                Some(key) => updated[map]["instance-a"][key] = changed,
+                None => updated[map]["instance-a"] = changed,
+            }
+            assert_ne!(
+                slice,
+                super::per_instance_provider_claims(Some(&updated), "instance-a"),
+                "{map}/{key:?}"
+            );
         }
     }
 
