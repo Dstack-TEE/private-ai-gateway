@@ -24,9 +24,9 @@ These dated reviews cover proposed integrations. Implementation and admission
 status are recorded in each review.
 
 - [0G Private Computer](0g-private-computer/review.md): draft admission review
-  and integration proposal, 2026-10-14. Strict admission is blocked on provider
-  application-policy enforcement and verifiable per-model sealing; GPU and
-  live-inference acceptance remain open.
+  and integration proposal, 2026-10-14, updated 2026-10-16. Strict admission is
+  blocked on provider application-policy enforcement and verifiable per-model
+  sealing; GPU and live-inference acceptance remain open.
 
 ## What `verified` means
 
