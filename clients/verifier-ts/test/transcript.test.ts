@@ -285,3 +285,49 @@ test('receipt transcript: an aggregator receipt recording a failed upstream fail
   });
   assert.equal(lenient.lines.find((l) => l.id === 'upstream-1')?.status, 'info');
 });
+
+test('aggregator audit uses admission time after expiry and excludes expiry itself', async () => {
+  const { computeSessionId } = await import('../src/index.js');
+  const verification = await verifyReportBinding(report, FIXTURE_NONCE, { now: FIXED_NOW });
+  const keyset = verification.keyset as WorkloadKeyset;
+  const digest = verification.workloadKeysetDigest as string;
+  const evidence = new TextEncoder().encode('establishing evidence');
+  const session = {
+    api_version: 'aci/1', upstream_name: 'upstream', verifier_id: 'test/1',
+    established_at: FIXED_NOW - 10, expires_at: FIXED_NOW - 1,
+    channel_binding: [], claims: {},
+    evidence: { digest: await hashBody(evidence), data: `data:application/json;base64,${toBase64(evidence)}` },
+  };
+  const sessionId = await computeSessionId(session);
+  const privateKey = await globalThis.crypto.subtle.importKey(
+    'pkcs8', fromHex('302e020100300506032b657004220420' + RECEIPT_SEED) as BufferSource,
+    { name: 'Ed25519' }, false, ['sign'],
+  );
+  // The stream has completed and the session is already expired when audited.
+  // Only the forwarding decision represented by served_at controls acceptance.
+  for (const servedAt of [session.expires_at - 1, session.expires_at]) {
+    const unsigned = {
+      api_version: 'aci/1', receipt_id: 'rcpt-admission', chat_id: null, model: 'demo-model',
+      workload_keyset_digest: digest, endpoint: '/v1/chat/completions', method: 'POST',
+      served_at: servedAt,
+      event_log: [
+        { type: 'request.received', body_hash: 'sha256:' + '00'.repeat(32) },
+        { type: 'request.forwarded', body_hash: 'sha256:' + '00'.repeat(32) },
+        { type: 'upstream.verified', result: 'verified', required: true, session_id: sessionId },
+        { type: 'response.returned', body_hash: 'sha256:' + '11'.repeat(32) },
+      ],
+      key_id: RECEIPT_KEY_ID,
+    };
+    const signature = toHex(new Uint8Array(await globalThis.crypto.subtle.sign(
+      { name: 'Ed25519' }, privateKey, jcsBytes(unsigned) as BufferSource,
+    )));
+    const document = { ...unsigned, signature } as unknown as ReceiptEnvelope;
+    const result = await receiptTranscript(document, keyset, digest, undefined, undefined, {
+      serving: 'aggregator', requiresVerified: true, session, pinnedSessions: [sessionId],
+    });
+    assert.equal(result.lines.find((line) => line.id === 'receipt-1')?.status, 'pass');
+    assert.equal(result.lines.find((line) => line.id === 'upstream-2')?.status,
+      servedAt < session.expires_at ? 'pass' : 'fail');
+    assert.equal(result.verdict.verified, servedAt < session.expires_at);
+  }
+});

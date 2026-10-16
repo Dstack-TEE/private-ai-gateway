@@ -397,6 +397,8 @@ impl From<&ServiceError> for ErrorClass {
             | ServiceError::Keyset(_)
             | ServiceError::InvalidNonce(_)
             | ServiceError::Key(_)
+            | ServiceError::InvalidAttestedSessionTtl
+            | ServiceError::AdmissionInvariant(_)
             | ServiceError::SessionStore(_)
             | ServiceError::Metrics(_)
             | ServiceError::DownstreamTlsDomainMissing

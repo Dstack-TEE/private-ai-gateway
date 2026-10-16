@@ -603,6 +603,8 @@ service extracts it from a protected request. Events are flat objects — `type`
 plus type-specific fields — and event order is the array order. The first event
 MUST be `request.received`.
 
+For an aggregator receipt that records forwarding, `served_at` is the time of the forwarding decision for the attempt whose upstream response the receipt records. The service MUST admit that attempt against its current verification state before forwarding. Response completion and receipt publication may occur later, including after the cited session expires. For a refusal without forwarding, `served_at` is the time the refusal is recorded.
+
 ### 7.4 Event vocabulary
 
 All hashes are computed inside the TEE over bytes the workload actually
@@ -701,6 +703,8 @@ as the service still serves any receipt citing it (§7.1), and SHOULD
 remain available longer for receipts clients have archived. `expires_at`
 ends the validity period for new forwarding decisions, not the retention
 obligation.
+
+An admitted request MUST keep its cited session available while its response or receipt is pending. Publishing the receipt MUST retain that session through the receipt's retention deadline. Keeping a session available does not extend its validity for new forwarding decisions.
 
 ### 8.1 Endpoints
 
@@ -910,8 +914,8 @@ Behind an aggregator, additionally:
    `session_id`. A client that requires verified serving rejects
    `"failed"` and `required: false`.
 6. The cited session verifies (§9.2), ideally one you verified before
-   sending. The receipt's `served_at` falls within the session's validity
-   window. If you pinned sessions (§5.3), the cited id is in your list.
+   sending. The receipt's `served_at` MUST satisfy `established_at <= served_at < expires_at`. Response completion need not fall within that window.
+   If you pinned sessions (§5.3), the cited id is in your list.
    `served_at` is self-asserted (§11), so this catches an honest service
    citing an expired session. Against a dishonest one, the fail-closed
    rule (§1.2) rests on the attested code.

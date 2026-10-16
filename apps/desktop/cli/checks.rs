@@ -583,7 +583,7 @@ pub fn audit_session_record(
         record["expires_at"].as_u64(),
     );
     let in_window = match (at, window) {
-        (Some(at), (Some(from), Some(until))) => from <= at && at <= until,
+        (Some(at), (Some(from), Some(until))) => from <= at && at < until,
         _ => false,
     };
     let evidence = evidence_check(record.get("evidence"));
@@ -1250,6 +1250,27 @@ mod tests {
             },
         );
         assert_eq!(status_of(&t, "upstream-2"), Status::Fail);
+    }
+
+    #[test]
+    fn session_audit_uses_admission_time_and_excludes_the_expiry_boundary() {
+        let bytes = vector_session_bytes();
+        let id = crate::aci::digest::sha256_bare_hex(&bytes);
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        let expires_at = record["expires_at"].as_u64().unwrap();
+        // Auditing after completion still evaluates the receipt's admission time.
+        let admitted = audit_session_record(&bytes, &id, Some(expires_at - 1)).unwrap();
+        assert!(admitted.integrity_ok());
+        assert!(
+            !audit_session_record(&bytes, &id, Some(expires_at))
+                .unwrap()
+                .in_window
+        );
+        assert!(
+            !audit_session_record(&bytes, &id, Some(expires_at + 1))
+                .unwrap()
+                .in_window
+        );
     }
 
     #[test]
