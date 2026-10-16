@@ -134,6 +134,16 @@ export async function verifyComposeMeasurement(
 
   // The event log must replay to the RTMR3 the raw quote states (v4 TDX offset).
   const replayed = await replayRtmr3(events);
+  if (replayed === null) {
+    const detail = 'dstack runtime event digest does not match event and payload';
+    return {
+      ok: false,
+      checks: [
+        { name: 'rtmr3', ok: false, detail },
+        { name: 'compose_hash', ok: false, detail },
+      ],
+    };
+  }
   const stated = fromHex(quote).slice(TDX_RTMR3_OFFSET, TDX_RTMR3_OFFSET + 48);
   const rtmrOk = stated.length === 48 && replayed.every((b, i) => b === stated[i]);
 
@@ -187,18 +197,19 @@ function parseDstackEventLog(eventLog: string): DstackEvent[] {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       throw new AciFormatError('invalid dstack event_log entry');
     }
-    if (Object.hasOwn(value, 'version')) {
-      throw new AciFormatError(
-        'unsupported dstack event log version: only v1 (version absent) is supported',
-      );
-    }
     const {
+      version,
       imr,
       event_type: eventType,
       digest,
       event,
       event_payload: payload,
     } = value as Record<string, unknown>;
+    if (Object.hasOwn(value, 'version') && version !== 1) {
+      throw new AciFormatError(
+        'unsupported dstack event log version: expected version absent or numeric 1 (v1)',
+      );
+    }
     if (
       typeof imr !== 'number' ||
       !Number.isInteger(imr) ||
@@ -230,8 +241,9 @@ function eventBytes(hex: string): Uint8Array {
 /** Replay the dstack event log's `imr==3` events to RTMR3 (SHA-384 chain over
  *  each digest, zero-padded to 48 bytes). Runtime events use the v1 preimage
  *  defined by dstack/cc-eventlog/src/runtime_events.rs; other event types
- *  retain their stored digest, matching the Rust verifier. */
-async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array> {
+ *  retain their stored digest, matching the Rust verifier. Returns null when
+ *  a runtime event's stored digest does not match its recomputed digest. */
+async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array | null> {
   let mr: Uint8Array = new Uint8Array(48);
   for (const e of events) {
     if (e.imr !== 3) continue;
@@ -247,7 +259,7 @@ async function replayRtmr3(events: DstackEvent[]): Promise<Uint8Array> {
       preimage.set(payload, 6 + name.length);
       const recomputed = await sha384(preimage);
       if (digest.length !== recomputed.length || !digest.every((b, i) => b === recomputed[i])) {
-        throw new AciFormatError('dstack runtime event digest does not match event and payload');
+        return null;
       }
       digest = recomputed;
     }

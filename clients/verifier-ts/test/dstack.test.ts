@@ -115,6 +115,19 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
   }
   assert.equal(unchanged.composeHash, composeEvent(events(recorded.report)).event_payload);
 
+  await t.test('explicit numeric version 1 is equivalent to an absent version', async () => {
+    const report = structuredClone(recorded.report);
+    const log = events(report);
+    for (const event of log) event.version = 1;
+    evidence(report).event_log = JSON.stringify(log);
+    const result = await reportTranscript(report, recorded.nonce, options);
+    for (const id of ['id-1', 'id-2', 'id-3', 'id-4']) {
+      const line = result.lines.find((l) => l.id === id);
+      assert.equal(line?.status, 'pass', JSON.stringify(line));
+    }
+    assert.equal(result.composeHash, unchanged.composeHash);
+  });
+
   const cases: { name: string; mutate: (ev: Evidence, log: Event[]) => void; reason: RegExp }[] = [
     {
       name: 'changed app-compose',
@@ -174,16 +187,16 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
         assert.ok(boot);
         boot.version = 99;
       },
-      reason: /only v1 \(version absent\) is supported/,
+      reason: /expected version absent or numeric 1 \(v1\)/,
     },
   ];
-  for (const version of [1, 2, 99, '2', null]) {
+  for (const version of [2, 99, '1', '2', null]) {
     cases.push({
       name: `explicit event version ${JSON.stringify(version)}`,
       mutate: (_ev, log) => {
         composeEvent(log).version = version;
       },
-      reason: /only v1 \(version absent\) is supported/,
+      reason: /expected version absent or numeric 1 \(v1\)/,
     });
   }
   for (const { name, mutate, reason } of cases) {
@@ -201,6 +214,21 @@ test('recorded vendor-valid v1 quote binds the displayed compose to RTMR3', asyn
       assert.equal(result.composeHash, undefined);
     });
   }
+});
+
+test('runtime digest mismatches return failed measurements without throwing', async () => {
+  const { report } = await makeMeasuredComposeReport();
+  const log = events(report);
+  composeEvent(log).digest = '00'.repeat(48);
+  evidence(report).event_log = JSON.stringify(log);
+  const result = await verifyComposeMeasurement(report);
+  assert.equal(result.ok, false);
+  assert.equal(result.composeHash, undefined);
+  assert.deepEqual(result.checks.map((c) => [c.name, c.ok]), [
+    ['rtmr3', false],
+    ['compose_hash', false],
+  ]);
+  assert.match(result.checks[0]?.detail ?? '', /digest does not match/);
 });
 
 test('duplicate pre-system-ready compose events fail even when RTMR3 matches', async () => {
