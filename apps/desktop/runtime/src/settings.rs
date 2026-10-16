@@ -498,25 +498,14 @@ pub(crate) fn write<T: Serialize>(
     Ok(())
 }
 
-const REMOVED_OS_POLICY_KEYS: &[&str] = &[
-    "require-production-os",
-    "require_production_os",
-    "requireProductionOs",
-];
-
 fn remove_removed_os_policy_keys(text: &str) -> Option<String> {
     let mut document: DocumentMut = text.parse().ok()?;
-    let remove = |table: &mut dyn TableLike| {
-        for key in REMOVED_OS_POLICY_KEYS {
-            table.remove(key);
-        }
-    };
     let root = document.as_table_mut();
-    remove(root);
+    root.remove("require-production-os");
     if let Some(profiles) = root.get_mut("profiles").and_then(Item::as_table_like_mut) {
         for (_, profile) in profiles.iter_mut() {
             if let Some(profile) = profile.as_table_like_mut() {
-                remove(profile);
+                profile.remove("require-production-os");
             }
         }
     }

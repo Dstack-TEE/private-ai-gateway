@@ -432,7 +432,17 @@ pub fn parse_toml<T: DeserializeOwned>(
     let value = serde_ignored::deserialize(deserializer, |path| {
         let mut keys = Vec::new();
         key_path(&path, &mut keys);
-        unknown.push(keys);
+        // Ignore the removed OS policy at the root and in profile tables,
+        // without leaving a warning until the next settings write.
+        let removed_os_policy = file == CONFIG_FILE
+            && match keys.as_slice() {
+                [key] => key == "require-production-os",
+                [section, _, key] => section == "profiles" && key == "require-production-os",
+                _ => false,
+            };
+        if !removed_os_policy {
+            unknown.push(keys);
+        }
     })
     .map_err(located)?;
     let unknown = unknown
@@ -867,8 +877,7 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
         for required in [true, false] {
             let parsed = parse(&format!("require-production-os = {required}\n")).unwrap();
             assert_eq!(parsed.value, Config::default());
-            assert_eq!(parsed.unknown.len(), 1);
-            assert!(parsed.unknown[0].contains("require-production-os: unknown key, ignored"));
+            assert!(parsed.unknown.is_empty(), "{:?}", parsed.unknown);
             assert!(!toml_edit::ser::to_string(&parsed.value)
                 .unwrap()
                 .contains("require-production-os"));

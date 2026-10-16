@@ -165,6 +165,9 @@ applies. This is Cargo's "unused config key" warning, collected the same way
 (with `serde_ignored`), and matches Alacritty and VS Code, which also warn about
 unknown settings instead of rejecting the file.
 
+The removed `require-production-os` key, at the top level or in a profile,
+is silently ignored and dropped on the next settings write.
+
 An edit that does not parse or validate is not applied: the previous settings
 stay in effect, and the error, with file, line and column
 (`config.toml:3:8: invalid type: string "x", expected u16`), is shown in

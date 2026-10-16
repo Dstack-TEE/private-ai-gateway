@@ -84,7 +84,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
           </div>
         ))}
       </div>
-      <p className="mt-3 mb-4.5 text-xs text-muted-foreground">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. Clients do not appraise the OS image; production runs only production dstack images.</p>
+      <p className="mt-3 mb-4.5 text-xs text-muted-foreground">{passed("id-5") ? "Key custody evidence passed." : "Key custody is not independently established by these checks."} Responses are forwarded immediately; receipts are audited afterward and cannot retract delivered content. This summary does not verify upstream inference or answer accuracy. This app does not check whether the gateway uses a production or development dstack OS image. Development images allow operator access. For OS assurance, use an independent dstack verifier.</p>
       {identity && (
         <section className="mt-6" aria-labelledby="verified-identity-title">
           <SectionHeading id="verified-identity-title" title={verified ? "Current service identity" : "Last reported identity"} summary={`${checkCount(checks)} checks passed`} />

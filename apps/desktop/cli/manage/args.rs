@@ -282,10 +282,10 @@ pub enum Profiles {
         #[arg(long)]
         key_stdin: bool,
         /// Deprecated compatibility flag; clients no longer check the gateway OS image.
-        #[arg(long, hide = true, conflicts_with = "require_production_os")]
+        #[arg(long, hide = true)]
         allow_development_os: bool,
         /// Deprecated compatibility flag; clients no longer check the gateway OS image.
-        #[arg(long, hide = true, conflicts_with = "allow_development_os")]
+        #[arg(long, hide = true)]
         require_production_os: bool,
     },
     /// Make a saved profile active.

@@ -530,6 +530,23 @@ private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
 {"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
 
 "#]]);
+    fails(
+        1,
+        &[
+            "profiles",
+            "edit",
+            "work",
+            "--allow-development-os",
+            "--require-production-os",
+            "--json",
+        ],
+    )
+    .stderr_eq(str![[r#"
+warning: --allow-development-os is deprecated and has no effect; clients no longer check the gateway OS image.
+warning: --require-production-os is deprecated and has no effect; clients no longer check the gateway OS image.
+{"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
+
+"#]]);
     fails(1, &["token", "show"]).stderr_eq(str![[r#"
 private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
 

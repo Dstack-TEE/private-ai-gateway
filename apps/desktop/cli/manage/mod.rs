@@ -133,29 +133,29 @@ fn warn_deprecated_os_flags(action: &Action) {
             "warning: {flag} is deprecated and has no effect; clients no longer check the gateway OS image."
         );
     };
-    match action {
+    let (allow_development_os, require_production_os) = match action {
         Action::Profiles {
             command:
                 Profiles::Add {
-                    allow_development_os: true,
+                    allow_development_os,
                     ..
                 },
-        }
-        | Action::Profiles {
-            command:
-                Profiles::Edit {
-                    allow_development_os: true,
-                    ..
-                },
-        } => warning("--allow-development-os"),
+        } => (*allow_development_os, false),
         Action::Profiles {
             command:
                 Profiles::Edit {
-                    require_production_os: true,
+                    allow_development_os,
+                    require_production_os,
                     ..
                 },
-        } => warning("--require-production-os"),
-        _ => {}
+        } => (*allow_development_os, *require_production_os),
+        _ => return,
+    };
+    if allow_development_os {
+        warning("--allow-development-os");
+    }
+    if require_production_os {
+        warning("--require-production-os");
     }
 }
 
