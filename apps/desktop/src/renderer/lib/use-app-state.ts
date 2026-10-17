@@ -14,6 +14,20 @@ export function newerState(current: AppState | undefined, next: AppState): AppSt
     && current.sequence > next.sequence ? current : next;
 }
 
+/**
+ * Reads the state. An event or command result that arrives during the read
+ * may be newer than the reply, so the reply applies only through
+ * `newerState`; one from another backend replaced the backend the reply came
+ * from, and the events that follow it carry later changes.
+ */
+export async function readState(client: QueryClient, api: Pick<DesktopApi, "getState">): Promise<AppState> {
+  const before = client.getQueryData<AppState>(key);
+  const reply = await api.getState();
+  const current = client.getQueryData<AppState>(key);
+  if (current && current !== before && current.backendInstance !== reply.backendInstance) return current;
+  return newerState(current, reply);
+}
+
 /** Resolves once protection is not verifying; saving a profile waits for it. */
 export function afterVerification(client: QueryClient): Promise<void> {
   return new Promise((resolve) => {
@@ -33,7 +47,7 @@ export function useAppState(api: DesktopApi) {
   const client = useQueryClient();
   const query = useQuery({
     queryKey: key,
-    queryFn: async () => newerState(client.getQueryData(key), await api.getState()),
+    queryFn: () => readState(client, api),
     retry: false,
   });
   const setState = useSetAppState();
