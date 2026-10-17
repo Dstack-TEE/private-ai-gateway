@@ -1,8 +1,9 @@
 use super::ServiceError;
 use crate::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 
-/// Default keyset lifetime: launch time + 30 days (§3.4 bounded lifetime).
-/// The launcher computes `keyset_not_after` from this unless configured.
+/// Default keyset lifetime: seal time + 30 days (§3.4 bounded lifetime).
+/// The launcher computes `keyset_not_after` from this unless configured and
+/// renews the keyset with the same lifetime at half-life.
 pub const DEFAULT_KEYSET_NOT_AFTER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 /// Validate source provenance before it is serialized in an attestation report.

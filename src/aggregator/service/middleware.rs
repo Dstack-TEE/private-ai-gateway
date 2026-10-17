@@ -160,6 +160,7 @@ pub(super) struct BufferedCommit {
 /// [`AciService::build_middleware_receipt_prefix`] reads by field name rather
 /// than ten positional arguments.
 pub(super) struct MiddlewareReceiptInputs<'a> {
+    pub keyset: &'a crate::aci::identity::SealedWorkloadKeyset,
     pub receipt_id: &'a str,
     pub chat_id: Option<String>,
     /// The user-requested model (received request's top-level `model`), recorded
@@ -181,6 +182,7 @@ impl AciService {
         inputs: MiddlewareReceiptInputs<'_>,
     ) -> Result<ReceiptBuilder, ServiceError> {
         let MiddlewareReceiptInputs {
+            keyset,
             receipt_id,
             chat_id,
             model,
@@ -197,7 +199,7 @@ impl AciService {
             receipt_id.to_string(),
             chat_id,
             model,
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -238,11 +240,13 @@ impl AciService {
 
         let receipt_id = generate_receipt_id();
         let served_at = self.clock.now_secs();
+        let keyset = self.current_keyset();
         let chat_id = extract_chat_id(&response.body);
         let sealed = self.record_attested_upstream_session(&recorded_event)?;
         let recorded = cite_served_session(&sealed, response.served_instance_id.as_deref());
         let session_id = recorded.clone();
         let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+            keyset: &keyset,
             receipt_id: &receipt_id,
             chat_id,
             model: user_model,
@@ -584,6 +588,7 @@ impl AciService {
                     let upstream_headers = upstream_response.headers;
                     let receipt_id = generate_receipt_id();
                     let served_at = self.clock.now_secs();
+                    let keyset = self.current_keyset();
                     let sealed = self.record_attested_upstream_session(&recorded_event)?;
                     let recorded = cite_served_session(
                         &sealed,
@@ -592,6 +597,7 @@ impl AciService {
                     let session_id = recorded.clone();
                     let builder =
                         self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+                            keyset: &keyset,
                             receipt_id: &receipt_id,
                             chat_id: None,
                             model: user_model.clone(),
@@ -606,6 +612,7 @@ impl AciService {
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
+                    let keyset_digest = builder.workload_keyset_digest().to_string();
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         builder,
@@ -619,6 +626,7 @@ impl AciService {
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
                             receipt_id: receipt_id.clone(),
+                            keyset_digest,
                             upstream_status: status,
                             upstream_headers,
                             body: Box::pin(body),

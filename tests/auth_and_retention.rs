@@ -328,7 +328,7 @@ async fn aci_headers_present_on_success_responses() {
     assert!(headers.get("x-aci-identity").is_none());
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 
@@ -347,7 +347,7 @@ async fn aci_headers_present_on_not_found_error() {
     assert_eq!(headers.get("x-aci-version").unwrap(), "aci/1");
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 
@@ -367,7 +367,7 @@ async fn aci_headers_present_on_bad_request_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 

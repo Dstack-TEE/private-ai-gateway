@@ -139,6 +139,7 @@ pub struct MiddlewareForwarded {
 
 pub struct MiddlewareStreamingForwarded {
     pub receipt_id: String,
+    pub keyset_digest: String,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub body: ServiceResponseStream,
@@ -306,6 +307,7 @@ pub struct StreamingForwardStream {
     /// receipt becomes queryable after the response stream finishes
     /// and the final hash is known.
     pub receipt_id: String,
+    pub keyset_digest: String,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub e2ee: Option<E2eeResponseInfo>,

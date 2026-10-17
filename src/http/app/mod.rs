@@ -275,8 +275,10 @@ async fn aci_headers_middleware(
         HeaderName::from_static("x-aci-version"),
         HeaderValue::from_static("aci/1"),
     );
-    if let Ok(v) = HeaderValue::from_str(state.service.workload_keyset_digest()) {
-        headers.insert(HeaderName::from_static("x-aci-keyset-digest"), v);
+    if !headers.contains_key("x-aci-keyset-digest") {
+        if let Ok(v) = HeaderValue::from_str(&state.service.workload_keyset_digest()) {
+            headers.insert(HeaderName::from_static("x-aci-keyset-digest"), v);
+        }
     }
     resp
 }
