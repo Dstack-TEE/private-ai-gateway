@@ -4,7 +4,7 @@
 //! SPKI-pinned connection capturing the exact wire bytes, then fetches
 //! and verifies the receipt (spec 9.3) and the session it cites (9.2).
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 use crate::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
 use desktop_core::sse::DataLines;
@@ -15,8 +15,8 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
-use crate::print_json;
 use crate::verify::{verify_service, ServiceVerification};
+use crate::{print_json, safe, safe_multiline, write_stdout};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
@@ -25,9 +25,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let verification =
         verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
     if !args.json {
-        println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human());
-        println!();
+        write_stdout(
+            format!(
+                "== service verification: {} ==\n{}\n",
+                safe(&verification.base_url),
+                verification.transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     if !verification.transcript.verified() {
         if args.json {
@@ -62,10 +67,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let request_body = chat_request(&args, &model, &prompt, stream)?;
 
     if !args.json {
-        println!("model:  {model}");
-        println!("prompt: {prompt}");
-        print!("reply:  ");
-        let _ = std::io::stdout().flush();
+        write_stdout(
+            format!(
+                "model:  {}\nprompt: {}\nreply:  ",
+                safe(&model),
+                safe(&prompt)
+            )
+            .as_bytes(),
+        )?;
     }
     let mut collector = SseTextCollector::new(stream && !args.json);
     let response = client
@@ -75,17 +84,18 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
             request_body.clone(),
             |chunk| {
                 if stream {
-                    collector.feed(chunk);
+                    collector.feed(chunk)?;
                 }
+                Ok(())
             },
         )
         .await?;
-    collector.finish();
+    collector.finish()?;
     if let Err(e) = response.error_for_status("chat completion") {
         // The `reply:  ` prefix was already printed (no newline); close the line
         // so the error does not glue onto it as if it were the reply.
         if !args.json {
-            println!();
+            write_stdout(b"\n")?;
         }
         return Err(e);
     }
@@ -97,10 +107,9 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     };
     if !args.json {
         if !stream {
-            print!("{response_text}");
+            write_stdout(safe(&response_text).as_bytes())?;
         }
-        println!();
-        println!();
+        write_stdout(b"\n\n")?;
     }
 
     let receipt_id = receipt_id(&response, args.allow_unverified && stream)?;
@@ -140,8 +149,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
         output["response_text"] = json!(response_text);
         print_json(&output)?;
     } else {
-        println!("== receipt verification: {receipt_id} ==");
-        print!("{}", transcript.render_human());
+        write_stdout(
+            format!(
+                "== receipt verification: {} ==\n{}",
+                safe(&receipt_id),
+                transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     Ok(if transcript.verified() { 0 } else { 1 })
 }
@@ -277,35 +292,112 @@ impl SseTextCollector {
         }
     }
 
-    fn feed(&mut self, chunk: &[u8]) {
-        let (text, echo) = (&mut self.text, self.echo);
-        self.lines
-            .push(chunk, |data| append_delta(text, echo, data));
+    fn feed(&mut self, chunk: &[u8]) -> Result<(), String> {
+        self.collect_with(Some(chunk), write_stdout)
     }
 
-    fn finish(&mut self) {
-        let (text, echo) = (&mut self.text, self.echo);
-        self.lines.finish(|data| append_delta(text, echo, data));
+    fn collect_with(
+        &mut self,
+        chunk: Option<&[u8]>,
+        mut output: impl FnMut(&[u8]) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let (text, echo) = (&mut self.text, &mut self.echo);
+        let mut result = Ok(());
+        let append = |data: &str| {
+            if result.is_ok() {
+                result = append_delta(text, echo, data, &mut output);
+            }
+        };
+        match chunk {
+            Some(chunk) => self.lines.push(chunk, append),
+            None => self.lines.finish(append),
+        }
+        result
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        self.collect_with(None, write_stdout)
     }
 }
 
 /// Appends an event's content delta; `[DONE]` and other events carry none.
-fn append_delta(text: &mut String, echo: bool, data: &str) {
+fn append_delta(
+    text: &mut String,
+    echo: &mut bool,
+    data: &str,
+    output: &mut impl FnMut(&[u8]) -> Result<bool, String>,
+) -> Result<(), String> {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
-        return;
+        return Ok(());
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if echo {
-            print!("{delta}");
-            let _ = std::io::stdout().flush();
+        if *echo {
+            *echo = output(safe_multiline(delta).as_bytes())?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{response_chat_id, SseTextCollector};
+
+    #[tokio::test]
+    async fn streamed_reply_surfaces_writer_errors_and_only_silences_closed_pipes() {
+        for final_newline in [false, true] {
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"hello\"}}}}]}}\n\n\
+                 data: {{\"choices\":[{{\"delta\":{{\"content\":\" world\"}}}}]}}{}",
+                if final_newline { "\n\n" } else { "" }
+            );
+            let app = axum::Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(move || {
+                    let body = body.clone();
+                    async move { body }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            for closed_pipe in [false, true] {
+                let mut collector = SseTextCollector::new(true);
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected output failure",
+                )
+                .to_string();
+                let mut writes = 0;
+                let mut output = |_: &[u8]| {
+                    writes += 1;
+                    if closed_pipe {
+                        Ok(false)
+                    } else if writes == 1 {
+                        Ok(true)
+                    } else {
+                        Err(error.clone())
+                    }
+                };
+                let result = crate::client::AciClient::new()
+                    .unwrap()
+                    .post_chat_captured(&base, None, b"{}".to_vec(), |chunk| {
+                        collector.collect_with(Some(chunk), &mut output)
+                    })
+                    .await
+                    .and_then(|_| collector.collect_with(None, &mut output));
+                assert_eq!(writes, if closed_pipe { 1 } else { 2 });
+                if closed_pipe {
+                    result.unwrap();
+                    assert_eq!(collector.text, "hello world");
+                } else {
+                    assert_eq!(result.unwrap_err(), error);
+                }
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+    }
 
     #[test]
     fn reads_the_response_id_from_json_or_the_first_event_carrying_one() {
@@ -326,17 +418,48 @@ mod tests {
     #[test]
     fn collects_deltas_across_chunk_boundaries() {
         let mut c = SseTextCollector::new(false);
-        c.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choi");
-        c.feed(b"ces\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n");
-        c.finish();
+        c.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choi")
+            .unwrap();
+        c.feed(b"ces\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n")
+            .unwrap();
+        c.finish().unwrap();
         assert_eq!(c.text, "Hello");
+    }
+
+    #[test]
+    fn split_escape_sequences_in_reply_deltas_are_inert_but_captured_exactly() {
+        let mut collector = SseTextCollector::new(true);
+        let mut rendered = Vec::new();
+        for delta in [
+            "hello\u{1b}[",
+            "31mred\u{1b}]8;;https://example.com",
+            "\u{7}link\r\u{202e}text\n\t",
+        ] {
+            let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
+            collector
+                .collect_with(Some(format!("data: {event}\n\n").as_bytes()), |bytes| {
+                    rendered.extend_from_slice(bytes);
+                    Ok(true)
+                })
+                .unwrap();
+        }
+        collector.finish().unwrap();
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "hello [31mred ]8;;https://example.com link  text\n\t"
+        );
+        assert_eq!(
+            collector.text,
+            "hello\u{1b}[31mred\u{1b}]8;;https://example.com\u{7}link\r\u{202e}text\n\t"
+        );
     }
 
     #[test]
     fn handles_no_space_data_prefix_and_crlf() {
         let mut c = SseTextCollector::new(false);
-        c.feed(b"data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n");
-        c.finish();
+        c.feed(b"data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n")
+            .unwrap();
+        c.finish().unwrap();
         assert_eq!(c.text, "hi");
     }
 }

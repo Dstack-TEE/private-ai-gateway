@@ -15,6 +15,9 @@ use std::{
 
 use crate::private_fs::create_private_dir;
 
+/// The wait for a just-released instance lock, needed on Windows.
+pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
+
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
     fs::OpenOptions::new()

@@ -36,6 +36,22 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
+Attestation, receipt, and session responses are size-bounded: 4 MiB for
+attestation documents, 16 MiB for session listings, 32 MiB for session records,
+and 64 KiB for receipts. Each attestation, session, and receipt response must
+arrive within 30 seconds, including headers and body. Session audits may take
+longer in total when there are many sessions; `send`'s session fetch uses the
+same per-response bound. Service verification also has a 30-second overall
+deadline; a timeout fails closed.
+
+Human-readable fields replace terminal controls, including line breaks and
+tabs, with spaces. Transcript explanations render each sanitized line behind a
+`|` gutter. Echoed streamed replies in `send` preserve line breaks and tabs.
+JSON output and captured body bytes are unchanged.
+
+When stdout's reader closes, output ends quietly. Other output failures make
+`send` fail; `serve` reports them on stderr and continues serving.
+
 Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
 to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
@@ -63,6 +79,9 @@ policy flags:
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
 
+A nonempty `--require-claim` policy always fails closed when no session can be
+audited, including direct services and unverified or missing-session receipts.
+
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
 must then end at an accepted root, anchored on the app-id that the verified
@@ -75,6 +94,12 @@ Clients do not check whether the gateway runs a production or development dstack
 OS image. A development image permits operator access to the gateway. Users who
 need assurance about the OS image should verify the quote, event log, and VM
 configuration with an independent dstack verifier.
+
+### Offline audit
+
+`pap audit` receipt-only options (`--request-body`, `--response-body`,
+`--session`, `--require-claim`, `--pin`, and `--require-verified`) require
+`--receipt`; using one without it is a usage error (exit 2).
 
 ### One pinned curl request
 
@@ -126,6 +151,9 @@ Anthropic-compatible client can use it as a local base URL.
 [Quickstart step 4](../../../docs/quickstart.md#4-use-it-as-a-local-endpoint)
 walks through it against a live service.
 
+A re-verification timeout keeps the previously trusted identity and releases
+queued requests to retry the normal failure path.
+
 Requests:
 
 - Every method and path is forwarded to the same path on the service over the
@@ -136,6 +164,12 @@ Requests:
 - Every JSON POST body gets `provider.aci_verified: true` (spec 5.3), so an
   aggregator refuses rather than serve the request through an unverified
   upstream. `--allow-unverified` drops this demand.
+- When verified serving or session pins are active, JSON request bodies must
+  have an object top level, and `provider` must be an object or `null`.
+  `provider: null` is treated like an absent provider and receives the local
+  constraints. If present, `provider.aci_session_ids` must be an array of
+  strings. Malformed JSON shapes are rejected locally with HTTP 400 before an
+  upstream call; non-JSON POST bodies pass through unchanged.
 - Session pinning is opt-in, in one of two ways that cannot be combined.
   - `--session <id>` (repeatable) defines a fixed accepted set. Each POST uses
     the intersection with its own pins, or this set when it has none, and a

@@ -9,7 +9,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::print_json;
+use crate::{print_json, safe, write_stdout};
 
 /// One entry in the fixed check vocabulary (id, spec citation, title).
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -206,7 +206,7 @@ impl Transcript {
             }
         }
         let skip_clause = if skipped > 0 {
-            format!(", {skipped} skipped: {}", reasons.join(", "))
+            format!(", {skipped} skipped: {}", safe(&reasons.join(", ")))
         } else {
             String::new()
         };
@@ -233,13 +233,15 @@ impl Transcript {
             ));
             if !check.detail.is_empty() {
                 out.push_str(" — ");
-                out.push_str(&check.detail);
+                out.push_str(&safe(&check.detail));
             }
             out.push('\n');
-            for line in check.explain.iter().flat_map(|explain| explain.lines()) {
-                out.push_str("        | ");
-                out.push_str(line);
-                out.push('\n');
+            if let Some(explain) = &check.explain {
+                for line in explain.lines() {
+                    out.push_str("        | ");
+                    out.push_str(&safe(line));
+                    out.push('\n');
+                }
             }
         }
         out.push_str(&self.verdict_line());
@@ -253,7 +255,7 @@ impl Transcript {
         if json {
             print_json(&self.to_json())?;
         } else {
-            print!("{}", self.render_human());
+            write_stdout(self.render_human().as_bytes())?;
         }
         Ok(if self.verified() { 0 } else { 1 })
     }
@@ -315,6 +317,30 @@ mod tests {
             t.verdict_line(),
             "PARTIAL — hardware root not verified (1 pass, 2 skipped: quote collateral offline, no custody policy configured)"
         );
+    }
+
+    #[test]
+    fn human_transcript_sanitizes_server_detail_without_changing_json() {
+        let mut transcript = Transcript::default();
+        transcript.fail(ID_2, "bad\u{1b}[31m\u{202e}text\n[PASS] forged\tfield");
+        transcript.explain("source\n[PASS] forged\texplanation");
+        let json = transcript.to_json();
+        assert_eq!(
+            json["checks"][0]["detail"],
+            "bad\u{1b}[31m\u{202e}text\n[PASS] forged\tfield"
+        );
+        assert_eq!(
+            json["checks"][0]["explain"],
+            "source\n[PASS] forged\texplanation"
+        );
+        let human = transcript.render_human();
+        assert!(!human.contains('\u{1b}'));
+        assert!(!human.contains('\u{202e}'));
+        let lines: Vec<_> = human.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("text [PASS] forged field"));
+        assert_eq!(lines[1], "        | source");
+        assert_eq!(lines[2], "        | [PASS] forged explanation");
     }
 
     #[test]

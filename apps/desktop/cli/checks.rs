@@ -692,7 +692,12 @@ fn check_session_audit(
         // §8 retention: a cited session must stay resolvable for as long as
         // the receipt citing it. A client demanding verified serving cannot
         // accept "the record was there, trust us".
-        if requires_verified && session_id_from_receipt(payload).is_some() {
+        if !required_claims.is_empty() {
+            transcript.fail(
+                UPSTREAM_2,
+                format!("required claims cannot be checked: {no_session_reason} (spec 9.2(3))"),
+            );
+        } else if requires_verified && session_id_from_receipt(payload).is_some() {
             transcript.fail(
                 UPSTREAM_2,
                 format!(
@@ -1372,5 +1377,45 @@ mod tests {
         );
         assert_eq!(status_of(&t, "upstream-1"), Status::Fail);
         assert_eq!(status_of(&t, "upstream-2"), Status::Skip);
+    }
+
+    #[test]
+    fn required_claims_fail_without_an_auditable_session() {
+        let receipt = parse_receipt_document(vector_receipt_envelope()).unwrap();
+        let required = [RequiredClaim::parse("tee_attested").unwrap()];
+        for serving in ["aggregator", "direct"] {
+            let mut t = Transcript::default();
+            run_upstream_checks(
+                &mut t,
+                &receipt,
+                UpstreamContext {
+                    session_bytes: None,
+                    no_session_reason: "no session record",
+                    pinned: None,
+                    requires_verified: serving != "direct",
+                    serving,
+                    required_claims: &required,
+                },
+            );
+            assert_eq!(status_of(&t, "upstream-2"), Status::Fail, "{serving}");
+        }
+
+        // An unverified receipt without a cited session cannot satisfy a
+        // claims policy either, even when verified serving was not demanded.
+        let payload = serde_json::json!({ "served_at": SERVED_AT, "event_log": [] });
+        let mut t = Transcript::default();
+        run_upstream_checks(
+            &mut t,
+            &payload,
+            UpstreamContext {
+                session_bytes: None,
+                no_session_reason: "receipt has no verified session",
+                pinned: None,
+                requires_verified: false,
+                serving: "aggregator",
+                required_claims: &required,
+            },
+        );
+        assert_eq!(status_of(&t, "upstream-2"), Status::Fail);
     }
 }

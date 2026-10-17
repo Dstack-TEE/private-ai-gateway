@@ -3,7 +3,7 @@ mod manage;
 
 use clap::{Args, Parser, Subcommand};
 use desktop_core::client::CallError;
-use private_ai_proxy::{args::Command as Aci, audit, curl, send, serve, sessions, verify};
+use private_ai_proxy::{args::Command as Aci, audit, curl, safe, send, serve, sessions, verify};
 use std::{ffi::OsStr, io::IsTerminal, path::Path};
 
 #[derive(Parser)]
@@ -103,7 +103,7 @@ async fn main() {
         if json {
             eprintln!("{}", json_error(error));
         } else {
-            eprintln!("private-ai-proxy: {error}");
+            eprintln!("private-ai-proxy: {}", safe(&error.to_string()));
         }
         failure_code
     });
