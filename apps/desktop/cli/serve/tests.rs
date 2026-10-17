@@ -6,8 +6,8 @@ use super::*;
 use crate::checks::{parse_receipt_document, run_response_checks, UpstreamContext};
 use crate::client::host_of;
 use crate::spec_fixtures::{
-    vector_receipt_envelope, vector_report, vector_session_bytes, REQUEST_BODY, RESPONSE_BODY,
-    SERVED_AT,
+    vector_receipt_envelope, vector_report, vector_session_bytes, KEYSET_NOT_AFTER, REQUEST_BODY,
+    RESPONSE_BODY, SERVED_AT,
 };
 use crate::transcript::Transcript;
 use agent_bridge::proxy::ProxyEvent;
@@ -268,11 +268,9 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     rotation_gate(&state, &state.snapshot(), &headers);
     // A second response under the already-blocked identity reports nothing.
     rotation_gate(&state, &state.snapshot(), &headers);
-    assert!(previous.is_cancelled());
-    assert!(matches!(
-        received.recv().await.unwrap(),
-        VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed"
-    ));
+    assert!(!previous.is_cancelled());
+    assert!(state.is_blocked());
+    assert!(received.try_recv().is_err());
     let proxy = spawn_server(build_proxy_router(state)).await;
     let response = reqwest::Client::new()
         .get(format!("{proxy}/v1/models"))
@@ -326,9 +324,9 @@ async fn a_rotation_observed_under_a_replaced_identity_is_ignored() {
     headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
     rotation_gate(&state, &observed, &headers);
 
-    assert!(observed.delivery.is_cancelled());
+    assert!(!observed.delivery.is_cancelled());
+    assert!(state.is_blocked());
     assert!(blocked_codes(&mut events).is_empty());
-    assert_forwards_without_reverification(&state).await;
 }
 
 /// The expiry path: a request observes the old identity expired, another
@@ -341,7 +339,7 @@ async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_success
     let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(upstream, tx);
-    state.trusted.lock().unwrap().not_after = 0;
+    state.trusted.lock().unwrap().digests[0].not_after = 0;
     let expired = state.snapshot();
     adopt_fixture_identity(&state);
 
@@ -356,7 +354,7 @@ async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_success
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(expired.delivery.is_cancelled());
+    assert!(!expired.delivery.is_cancelled());
     assert_forwards_without_reverification(&state).await;
 }
 
@@ -1935,10 +1933,7 @@ async fn timed_out_reverification_releases_waiters_and_keeps_old_pins() {
         "attestation did not trickle"
     );
     assert_eq!(state.client.pinned_spkis(&state.host), stale);
-    assert_eq!(
-        state.snapshot().identity.keyset_digest,
-        observed.identity.keyset_digest
-    );
+    assert_eq!(state.snapshot().keyset_digest, observed.keyset_digest);
     assert!(state.is_blocked());
     assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
 }
@@ -1972,23 +1967,36 @@ async fn refused_while_another_heal_completes(
         .pin(&state.host, &[ROTATED_KEY.spki()])
         .unwrap();
     let mut report = vector_report();
-    let identity = crate::checks::established_identity(&report).unwrap();
     if identity_changed {
-        report.workload_keyset_digest = "rotated-keyset".to_string();
+        report.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+            json!("00".repeat(32));
     }
+    let identity = crate::checks::established_identity(&report).unwrap();
     state.adopt(report, identity);
     drop(heal);
 
     let resp = request.await.unwrap().unwrap();
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap();
-    assert!(admitted.is_cancelled());
+    assert!(admitted.is_cancelled() == identity_changed);
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
     (status, body, upstream, blocked_codes(&mut events))
 }
 
 /// When the heal kept the identity, the request is sent once more — under
 /// the current delivery token, since the one it was admitted with was
+/// When the heal kept the identity, the request is sent once more — under
+/// the current delivery token, since the one it was admitted with was
+/// revoked.
+#[tokio::test]
+async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("identity changed"), "{body}");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
+    assert!(blocked.is_empty());
+}
+
 /// revoked.
 #[tokio::test]
 async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
@@ -1996,17 +2004,6 @@ async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
     assert_eq!(status, 200);
     assert_eq!(body, "ok");
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
-    assert!(blocked.is_empty());
-}
-
-/// When the heal replaced the identity, the request admitted under the old
-/// one is refused as retryable, never silently re-sent under the new one.
-#[tokio::test]
-async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
-    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
-    assert_eq!(status, 503);
-    assert!(body.contains("identity changed"), "{body}");
-    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
     assert!(blocked.is_empty());
 }
 
@@ -2060,9 +2057,22 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
         }
         let _ = events.send(event);
     });
-    let mut headers = HeaderMap::new();
-    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
-    rotation_gate(&state, &state.snapshot(), &headers);
+    let mut report = vector_report();
+    report.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+        json!("00".repeat(32));
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state
+        .apply_verified_identity(ServiceVerification {
+            transcript: Transcript::default(),
+            report,
+            identity: Some(identity),
+            client: AciClient::new().unwrap(),
+            base_url: state.base_url.clone(),
+            host: state.host.clone(),
+            observed_spki: None,
+            tls_pins: vec!["c0".repeat(32)],
+        })
+        .unwrap();
 
     let proxy = spawn_server(build_proxy_router(state)).await;
     let client = reqwest::Client::new();
@@ -2085,14 +2095,11 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
     assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
 }
 
-/// Stale-pin heal against the live service: a bogus pin on the real host
-/// makes every forward's handshake fail closed, exactly as when the service
-/// rotates its attested TLS key. The proxy must re-verify (fresh nonce, full
-/// §9.1 checks incl. the DCAP quote) and re-pin — not wedge in 502 until
-/// restarted. The harness starts from a fixture identity, so the request
-/// that triggered the heal sees the identity change (retryable 503) and the
-/// next one goes through.
-/// Run from apps/desktop with: cargo test --package private-ai-proxy --lib -- --ignored stale_pin
+/// A normal rotation in managed mode: a response advertises a new keyset,
+/// the backend stops this verifier to rebuild the session, and requests
+/// arriving meanwhile are refused as retryable. None of them may report a
+/// verification failure: a `Blocked` without a code after `keyset_changed`
+/// would turn the rebuild into a hard block with no reconnect.
 #[tokio::test]
 #[ignore]
 async fn stale_pin_heals_against_live_service() {
@@ -2267,4 +2274,226 @@ async fn failed_upstream_requests_never_put_query_credentials_in_events() {
     let event = request_outcome_event(outcome).to_string();
     assert!(!event.contains("never-log-this"), "{event}");
     assert!(!event.contains("api_key"), "{event}");
+}
+
+fn renewed_fixture_report() -> AttestationReport {
+    let mut report = vector_report();
+    report.attestation.workload_keyset["not_after"] = json!(KEYSET_NOT_AFTER + 86_400);
+    report.workload_keyset_digest = crate::checks::established_identity(&report)
+        .expect("renewed fixture keyset parses")
+        .keyset_digest;
+    report
+}
+
+#[test]
+fn renewal_keeps_delivery_and_accepts_the_family_receipt() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let previous = state.snapshot();
+    let renewed = renewed_fixture_report();
+    let renewed_identity = crate::checks::established_identity(&renewed).unwrap();
+    state.adopt(renewed, renewed_identity);
+
+    assert!(!previous.delivery.is_cancelled());
+    assert!(!state.is_blocked());
+    let old_receipt = json!({
+        "workload_keyset_digest": previous.keyset_digest,
+        "served_at": SERVED_AT,
+    });
+    assert!(state.receipt_identity(&previous, &old_receipt).is_some());
+}
+
+#[tokio::test]
+async fn renewal_during_a_stream_keeps_delivery_and_emits_identity_renewed() {
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let upstream_resume = resume.clone();
+    let upstream = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let resume = upstream_resume.clone();
+            async move {
+                let body = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"first"));
+                    resume.notified().await;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"second"));
+                };
+                Response::new(Body::from_stream(body))
+            }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let mut state = state_over(base, tx);
+    let mut events = capture_events(&mut state);
+    let previous = state.snapshot();
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let mut response = reqwest::get(format!("{proxy}/v1/models")).await.unwrap();
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "first");
+
+    let report = renewed_fixture_report();
+    let renewed_digest = crate::checks::established_identity(&report)
+        .unwrap()
+        .keyset_digest;
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", renewed_digest.parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+    assert!(state.is_blocked());
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state.queue_verification(ServiceVerification {
+        transcript: Transcript::default(),
+        report,
+        identity: Some(identity),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec!["c0".repeat(32)],
+    });
+    // A new admission runs the pending single-flight re-verification while
+    // the first response is still open.
+    let admitted = reqwest::get(format!("{proxy}/v1/ping")).await.unwrap();
+    assert_eq!(admitted.status(), StatusCode::NOT_FOUND);
+    assert!(!previous.delivery.is_cancelled());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(VerifierEvent::IdentityRenewed { .. })
+    ));
+    assert!(events.try_recv().is_err());
+
+    resume.notify_one();
+    let mut body = b"first".to_vec();
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        body.extend_from_slice(&chunk);
+    }
+    assert_eq!(body, b"firstsecond");
+    state.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn expiry_reverification_adopts_a_renewal_without_leaving_pending_expired_digest() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    state.trusted.lock().unwrap().digests[0].not_after = SERVED_AT;
+
+    let report = renewed_fixture_report();
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state.queue_verification(ServiceVerification {
+        transcript: Transcript::default(),
+        report,
+        identity: Some(identity),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec!["c0".repeat(32)],
+    });
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    for _ in 0..2 {
+        let response = client
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert!(!state.is_blocked());
+    assert!(state.snapshot().pending.is_none());
+}
+
+#[tokio::test]
+async fn different_keys_cancel_delivery_and_report_rotation() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let mut state = state_over(upstream, tx);
+    let mut events = capture_events(&mut state);
+    let previous = state.snapshot();
+    let mut rotated = renewed_fixture_report();
+    rotated.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+        json!("00".repeat(32));
+    let rotated_digest = crate::checks::established_identity(&rotated)
+        .unwrap()
+        .keyset_digest;
+    let identity = crate::checks::established_identity(&rotated).unwrap();
+    state.queue_verification(ServiceVerification {
+        transcript: Transcript::default(),
+        report: rotated,
+        identity: Some(identity),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec!["c0".repeat(32)],
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", rotated_digest.parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let response = reqwest::get(format!("{proxy}/v1/models")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(previous.delivery.is_cancelled());
+    assert!(
+        matches!(events.try_recv(), Ok(VerifierEvent::Blocked { code: Some(code), .. }) if code == "keyset_changed")
+    );
+}
+
+#[tokio::test]
+async fn unknown_receipt_digest_reverifies_once_then_audit_fails() {
+    let mut receipt = vector_receipt_envelope();
+    receipt["workload_keyset_digest"] = json!("unknown");
+    let upstream = Router::new().route(
+        "/v1/aci/receipts/rcpt-0001",
+        get(move || {
+            let receipt = receipt.clone();
+            async move { json_response(StatusCode::OK, receipt) }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let report = vector_report();
+    state.queue_verification(ServiceVerification {
+        transcript: Transcript::default(),
+        report: report.clone(),
+        identity: Some(crate::checks::established_identity(&report).unwrap()),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec!["c0".repeat(32)],
+    });
+    let (outcomes, mut received) = mpsc::unbounded_channel();
+    let state = {
+        let mut state = state;
+        Arc::get_mut(&mut state).unwrap().reporter = Arc::new(move |outcome| {
+            let _ = outcomes.send(outcome);
+        });
+        state
+    };
+    let exchange = RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: false,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        at: SERVED_AT,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+    audit_exchange(state.clone(), state.snapshot(), exchange, None);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.verified, None);
+    assert!(outcome.detail.contains("re-verification did not establish"));
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert!(state.is_blocked());
 }

@@ -75,6 +75,11 @@ pub enum VerifierEvent {
     IdentityUpdated {
         identity: IdentityEvent,
     },
+    /// A same-family renewal updates the displayed identity without resetting
+    /// the verified session or its delivery gate.
+    IdentityRenewed {
+        identity: IdentityEvent,
+    },
     Blocked {
         code: Option<String>,
         reason: String,

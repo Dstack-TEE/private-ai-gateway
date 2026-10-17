@@ -259,11 +259,16 @@ Rules:
 - Entries whose `algo` is not recognized are ignored. Clients select
   keys by `algo`.
 
-Any keyset change — a rotated key, a changed subject, a new expiry —
-produces a new digest and a fresh attestation report binding it; a quote
-over the old digest cannot bind a fresh nonce. Historical receipts keep
-referencing the digest current when they were signed; whether to accept an
-archived keyset when re-checking old receipts is local policy.
+Changing any key or identity field produces a new identity and requires a
+fresh attestation report. A **renewal** changes only `not_after`, to a later
+time, while keeping the same keys, subject, source provenance, and measured
+workload. It has a new digest, but remains in the same renewal family. A
+quote over the old digest cannot bind a fresh nonce.
+
+Replicas can expose members of one renewal family with different expiry times.
+A fresh verification of any same-family keyset keeps continuity while that
+keyset is unexpired, even when its `not_after` is earlier than the previous
+member's.
 
 ### 3.2 Attestation binding
 
@@ -321,10 +326,10 @@ attested keyset. ACI defines no key sharing between replicas.
 
 ### 3.4 Expiry and deny-listing
 
-**Bounded lifetime.** Every keyset expires (`not_after`, §3.1), and an
-expired keyset stops producing acceptable reports on its own — no
-coordinated revocation. To replace keys ahead of expiry, the service
-publishes a new keyset and a fresh report (§3.1).
+**Bounded lifetime.** Every keyset expires (`not_after`, §3.1). A service may
+renew a keyset before expiry by publishing the same keys and identity with a
+later `not_after` and a fresh report. A real key rotation publishes a new
+keyset and report.
 
 **Relying-party deny-list.** To drop a compromised workload faster than
 expiry, a relying party deny-lists its stable identifiers (provenance,
@@ -457,10 +462,10 @@ after that early commit issues no receipt. Requests carrying §5.3
 constraints are never committed early, so constrained clients always
 see the header.
 
-Headers are unauthenticated hints. Only the attested keyset and the
-signed receipt bind anything. On a changed `X-ACI-Keyset-Digest`, the
-client SHOULD re-verify the attestation report before sending further
-sensitive data.
+Headers are unauthenticated hints. Only the attested keyset and the signed
+receipt bind anything. The header and receipt for one exchange carry the
+digest established for that exchange. A changed digest gates new sends until
+the client re-verifies; responses already in flight continue unaffected.
 
 ### 5.3 Serving constraints (aggregators)
 
@@ -808,10 +813,12 @@ anything sensitive:
   (check 4) names it.
 - From now on, talk to the service only through the keyset: TLS pinned to a
   listed SPKI, or content encrypted to a listed E2EE key under a separately
-  specified extension (§6), on every connection. Re-establish identity when
-  `not_after` passes, when the
-  served `X-ACI-Keyset-Digest` changes (§5.2), or when your policy
-  deny-lists the workload (§3.4).
+  specified extension (§6), on every connection. Before a new send, re-verify
+  through the same single-flight path when `not_after` has passed or the
+  served `X-ACI-Keyset-Digest` changes (§5.2). A renewing service changes its
+  digest well before expiry, so a client normally re-verifies during the
+  renewal rather than cutting an in-flight response. Also re-establish it when
+  your policy deny-lists the workload (§3.4).
 - Behind an aggregator, the session list (§8.1) shows which upstreams
   currently back a model. Verify the ones you would accept (§9.2) before
   you send, and pin them with `aci_session_ids` (§5.3).
@@ -854,7 +861,9 @@ Given an established keyset, plus a response and its receipt:
    names in the established keyset's `receipt_signing_keys`, with that
    entry's algorithm (§7.2).
 2. **Document.** The document's `api_version` is `aci/1` (Appendix B) and
-   its `workload_keyset_digest` equals the established digest.
+   its `workload_keyset_digest` equals a digest the client established in
+   §9.1 in the admitted identity's renewal family, with that keyset
+   unexpired at `served_at`. Verify the signature under that keyset.
 3. **Request.** `request.received.body_hash` matches the wire body for a
    plaintext request. For a protected request, follow the advertised transport
    extension's receipt-integration rules (§6, §7.4).

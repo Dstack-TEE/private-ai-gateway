@@ -104,24 +104,31 @@ pub struct RequestOutcome {
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
 
-/// The attested identity the proxy currently trusts. Replaced wholesale when a
-/// keyset rotation forces a fresh verify.
+/// The attested identity the proxy currently trusts. Digests are retained only
+/// for the currently verified renewal family.
 #[derive(Clone)]
 struct TrustedIdentity {
     report: Arc<AttestationReport>,
     keyset_digest: String,
-    /// The identity id-2 established on the verify that pinned this report.
-    identity: Arc<EstablishedIdentity>,
-    /// §3.4: forwarding on an expired keyset must stop, so expiry blocks
-    /// like a rotation and a fresh verify re-establishes trust.
-    not_after: u64,
+    /// Every digest established by a fresh-nonce verification in this family.
+    digests: Vec<EstablishedDigest>,
+    /// A response or receipt may request one re-verification. It is cleared
+    /// only when that verification establishes the requested digest.
+    pending: Option<String>,
     /// Delivery gate for this identity, read in the same snapshot as the
-    /// identity itself. Cancelled when the identity is blocked (a rotation,
-    /// expiry, or refused pin observed under it) or replaced, so a request
-    /// that passed the entry checks is refused rather than sent under a
-    /// decision made for an identity no longer trusted. The proxy is blocked
-    /// exactly while the current identity's gate is cancelled.
+    /// identity itself. Cancelled when a rotation or refused pin is observed
+    /// under it, or when it is replaced, so a request that passed the entry
+    /// checks is refused rather than sent under a decision made for an
+    /// identity no longer trusted.
     delivery: CancellationToken,
+}
+
+#[derive(Clone)]
+struct EstablishedDigest {
+    digest: String,
+    not_after: u64,
+    identity: Arc<EstablishedIdentity>,
+    report: Arc<AttestationReport>,
 }
 
 impl TrustedIdentity {
@@ -130,13 +137,52 @@ impl TrustedIdentity {
         identity: EstablishedIdentity,
         delivery: CancellationToken,
     ) -> Self {
-        Self {
-            keyset_digest: report.workload_keyset_digest.clone(),
-            report: Arc::new(report),
+        let report = Arc::new(report);
+        let identity = Arc::new(identity);
+        let digest = EstablishedDigest {
+            digest: report.workload_keyset_digest.clone(),
             not_after: identity.keyset.not_after,
-            identity: Arc::new(identity),
+            identity: identity.clone(),
+            report: report.clone(),
+        };
+        Self {
+            keyset_digest: digest.digest.clone(),
+            report,
+            digests: vec![digest],
+            pending: None,
             delivery,
         }
+    }
+
+    fn same_provenance_as(&self, other: &Self) -> bool {
+        self.report.attestation.tee_type == other.report.attestation.tee_type
+            && self.report.attestation.source_provenance
+                == other.report.attestation.source_provenance
+            && self.report.attestation.evidence.get("app_compose")
+                == other.report.attestation.evidence.get("app_compose")
+    }
+
+    fn same_renewal_family(&self, other: &Self) -> bool {
+        let mut current = self.report.attestation.workload_keyset.clone();
+        let mut previous = other.report.attestation.workload_keyset.clone();
+        let (Some(current), Some(previous)) = (current.as_object_mut(), previous.as_object_mut())
+        else {
+            return false;
+        };
+        current.remove("not_after");
+        previous.remove("not_after");
+        current == previous && self.same_provenance_as(other)
+    }
+
+    fn digest(&self, digest: &str, now: u64) -> Option<EstablishedDigest> {
+        self.digests
+            .iter()
+            .find(|entry| entry.digest == digest && now < entry.not_after)
+            .cloned()
+    }
+
+    fn prune(&mut self, now: u64) {
+        self.digests.retain(|entry| now < entry.not_after);
     }
 }
 
@@ -215,6 +261,8 @@ pub struct ProxyState {
     #[cfg(test)]
     pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     verify_timeout: std::time::Duration,
+    #[cfg(test)]
+    queued_verifications: Mutex<VecDeque<ServiceVerification>>,
     event_sink: VerifierEventSink,
 }
 
@@ -259,7 +307,17 @@ impl ProxyState {
             #[cfg(test)]
             pause: Mutex::new(None),
             verify_timeout: VERIFICATION_TIMEOUT,
+            #[cfg(test)]
+            queued_verifications: Mutex::new(VecDeque::new()),
         }
+    }
+
+    #[cfg(test)]
+    fn queue_verification(&self, verification: ServiceVerification) {
+        self.queued_verifications
+            .lock()
+            .expect("queued verifications poisoned")
+            .push_back(verification);
     }
 
     fn record(&self, exchange: RecordedExchange) {
@@ -270,13 +328,61 @@ impl ProxyState {
         recorded.push_back(exchange);
     }
 
-    /// Trust a freshly verified identity under a new delivery gate, closing
-    /// the previous identity's gate in the same critical section: under the
-    /// trusted lock, a gate still open is the current identity's.
+    /// Adopt a freshly verified identity. A renewal keeps the delivery gate
+    /// and the verified digests in its family; a real rotation replaces both.
     fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) {
-        let adopted = TrustedIdentity::new(report, identity, self.shutdown.child_token());
+        let mut adopted = TrustedIdentity::new(report, identity, self.shutdown.child_token());
         let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
-        std::mem::replace(&mut *trusted, adopted).delivery.cancel();
+        let continuity = adopted.same_renewal_family(&trusted);
+        if continuity && !trusted.delivery.is_cancelled() {
+            adopted.delivery = trusted.delivery.clone();
+            let additions: Vec<_> = trusted
+                .digests
+                .iter()
+                .filter(|entry| (self.now_secs)() < entry.not_after)
+                .filter(|entry| !adopted.digests.iter().any(|new| new.digest == entry.digest))
+                .cloned()
+                .collect();
+            adopted.digests.extend(additions);
+        } else {
+            trusted.delivery.cancel();
+        }
+        adopted.pending = trusted.pending.take().filter(|pending| {
+            !adopted
+                .digests
+                .iter()
+                .any(|entry| entry.digest == *pending && (self.now_secs)() < entry.not_after)
+        });
+        adopted.prune((self.now_secs)());
+        *trusted = adopted;
+    }
+
+    fn receipt_identity(
+        &self,
+        admitted: &TrustedIdentity,
+        receipt: &Value,
+    ) -> Option<EstablishedDigest> {
+        let digest = receipt["workload_keyset_digest"].as_str()?;
+        let served_at = receipt["served_at"].as_u64()?;
+        let current = self.snapshot();
+        admitted.digest(digest, served_at).or_else(|| {
+            if current.same_renewal_family(admitted) {
+                current.digest(digest, served_at)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn require_reverification(&self, digest: &str) -> bool {
+        let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
+        trusted.prune((self.now_secs)());
+        if !trusted.digests.iter().any(|entry| entry.digest == digest) {
+            trusted.pending = Some(digest.to_string());
+            true
+        } else {
+            false
+        }
     }
 
     /// The active accepted set: the user's fixed list, or the current
@@ -298,10 +404,13 @@ impl ProxyState {
             .clone()
     }
 
-    /// Whether forwards wait for a fresh verify: the current identity's
-    /// gate was cancelled by a block observed under it (or by shutdown).
+    /// Whether admission must wait for a fresh verify.
     fn is_blocked(&self) -> bool {
-        self.snapshot().delivery.is_cancelled()
+        let trusted = self.snapshot();
+        let now = (self.now_secs)();
+        trusted.delivery.is_cancelled()
+            || trusted.pending.is_some()
+            || !trusted.digests.iter().any(|entry| now < entry.not_after)
     }
 
     /// Block forwards until a fresh verify re-establishes trust: cancel the
@@ -332,15 +441,18 @@ impl ProxyState {
         }
     }
 
-    /// When blocked by a keyset change, re-verify the service once and, on
-    /// success, re-pin the TLS key and adopt the new identity. Returns `Ok`
-    /// when forwarding may proceed.
+    /// Re-verify once. If the requested digest remains unknown, this send
+    /// fails closed instead of looping.
     async fn ensure_unblocked(self: &Arc<Self>) -> Result<(), String> {
         if !self.is_blocked() {
             return Ok(());
         }
         let attempts = self.reverify_attempts.load(Ordering::SeqCst);
-        self.reverify_blocked(attempts, None).await
+        self.reverify_blocked(attempts, None).await?;
+        if self.is_blocked() {
+            return Err("re-verification did not establish the advertised digest".to_string());
+        }
+        Ok(())
     }
 
     /// The single re-verify funnel. `attempts` is the count the caller read
@@ -377,9 +489,7 @@ impl ProxyState {
             return Ok(());
         }
         if self.reverify_attempts.load(Ordering::SeqCst) != attempts {
-            if let Err(reason) = &*last {
-                return Err(reason.clone());
-            }
+            return last.clone();
         }
         *last = self.reverify().await;
         self.reverify_attempts.fetch_add(1, Ordering::SeqCst);
@@ -397,6 +507,15 @@ impl ProxyState {
     }
 
     async fn reverify(self: &Arc<Self>) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(verification) = self
+            .queued_verifications
+            .lock()
+            .expect("queued verifications poisoned")
+            .pop_front()
+        {
+            return self.apply_verified_identity(verification);
+        }
         let verification = tokio::select! {
             biased;
             _ = self.shutdown.cancelled() => {
@@ -413,19 +532,48 @@ impl ProxyState {
         if !verification.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".to_string());
         }
+        self.apply_verified_identity(verification)
+    }
+
+    /// Commit one already verified report. Renewals reuse the delivery gate;
+    /// a different family closes it and reports `keyset_changed`.
+    fn apply_verified_identity(&self, verification: ServiceVerification) -> Result<(), String> {
         let stale_pins = self.client.pinned_spkis(&self.host);
         let pins = verification.tls_pins;
         let verification_summary = verification.transcript.to_json();
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
-        let identity_event = VerifierEvent::IdentityUpdated {
-            identity: identity_event(
-                &verification.report,
-                &identity,
-                verification.observed_spki.as_deref(),
-                verification_summary,
-            ),
+        let current = self.snapshot();
+        let candidate = TrustedIdentity::new(
+            verification.report.clone(),
+            EstablishedIdentity {
+                keyset: identity.keyset.clone(),
+                keyset_digest: identity.keyset_digest.clone(),
+            },
+            self.shutdown.child_token(),
+        );
+        let same_family = candidate.same_renewal_family(&current);
+        if !same_family {
+            self.block_for_keyset_change(
+                &current,
+                "upstream workload keys or provenance changed".to_string(),
+            );
+        }
+        let event_identity = identity_event(
+            &verification.report,
+            &identity,
+            verification.observed_spki.as_deref(),
+            verification_summary,
+        );
+        let identity_event = if same_family {
+            VerifierEvent::IdentityRenewed {
+                identity: event_identity,
+            }
+        } else {
+            VerifierEvent::IdentityUpdated {
+                identity: event_identity,
+            }
         };
         // Re-pin last among the fallible steps, so a failed re-verify never
         // leaves the new key pinned under the old identity.
@@ -801,14 +949,10 @@ async fn proxy_observed(
     context: Option<ForwardContext>,
 ) -> Response {
     let path = uri.path().to_string();
-    // Without the trusted lock on purpose: the lock only decides which block
-    // reports `Blocked`, and expiry reports nothing itself (a failed
-    // re-verify below does). Cancelling a gate `adopt` already closed is a
-    // no-op, so a newer identity is never blocked by this.
-    if (state.now_secs)() >= observed.not_after {
-        observed.delivery.cancel();
-    }
-    let identity_before = observed.keyset_digest;
+    // Expiry is a clock-derived blocked condition. It does not create a
+    // pending digest: only a digest the service actually served can be
+    // pending, and the re-verification below can establish a renewal.
+    let identity_before = observed.clone();
     if let Err(reason) = state.ensure_unblocked().await {
         // A managed verifier stopping is retryable, not a failed verification.
         if state.shutdown.is_cancelled() {
@@ -823,7 +967,7 @@ async fn proxy_observed(
     // The identity this request is admitted under, and its delivery gate,
     // from one snapshot.
     let admitted = state.snapshot();
-    if admitted.keyset_digest != identity_before {
+    if !admitted.same_renewal_family(&identity_before) {
         return identity_changed_response(&method, &path);
     }
     if method == Method::POST {
@@ -1195,7 +1339,7 @@ where
         return Err(failed(error));
     }
     let current = state.snapshot();
-    if current.keyset_digest != admitted.keyset_digest {
+    if !current.same_renewal_family(admitted) {
         return Err(Box::new(identity_changed_response(method, path)));
     }
     // A heal (this request's or another's) re-adopted the same identity under
@@ -1239,19 +1383,15 @@ fn delivery_revoked_response(path: &str) -> Response {
     )
 }
 
-/// Keyset-rotation gate (§3.4): a response advertising a digest other than
-/// the trusted one blocks further inference forwards until a fresh verify
-/// re-establishes trust.
+/// A response digest gates new sends until one fresh verification establishes
+/// it. The delivery gate stays open so an in-flight response is unaffected.
 fn rotation_gate(state: &ProxyState, admitted: &TrustedIdentity, headers: &HeaderMap) {
-    let trusted_digest = &admitted.keyset_digest;
     if let Some(observed) = header_str(headers, "x-aci-keyset-digest") {
-        if observed != trusted_digest {
-            state.block_for_keyset_change(admitted, format!(
-                "upstream keyset digest changed ({observed} != {trusted_digest}); re-verification required"
-            ));
+        if state.require_reverification(observed) {
             tracing::warn!(
-                "!! upstream X-ACI-Keyset-Digest changed ({observed} != {trusted_digest}); \
-                 blocking further inference forwards until re-verify"
+                "!! upstream X-ACI-Keyset-Digest changed ({observed} != {}); \
+                 re-verification required",
+                admitted.keyset_digest
             );
         }
     }
