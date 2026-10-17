@@ -1,5 +1,6 @@
 //! The main window: created hidden and shown once its page has loaded, hidden
-//! rather than closed, and shown at the page the tray or the menu bar asks for.
+//! to the tray rather than closed (minimized while no tray can show the app),
+//! and shown at the page the tray or the menu bar asks for.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -29,10 +30,11 @@ pub fn create(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // A request to show the window that came earlier shows it now.
                 let mut state = state(window.app_handle());
                 let requested = !state.loaded && state.show_requested;
+                let minimized = state.minimized;
                 state.loaded = true;
                 drop(state);
                 if requested {
-                    show(window.app_handle());
+                    present(window.app_handle(), minimized);
                 }
             }
         })
@@ -49,18 +51,48 @@ pub fn create(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            let handle = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                if let Some(window) = handle.get_webview_window(MAIN) {
-                    let _ = window.hide();
-                }
-                set_dock_visibility(&handle, false);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                close(&app, crate::tray::usable(&app).await);
             });
-            #[cfg(target_os = "windows")]
-            crate::windows_window::explain_close_to_tray(&app);
         }
     });
     Ok(())
+}
+
+/// Hides the window to the tray. Without a usable tray it minimizes the
+/// window instead, so the taskbar or the Dock can still open it.
+fn close(app: &AppHandle, to_tray: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(MAIN) else {
+            return;
+        };
+        if to_tray {
+            let _ = window.hide();
+            set_dock_visibility(&handle, false);
+        } else {
+            let _ = window.minimize();
+        }
+    });
+    #[cfg(target_os = "windows")]
+    if to_tray {
+        crate::windows_window::explain_close_to_tray(app);
+    }
+}
+
+/// An app opened at login starts in the tray, without a Dock icon on macOS.
+/// Without a usable tray it shows minimized instead, so the taskbar or the
+/// Dock can open it.
+pub fn launch_hidden(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if crate::tray::usable(&app).await {
+            set_dock_visibility(&app, false);
+        } else {
+            present(&app, true);
+        }
+    });
 }
 
 fn main_config(app: &AppHandle) -> Option<&WindowConfig> {
@@ -85,12 +117,13 @@ pub fn native_theme(appearance: Appearance) -> Option<tauri::Theme> {
 }
 
 /// The main window's page has loaded, it was asked to show (it shows once
-/// both hold), and the page it was last asked for that the renderer has not
-/// taken yet.
+/// both hold) and whether minimized, and the page it was last asked for that
+/// the renderer has not taken yet.
 #[derive(Default)]
 pub struct WindowState {
     loaded: bool,
     show_requested: bool,
+    minimized: bool,
     navigation: Option<NavigationTarget>,
 }
 
@@ -100,8 +133,13 @@ fn state(app: &AppHandle) -> MutexGuard<'_, WindowState> {
 }
 
 pub fn show(app: &AppHandle) {
+    present(app, false);
+}
+
+fn present(app: &AppHandle, minimized: bool) {
     let mut state = state(app);
     state.show_requested = true;
+    state.minimized = minimized;
     if !state.loaded {
         return;
     }
@@ -112,6 +150,12 @@ pub fn show(app: &AppHandle) {
             return;
         };
         set_dock_visibility(&handle, true);
+        if minimized {
+            // Minimizing a window that was never shown does not work everywhere.
+            let _ = window.show();
+            let _ = window.minimize();
+            return;
+        }
         // Focusing skips a minimized window, so restore it first.
         let _ = window.unminimize();
         let _ = window.show();

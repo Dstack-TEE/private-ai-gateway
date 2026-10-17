@@ -2,6 +2,8 @@
 //! the same client as the window.
 
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use tauri::{
     image::Image,
@@ -129,6 +131,52 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Whether the tray can bring the app back: its icon was created and, on
+/// Linux, a panel shows StatusNotifier items (stock GNOME has none). Without
+/// one, a hidden window could not be opened again.
+pub async fn usable(app: &AppHandle) -> bool {
+    if app.tray_by_id(TRAY_ID).is_none() {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // The host can start or stop at any time, so it is asked each time.
+        match tokio::time::timeout(Duration::from_secs(2), status_notifier_host()).await {
+            Ok(Ok(registered)) => registered,
+            Ok(Err(error)) => {
+                tracing::info!("No StatusNotifier host can show the tray: {error}");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("The StatusNotifier watcher did not answer in time");
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    true
+}
+
+#[cfg(target_os = "linux")]
+#[zbus::proxy(
+    interface = "org.kde.StatusNotifierWatcher",
+    default_service = "org.kde.StatusNotifierWatcher",
+    default_path = "/StatusNotifierWatcher"
+)]
+trait StatusNotifierWatcher {
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn is_status_notifier_host_registered(&self) -> zbus::Result<bool>;
+}
+
+#[cfg(target_os = "linux")]
+async fn status_notifier_host() -> zbus::Result<bool> {
+    let connection = zbus::Connection::session().await?;
+    StatusNotifierWatcherProxy::new(&connection)
+        .await?
+        .is_status_notifier_host_registered()
+        .await
 }
 
 /// What a tray item, or the menu bar's Settings… item, which shares its id,

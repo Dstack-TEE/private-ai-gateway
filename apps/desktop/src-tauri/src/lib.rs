@@ -167,6 +167,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     follow_backend(app.handle(), client);
     if show_on_launch {
         window::show(app.handle());
+    } else {
+        window::launch_hidden(app.handle());
     }
     Ok(())
 }
