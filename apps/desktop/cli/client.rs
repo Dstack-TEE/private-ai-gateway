@@ -12,7 +12,6 @@ use std::{
 };
 
 use crate::aci::tls::{error_chain, error_chain_message, observing_spki_client, SpkiObservations};
-use crate::safe;
 use desktop_core::endpoint;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -194,9 +193,9 @@ impl HttpResult {
         ))
     }
 
-    /// A one-line body summary for error messages: HTML pages collapse to a
-    /// type+size note, other bodies are trimmed to a short prefix, so pointing
-    /// the CLI at the wrong URL does not dump a wall of markup.
+    /// A raw body summary for error data: HTML pages collapse to a type+size
+    /// note, other bodies are trimmed to a short prefix. Human output sinks
+    /// sanitize this text when rendering it.
     fn summarize_body(&self) -> String {
         const MAX_CHARS: usize = 200;
         let content_type = self
@@ -207,7 +206,7 @@ impl HttpResult {
         if content_type.contains("text/html") {
             return format!("(text/html body, {} bytes)", self.body.len());
         }
-        let text = safe(&String::from_utf8_lossy(&self.body));
+        let text = String::from_utf8_lossy(&self.body);
         let text = text.trim();
         if text.chars().count() <= MAX_CHARS {
             text.to_string()
@@ -400,12 +399,13 @@ impl AciClient {
     /// POST a chat completion and read the whole body, capturing the exact
     /// wire bytes (streamed and buffered alike). `on_chunk` sees each chunk as
     /// it arrives, in order — the concatenation equals the returned body.
+    /// A callback error stops the read and is returned to the caller.
     pub async fn post_chat_captured(
         &self,
         base_url: &str,
         bearer: Option<&str>,
         body: Vec<u8>,
-        mut on_chunk: impl FnMut(&[u8]),
+        mut on_chunk: impl FnMut(&[u8]) -> Result<(), String>,
     ) -> Result<HttpResult, String> {
         let url = endpoint(base_url, &["v1", "chat", "completions"])?;
         let mut req = self
@@ -429,7 +429,7 @@ impl AciClient {
             let chunk = chunk
                 .map_err(|e| format!("POST {url}: stream error: {}", error_chain_message(&e)))?;
             wire.extend_from_slice(&chunk);
-            on_chunk(&chunk);
+            on_chunk(&chunk)?;
         }
         Ok(HttpResult {
             status,

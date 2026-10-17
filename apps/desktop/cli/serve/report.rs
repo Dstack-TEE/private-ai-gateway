@@ -97,6 +97,13 @@ fn status_of(transcript: &Transcript, id: &str) -> Option<Status> {
 /// Default console reporter: one line per request; loud on verification
 /// failure; keep serving either way.
 pub(super) fn default_reporter(outcome: RequestOutcome) {
+    default_reporter_with(outcome, write_stdout);
+}
+
+fn default_reporter_with(
+    outcome: RequestOutcome,
+    output: impl FnOnce(&[u8]) -> Result<bool, String>,
+) {
     let tag = if outcome.streamed { " (streamed)" } else { "" };
     let mut line = format!(
         "{} {} -> {}{tag}",
@@ -108,8 +115,11 @@ pub(super) fn default_reporter(outcome: RequestOutcome) {
     }
     if outcome.verified == Some(false) {
         tracing::warn!("!! {}", safe(&line));
-    } else {
-        let _ = write_stdout(format!("{}\n", safe(&line)).as_bytes());
+    } else if let Err(error) = output(format!("{}\n", safe(&line)).as_bytes()) {
+        tracing::warn!(
+            "private-ai-proxy serve: cannot write request report: {}",
+            safe(&error)
+        );
     }
 }
 
@@ -198,4 +208,59 @@ pub(super) fn lifecycle_json(kind: &str, identity: IdentityEvent, extra: Option<
         object.extend(extra);
     }
     Value::Object(object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_failures_are_reported_and_the_console_reporter_keeps_running() {
+        const CHILD: &str = "PAP_TEST_REPORT_OUTPUT_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            desktop_core::logging::init();
+            let outcome = || RequestOutcome {
+                method: axum::http::Method::GET,
+                path: "/v1/models".to_string(),
+                status: 200,
+                streamed: false,
+                receipt_id: None,
+                receipt: None,
+                verified: None,
+                detail: "first\nsecond".to_string(),
+                context: None,
+                rewritten: None,
+                local_policy_applied: false,
+            };
+            default_reporter_with(outcome(), |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected output failure",
+                )
+                .to_string())
+            });
+            default_reporter_with(outcome(), |_| Ok(false));
+            default_reporter(outcome());
+            std::process::exit(0);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "serve::report::tests::output_failures_are_reported_and_the_console_reporter_keeps_running",
+                "--quiet",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "private-ai-proxy serve: cannot write request report: injected output failure\n"
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "\nrunning 1 test\nGET /v1/models -> 200 — first second\n"
+        );
+    }
 }

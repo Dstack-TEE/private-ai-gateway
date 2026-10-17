@@ -546,7 +546,12 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             control = safe(&control_url),
         );
         // Keep serving when stdout is closed.
-        let _ = write_stdout(startup.as_bytes());
+        if let Err(error) = write_stdout(startup.as_bytes()) {
+            tracing::warn!(
+                "private-ai-proxy serve: cannot write startup message: {}",
+                safe(&error)
+            );
+        }
     }
 
     // Both serve until the process is interrupted.
@@ -926,7 +931,10 @@ async fn proxy_inference(
             }
             Ok(_) => {}
             Err(e) => {
-                tracing::warn!("private-ai-proxy serve: policy pin refresh after 412 failed: {e}")
+                tracing::warn!(
+                    "private-ai-proxy serve: policy pin refresh after 412 failed: {}",
+                    safe(&e)
+                )
             }
         }
     }
@@ -1106,7 +1114,10 @@ where
         if state.shutdown.is_cancelled() {
             return Err(Box::new(delivery_revoked_response(path)));
         }
-        tracing::warn!("!! {method} {path} -> 502 stale TLS pin; re-verification failed: {reason}");
+        tracing::warn!(
+            "!! {method} {path} -> 502 stale TLS pin; re-verification failed: {}",
+            safe(&reason)
+        );
         return Err(failed(error));
     }
     let current = state.snapshot();

@@ -46,6 +46,9 @@ tabs, with spaces. Transcript explanations render each sanitized line behind a
 `|` gutter. Echoed streamed replies in `send` preserve line breaks and tabs.
 JSON output and captured body bytes are unchanged.
 
+When stdout's reader closes, output ends quietly. Other output failures make
+`send` fail; `serve` reports them on stderr and continues serving.
+
 Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
 to Intel's root; the id-1 detail names the PCCS, and a failure reports why the

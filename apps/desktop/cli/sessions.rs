@@ -26,9 +26,6 @@ pub(crate) async fn run_verified(
     args: SessionsArgs,
     verification: ServiceVerification,
 ) -> Result<i32, String> {
-    verification
-        .client
-        .pin(&verification.host, &verification.tls_pins)?;
     if !args.json {
         write_stdout(
             format!(
@@ -42,6 +39,9 @@ pub(crate) async fn run_verified(
     if !verification.transcript.verified() {
         return Err("service verification failed; not auditing sessions (fail closed)".to_string());
     }
+    verification
+        .client
+        .pin(&verification.host, &verification.tls_pins)?;
     if verification.report.service_capabilities.serving == "direct" {
         if args.json {
             print_json(&json!({ "sessions": [] }))?;
@@ -98,11 +98,14 @@ pub(crate) async fn run_verified(
                 } else {
                     format!(
                         " under policy {}",
-                        args.require_claims
-                            .iter()
-                            .map(RequiredClaim::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        safe(
+                            &args
+                                .require_claims
+                                .iter()
+                                .map(RequiredClaim::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     )
                 }
             )
@@ -287,6 +290,161 @@ async fn audit_current_sessions_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_output_preserves_errors_and_enforces_direct_claim_policy() {
+        const CHILD: &str = "PAP_TEST_SESSION_OUTPUT";
+        const BASE: &str = "PAP_TEST_SESSION_OUTPUT_BASE";
+        const CLAIM: &str = "tee_attested\n[PASS] forged";
+        if let Ok(case) = std::env::var(CHILD) {
+            let base_url = std::env::var(BASE).unwrap();
+            let mut report = crate::spec_fixtures::vector_report();
+            if case.starts_with("direct") {
+                report.service_capabilities.serving = "direct".to_string();
+            }
+            let mut transcript = crate::transcript::Transcript::default();
+            for check in [
+                crate::transcript::ID_1,
+                crate::transcript::ID_2,
+                crate::transcript::ID_3,
+                crate::transcript::ID_4,
+                crate::transcript::ID_5,
+                crate::transcript::ID_6,
+            ] {
+                transcript.pass(check, "verified service fixture");
+            }
+            let mut pins = vec!["c0".repeat(32)];
+            if case == "failed-human" {
+                transcript.fail(crate::transcript::ID_6, "no attested TLS key");
+                pins.clear();
+            }
+            let verification = ServiceVerification {
+                host: crate::client::host_of(&base_url).unwrap(),
+                identity: Some(crate::checks::established_identity(&report).unwrap()),
+                report,
+                transcript,
+                client: AciClient::new().unwrap(),
+                base_url: base_url.clone(),
+                observed_spki: pins.first().cloned(),
+                tls_pins: pins,
+            };
+            let args = SessionsArgs {
+                base_url,
+                policy: Default::default(),
+                model: None,
+                require_claims: if case.contains("claims") {
+                    vec![RequiredClaim::parse(CLAIM).unwrap()]
+                } else {
+                    Vec::new()
+                },
+                json: case.contains("json"),
+            };
+            let code = run_verified(args, verification)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("{}", safe(&error));
+                    1
+                });
+            std::process::exit(code);
+        }
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/v1/aci/sessions",
+                axum::routing::get({
+                    let calls = calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async {
+                            axum::Json(json!({ "sessions": [{ "session_id": "test-session" }] }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/sessions/{id}",
+                axum::routing::get({
+                    let calls = calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { (axum::http::StatusCode::BAD_GATEWAY, "first\nsecond") }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (case, code) in [
+            ("direct-json", 0),
+            ("direct-json-claims", 1),
+            ("direct-human-claims", 1),
+            ("failed-human", 1),
+            ("gateway-json", 1),
+            ("gateway-human-claims", 1),
+        ] {
+            let base = base.clone();
+            let output = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "sessions::tests::command_output_preserves_errors_and_enforces_direct_claim_policy",
+                        "--quiet",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, case)
+                    .env(BASE, base)
+                    .output()
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+            assert_eq!(output.status.code(), Some(code), "{case}: {output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stdout = stdout.strip_prefix("\nrunning 1 test\n").unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            if case.contains("json") {
+                let value: Value = serde_json::from_str(stdout).unwrap();
+                if case.starts_with("direct") {
+                    assert_eq!(value, json!({ "sessions": [] }));
+                } else {
+                    assert_eq!(
+                        value["sessions"][0]["error"],
+                        "session fetch returned HTTP 502: first\nsecond"
+                    );
+                }
+            } else if case == "failed-human" {
+                assert!(stdout.contains("no attested TLS key"));
+                assert_eq!(
+                    stderr,
+                    "service verification failed; not auditing sessions (fail closed)\n"
+                );
+            } else {
+                assert!(stdout.contains("tee_attested [PASS] forged"));
+                assert!(!stdout.lines().any(|line| line.starts_with("[PASS]")));
+                if case.starts_with("direct") {
+                    assert!(stdout.contains("required claims cannot be met by a direct service (no session to establish them)"));
+                } else {
+                    assert!(stdout.contains(
+                        "REJECTED test-session: session fetch returned HTTP 502: first second\n"
+                    ));
+                    assert!(stdout.contains("under policy tee_attested [PASS] forged\n"));
+                }
+            }
+            if case != "failed-human" {
+                assert!(stderr.is_empty(), "{case}: {stderr}");
+            }
+            if !case.starts_with("gateway") {
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn a_model_id_round_trips_through_the_listing_query() {

@@ -84,12 +84,13 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
             request_body.clone(),
             |chunk| {
                 if stream {
-                    collector.feed(chunk);
+                    collector.feed(chunk)?;
                 }
+                Ok(())
             },
         )
         .await?;
-    collector.finish();
+    collector.finish()?;
     if let Err(e) = response.error_for_status("chat completion") {
         // The `reply:  ` prefix was already printed (no newline); close the line
         // so the error does not glue onto it as if it were the reply.
@@ -292,25 +293,31 @@ impl SseTextCollector {
         }
     }
 
-    fn feed(&mut self, chunk: &[u8]) {
-        self.collect_with(Some(chunk), write_stdout);
+    fn feed(&mut self, chunk: &[u8]) -> Result<(), String> {
+        self.collect_with(Some(chunk), write_stdout)
     }
 
     fn collect_with(
         &mut self,
         chunk: Option<&[u8]>,
         mut output: impl FnMut(&[u8]) -> Result<bool, String>,
-    ) {
+    ) -> Result<(), String> {
         let (text, echo) = (&mut self.text, &mut self.echo);
-        let append = |data: &str| append_delta(text, echo, data, &mut output);
+        let mut result = Ok(());
+        let append = |data: &str| {
+            if result.is_ok() {
+                result = append_delta(text, echo, data, &mut output);
+            }
+        };
         match chunk {
             Some(chunk) => self.lines.push(chunk, append),
             None => self.lines.finish(append),
         }
+        result
     }
 
-    fn finish(&mut self) {
-        self.collect_with(None, write_stdout);
+    fn finish(&mut self) -> Result<(), String> {
+        self.collect_with(None, write_stdout)
     }
 }
 
@@ -320,21 +327,78 @@ fn append_delta(
     echo: &mut bool,
     data: &str,
     output: &mut impl FnMut(&[u8]) -> Result<bool, String>,
-) {
+) -> Result<(), String> {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
-        return;
+        return Ok(());
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if *echo && !output(safe_multiline(delta).as_bytes()).unwrap_or(false) {
-            *echo = false;
+        if *echo {
+            *echo = output(safe_multiline(delta).as_bytes())?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{response_chat_id, SseTextCollector};
+
+    #[tokio::test]
+    async fn streamed_reply_surfaces_writer_errors_and_only_silences_closed_pipes() {
+        for final_newline in [false, true] {
+            let body = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"hello\"}}}}]}}\n\n\
+                 data: {{\"choices\":[{{\"delta\":{{\"content\":\" world\"}}}}]}}{}",
+                if final_newline { "\n\n" } else { "" }
+            );
+            let app = axum::Router::new().route(
+                "/v1/chat/completions",
+                axum::routing::post(move || {
+                    let body = body.clone();
+                    async move { body }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            for closed_pipe in [false, true] {
+                let mut collector = SseTextCollector::new(true);
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected output failure",
+                )
+                .to_string();
+                let mut writes = 0;
+                let mut output = |_: &[u8]| {
+                    writes += 1;
+                    if closed_pipe {
+                        Ok(false)
+                    } else if writes == 1 {
+                        Ok(true)
+                    } else {
+                        Err(error.clone())
+                    }
+                };
+                let result = crate::client::AciClient::new()
+                    .unwrap()
+                    .post_chat_captured(&base, None, b"{}".to_vec(), |chunk| {
+                        collector.collect_with(Some(chunk), &mut output)
+                    })
+                    .await
+                    .and_then(|_| collector.collect_with(None, &mut output));
+                assert_eq!(writes, if closed_pipe { 1 } else { 2 });
+                if closed_pipe {
+                    result.unwrap();
+                    assert_eq!(collector.text, "hello world");
+                } else {
+                    assert_eq!(result.unwrap_err(), error);
+                }
+            }
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+    }
 
     #[test]
     fn reads_the_response_id_from_json_or_the_first_event_carrying_one() {
@@ -355,9 +419,11 @@ mod tests {
     #[test]
     fn collects_deltas_across_chunk_boundaries() {
         let mut c = SseTextCollector::new(false);
-        c.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choi");
-        c.feed(b"ces\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n");
-        c.finish();
+        c.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choi")
+            .unwrap();
+        c.feed(b"ces\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n")
+            .unwrap();
+        c.finish().unwrap();
         assert_eq!(c.text, "Hello");
     }
 
@@ -371,12 +437,14 @@ mod tests {
             "\u{7}link\r\u{202e}text\n\t",
         ] {
             let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
-            collector.collect_with(Some(format!("data: {event}\n\n").as_bytes()), |bytes| {
-                rendered.extend_from_slice(bytes);
-                Ok(true)
-            });
+            collector
+                .collect_with(Some(format!("data: {event}\n\n").as_bytes()), |bytes| {
+                    rendered.extend_from_slice(bytes);
+                    Ok(true)
+                })
+                .unwrap();
         }
-        collector.finish();
+        collector.finish().unwrap();
         assert_eq!(
             String::from_utf8(rendered).unwrap(),
             "hello [31mred ]8;;https://example.com link  text\n\t"
@@ -390,8 +458,9 @@ mod tests {
     #[test]
     fn handles_no_space_data_prefix_and_crlf() {
         let mut c = SseTextCollector::new(false);
-        c.feed(b"data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n");
-        c.finish();
+        c.feed(b"data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n")
+            .unwrap();
+        c.finish().unwrap();
         assert_eq!(c.text, "hi");
     }
 }
