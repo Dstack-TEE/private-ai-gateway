@@ -44,8 +44,9 @@ timeout keeps the previously trusted identity and releases queued requests to
 retry the normal failure path.
 
 Human-readable fields replace terminal controls, including line breaks and
-tabs, with spaces. Only echoed streamed replies in `send` preserve line breaks
-and tabs. JSON output and captured body bytes are unchanged.
+tabs, with spaces. Transcript explanations render each sanitized line behind a
+`|` gutter. Echoed streamed replies in `send` preserve line breaks and tabs.
+JSON output and captured body bytes are unchanged.
 
 Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked

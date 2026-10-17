@@ -237,9 +237,11 @@ impl Transcript {
             }
             out.push('\n');
             if let Some(explain) = &check.explain {
-                out.push_str("        | ");
-                out.push_str(&safe(explain));
-                out.push('\n');
+                for line in explain.lines() {
+                    out.push_str("        | ");
+                    out.push_str(&safe(line));
+                    out.push('\n');
+                }
             }
         }
         out.push_str(&self.verdict_line());
@@ -335,9 +337,10 @@ mod tests {
         assert!(!human.contains('\u{1b}'));
         assert!(!human.contains('\u{202e}'));
         let lines: Vec<_> = human.lines().collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("text [PASS] forged field"));
-        assert_eq!(lines[1], "        | source [PASS] forged explanation");
+        assert_eq!(lines[1], "        | source");
+        assert_eq!(lines[2], "        | [PASS] forged explanation");
     }
 
     #[test]
