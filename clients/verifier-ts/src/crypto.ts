@@ -63,6 +63,12 @@ export function jcsBytes(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(sortedValue(value)));
 }
 
+export function jcsEqual(left: unknown, right: unknown): boolean {
+  const a = jcsBytes(left);
+  const b = jcsBytes(right);
+  return a.length === b.length && a.every((byte, index) => byte === b[index]);
+}
+
 function sortedValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortedValue);
   if (value !== null && typeof value === 'object') {
