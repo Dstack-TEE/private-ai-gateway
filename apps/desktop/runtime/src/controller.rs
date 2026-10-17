@@ -564,7 +564,7 @@ pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentSt
     }
     let data_dir = app_data_dir()?;
     // A backend that `service stop` just ended may hold it for a moment longer.
-    let Some(_instance) = lock::instance_within(&data_dir, std::time::Duration::from_secs(2))
+    let Some(_instance) = lock::instance_within(&data_dir, lock::INSTANCE_RELEASE_WAIT)
         .map_err(|error| format!("Cannot take the instance lock: {error}"))?
     else {
         return Ok(None);

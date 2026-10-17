@@ -14,8 +14,7 @@ use crate::args::SendArgs;
 use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
-use crate::client::HttpResult;
-use crate::sessions::SESSION_AUDIT_TIMEOUT;
+use crate::client::{with_session_audit_timeout, HttpResult};
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, safe_multiline, write_stdout};
 
@@ -123,12 +122,8 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let identity = identity.ok_or("verified run carried no established identity")?;
     // Audit the cited session (§9.2): its id is the hash of the parsed
     // document's JCS form, so any served encoding verifies.
-    let (session_resp, no_session_reason) = tokio::time::timeout(
-        SESSION_AUDIT_TIMEOUT,
-        fetch_live_session(&client, &base_url, &receipt),
-    )
-    .await
-    .map_err(|_| "session audit timed out".to_string())?;
+    let (session_resp, no_session_reason) =
+        with_session_audit_timeout(fetch_live_session(&client, &base_url, &receipt)).await?;
     run_response_checks(
         &mut transcript,
         &receipt,
@@ -286,7 +281,6 @@ struct SseTextCollector {
     lines: DataLines,
     text: String,
     echo: bool,
-    output_alive: bool,
 }
 
 impl SseTextCollector {
@@ -295,33 +289,35 @@ impl SseTextCollector {
             lines: DataLines::new(),
             text: String::new(),
             echo,
-            output_alive: true,
         }
     }
 
     fn feed(&mut self, chunk: &[u8]) {
-        self.feed_with(chunk, write_stdout);
+        self.collect_with(Some(chunk), write_stdout);
     }
 
-    fn feed_with(&mut self, chunk: &[u8], mut output: impl FnMut(&[u8]) -> Result<bool, String>) {
-        let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
-        self.lines.push(chunk, |data| {
-            append_delta(text, echo, output_alive, data, &mut output)
-        });
+    fn collect_with(
+        &mut self,
+        chunk: Option<&[u8]>,
+        mut output: impl FnMut(&[u8]) -> Result<bool, String>,
+    ) {
+        let (text, echo) = (&mut self.text, &mut self.echo);
+        let append = |data: &str| append_delta(text, echo, data, &mut output);
+        match chunk {
+            Some(chunk) => self.lines.push(chunk, append),
+            None => self.lines.finish(append),
+        }
     }
 
     fn finish(&mut self) {
-        let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
-        self.lines
-            .finish(|data| append_delta(text, echo, output_alive, data, &mut write_stdout));
+        self.collect_with(None, write_stdout);
     }
 }
 
 /// Appends an event's content delta; `[DONE]` and other events carry none.
 fn append_delta(
     text: &mut String,
-    echo: bool,
-    output_alive: &mut bool,
+    echo: &mut bool,
     data: &str,
     output: &mut impl FnMut(&[u8]) -> Result<bool, String>,
 ) {
@@ -330,8 +326,8 @@ fn append_delta(
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if echo && *output_alive && !output(safe_multiline(delta).as_bytes()).unwrap_or(false) {
-            *output_alive = false;
+        if *echo && !output(safe_multiline(delta).as_bytes()).unwrap_or(false) {
+            *echo = false;
         }
     }
 }
@@ -375,7 +371,7 @@ mod tests {
             "\u{7}link\r\u{202e}text\n\t",
         ] {
             let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
-            collector.feed_with(format!("data: {event}\n\n").as_bytes(), |bytes| {
+            collector.collect_with(Some(format!("data: {event}\n\n").as_bytes()), |bytes| {
                 rendered.extend_from_slice(bytes);
                 Ok(true)
             });

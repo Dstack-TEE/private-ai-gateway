@@ -75,7 +75,7 @@ pub fn read_api_key(input: impl std::io::Read) -> Result<String, String> {
 }
 
 /// Pretty JSON on stdout, the form the ACI commands print.
-pub fn print_json(value: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn print_json(value: &serde_json::Value) -> Result<(), String> {
     let text =
         serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize: {e}"))?;
     write_stdout(format!("{text}\n").as_bytes())?;
@@ -95,7 +95,5 @@ mod tests {
     fn human_fields_neutralize_terminal_controls_and_stay_on_one_line() {
         let rendered = safe("ok\u{1b}[31m\r\u{202e}bad\n\tend");
         assert_eq!(rendered, "ok [31m  bad  end");
-        assert!(!rendered.contains('\u{1b}'));
-        assert!(!rendered.contains('\u{202e}'));
     }
 }

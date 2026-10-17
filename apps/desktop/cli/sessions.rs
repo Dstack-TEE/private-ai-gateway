@@ -10,13 +10,11 @@ use serde_json::{json, Value};
 
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
-use crate::client::AciClient;
+use crate::client::{with_session_audit_timeout, AciClient};
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
 use desktop_core::now_secs;
-
-pub(crate) const SESSION_AUDIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub async fn run(args: SessionsArgs) -> Result<i32, String> {
     let verification =
@@ -48,12 +46,28 @@ pub(crate) async fn run_verified(
         if args.json {
             print_json(&json!({ "sessions": [] }))?;
         } else {
-            write_stdout("direct service (spec 4.1): no upstream hop, so there are no attested sessions to pin — the spec 9.1 verification above is the whole prevention layer\n".as_bytes())?;
+            write_stdout(
+                "direct service (spec 4.1): no upstream hop, so there are no attested sessions to pin — \
+                 the spec 9.1 verification above is the whole prevention layer\n"
+                    .as_bytes(),
+            )?;
+            if !args.require_claims.is_empty() {
+                write_stdout(
+                    format!(
+                        "required claims cannot be met by a direct service (no session to establish them): {}\n",
+                        safe(
+                            &args.require_claims
+                                .iter()
+                                .map(RequiredClaim::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    )
+                    .as_bytes(),
+                )?;
+            }
         }
-        if !args.require_claims.is_empty() {
-            return Ok(1);
-        }
-        return Ok(0);
+        return Ok(if args.require_claims.is_empty() { 0 } else { 1 });
     }
 
     let audited = audit_current_sessions(
@@ -215,12 +229,13 @@ pub async fn audit_current_sessions(
     model: Option<&str>,
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
-    tokio::time::timeout(
-        SESSION_AUDIT_TIMEOUT,
-        audit_current_sessions_inner(client, base_url, model, required_claims),
-    )
-    .await
-    .map_err(|_| "session audit timed out".to_string())?
+    with_session_audit_timeout(audit_current_sessions_inner(
+        client,
+        base_url,
+        model,
+        required_claims,
+    ))
+    .await?
 }
 
 async fn audit_current_sessions_inner(

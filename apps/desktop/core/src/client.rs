@@ -41,6 +41,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// This follows the legacy protocol's HELLO timeout so a live but wedged
 /// backend cannot make management commands hang indefinitely.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds the response headers when opening an event stream.
+const EVENTS_HEADER_TIMEOUT: Duration = HELLO_TIMEOUT;
 /// The service sends an SSE comment every 15 s; silence past this means it hung.
 const EVENTS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a client waits to retry an event stream the backend has no room for.
@@ -332,7 +334,7 @@ impl Client {
             let (connection, response) = loop {
                 let mut connection = open_current().await?;
                 let response = connection
-                    .events(HELLO_TIMEOUT)
+                    .events(EVENTS_HEADER_TIMEOUT)
                     .await
                     .map_err(connection_error)?;
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE {
@@ -499,7 +501,7 @@ impl Client {
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let ownership = crate::lock::instance_within(&data, Duration::from_secs(2))
+        let ownership = crate::lock::instance_within(&data, crate::lock::INSTANCE_RELEASE_WAIT)
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
         let result = install();
@@ -550,12 +552,11 @@ struct Connection {
 
 impl Connection {
     async fn events(&mut self, timeout: Duration) -> io::Result<hyper::Response<Incoming>> {
-        tokio::time::timeout(
+        bounded(
             timeout,
             send(&mut self.sender, Method::GET, protocol::EVENTS_PATH, None),
         )
         .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
     }
 
     async fn call(&mut self, command: &Command) -> Result<Value, CallError> {
@@ -588,39 +589,45 @@ impl Connection {
     }
 }
 
+async fn bounded<T>(
+    timeout: Duration,
+    future: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
 async fn open() -> io::Result<Connection> {
     let endpoint = transport::endpoint_path()?;
     open_at(&endpoint, HELLO_TIMEOUT).await
 }
 
 async fn open_at(endpoint: &Path, timeout: Duration) -> io::Result<Connection> {
-    tokio::time::timeout(timeout, open_inner(endpoint))
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-}
-
-async fn open_inner(endpoint: &Path) -> io::Result<Connection> {
-    let stream = transport::connect(endpoint).await?;
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-        .await
-        .map_err(http_error)?;
-    tokio::spawn(connection);
-    let response = send(&mut sender, Method::GET, protocol::VERSION_PATH, None).await?;
-    let (status, body) = read(response).await?;
-    let version = serde_json::from_slice::<Version>(&body)
-        .ok()
-        .filter(|version| {
-            status == StatusCode::OK
-                && version.api_version == protocol::API_VERSION
-                && version.product == crate::brand::APP_IDENTIFIER
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Incompatible Private AI Proxy backend; update the client and backend together",
-            )
-        })?;
-    Ok(Connection { sender, version })
+    bounded(timeout, async {
+        let stream = transport::connect(endpoint).await?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(http_error)?;
+        tokio::spawn(connection);
+        let response = send(&mut sender, Method::GET, protocol::VERSION_PATH, None).await?;
+        let (status, body) = read(response).await?;
+        let version = serde_json::from_slice::<Version>(&body)
+            .ok()
+            .filter(|version| {
+                status == StatusCode::OK
+                    && version.api_version == protocol::API_VERSION
+                    && version.product == crate::brand::APP_IDENTIFIER
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Incompatible Private AI Proxy backend; update the client and backend together",
+                )
+            })?;
+        Ok(Connection { sender, version })
+    })
+    .await
 }
 
 /// A connection to a backend of this build. A backend of another build,
@@ -748,11 +755,23 @@ fn connection_error(error: io::Error) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{acquire_startup, open_at, STARTUP_IN_PROGRESS};
+
+    fn local_endpoint() -> (tempfile::TempDir, PathBuf, tokio::net::UnixListener) {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        crate::private_fs::create_private_dir(&runtime).unwrap();
+        let endpoint = runtime.join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        (temp, endpoint, listener)
+    }
 
     async fn request_headers(stream: &mut tokio::net::UnixStream) {
         let mut bytes = Vec::new();
@@ -766,21 +785,15 @@ mod tests {
 
     #[tokio::test]
     async fn version_handshake_timeout_covers_a_connected_silent_endpoint() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = temp.path().join("runtime");
-        crate::private_fs::create_private_dir(&runtime).unwrap();
-        let endpoint = runtime.join("api.sock");
-        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let (_temp, endpoint, listener) = local_endpoint();
         let (requested, mut received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             request_headers(&mut stream).await;
             requested.send(()).unwrap();
             std::future::pending::<()>().await;
-            drop(stream);
         });
 
-        let started = Instant::now();
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             open_at(&endpoint, Duration::from_millis(50)),
@@ -795,18 +808,13 @@ mod tests {
         received
             .try_recv()
             .expect("backend did not receive the request");
-        assert!(started.elapsed() < Duration::from_secs(1));
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }
 
     #[tokio::test]
     async fn events_headers_timeout_after_a_successful_version_exchange() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = temp.path().join("runtime");
-        crate::private_fs::create_private_dir(&runtime).unwrap();
-        let endpoint = runtime.join("api.sock");
-        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let (_temp, endpoint, listener) = local_endpoint();
         let (requested, mut received) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -830,11 +838,9 @@ mod tests {
             request_headers(&mut stream).await;
             requested.send(()).unwrap();
             std::future::pending::<()>().await;
-            drop(stream);
         });
 
         let mut connection = open_at(&endpoint, Duration::from_secs(1)).await.unwrap();
-        let started = Instant::now();
         let error = tokio::time::timeout(
             Duration::from_secs(1),
             connection.events(Duration::from_millis(50)),
@@ -846,7 +852,6 @@ mod tests {
         received
             .try_recv()
             .expect("backend did not receive the request");
-        assert!(started.elapsed() < Duration::from_secs(1));
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }

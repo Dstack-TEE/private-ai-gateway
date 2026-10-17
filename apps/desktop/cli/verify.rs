@@ -15,10 +15,9 @@ use crate::checks::{
 };
 use crate::client::{
     attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError,
+    VERIFICATION_TIMEOUT,
 };
 use crate::transcript::Transcript;
-
-pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a verification could not run or did not pass: the service could not
 /// be reached or is not an ACI service (authored for the user), its verdict

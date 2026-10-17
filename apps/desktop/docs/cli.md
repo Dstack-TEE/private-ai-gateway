@@ -36,12 +36,10 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
-Verification and receipt/session artifact reads are bounded (4 MiB for
-attestation and session documents, 64 KiB for receipts). Verification and
-session audits, including the session fetch after `send`, have an overall
-30-second deadline. A timeout fails closed; a re-verification
-timeout keeps the previously trusted identity and releases queued requests to
-retry the normal failure path.
+Attestation, receipt, and session responses are size-bounded (4 MiB for
+attestation and session documents, 64 KiB for receipts), and verification and
+session audits, including `send`'s session fetch, have a 30-second overall
+deadline; a timeout fails closed.
 
 Human-readable fields replace terminal controls, including line breaks and
 tabs, with spaces. Transcript explanations render each sanitized line behind a
@@ -75,6 +73,9 @@ policy flags:
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
 
+A nonempty `--require-claim` policy always fails closed when no session can be
+audited, including direct services and unverified or missing-session receipts.
+
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
 must then end at an accepted root, anchored on the app-id that the verified
@@ -92,9 +93,7 @@ configuration with an independent dstack verifier.
 
 `pap audit` receipt-only options (`--request-body`, `--response-body`,
 `--session`, `--require-claim`, `--pin`, and `--require-verified`) require
-`--receipt`; clap reports these as usage errors with exit code 2. A nonempty
-`--require-claim` policy always fails closed when no session can be audited,
-including direct services and unverified or missing-session receipts.
+`--receipt`; using one without it is a usage error (exit 2).
 
 ### One pinned curl request
 
@@ -145,6 +144,9 @@ start unless the verdict is `VERIFIED`. It then listens on plain HTTP at
 Anthropic-compatible client can use it as a local base URL.
 [Quickstart step 4](../../../docs/quickstart.md#4-use-it-as-a-local-endpoint)
 walks through it against a live service.
+
+A re-verification timeout keeps the previously trusted identity and releases
+queued requests to retry the normal failure path.
 
 Requests:
 

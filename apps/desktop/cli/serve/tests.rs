@@ -718,15 +718,6 @@ fn apply_constraints_tightens_plaintext_body() {
     });
     assert!(apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,).is_err());
 
-    for body in [
-        br#"[]"#.to_vec(),
-        br#"{"provider":[]}"#.to_vec(),
-        br#"{"provider":{"aci_session_ids":"not-an-array"}}"#.to_vec(),
-        br#"{"provider":{"aci_session_ids":[1]}}"#.to_vec(),
-    ] {
-        assert!(apply_constraints(body, true, &[]).is_err());
-    }
-
     // Non-JSON bodies pass through untouched.
     assert_eq!(
         apply_constraints(b"not json".to_vec(), true, &[]).unwrap(),

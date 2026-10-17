@@ -432,30 +432,18 @@ mod tests {
 
     #[test]
     fn audit_receipt_only_flags_require_a_receipt() {
-        for flag in [
-            "--request-body",
-            "--response-body",
-            "--session",
-            "--require-claim",
-            "--pin",
-            "--require-verified",
+        let pin = "a".repeat(64);
+        for (flag, value) in [
+            ("--request-body", Some("artifact")),
+            ("--response-body", Some("artifact")),
+            ("--session", Some("artifact")),
+            ("--require-claim", Some("tee_attested")),
+            ("--pin", Some(pin.as_str())),
+            ("--require-verified", None),
         ] {
-            let mut args = vec![
-                "pap".to_string(),
-                "audit".to_string(),
-                "--report".to_string(),
-                "report.json".to_string(),
-                flag.to_string(),
-            ];
-            if flag != "--require-verified" {
-                args.push(if flag == "--require-claim" {
-                    "tee_attested".to_string()
-                } else if flag == "--pin" {
-                    "a".repeat(64)
-                } else {
-                    "artifact".to_string()
-                });
-            }
+            let args = ["pap", "audit", "--report", "report.json", flag]
+                .into_iter()
+                .chain(value);
             assert!(
                 Command::augment_subcommands(clap::Command::new("pap"))
                     .try_get_matches_from(args)

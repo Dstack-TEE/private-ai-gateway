@@ -33,11 +33,10 @@ use tokio_util::sync::CancellationToken;
 use crate::aci::tls::is_pin_mismatch;
 use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
-use crate::client::AciClient;
+use crate::client::{AciClient, VERIFICATION_TIMEOUT};
 use crate::sessions::audit_current_sessions;
 use crate::verify::{
     verify_service, verify_service_with_timeout, ServiceVerification, VerifyError,
-    VERIFICATION_TIMEOUT,
 };
 use crate::{safe, write_stdout};
 
@@ -535,19 +534,18 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             "every inference demands verified serving (provider.aci_verified, spec 5.3)."
         };
         let startup = format!(
-            "\nprivate-ai-proxy serve: proxying {} on {} (plain HTTP, localhost)\n\
+            "\nprivate-ai-proxy serve: proxying {base} on {proxy} (plain HTTP, localhost)\n\
              forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
              body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
-             verify on demand: GET {}/receipts lists recent exchanges, \
-             POST {}/receipts/<id>/verify checks one (send Authorization \
-             if the receipt fetch needs it).\n{}\n",
-            safe(&base_url),
-            safe(&proxy_url),
-            safe(&control_url),
-            safe(&control_url),
-            policy_note,
+             verify on demand: GET {control}/receipts lists recent exchanges, \
+             POST {control}/receipts/<id>/verify checks one (send Authorization \
+             if the receipt fetch needs it).\n{policy_note}\n",
+            base = safe(&base_url),
+            proxy = safe(&proxy_url),
+            control = safe(&control_url),
         );
+        // Keep serving when stdout is closed.
         let _ = write_stdout(startup.as_bytes());
     }
 

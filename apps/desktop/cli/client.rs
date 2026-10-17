@@ -5,9 +5,14 @@
 //! per hostname (the spec 9.1(6) channel check) and enforces a registered
 //! per-hostname pin set, fail closed on mismatch.
 
-use std::sync::{Arc, RwLock};
+use std::{
+    future::Future,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use crate::aci::tls::{error_chain, error_chain_message, observing_spki_client, SpkiObservations};
+use crate::safe;
 use desktop_core::endpoint;
 use futures_util::StreamExt;
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -61,6 +66,16 @@ pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 pub const MAX_ATTESTATION_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SESSION_LIST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const SESSION_AUDIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) async fn with_session_audit_timeout<T>(
+    future: impl Future<Output = T>,
+) -> Result<T, String> {
+    tokio::time::timeout(SESSION_AUDIT_TIMEOUT, future)
+        .await
+        .map_err(|_| "session audit timed out".to_string())
+}
 
 /// Why a bounded GET produced no response.
 #[derive(Debug, thiserror::Error)]
@@ -192,7 +207,7 @@ impl HttpResult {
         if content_type.contains("text/html") {
             return format!("(text/html body, {} bytes)", self.body.len());
         }
-        let text = crate::safe(&String::from_utf8_lossy(&self.body));
+        let text = safe(&String::from_utf8_lossy(&self.body));
         let text = text.trim();
         if text.chars().count() <= MAX_CHARS {
             text.to_string()
@@ -328,7 +343,7 @@ impl AciClient {
     }
 
     /// Fetch the attestation report. The caller classifies a failure with
-    /// [`ServiceError::from_request`].
+    /// [`ServiceError::from_get`].
     pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, GetError> {
         self.get_limited(url.as_str(), None, MAX_ATTESTATION_BYTES)
             .await
@@ -366,15 +381,7 @@ impl AciClient {
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
         self.get_limited(url.as_str(), None, MAX_SESSION_BYTES)
             .await
-            .map_err(|error| match error {
-                GetError::Request(error) => {
-                    format!("GET {url} failed: {}", error_chain_message(&error))
-                }
-                GetError::Failed(error) => error,
-                GetError::TooLarge(limit) => {
-                    format!("GET {url} response body exceeds {} KiB", limit / 1024)
-                }
-            })
+            .map_err(|error| format!("GET {url}: {error}"))
     }
 
     pub async fn fetch_session_listing(&self, url: &str) -> Result<HttpResult, GetError> {
@@ -551,7 +558,13 @@ mod tests {
         .await
         .expect("session record read should stop before EOF")
         .unwrap_err();
-        assert!(error.contains("response body exceeds 4096 KiB"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "response body exceeds {} KiB",
+                MAX_SESSION_BYTES / 1024
+            )),
+            "{error}"
+        );
         server.abort();
     }
 

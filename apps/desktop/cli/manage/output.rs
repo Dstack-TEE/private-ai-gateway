@@ -7,7 +7,8 @@ use super::{
     Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
 };
 use crate::Global;
-use private_ai_proxy::{safe, write_stdout as write_aci_stdout};
+use private_ai_proxy::safe;
+pub(super) use private_ai_proxy::write_stdout;
 
 /// Prints a command's result as one line of compact JSON or its human rendering.
 pub(super) fn print(action: &Action, global: &Global, value: &Value) -> Result<(), CallError> {
@@ -31,12 +32,6 @@ pub(super) fn render_line(
 pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
     write_stdout(bytes)?;
     Ok(())
-}
-
-/// Writes to stdout, `Ok(false)` once the reader has gone away, as after
-/// `| head`: output then ends quietly.
-pub(super) fn write_stdout(bytes: &[u8]) -> Result<bool, String> {
-    write_aci_stdout(bytes)
 }
 
 /// The human rendering of `action`'s result `value`; details by default.
@@ -458,7 +453,7 @@ fn text(value: &Value) -> String {
 
 fn label(key: &str) -> String {
     let mut label = String::new();
-    for (index, c) in crate::safe(key).chars().enumerate() {
+    for (index, c) in safe(key).chars().enumerate() {
         if index == 0 {
             label.extend(c.to_uppercase());
         } else if c.is_uppercase() {
