@@ -37,6 +37,10 @@ use crate::{
 mod legacy;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bounds the initial version handshake, including response headers and body.
+/// This follows the legacy protocol's HELLO timeout so a live but wedged
+/// backend cannot make management commands hang indefinitely.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// The service sends an SSE comment every 15 s; silence past this means it hung.
 const EVENTS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a client waits to retry an event stream the backend has no room for.
@@ -194,6 +198,10 @@ impl Client {
                     return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
                 }
                 Err(error) if absent(&error) => {}
+                // A live backend can accept the socket and then stall before
+                // answering /api/version. Keep the startup deadline as the
+                // outer bound instead of returning early on one HELLO timeout.
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error) => {
                     reap(child);
                     return Err(connection_error(error));
@@ -323,13 +331,17 @@ impl Client {
             // The connection stays open while its event stream is read.
             let (connection, response) = loop {
                 let mut connection = open_current().await?;
-                let response = send(
-                    &mut connection.sender,
-                    Method::GET,
-                    protocol::EVENTS_PATH,
-                    None,
+                let response = tokio::time::timeout(
+                    HELLO_TIMEOUT,
+                    send(
+                        &mut connection.sender,
+                        Method::GET,
+                        protocol::EVENTS_PATH,
+                        None,
+                    ),
                 )
                 .await
+                .map_err(|_| connection_error(io::ErrorKind::TimedOut.into()))?
                 .map_err(connection_error)?;
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE {
                     if !receive(Watched::Busy) {
@@ -495,7 +507,7 @@ impl Client {
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let ownership = crate::lock::instance(&data)
+        let ownership = crate::lock::instance_within(&data, Duration::from_secs(2))
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
         let result = install();
@@ -576,6 +588,12 @@ impl Connection {
 }
 
 async fn open() -> io::Result<Connection> {
+    tokio::time::timeout(HELLO_TIMEOUT, open_inner())
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+async fn open_inner() -> io::Result<Connection> {
     let stream = transport::connect(&transport::endpoint_path()?).await?;
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
