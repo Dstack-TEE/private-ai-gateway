@@ -61,9 +61,10 @@ pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 /// Generous bounds for attestation and session artifacts. These are large
 /// enough for quote collateral and evidence in normal deployments while
 /// preventing an untrusted service from making the CLI buffer indefinitely.
+// Observed live: 54 KB attestation, 162 KB listing (97 sessions), 6.7 MB GPU session records.
 pub const MAX_ATTESTATION_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_SESSION_LIST_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_SESSION_LIST_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
 /// Total time for one artifact's connection, response headers, and body.
 const ARTIFACT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -644,12 +645,18 @@ mod tests {
 
     #[tokio::test]
     async fn chunked_artifact_bodies_are_limited_without_waiting_for_eof() {
-        let app = Router::new().fallback(get(|| async {
+        let app = Router::new().fallback(get(|uri: axum::http::Uri| async move {
+            let limit = match uri.path() {
+                "/v1/aci/attestation" => MAX_ATTESTATION_BYTES,
+                "/v1/aci/sessions" => MAX_SESSION_LIST_BYTES,
+                _ => MAX_SESSION_BYTES,
+            };
             let body = async_stream::stream! {
                 let chunk = axum::body::Bytes::from(vec![b'x'; 64 * 1024]);
-                for _ in 0..=(MAX_ATTESTATION_BYTES / chunk.len()) {
+                for _ in 0..(limit / chunk.len()) {
                     yield Ok::<_, Infallible>(chunk.clone());
                 }
+                yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b"x"));
                 // An unbounded reader would wait forever for the remainder.
                 std::future::pending::<()>().await;
             };
@@ -707,6 +714,7 @@ mod tests {
             "{error}"
         );
         server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
     }
 
     /// Live-network check that a registered pin is enforced fail-closed:

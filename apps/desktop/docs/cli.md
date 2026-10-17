@@ -36,12 +36,13 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
-Attestation, receipt, and session responses are size-bounded (4 MiB for
-attestation and session documents, 64 KiB for receipts). Each attestation,
-session, and receipt response must arrive within 30 seconds, including headers
-and body. Session audits may take longer in total when there are many sessions;
-`send`'s session fetch uses the same per-response bound. Service verification
-also has a 30-second overall deadline; a timeout fails closed.
+Attestation, receipt, and session responses are size-bounded: 4 MiB for
+attestation documents, 16 MiB for session listings, 32 MiB for session records,
+and 64 KiB for receipts. Each attestation, session, and receipt response must
+arrive within 30 seconds, including headers and body. Session audits may take
+longer in total when there are many sessions; `send`'s session fetch uses the
+same per-response bound. Service verification also has a 30-second overall
+deadline; a timeout fails closed.
 
 Human-readable fields replace terminal controls, including line breaks and
 tabs, with spaces. Transcript explanations render each sanitized line behind a
