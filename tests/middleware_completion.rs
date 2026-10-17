@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::admission;
 mod common;
 
 use async_trait::async_trait;
@@ -4436,4 +4437,315 @@ async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() 
             .count(),
         1
     );
+}
+
+fn assert_admitted_receipt(
+    receipt: &private_ai_gateway::aci::receipt::SignedReceipt,
+    original_id: &str,
+) {
+    let document = receipt.document_json().unwrap();
+    assert_eq!(document["served_at"], 109);
+    let upstream = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "upstream.verified")
+        .unwrap();
+    assert_eq!(upstream["session_id"], original_id);
+}
+
+#[tokio::test]
+async fn delayed_buffered_finalization_and_retained_failover_preserve_admission() {
+    use admission::{candidate, request, Attempt, Harness, RESPONSE};
+    for retained in [false, true] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: if retained { 503 } else { 200 },
+            at: 120,
+        }]);
+        let original = h.listed().remove(0);
+        h.clock.set(109);
+        let mut candidates = vec![candidate("first")];
+        if retained {
+            candidates.push(candidate("unrouteable"));
+        }
+        let result = h
+            .service
+            .forward_chat_completion_for_middleware(
+                request(vec![]),
+                candidates,
+                false,
+                MiddlewareReceiptJournal::default(),
+            )
+            .await
+            .unwrap();
+        let MiddlewareForwardResult::Forwarded(forwarded) = result else {
+            panic!("buffered response expected")
+        };
+        assert_eq!(forwarded.session_id.as_deref(), Some(original.session_id()));
+        h.clock.set(140);
+        assert_eq!(
+            h.service.get_attested_session(original.session_id()),
+            Some(original.clone())
+        );
+        let finalized = h
+            .service
+            .finalize_middleware_receipt(
+                forwarded.receipt,
+                RESPONSE,
+                Some("application/json"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_admitted_receipt(&finalized.receipt, original.session_id());
+        h.clock.set(144);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_some());
+        h.clock.set(145);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() {
+    use admission::{candidate, request, Attempt, Harness};
+    for streaming_finalizer in [false, true] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 109,
+        }]);
+        let original = h.listed().remove(0);
+        h.clock.set(109);
+        let journal = MiddlewareReceiptJournal::default();
+        let result = h
+            .service
+            .forward_chat_completion_for_middleware(
+                request(vec![]),
+                vec![candidate("first")],
+                true,
+                journal.clone(),
+            )
+            .await
+            .unwrap();
+        let MiddlewareForwardResult::Stream(mut forwarded) = result else {
+            panic!("stream expected")
+        };
+        h.clock.set(120);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_some());
+        let mut bytes = Vec::new();
+        while let Some(chunk) = forwarded.body.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        drop(forwarded.body);
+        h.clock.set(140);
+        assert!(
+            h.service
+                .get_attested_session(original.session_id())
+                .is_some(),
+            "journal now owns the lease"
+        );
+        if streaming_finalizer {
+            let source: ServiceResponseStream =
+                Box::pin(futures_util::stream::iter([Ok(Bytes::from(bytes))]));
+            let mut finalized = h
+                .service
+                .finalize_middleware_response_stream(
+                    journal,
+                    source,
+                    "/v1/chat/completions",
+                    Some("text/event-stream"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            while let Some(chunk) = finalized.body.next().await {
+                chunk.unwrap();
+            }
+        } else {
+            let draft = journal.take().unwrap();
+            h.service
+                .finalize_middleware_receipt(draft, &bytes, Some("text/event-stream"), None, None)
+                .unwrap();
+        }
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(&forwarded.receipt_id)
+            .unwrap();
+        assert_admitted_receipt(&receipt, original.session_id());
+        h.clock.set(144);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_some());
+        h.clock.set(145);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn abandoning_drafts_streams_and_inflight_attempts_releases_leases() {
+    use admission::{candidate, request, Attempt, Harness};
+    for streaming in [false, true] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 109,
+        }]);
+        let original = h.listed().remove(0);
+        h.clock.set(109);
+        let journal = MiddlewareReceiptJournal::default();
+        let result = h
+            .service
+            .forward_chat_completion_for_middleware(
+                request(vec![]),
+                vec![candidate("first")],
+                streaming,
+                journal.clone(),
+            )
+            .await
+            .unwrap();
+        h.clock.set(120);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_some());
+        drop(result);
+        drop(journal);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_none());
+    }
+    // Cancellation while awaiting the backend drops the attempt's admission.
+    let h = Harness::new(vec![Attempt::Pending]);
+    let original = h.listed().remove(0);
+    h.clock.set(109);
+    let mut future = Box::pin(h.service.forward_chat_completion_for_middleware(
+        request(vec![]),
+        vec![candidate("first")],
+        false,
+        MiddlewareReceiptJournal::default(),
+    ));
+    assert!(futures_util::poll!(&mut future).is_pending());
+    h.clock.set(120);
+    assert!(h
+        .service
+        .get_attested_session(original.session_id())
+        .is_some());
+    drop(future);
+    assert!(h
+        .service
+        .get_attested_session(original.session_id())
+        .is_none());
+}
+
+#[tokio::test]
+async fn replacing_a_retained_response_releases_its_session_lease() {
+    use admission::{candidate, request, Attempt, Harness, RESPONSE};
+    let h = Harness::new(vec![
+        Attempt::Response {
+            status: 503,
+            at: 120,
+        },
+        Attempt::Response {
+            status: 503,
+            at: 130,
+        },
+    ]);
+    let original = h.listed().remove(0);
+    h.clock.set(109);
+    let result = h
+        .service
+        .forward_chat_completion_for_middleware(
+            request(vec![]),
+            vec![
+                candidate("first"),
+                candidate("second"),
+                candidate("unrouteable"),
+            ],
+            false,
+            MiddlewareReceiptJournal::default(),
+        )
+        .await
+        .unwrap();
+    let MiddlewareForwardResult::Forwarded(forwarded) = result else {
+        panic!("buffered response expected")
+    };
+    let replacement_id = forwarded.session_id.clone().unwrap();
+    assert_ne!(replacement_id, original.session_id());
+    assert!(
+        h.service
+            .get_attested_session(original.session_id())
+            .is_none(),
+        "replaced retained owner released its lease"
+    );
+    assert!(h.service.get_attested_session(&replacement_id).is_some());
+    h.clock.set(140);
+    let finalized = h
+        .service
+        .finalize_middleware_receipt(
+            forwarded.receipt,
+            RESPONSE,
+            Some("application/json"),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(finalized.receipt.document_json().unwrap()["served_at"], 120);
+    h.clock.set(145);
+    assert!(h.service.get_attested_session(&replacement_id).is_none());
+}
+
+#[tokio::test]
+async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
+    use admission::{candidate, request, Attempt, Harness};
+    let h = Harness::new(vec![Attempt::Response {
+        status: 200,
+        at: 109,
+    }]);
+    let original = h.listed().remove(0);
+    h.clock.set(109);
+    let journal = MiddlewareReceiptJournal::default();
+    let clone = journal.clone();
+    let result = h
+        .service
+        .forward_chat_completion_for_middleware(
+            request(vec![]),
+            vec![candidate("first")],
+            true,
+            journal.clone(),
+        )
+        .await
+        .unwrap();
+    let MiddlewareForwardResult::Stream(mut forwarded) = result else {
+        panic!("stream expected")
+    };
+    while let Some(chunk) = forwarded.body.next().await {
+        chunk.unwrap();
+    }
+    drop(forwarded);
+    h.clock.set(120);
+    drop(journal);
+    assert!(
+        h.service
+            .get_attested_session(original.session_id())
+            .is_some(),
+        "the cloned journal still owns the draft"
+    );
+    drop(clone);
+    assert!(h
+        .service
+        .get_attested_session(original.session_id())
+        .is_none());
 }
