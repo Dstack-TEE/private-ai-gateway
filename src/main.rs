@@ -112,8 +112,9 @@ struct GatewayConfigFile {
     upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
     admin_token_sha256: Option<String>,
-    /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
-    /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
+    /// Keyset lifetime in seconds: `not_after` = seal time + this (§3.4),
+    /// renewed in-process at half-life. Defaults to
+    /// [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
     keyset_not_after_seconds: Option<u64>,
     /// Validity period for newly sealed sessions, independent of receipt retention.
     attested_session_ttl_seconds: u64,
@@ -559,9 +560,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
 
-    // Keyset lifetime (§3.4): launch time plus a configurable duration. The
-    // keyset is sealed once by the service with this absolute expiry; replacing
-    // keys ahead of it means restarting with a fresh keyset and quote.
+    // Keyset lifetime (§3.4): launch time plus a configurable duration. A
+    // background task re-seals the keyset with a later expiry once half of
+    // this lifetime has passed, so a long-running replica never expires.
     let keyset_not_after_seconds = gateway_config
         .keyset_not_after_seconds
         .unwrap_or(DEFAULT_KEYSET_NOT_AFTER_SECONDS);
@@ -637,6 +638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         not_after = keyset_not_after,
         "sealed workload keyset"
     );
+    spawn_keyset_renewal(service.clone(), keyset_not_after_seconds);
     if provenance_unknown {
         // §4.1: a conformant verifier rejects a report without provenance, so
         // a deployment without git-launcher metadata fails every client.
@@ -795,6 +797,28 @@ fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>, concurr
                         "upstream provider session refresh finished"
                     ),
                 }
+            }
+        }
+    });
+}
+
+/// Upper bound on how often the background task checks whether the keyset is
+/// due for renewal. Shorter lifetimes are checked at a quarter of the lifetime.
+const KEYSET_RENEWAL_CHECK_INTERVAL_SECONDS: u64 = 3600;
+
+fn spawn_keyset_renewal(service: Arc<AciService>, lifetime_seconds: u64) {
+    let check_seconds = KEYSET_RENEWAL_CHECK_INTERVAL_SECONDS.min((lifetime_seconds / 4).max(1));
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(check_seconds)).await;
+            match service.renew_keyset_if_due(lifetime_seconds) {
+                Ok(Some(not_after)) => tracing::info!(
+                    workload_keyset_digest = %service.workload_keyset_digest(),
+                    not_after,
+                    "renewed workload keyset"
+                ),
+                Ok(None) => {}
+                Err(err) => tracing::error!(error = %err, "workload keyset renewal failed"),
             }
         }
     });

@@ -340,12 +340,19 @@ impl AciService {
         // service received from axum.
         let receipt_id = generate_receipt_id();
         let chat_id = extract_chat_id(&client_body);
-        let served_at = selected.admitted_at;
+        // Aggregator receipts cite the admitted attempt (§7.3). A direct
+        // service has no upstream admission and timestamps its response.
+        let served_at = if self.serves_directly() {
+            self.clock.now_secs()
+        } else {
+            selected.admitted_at
+        };
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             receipt_id,
             chat_id,
             req.context.user_model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -497,12 +504,17 @@ impl AciService {
         }
 
         let receipt_id = generate_receipt_id();
-        let served_at = selected.admitted_at;
+        let served_at = if self.serves_directly() {
+            self.clock.now_secs()
+        } else {
+            selected.admitted_at
+        };
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             receipt_id.clone(),
             None,
             req.context.user_model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -563,6 +575,7 @@ impl AciService {
 
         Ok(StreamingForwardResult::Stream(StreamingForwardStream {
             receipt_id,
+            keyset_digest: keyset.digest().to_string(),
             upstream_status: upstream_response.status_code,
             upstream_headers: upstream_response.headers,
             e2ee: e2ee_response,
@@ -857,14 +870,16 @@ impl AciService {
         wire_error_body: &[u8],
         requester: Option<ReceiptOwner>,
     ) -> Result<SignedReceipt, ServiceError> {
+        let served_at = self.clock.now_secs();
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             generate_receipt_id(),
             None,
             model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
-            self.clock.now_secs(),
+            served_at,
         );
         builder.add_request_received(received_body)?;
         // A refusal only happens when verification was required (§7.5).

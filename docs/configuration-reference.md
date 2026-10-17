@@ -36,7 +36,7 @@ Minimal container configuration:
 | `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
 | `admin_token_sha256` | hex string | unset | SHA-256 the admin token must match, whether it comes from `admin_token`, `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`, or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. Startup fails on a missing or mismatched token. |
-| `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
+| `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a sealed workload keyset. The gateway re-seals the same keys with a fresh `not_after` once half the lifetime has passed, so the served keyset digest changes then. Zero is rejected. |
 | `attested_session_ttl_seconds` | positive integer | `3600` | Validity of newly sealed attested sessions, independent of receipt retention and verifier-cache TTL. Zero, negative, non-integer and unrepresentable expiry values are rejected. Existing documents keep their original expiry. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
 | `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |

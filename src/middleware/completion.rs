@@ -628,6 +628,11 @@ pub async fn run(
                         StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let mut headers = gateway_owned_headers("application/json");
                     insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
+                    insert_header(
+                        &mut headers,
+                        "x-aci-keyset-digest",
+                        finalized.receipt.workload_keyset_digest(),
+                    );
                     apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                     (status, headers, finalized.wire_body).into_response()
                 }
@@ -740,6 +745,11 @@ pub async fn run(
                     match &receipt_id {
                         Some(receipt_id) => {
                             insert_header(&mut headers, "x-receipt-id", receipt_id);
+                            insert_header(
+                                &mut headers,
+                                "x-aci-keyset-digest",
+                                &forward.keyset_digest,
+                            );
                             apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                         }
                         None => apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), false),
@@ -1632,7 +1642,11 @@ fn service_error_response(
             outcome.requester.clone(),
         ) {
             Ok(receipt) => {
-                let headers = [("x-receipt-id", receipt.receipt_id.clone())];
+                let mut headers = vec![("x-receipt-id", receipt.receipt_id.clone())];
+                headers.push((
+                    "x-aci-keyset-digest",
+                    receipt.workload_keyset_digest().to_string(),
+                ));
                 finalize_generated(status, body, &headers, e2ee, outcome)
             }
             // The receipt is part of the refusal contract (§5.2); a refusal
