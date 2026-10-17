@@ -39,13 +39,10 @@ pub fn disable_browser_accelerator_keys(window: &WebviewWindow) {
 
 const TRAY_NOTICE_FILE: &str = "tray-notice-shown";
 
-/// The first time closing the window leaves the app running, says where it
-/// went. The notice is recorded with the app's other local state, not in its
-/// settings.
+/// The first time closing the window hides it to the notification area, says
+/// where it went. The notice is recorded with the app's other local state, not
+/// in its settings.
 pub fn explain_close_to_tray(app: &AppHandle) {
-    if app.tray_by_id(crate::tray::TRAY_ID).is_none() {
-        return;
-    }
     let Ok(directory) = desktop_core::paths::app_data_dir() else {
         return;
     };

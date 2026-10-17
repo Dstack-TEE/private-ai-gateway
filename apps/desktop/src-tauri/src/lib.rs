@@ -25,7 +25,7 @@ use std::sync::{
 
 use desktop_core::{
     client::Client,
-    config::NotificationPreferences,
+    config::{Appearance, NotificationPreferences},
     contracts::AppState,
     ui_api::{Host, StateEventProjection},
 };
@@ -86,7 +86,6 @@ pub fn run() {
         .manage(updates::PreparedUpdate::default())
         .manage(cli_registration::CliStartup::default())
         .manage(Mutex::new(window::WindowState::default()))
-        .manage(Mutex::new(NotificationPreferences::default()))
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .on_menu_event(menu::handle_event)
         .setup(setup);
@@ -132,6 +131,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Cannot prepare Agent Home access for the backend: {error}");
         }
     }
+    // The window and notifications follow the saved settings until the
+    // backend answers with its own; settings that cannot be read keep
+    // notifications off until then.
+    let (appearance, notifications) = match desktop_core::config::load() {
+        Ok(saved) => (saved.appearance, saved.notifications),
+        Err(_) => (
+            Appearance::default(),
+            NotificationPreferences {
+                enabled: false,
+                ..NotificationPreferences::default()
+            },
+        ),
+    };
+    app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     autostart::setup(app.handle())?;
     if updates::configured(app.handle()) {
@@ -147,7 +160,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // The renderer invokes backend commands on mount. Create it only
     // after Client and native services are registered in managed state.
-    window::create(app)?;
+    window::create(app, appearance)?;
     if let Err(error) = tray::setup(app.handle()) {
         tracing::warn!("The system tray is unavailable: {error}");
     } else {
@@ -159,6 +172,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     follow_backend(app.handle(), client);
     if show_on_launch {
         window::show(app.handle());
+    } else {
+        window::launch_hidden(app.handle());
     }
     Ok(())
 }
@@ -188,7 +203,7 @@ fn follow_backend(app: &AppHandle, client: Arc<Client>) {
     let initial = states.borrow().clone();
     let mut projection = StateEventProjection::new(&initial);
     tray::sync(&app, &initial);
-    let mut alerts = notifications::Observer::new(&initial);
+    let mut alerts = notifications::Observer::default();
     let mut backend = BackendInstance::default();
     // The notification permission is asked for once per launch, once a
     // backend answers with its preferences.

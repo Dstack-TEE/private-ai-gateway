@@ -2,7 +2,7 @@ import React, { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { SERVICE_AGENT, useAgents } from "./hooks/use-agents";
-import { useAppState } from "./lib/use-app-state";
+import { appStateKey, useAppState } from "./lib/use-app-state";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
@@ -30,7 +30,7 @@ export function AppLayout(): React.JSX.Element {
   const [announcement, setAnnouncement] = useState("");
   useEffect(() => desktopApi.onSettingsReset(() => {
     // The window's state is the backend's, which a reset doesn't clear.
-    void client.resetQueries({ predicate: (query) => query.queryKey[0] !== "app-state" });
+    void client.resetQueries({ predicate: (query) => query.queryKey[0] !== appStateKey[0] });
     void navigate({ to: "/settings", replace: true });
     setAnnouncement("Settings reset");
   }), [client, navigate]);
