@@ -14,7 +14,7 @@ use crate::args::SendArgs;
 use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
-use crate::client::{with_session_audit_timeout, HttpResult};
+use crate::client::HttpResult;
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, safe_multiline, write_stdout};
 
@@ -123,8 +123,7 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let identity = identity.ok_or("verified run carried no established identity")?;
     // Audit the cited session (§9.2): its id is the hash of the parsed
     // document's JCS form, so any served encoding verifies.
-    let (session_resp, no_session_reason) =
-        with_session_audit_timeout(fetch_live_session(&client, &base_url, &receipt)).await?;
+    let (session_resp, no_session_reason) = fetch_live_session(&client, &base_url, &receipt).await;
     run_response_checks(
         &mut transcript,
         &receipt,

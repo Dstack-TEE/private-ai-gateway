@@ -6,7 +6,6 @@
 //! per-hostname pin set, fail closed on mismatch.
 
 use std::{
-    future::Future,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -65,16 +64,9 @@ pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 pub const MAX_ATTESTATION_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SESSION_LIST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const SESSION_AUDIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Total time for one artifact's connection, response headers, and body.
+const ARTIFACT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
-
-pub(crate) async fn with_session_audit_timeout<T>(
-    future: impl Future<Output = T>,
-) -> Result<T, String> {
-    tokio::time::timeout(SESSION_AUDIT_TIMEOUT, future)
-        .await
-        .map_err(|_| "session audit timed out".to_string())
-}
 
 /// Why a bounded GET produced no response.
 #[derive(Debug, thiserror::Error)]
@@ -223,13 +215,18 @@ pub struct AciClient {
     /// pin set no longer allows.
     http: RwLock<reqwest::Client>,
     observations: Arc<SpkiObservations>,
+    artifact_timeout: Duration,
 }
 
 impl AciClient {
     pub fn new() -> Result<Self, String> {
         let observations = Arc::new(SpkiObservations::default());
         let http = RwLock::new(build_http(&observations)?);
-        Ok(Self { http, observations })
+        Ok(Self {
+            http,
+            observations,
+            artifact_timeout: ARTIFACT_FETCH_TIMEOUT,
+        })
     }
 
     fn http(&self) -> reqwest::Client {
@@ -283,7 +280,7 @@ impl AciClient {
         url: &str,
         bearer: Option<&str>,
     ) -> Result<HttpResult, reqwest::Error> {
-        let resp = self.send_get(url, bearer).await?;
+        let resp = self.send_get(url, bearer, None).await?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = resp.bytes().await?.to_vec();
@@ -294,7 +291,8 @@ impl AciClient {
         })
     }
 
-    /// A GET whose body read stops with `GetError::TooLarge` past `limit` bytes.
+    /// One deadline covers the headers and body; the body read also stops
+    /// with `GetError::TooLarge` past `limit` bytes.
     async fn get_limited(
         &self,
         url: &str,
@@ -302,7 +300,7 @@ impl AciClient {
         limit: usize,
     ) -> Result<HttpResult, GetError> {
         let resp = self
-            .send_get(url, bearer)
+            .send_get(url, bearer, Some(self.artifact_timeout))
             .await
             .map_err(GetError::Request)?;
         let status = resp.status().as_u16();
@@ -314,10 +312,13 @@ impl AciClient {
                 if error.is::<LengthLimitError>() {
                     GetError::TooLarge(limit)
                 } else {
-                    GetError::Failed(format!(
-                        "GET {url}: failed to read body: {}",
-                        error_chain_message(&*error)
-                    ))
+                    match error.downcast::<reqwest::Error>() {
+                        Ok(error) => GetError::Request(*error),
+                        Err(error) => GetError::Failed(format!(
+                            "GET {url}: failed to read body: {}",
+                            error_chain_message(&*error)
+                        )),
+                    }
                 }
             })?
             .to_bytes()
@@ -333,10 +334,14 @@ impl AciClient {
         &self,
         url: &str,
         bearer: Option<&str>,
+        timeout: Option<Duration>,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut req = self.http().get(url);
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
+        }
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
         }
         req.send().await
     }
@@ -502,6 +507,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_deadlines_cover_headers_and_trickling_bodies() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(get({
+            let chunks = chunks.clone();
+            move |uri: axum::http::Uri| {
+                let chunks = chunks.clone();
+                async move {
+                    if uri.path().starts_with("/headers/") {
+                        std::future::pending::<()>().await;
+                    }
+                    let body = async_stream::stream! {
+                        loop {
+                            chunks.fetch_add(1, Ordering::SeqCst);
+                            yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b" "));
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    };
+                    Response::new(Body::from_stream(body))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut client = AciClient::new().unwrap();
+        client.artifact_timeout = Duration::from_millis(100);
+
+        for mode in ["headers", "body"] {
+            let base = format!("{base_url}/{mode}");
+            for artifact in ["attestation", "receipt", "listing", "session"] {
+                let before = chunks.load(Ordering::SeqCst);
+                let error = tokio::time::timeout(Duration::from_secs(2), async {
+                    let error = match artifact {
+                        "attestation" => client
+                            .fetch_attestation(&attestation_url(&base, "test-nonce").unwrap())
+                            .await
+                            .unwrap_err(),
+                        "receipt" => client
+                            .fetch_receipt(&base, "test-receipt", None)
+                            .await
+                            .unwrap_err(),
+                        "listing" => client
+                            .fetch_session_listing(&format!("{base}/v1/aci/sessions"))
+                            .await
+                            .unwrap_err(),
+                        "session" => {
+                            // The same fetch path used by send's cited-session audit.
+                            let receipt = serde_json::json!({"event_log": [{
+                                "type": "upstream.verified",
+                                "result": "verified",
+                                "session_id": "test-session",
+                            }]});
+                            let (response, reason) =
+                                crate::checks::fetch_live_session(&client, &base, &receipt).await;
+                            assert!(response.is_none());
+                            return reason;
+                        }
+                        _ => unreachable!(),
+                    };
+                    assert!(
+                        matches!(
+                            ServiceError::from_get(&error, "127.0.0.1"),
+                            ServiceError::TimedOut { .. }
+                        ),
+                        "{mode} {artifact}: {error}"
+                    );
+                    error.to_string()
+                })
+                .await
+                .expect("individual artifact fetch did not enforce its deadline");
+                assert!(error.contains("timed out"), "{mode} {artifact}: {error}");
+                if mode == "body" {
+                    assert!(chunks.load(Ordering::SeqCst) > before + 1);
+                }
+            }
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn session_audits_can_outlast_an_individual_fetch_deadline() {
+        let now = desktop_core::now_secs();
+        let records: std::collections::BTreeMap<String, Vec<u8>> = (0..6)
+            .map(|index| {
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&crate::spec_fixtures::vector_session_bytes()).unwrap();
+                record["established_at"] = serde_json::json!(now - 10);
+                record["expires_at"] = serde_json::json!(now + 3600);
+                record["upstream_name"] = serde_json::json!(format!("upstream-{index}"));
+                let bytes = crate::aci::digest::jcs_bytes(&record).unwrap();
+                (crate::aci::digest::sha256_bare_hex(&bytes), bytes)
+            })
+            .collect();
+        let sessions: Vec<_> = records
+            .keys()
+            .map(|id| serde_json::json!({ "session_id": id }))
+            .collect();
+        let listing = serde_json::to_vec(&serde_json::json!({ "sessions": sessions })).unwrap();
+        let records = Arc::new(records);
+        let app = Router::new().fallback(get(move |uri: axum::http::Uri| {
+            let records = records.clone();
+            let listing = listing.clone();
+            async move {
+                // Advance while handling a request, then resume before waiting
+                // on sockets so paused time cannot skip an HTTP deadline.
+                tokio::time::pause();
+                tokio::time::advance(ARTIFACT_FETCH_TIMEOUT / 2).await;
+                tokio::time::resume();
+                if uri.path() == "/v1/aci/sessions" {
+                    listing
+                } else {
+                    records[uri.path().rsplit('/').next().unwrap()].clone()
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = AciClient::new().unwrap();
+        let started = tokio::time::Instant::now();
+        let audited = crate::sessions::audit_current_sessions(&client, &base_url, None, &[])
+            .await
+            .unwrap();
+        assert!(started.elapsed() > ARTIFACT_FETCH_TIMEOUT);
+        assert_eq!(audited.len(), 6);
+        assert!(audited
+            .iter()
+            .all(crate::sessions::AuditedSession::accepted));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
     async fn chunked_artifact_bodies_are_limited_without_waiting_for_eof() {
         let app = Router::new().fallback(get(|| async {
             let body = async_stream::stream! {
@@ -525,7 +666,7 @@ mod tests {
 
         let client = AciClient::new().unwrap();
         let url = attestation_url(&base_url, "test-nonce").unwrap();
-        let response = client.send_get(url.as_str(), None).await.unwrap();
+        let response = client.send_get(url.as_str(), None, None).await.unwrap();
         assert!(!response.headers().contains_key("content-length"));
         assert_eq!(response.headers()["transfer-encoding"], "chunked");
         drop(response);

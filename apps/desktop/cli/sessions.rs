@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
-use crate::client::{with_session_audit_timeout, AciClient};
+use crate::client::AciClient;
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
@@ -227,21 +227,6 @@ fn sessions_url(base_url: &str, model: Option<&str>) -> Result<url::Url, String>
 /// against `now` plus the claims policy. Shared with `private-ai-proxy serve
 /// --require-claim`, which pins the accepted ids.
 pub async fn audit_current_sessions(
-    client: &AciClient,
-    base_url: &str,
-    model: Option<&str>,
-    required_claims: &[RequiredClaim],
-) -> Result<Vec<AuditedSession>, String> {
-    with_session_audit_timeout(audit_current_sessions_inner(
-        client,
-        base_url,
-        model,
-        required_claims,
-    ))
-    .await?
-}
-
-async fn audit_current_sessions_inner(
     client: &AciClient,
     base_url: &str,
     model: Option<&str>,

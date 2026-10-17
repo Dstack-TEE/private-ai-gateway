@@ -37,9 +37,11 @@ These commands are the relying party of the
 service or read the settings files.
 
 Attestation, receipt, and session responses are size-bounded (4 MiB for
-attestation and session documents, 64 KiB for receipts), and verification and
-session audits, including `send`'s session fetch, have a 30-second overall
-deadline; a timeout fails closed.
+attestation and session documents, 64 KiB for receipts). Each attestation,
+session, and receipt response must arrive within 30 seconds, including headers
+and body. Session audits may take longer in total when there are many sessions;
+`send`'s session fetch uses the same per-response bound. Service verification
+also has a 30-second overall deadline; a timeout fails closed.
 
 Human-readable fields replace terminal controls, including line breaks and
 tabs, with spaces. Transcript explanations render each sanitized line behind a
