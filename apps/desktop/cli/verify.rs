@@ -4,6 +4,8 @@
 //! whose leaf SPKI is recorded, then checks online: DCAP collateral
 //! fetched, observed channel bound.
 
+use std::time::Duration;
+
 use crate::aci::types::AttestationReport;
 use crate::aci::verifier::DEFAULT_PCCS_URL;
 use crate::args::VerifyArgs;
@@ -15,6 +17,8 @@ use crate::client::{
     attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError,
 };
 use crate::transcript::Transcript;
+
+pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a verification could not run or did not pass: the service could not
 /// be reached or is not an ACI service (authored for the user), its verdict
@@ -66,8 +70,18 @@ pub async fn verify_service(
     policy: &VerifierPolicy,
     explain: bool,
 ) -> Result<ServiceVerification, VerifyError> {
+    verify_service_with_timeout(base_url, nonce_arg, policy, explain, VERIFICATION_TIMEOUT).await
+}
+
+pub(crate) async fn verify_service_with_timeout(
+    base_url: &str,
+    nonce_arg: Option<&str>,
+    policy: &VerifierPolicy,
+    explain: bool,
+    timeout: Duration,
+) -> Result<ServiceVerification, VerifyError> {
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        timeout,
         verify_service_inner(base_url, nonce_arg, policy, explain),
     )
     .await
@@ -152,4 +166,68 @@ pub async fn run(args: VerifyArgs) -> Result<i32, String> {
     )
     .await?;
     verification.transcript.print(args.json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, response::Response, routing::get, Router};
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[tokio::test]
+    async fn a_trickling_attestation_hits_the_injected_total_deadline() {
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/aci/attestation",
+            get({
+                let chunks = chunks.clone();
+                move || {
+                    let chunks = chunks.clone();
+                    async move {
+                        let body = async_stream::stream! {
+                            loop {
+                                chunks.fetch_add(1, Ordering::SeqCst);
+                                yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b" "));
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        };
+                        Response::new(Body::from_stream(body))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            verify_service_with_timeout(
+                &base_url,
+                Some("test-nonce"),
+                &VerifierPolicy::default(),
+                false,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("verification did not enforce its total deadline");
+        assert!(matches!(
+            result,
+            Err(VerifyError::Service(ServiceError::TimedOut { .. }))
+        ));
+        assert!(
+            chunks.load(Ordering::SeqCst) > 1,
+            "attestation did not trickle"
+        );
+        server.abort();
+    }
 }

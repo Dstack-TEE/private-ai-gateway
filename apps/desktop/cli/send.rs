@@ -294,26 +294,37 @@ impl SseTextCollector {
     }
 
     fn feed(&mut self, chunk: &[u8]) {
+        self.feed_with(chunk, write_stdout);
+    }
+
+    fn feed_with(&mut self, chunk: &[u8], mut output: impl FnMut(&[u8]) -> Result<bool, String>) {
         let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
-        self.lines
-            .push(chunk, |data| append_delta(text, echo, output_alive, data));
+        self.lines.push(chunk, |data| {
+            append_delta(text, echo, output_alive, data, &mut output)
+        });
     }
 
     fn finish(&mut self) {
         let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
         self.lines
-            .finish(|data| append_delta(text, echo, output_alive, data));
+            .finish(|data| append_delta(text, echo, output_alive, data, &mut write_stdout));
     }
 }
 
 /// Appends an event's content delta; `[DONE]` and other events carry none.
-fn append_delta(text: &mut String, echo: bool, output_alive: &mut bool, data: &str) {
+fn append_delta(
+    text: &mut String,
+    echo: bool,
+    output_alive: &mut bool,
+    data: &str,
+    output: &mut impl FnMut(&[u8]) -> Result<bool, String>,
+) {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
         return;
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if echo && *output_alive && !write_stdout(safe(delta).as_bytes()).unwrap_or(false) {
+        if echo && *output_alive && !output(safe(delta).as_bytes()).unwrap_or(false) {
             *output_alive = false;
         }
     }
@@ -346,6 +357,32 @@ mod tests {
         c.feed(b"ces\":[{\"delta\":{\"content\":\"lo\"}}]}\n\ndata: [DONE]\n\n");
         c.finish();
         assert_eq!(c.text, "Hello");
+    }
+
+    #[test]
+    fn split_escape_sequences_in_reply_deltas_are_inert_but_captured_exactly() {
+        let mut collector = SseTextCollector::new(true);
+        let mut rendered = Vec::new();
+        for delta in [
+            "hello\u{1b}[",
+            "31mred\u{1b}]8;;https://example.com",
+            "\u{7}link\r\u{202e}text\n\t",
+        ] {
+            let event = serde_json::json!({"choices": [{"delta": {"content": delta}}]});
+            collector.feed_with(format!("data: {event}\n\n").as_bytes(), |bytes| {
+                rendered.extend_from_slice(bytes);
+                Ok(true)
+            });
+        }
+        collector.finish();
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "hello [31mred ]8;;https://example.com link  text\n\t"
+        );
+        assert_eq!(
+            collector.text,
+            "hello\u{1b}[31mred\u{1b}]8;;https://example.com\u{7}link\r\u{202e}text\n\t"
+        );
     }
 
     #[test]

@@ -454,6 +454,8 @@ fn is_url_safe_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, response::Response, routing::get, Router};
+    use std::convert::Infallible;
 
     #[test]
     fn nonce_is_32_random_bytes_hex() {
@@ -490,6 +492,67 @@ mod tests {
         // Pins are keyed like rustls server names: no IPv6 brackets.
         assert_eq!(host_of("https://[::1]:8443/v1").unwrap(), "::1");
         assert_eq!(host_of("https://127.0.0.1:8443").unwrap(), "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn chunked_artifact_bodies_are_limited_without_waiting_for_eof() {
+        let app = Router::new().fallback(get(|| async {
+            let body = async_stream::stream! {
+                let chunk = axum::body::Bytes::from(vec![b'x'; 64 * 1024]);
+                for _ in 0..=(MAX_ATTESTATION_BYTES / chunk.len()) {
+                    yield Ok::<_, Infallible>(chunk.clone());
+                }
+                // An unbounded reader would wait forever for the remainder.
+                std::future::pending::<()>().await;
+            };
+            Response::builder()
+                .header("transfer-encoding", "chunked")
+                .body(Body::from_stream(body))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = AciClient::new().unwrap();
+        let url = attestation_url(&base_url, "test-nonce").unwrap();
+        let response = client.send_get(url.as_str(), None).await.unwrap();
+        assert!(!response.headers().contains_key("content-length"));
+        assert_eq!(response.headers()["transfer-encoding"], "chunked");
+        drop(response);
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.fetch_attestation(&url),
+        )
+        .await
+        .expect("attestation read should stop before EOF")
+        .unwrap_err();
+        assert!(matches!(error, GetError::TooLarge(MAX_ATTESTATION_BYTES)));
+        assert!(matches!(
+            ServiceError::from_get(&error, "127.0.0.1"),
+            ServiceError::ResponseTooLarge { .. }
+        ));
+        let listing_url = format!("{base_url}/v1/aci/sessions");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.fetch_session_listing(&listing_url),
+        )
+        .await
+        .expect("session listing read should stop before EOF")
+        .unwrap_err();
+        assert!(matches!(error, GetError::TooLarge(MAX_SESSION_LIST_BYTES)));
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.fetch_session(&base_url, "test-session"),
+        )
+        .await
+        .expect("session record read should stop before EOF")
+        .unwrap_err();
+        assert!(error.contains("response body exceeds 4096 KiB"), "{error}");
+        server.abort();
     }
 
     /// Live-network check that a registered pin is enforced fail-closed:

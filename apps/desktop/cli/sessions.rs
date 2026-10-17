@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
-use crate::verify::verify_service;
+use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
 use desktop_core::now_secs;
@@ -19,6 +19,13 @@ use desktop_core::now_secs;
 pub async fn run(args: SessionsArgs) -> Result<i32, String> {
     let verification =
         verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
+    run_verified(args, verification).await
+}
+
+pub(crate) async fn run_verified(
+    args: SessionsArgs,
+    verification: ServiceVerification,
+) -> Result<i32, String> {
     verification
         .client
         .pin(&verification.host, &verification.tls_pins)?;

@@ -35,7 +35,10 @@ use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
 use crate::client::AciClient;
 use crate::sessions::audit_current_sessions;
-use crate::verify::{verify_service, ServiceVerification, VerifyError};
+use crate::verify::{
+    verify_service, verify_service_with_timeout, ServiceVerification, VerifyError,
+    VERIFICATION_TIMEOUT,
+};
 use crate::{safe, write_stdout};
 
 mod audit;
@@ -211,6 +214,7 @@ pub struct ProxyState {
     shutdown: CancellationToken,
     #[cfg(test)]
     pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    verify_timeout: std::time::Duration,
     event_sink: VerifierEventSink,
 }
 
@@ -254,6 +258,7 @@ impl ProxyState {
             shutdown,
             #[cfg(test)]
             pause: Mutex::new(None),
+            verify_timeout: VERIFICATION_TIMEOUT,
         }
     }
 
@@ -397,11 +402,12 @@ impl ProxyState {
             _ = self.shutdown.cancelled() => {
                 return Err("verifier stopped during re-verification".to_string());
             }
-            result = verify_service(
+            result = verify_service_with_timeout(
                 &self.base_url,
                 None,
                 &self.policy,
                 false,
+                self.verify_timeout,
             ) => result?,
         };
         if !verification.transcript.verified() {

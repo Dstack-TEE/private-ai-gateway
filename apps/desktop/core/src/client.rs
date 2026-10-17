@@ -331,18 +331,10 @@ impl Client {
             // The connection stays open while its event stream is read.
             let (connection, response) = loop {
                 let mut connection = open_current().await?;
-                let response = tokio::time::timeout(
-                    HELLO_TIMEOUT,
-                    send(
-                        &mut connection.sender,
-                        Method::GET,
-                        protocol::EVENTS_PATH,
-                        None,
-                    ),
-                )
-                .await
-                .map_err(|_| connection_error(io::ErrorKind::TimedOut.into()))?
-                .map_err(connection_error)?;
+                let response = connection
+                    .events(HELLO_TIMEOUT)
+                    .await
+                    .map_err(connection_error)?;
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE {
                     if !receive(Watched::Busy) {
                         return Ok(());
@@ -557,6 +549,15 @@ struct Connection {
 }
 
 impl Connection {
+    async fn events(&mut self, timeout: Duration) -> io::Result<hyper::Response<Incoming>> {
+        tokio::time::timeout(
+            timeout,
+            send(&mut self.sender, Method::GET, protocol::EVENTS_PATH, None),
+        )
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    }
+
     async fn call(&mut self, command: &Command) -> Result<Value, CallError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -588,13 +589,18 @@ impl Connection {
 }
 
 async fn open() -> io::Result<Connection> {
-    tokio::time::timeout(HELLO_TIMEOUT, open_inner())
+    let endpoint = transport::endpoint_path()?;
+    open_at(&endpoint, HELLO_TIMEOUT).await
+}
+
+async fn open_at(endpoint: &Path, timeout: Duration) -> io::Result<Connection> {
+    tokio::time::timeout(timeout, open_inner(endpoint))
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
 }
 
-async fn open_inner() -> io::Result<Connection> {
-    let stream = transport::connect(&transport::endpoint_path()?).await?;
+async fn open_inner(endpoint: &Path) -> io::Result<Connection> {
+    let stream = transport::connect(endpoint).await?;
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
         .map_err(http_error)?;
@@ -744,7 +750,106 @@ fn connection_error(error: io::Error) -> String {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{acquire_startup, STARTUP_IN_PROGRESS};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::{acquire_startup, open_at, STARTUP_IN_PROGRESS};
+
+    async fn request_headers(stream: &mut tokio::net::UnixStream) {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 256];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "client closed before sending request headers");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    #[tokio::test]
+    async fn version_handshake_timeout_covers_a_connected_silent_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        crate::private_fs::create_private_dir(&runtime).unwrap();
+        let endpoint = runtime.join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let (requested, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            request_headers(&mut stream).await;
+            requested.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            open_at(&endpoint, Duration::from_millis(50)),
+        )
+        .await
+        .expect("version exchange exceeded its handshake deadline");
+        let error = match result {
+            Ok(_) => panic!("silent endpoint unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        received
+            .try_recv()
+            .expect("backend did not receive the request");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn events_headers_timeout_after_a_successful_version_exchange() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        crate::private_fs::create_private_dir(&runtime).unwrap();
+        let endpoint = runtime.join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let (requested, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            request_headers(&mut stream).await;
+            let version = serde_json::json!({
+                "apiVersion": crate::protocol::API_VERSION,
+                "product": crate::brand::APP_IDENTIFIER,
+                "version": crate::protocol::BUILD_VERSION,
+                "instanceId": "test-instance",
+                "processId": 1,
+                "executable": "test-backend"
+            });
+            let body = serde_json::to_vec(&version).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.flush().await.unwrap();
+            request_headers(&mut stream).await;
+            requested.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(stream);
+        });
+
+        let mut connection = open_at(&endpoint, Duration::from_secs(1)).await.unwrap();
+        let started = Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            connection.events(Duration::from_millis(50)),
+        )
+        .await
+        .expect("events request exceeded its header deadline")
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        received
+            .try_recv()
+            .expect("backend did not receive the request");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn startup_reports_an_installer_gate() {
