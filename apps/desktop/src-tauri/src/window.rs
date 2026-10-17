@@ -17,15 +17,12 @@ use tauri::{
 pub(crate) const MAIN: &str = "main";
 
 /// Creates the main window from its configuration. It is created hidden
-/// (`visible: false`) in the saved appearance, so the page paints in it from
-/// the start, and shown once the page has loaded. The settings file is read
-/// directly: the backend may still be starting, and it reapplies the
+/// (`visible: false`) in the saved `appearance`, so the page paints in it from
+/// the start, and shown once the page has loaded. The appearance comes from
+/// the settings file: the backend may still be starting, and it reapplies the
 /// appearance on connecting.
-pub fn create(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create(app: &tauri::App, appearance: Appearance) -> Result<(), Box<dyn std::error::Error>> {
     let config = main_config(app.handle()).ok_or("Main window configuration is missing")?;
-    let appearance = desktop_core::config::load()
-        .map(|saved| saved.appearance)
-        .unwrap_or_default();
     let window = WebviewWindowBuilder::from_config(app, config)?
         .initialization_script(crate::distribution::initialization_script())
         .on_page_load(|window, payload| {
@@ -33,11 +30,11 @@ pub fn create(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 // A request to show the window that came earlier shows it now.
                 let mut state = state(window.app_handle());
                 let requested = !state.loaded && state.show_requested;
-                let minimized = state.minimized;
+                let presentation = state.presentation;
                 state.loaded = true;
                 drop(state);
                 if requested {
-                    reveal(window.app_handle(), minimized);
+                    reveal(window.app_handle(), presentation);
                 }
             }
         })
@@ -75,6 +72,7 @@ fn close(app: &AppHandle, to_tray: bool) {
             let _ = window.hide();
             set_dock_visibility(&handle, false);
         } else {
+            tracing::info!("No usable tray: minimizing the window instead of hiding it");
             let _ = window.minimize();
         }
     });
@@ -84,33 +82,29 @@ fn close(app: &AppHandle, to_tray: bool) {
     }
 }
 
-/// How long a launch at login waits for the tray to become usable: panels
-/// such as XFCE's start alongside the apps opened at login.
+/// How long a launch at login waits for a tray host, and how often it asks:
+/// panels such as XFCE's start alongside the apps opened at login.
 const LOGIN_TRAY_WAIT: Duration = Duration::from_secs(10);
+const LOGIN_TRAY_POLL: Duration = Duration::from_millis(500);
 
 /// An app opened at login starts in the tray, without a Dock icon on macOS.
 /// Without a usable tray it shows minimized instead, so the taskbar or the
 /// Dock can open it.
 pub fn launch_hidden(app: &AppHandle) {
+    // Setup created the icon, if it could, before this runs.
+    let icon = app.tray_by_id(crate::tray::TRAY_ID).is_some();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let tray = async {
-            while !crate::tray::usable(&app).await {
-                // Without its icon, the tray cannot become usable.
-                if app.tray_by_id(crate::tray::TRAY_ID).is_none() {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+        let host = async {
+            while !crate::tray::host_registered().await {
+                tokio::time::sleep(LOGIN_TRAY_POLL).await;
             }
-            true
         };
-        if tokio::time::timeout(LOGIN_TRAY_WAIT, tray)
-            .await
-            .unwrap_or(false)
-        {
+        if icon && tokio::time::timeout(LOGIN_TRAY_WAIT, host).await.is_ok() {
             set_dock_visibility(&app, false);
         } else {
-            present(&app, true);
+            tracing::info!("No usable tray: showing the window minimized");
+            present(&app, Presentation::Minimized);
         }
     });
 }
@@ -137,14 +131,23 @@ pub fn native_theme(appearance: Appearance) -> Option<tauri::Theme> {
 }
 
 /// The main window's page has loaded, it was asked to show (it shows once
-/// both hold) and whether minimized, and the page it was last asked for that
-/// the renderer has not taken yet.
+/// both hold), and the page it was last asked for that the renderer has not
+/// taken yet.
 #[derive(Default)]
 pub struct WindowState {
     loaded: bool,
     show_requested: bool,
-    minimized: bool,
+    /// How the requested show presents the window.
+    presentation: Presentation,
     navigation: Option<NavigationTarget>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Presentation {
+    #[default]
+    Focused,
+    /// In the taskbar or the Dock: a launch at login without a usable tray.
+    Minimized,
 }
 
 fn state(app: &AppHandle) -> MutexGuard<'_, WindowState> {
@@ -153,32 +156,32 @@ fn state(app: &AppHandle) -> MutexGuard<'_, WindowState> {
 }
 
 pub fn show(app: &AppHandle) {
-    present(app, false);
+    present(app, Presentation::Focused);
 }
 
-fn present(app: &AppHandle, minimized: bool) {
+fn present(app: &AppHandle, presentation: Presentation) {
     let mut state = state(app);
     // A window the user opened while the app was starting stays open.
-    if minimized && state.show_requested {
+    if presentation == Presentation::Minimized && state.show_requested {
         return;
     }
     state.show_requested = true;
-    state.minimized = minimized;
+    state.presentation = presentation;
     if !state.loaded {
         return;
     }
     drop(state);
-    reveal(app, minimized);
+    reveal(app, presentation);
 }
 
-fn reveal(app: &AppHandle, minimized: bool) {
+fn reveal(app: &AppHandle, presentation: Presentation) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = handle.get_webview_window(MAIN) else {
             return;
         };
         set_dock_visibility(&handle, true);
-        if minimized {
+        if presentation == Presentation::Minimized {
             // Minimizing a window that was never shown does not work everywhere.
             let _ = window.show();
             let _ = window.minimize();

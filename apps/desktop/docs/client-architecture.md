@@ -138,12 +138,13 @@ protection problems, is stored under that key.
   and `start` explicitly launch it without opening a window.
 - Closing or quitting the UI leaves the backend and protection running. The tray's
   Stop All and Quit action requests confirmation, then shuts down the backend.
-- Closing the window hides it to the tray (on macOS without a Dock icon) only
-  while the tray can bring it back: its icon exists and, on Linux, a
-  StatusNotifier host is registered (stock GNOME has none). Otherwise the
+- Closing the window hides it to the tray (and, on macOS, removes the Dock
+  icon) only while the tray can bring it back: its icon exists and, on Linux,
+  a StatusNotifier host is registered (stock GNOME has none). Otherwise the
   window minimizes, so the taskbar or the Dock reopens it. A launch at login
   starts in the tray the same way, waiting up to 10 s for a panel that starts
-  alongside it, or else shows the window minimized unless it was opened.
+  alongside it; otherwise it shows the window minimized (unless the user
+  already opened it).
 - Notifications follow the saved preferences from startup. The failed proofs
   a backend reports when it first answers are history; only later ones alert.
 - The desktop shell starts the backend in the background; until it answers,

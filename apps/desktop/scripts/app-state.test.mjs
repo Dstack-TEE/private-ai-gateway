@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { QueryClient } from "@tanstack/react-query";
-import { newerState, readState } from "../src/renderer/lib/use-app-state.ts";
+import { appStateKey, newerState, readState } from "../src/renderer/lib/use-app-state.ts";
 
 const state = (backendInstance, sequence, status = "stopped") => ({ backendInstance, sequence, status });
 
@@ -49,18 +49,18 @@ test("a newer state that arrives during a read survives the older reply", async 
   const { api, resolve } = pendingRead();
   const read = readState(client, api);
   const event = state("a", 6, "verifying");
-  client.setQueryData(["app-state"], event);
+  client.setQueryData(appStateKey, event);
   resolve(state("a", 5));
   assert.deepEqual(await read, event);
 });
 
 test("another backend's state that arrives during a read replaces the reply", async () => {
   const client = new QueryClient();
-  client.setQueryData(["app-state"], state("a", 3));
+  client.setQueryData(appStateKey, state("a", 3));
   const { api, resolve } = pendingRead();
   const read = readState(client, api);
   const replacement = state("b", 1);
-  client.setQueryData(["app-state"], replacement);
+  client.setQueryData(appStateKey, replacement);
   resolve(state("a", 4));
   assert.deepEqual(await read, replacement);
 });

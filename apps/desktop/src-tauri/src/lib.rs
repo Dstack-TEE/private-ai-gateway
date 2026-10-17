@@ -25,7 +25,7 @@ use std::sync::{
 
 use desktop_core::{
     client::Client,
-    config::NotificationPreferences,
+    config::{Appearance, NotificationPreferences},
     contracts::AppState,
     ui_api::{Host, StateEventProjection},
 };
@@ -131,14 +131,19 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Cannot prepare Agent Home access for the backend: {error}");
         }
     }
-    // Notifications follow the saved preferences until the backend answers
-    // with its own; settings that cannot be read keep them off until then.
-    let notifications = desktop_core::config::load()
-        .map(|saved| saved.notifications)
-        .unwrap_or(NotificationPreferences {
-            enabled: false,
-            ..NotificationPreferences::default()
-        });
+    // The window and notifications follow the saved settings until the
+    // backend answers with its own; settings that cannot be read keep
+    // notifications off until then.
+    let (appearance, notifications) = match desktop_core::config::load() {
+        Ok(saved) => (saved.appearance, saved.notifications),
+        Err(_) => (
+            Appearance::default(),
+            NotificationPreferences {
+                enabled: false,
+                ..NotificationPreferences::default()
+            },
+        ),
+    };
     app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     autostart::setup(app.handle())?;
@@ -155,7 +160,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // The renderer invokes backend commands on mount. Create it only
     // after Client and native services are registered in managed state.
-    window::create(app)?;
+    window::create(app, appearance)?;
     if let Err(error) = tray::setup(app.handle()) {
         tracing::warn!("The system tray is unavailable: {error}");
     } else {

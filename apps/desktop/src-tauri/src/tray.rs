@@ -133,29 +133,36 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Whether the tray can bring the app back: its icon was created and, on
-/// Linux, a panel shows StatusNotifier items (stock GNOME has none). Without
-/// one, a hidden window could not be opened again.
+/// Whether the tray can bring the app back: its icon was created and a host
+/// shows it. Without one, a hidden window could not be opened again.
 pub async fn usable(app: &AppHandle) -> bool {
-    if app.tray_by_id(TRAY_ID).is_none() {
-        return false;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // The host can start or stop at any time, so it is asked each time.
-        match tokio::time::timeout(Duration::from_secs(2), status_notifier_host()).await {
-            Ok(Ok(registered)) => registered,
-            Ok(Err(error)) => {
-                tracing::info!("No StatusNotifier host can show the tray: {error}");
-                false
-            }
-            Err(_) => {
-                tracing::warn!("The StatusNotifier watcher did not answer in time");
-                false
-            }
+    app.tray_by_id(TRAY_ID).is_some() && host_registered().await
+}
+
+#[cfg(target_os = "linux")]
+const HOST_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether a panel shows StatusNotifier items (stock GNOME has none). The
+/// host can start or stop at any time, so it is asked each time; a failed
+/// query counts as none.
+#[cfg(target_os = "linux")]
+pub async fn host_registered() -> bool {
+    match tokio::time::timeout(HOST_QUERY_TIMEOUT, status_notifier_host()).await {
+        Ok(Ok(registered)) => registered,
+        Ok(Err(error)) => {
+            tracing::debug!("No StatusNotifier host: {error}");
+            false
+        }
+        Err(_) => {
+            tracing::debug!("The StatusNotifier watcher did not answer in time");
+            false
         }
     }
-    #[cfg(not(target_os = "linux"))]
+}
+
+/// The system always shows the tray (the menu bar on macOS).
+#[cfg(not(target_os = "linux"))]
+pub async fn host_registered() -> bool {
     true
 }
 

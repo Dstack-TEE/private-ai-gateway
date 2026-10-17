@@ -100,9 +100,8 @@ impl Observer {
             proof,
         ];
         self.faults = faults;
-        if self.proof.is_some()
-            || (state.backend_instance.is_some() && state.backend_connected != Some(false))
-        {
+        let answered = state.backend_instance.is_some() && state.backend_connected != Some(false);
+        if self.proof.is_some() || answered {
             self.proof = Some((state.session_id.clone(), failed_proof));
         }
         let allowed = [config.gateway, config.local_api, config.verification];
