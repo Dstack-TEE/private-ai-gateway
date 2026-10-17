@@ -2,7 +2,10 @@
 //! to the tray rather than closed (minimized while no tray can show the app),
 //! and shown at the page the tray or the menu bar asks for.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::{
+    sync::{Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
 
 use desktop_core::{config::Appearance, contracts::NavigationTarget, ui_api::NAVIGATE_EVENT};
 use tauri::{
@@ -34,7 +37,7 @@ pub fn create(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 state.loaded = true;
                 drop(state);
                 if requested {
-                    present(window.app_handle(), minimized);
+                    reveal(window.app_handle(), minimized);
                 }
             }
         })
@@ -81,13 +84,30 @@ fn close(app: &AppHandle, to_tray: bool) {
     }
 }
 
+/// How long a launch at login waits for the tray to become usable: panels
+/// such as XFCE's start alongside the apps opened at login.
+const LOGIN_TRAY_WAIT: Duration = Duration::from_secs(10);
+
 /// An app opened at login starts in the tray, without a Dock icon on macOS.
 /// Without a usable tray it shows minimized instead, so the taskbar or the
 /// Dock can open it.
 pub fn launch_hidden(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if crate::tray::usable(&app).await {
+        let tray = async {
+            while !crate::tray::usable(&app).await {
+                // Without its icon, the tray cannot become usable.
+                if app.tray_by_id(crate::tray::TRAY_ID).is_none() {
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            true
+        };
+        if tokio::time::timeout(LOGIN_TRAY_WAIT, tray)
+            .await
+            .unwrap_or(false)
+        {
             set_dock_visibility(&app, false);
         } else {
             present(&app, true);
@@ -138,12 +158,20 @@ pub fn show(app: &AppHandle) {
 
 fn present(app: &AppHandle, minimized: bool) {
     let mut state = state(app);
+    // A window the user opened while the app was starting stays open.
+    if minimized && state.show_requested {
+        return;
+    }
     state.show_requested = true;
     state.minimized = minimized;
     if !state.loaded {
         return;
     }
     drop(state);
+    reveal(app, minimized);
+}
+
+fn reveal(app: &AppHandle, minimized: bool) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let Some(window) = handle.get_webview_window(MAIN) else {

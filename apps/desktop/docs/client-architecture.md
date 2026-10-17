@@ -142,7 +142,8 @@ protection problems, is stored under that key.
   while the tray can bring it back: its icon exists and, on Linux, a
   StatusNotifier host is registered (stock GNOME has none). Otherwise the
   window minimizes, so the taskbar or the Dock reopens it. A launch at login
-  starts in the tray the same way, or shows the window minimized.
+  starts in the tray the same way, waiting up to 10 s for a panel that starts
+  alongside it, or else shows the window minimized unless it was opened.
 - Notifications follow the saved preferences from startup. The failed proofs
   a backend reports when it first answers are history; only later ones alert.
 - The desktop shell starts the backend in the background; until it answers,
