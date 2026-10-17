@@ -218,7 +218,7 @@ pub fn verify_dstack_kms_receipt_chain(
 /// identities, with secp256k1 keys in compressed lowercase hex; whether the
 /// recovered root is accepted is the caller's policy.
 ///
-/// Residual gap (conformance gaps item 16): the chain signs the evidence's
+/// Residual gap (conformance gaps item 11): the chain signs the evidence's
 /// self-asserted `kms_public_key`, and the link from that k256 scalar to the
 /// published Ed25519 receipt key rests on the measured workload code — which
 /// is why the policy anchor must itself be measured.
