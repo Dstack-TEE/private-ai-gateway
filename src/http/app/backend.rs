@@ -80,6 +80,11 @@ async fn forward_to_backend_inner(
                     "text/event-stream",
                     forward.e2ee.as_ref(),
                 );
+                insert_str_header(
+                    &mut resp_headers,
+                    "x-aci-keyset-digest",
+                    &forward.keyset_digest,
+                );
                 resp_headers.insert(
                     HeaderName::from_static("x-accel-buffering"),
                     HeaderValue::from_static("no"),
@@ -174,10 +179,15 @@ async fn forward_to_backend_inner(
             // error body is returned as-is: on this no-middleware path the receipt is
             // built over that body, so scrubbing it would have to move into the
             // service (before the receipt), which is out of scope here.
-            let resp_headers = chat_response_headers(
+            let mut resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
                 "application/json",
                 forward.e2ee.as_ref(),
+            );
+            insert_str_header(
+                &mut resp_headers,
+                "x-aci-keyset-digest",
+                forward.receipt.workload_keyset_digest(),
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
@@ -244,7 +254,14 @@ fn refusal_response(
         &body,
         requester,
     ) {
-        Ok(receipt) => insert_str_header(&mut headers, "x-receipt-id", &receipt.receipt_id),
+        Ok(receipt) => {
+            insert_str_header(&mut headers, "x-receipt-id", &receipt.receipt_id);
+            insert_str_header(
+                &mut headers,
+                "x-aci-keyset-digest",
+                receipt.workload_keyset_digest(),
+            );
+        }
         // The receipt is part of the refusal contract (§5.2, §7.5): a refusal
         // this workload cannot commit to is a server error, not a bare 503.
         Err(err) => return internal_error_response(err),

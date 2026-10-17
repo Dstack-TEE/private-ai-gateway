@@ -758,7 +758,7 @@ async fn aci_attestation_report_binds_nonce_and_serves_exact_keyset_bytes() {
 
     // report_data = sha256 of the §3.2 statement for the supplied nonce.
     let statement = private_ai_gateway::aci::identity::attestation_statement(
-        h.service.workload_keyset_digest(),
+        &h.service.workload_keyset_digest(),
         Some("9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"),
     )
     .unwrap();
@@ -916,9 +916,8 @@ async fn aci_receipt_endpoint_serves_signed_document() {
     assert!(document["event_log"].is_array());
     let signature = hex::decode(document["signature"].as_str().unwrap()).unwrap();
     let key_id = document["key_id"].as_str().unwrap();
-    let receipt_key = h
-        .service
-        .keyset()
+    let keyset = h.service.keyset();
+    let receipt_key = keyset
         .receipt_signing_keys
         .iter()
         .find(|key| key.key_id == key_id)

@@ -3,6 +3,8 @@
 //! `AciService` is thin:
 //!
 //! * `attestation_report(nonce)` builds a fresh report over the sealed keyset.
+//! * `renew_keyset_if_due(lifetime)` re-seals the same keys with a later
+//!   `not_after` once half the lifetime has passed (§3.4).
 //! * `forward_chat_completion(...)` runs the receipt-issuing hot path for
 //!   buffered responses.
 //! * `forward_chat_completion_stream_request(...)` runs the same path
@@ -72,7 +74,7 @@ pub struct AciService {
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
     session_store: Arc<dyn SessionStore>,
-    keyset: SealedWorkloadKeyset,
+    keyset: RwLock<Arc<SealedWorkloadKeyset>>,
     default_receipt_key_id: String,
     config: AciServiceConfig,
     clock: Arc<dyn Clock>,
@@ -145,8 +147,8 @@ impl AciService {
             tls_public_keys,
         };
         validate_keyset(&unsealed, &config)?;
-        // Sealed once: these exact bytes (and their digest) are what every
-        // report serves for the lifetime of the process (Appendix A, §3.1).
+        // These exact bytes (and their digest) are what every report serves
+        // until the keyset is renewed (Appendix A, §3.1).
         let keyset = SealedWorkloadKeyset::seal(unsealed)
             .map_err(|e| ServiceError::Keyset(e.to_string()))?;
 
@@ -164,7 +166,7 @@ impl AciService {
             upstream_verifier,
             receipt_store,
             session_store: Arc::new(InMemorySessionStore::default()),
-            keyset,
+            keyset: RwLock::new(Arc::new(keyset)),
             default_receipt_key_id,
             config,
             clock,
@@ -182,12 +184,40 @@ impl AciService {
         self
     }
 
-    pub fn workload_keyset_digest(&self) -> &str {
-        self.keyset.digest()
+    /// Snapshot the current sealed keyset for one report or exchange.
+    pub(crate) fn current_keyset(&self) -> Arc<SealedWorkloadKeyset> {
+        Arc::clone(&self.keyset.read().expect("keyset lock poisoned"))
     }
 
-    pub fn keyset(&self) -> &WorkloadKeyset {
-        self.keyset.keyset()
+    pub fn workload_keyset_digest(&self) -> String {
+        self.current_keyset().digest().to_string()
+    }
+
+    pub fn keyset(&self) -> WorkloadKeyset {
+        self.current_keyset().keyset().clone()
+    }
+
+    /// Bounded lifetime (§3.4): once at most half of `lifetime_seconds`
+    /// remains before `not_after`, re-seal the same keys with
+    /// `not_after = now + lifetime_seconds` and serve the new keyset. The keys
+    /// are the ones a restart would load again, so this only moves the
+    /// expiry; clients see the new `X-ACI-Keyset-Digest` and re-verify
+    /// (§5.2). Returns the new `not_after` when the keyset was renewed.
+    pub fn renew_keyset_if_due(&self, lifetime_seconds: u64) -> Result<Option<u64>, ServiceError> {
+        let now = self.clock.now_secs();
+        let mut guard = self.keyset.write().expect("keyset lock poisoned");
+        let current = guard.keyset();
+        if current.not_after.saturating_sub(now) > lifetime_seconds / 2 {
+            return Ok(None);
+        }
+        let not_after = now.saturating_add(lifetime_seconds);
+        let renewed = SealedWorkloadKeyset::seal(WorkloadKeyset {
+            not_after,
+            ..current.clone()
+        })
+        .map_err(|e| ServiceError::Keyset(e.to_string()))?;
+        *guard = Arc::new(renewed);
+        Ok(Some(not_after))
     }
 
     /// Inference runs inside this attested workload: no upstream hop, so no
@@ -198,7 +228,7 @@ impl AciService {
 
     /// The keyset object the report serves as `workload_keyset` (§4.1).
     pub fn keyset_value(&self) -> serde_json::Value {
-        self.keyset.to_value()
+        self.current_keyset().to_value()
     }
 
     pub fn upstream(&self) -> &dyn UpstreamBackend {
