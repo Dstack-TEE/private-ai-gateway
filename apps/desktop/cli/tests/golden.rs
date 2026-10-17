@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::Path,
+    process::Stdio,
 };
 
 use sha2::{Digest, Sha256};
@@ -114,6 +115,21 @@ fn the_deprecated_os_flag_warns_without_changing_verification() {
         results.push(transcript);
     }
     assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn aci_output_stops_quietly_when_stdout_is_closed() {
+    let report =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aci_report_fixture.json");
+    let mut child = std::process::Command::new(cargo_bin!("private-ai-proxy"))
+        .args(["audit", "--report", report.to_str().unwrap(), "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(1));
 }
 
 #[test]

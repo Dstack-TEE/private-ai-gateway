@@ -66,6 +66,22 @@ pub async fn verify_service(
     policy: &VerifierPolicy,
     explain: bool,
 ) -> Result<ServiceVerification, VerifyError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        verify_service_inner(base_url, nonce_arg, policy, explain),
+    )
+    .await
+    .map_err(|_| ServiceError::TimedOut {
+        host: host_of(&normalize_base_url(base_url)).unwrap_or_else(|_| "service".to_string()),
+    })?
+}
+
+async fn verify_service_inner(
+    base_url: &str,
+    nonce_arg: Option<&str>,
+    policy: &VerifierPolicy,
+    explain: bool,
+) -> Result<ServiceVerification, VerifyError> {
     let base_url = normalize_base_url(base_url);
     if base_url.is_empty() {
         return Err(VerifyError::Failed("base URL is empty".to_string()));
@@ -80,7 +96,7 @@ pub async fn verify_service(
     let resp = client
         .fetch_attestation(&url)
         .await
-        .map_err(|error| ServiceError::from_request(&error, &host))?;
+        .map_err(|error| ServiceError::from_get(&error, &host))?;
     if !(200..300).contains(&resp.status) {
         return Err(ServiceError::from_status(&host, resp.status).into());
     }

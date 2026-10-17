@@ -11,27 +11,39 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
-use crate::print_json;
 use crate::verify::verify_service;
+use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
 use desktop_core::now_secs;
 
 pub async fn run(args: SessionsArgs) -> Result<i32, String> {
     let verification =
         verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
+    verification
+        .client
+        .pin(&verification.host, &verification.tls_pins)?;
     if !args.json {
-        println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human());
-        println!();
+        write_stdout(
+            format!(
+                "== service verification: {} ==\n{}\n",
+                safe(&verification.base_url),
+                verification.transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     if !verification.transcript.verified() {
         return Err("service verification failed; not auditing sessions (fail closed)".to_string());
     }
     if verification.report.service_capabilities.serving == "direct" {
-        println!(
-            "direct service (spec 4.1): no upstream hop, so there are no attested sessions to \
-             pin — the spec 9.1 verification above is the whole prevention layer"
-        );
+        if args.json {
+            print_json(&json!({ "sessions": [] }))?;
+        } else {
+            write_stdout("direct service (spec 4.1): no upstream hop, so there are no attested sessions to pin — the spec 9.1 verification above is the whole prevention layer\n".as_bytes())?;
+        }
+        if !args.require_claims.is_empty() {
+            return Ok(1);
+        }
         return Ok(0);
     }
 
@@ -48,29 +60,31 @@ pub async fn run(args: SessionsArgs) -> Result<i32, String> {
         print_json(&json!({ "sessions": sessions }))?;
     } else {
         if audited.is_empty() {
-            println!("no current attested sessions listed");
+            write_stdout(b"no current attested sessions listed\n")?;
         }
         for session in &audited {
-            println!("{}", session.render());
+            write_stdout(format!("{}\n", session.render()).as_bytes())?;
         }
         let accepted = audited.iter().filter(|s| s.accepted()).count();
-        println!();
-        println!(
-            "{accepted} of {} session(s) accepted{}",
-            audited.len(),
-            if args.require_claims.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " under policy {}",
-                    args.require_claims
-                        .iter()
-                        .map(RequiredClaim::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        );
+        write_stdout(
+            format!(
+                "\n{accepted} of {} session(s) accepted{}\n",
+                audited.len(),
+                if args.require_claims.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " under policy {}",
+                        args.require_claims
+                            .iter()
+                            .map(RequiredClaim::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            )
+            .as_bytes(),
+        )?;
     }
 
     // Fail closed: every listed session must audit clean, and a policy that
@@ -117,7 +131,7 @@ impl AuditedSession {
 
     fn render(&self) -> String {
         let audit = match &self.audit {
-            Err(e) => return format!("REJECTED {}: {e}", self.session_id),
+            Err(e) => return format!("REJECTED {}: {}", safe(&self.session_id), safe(e)),
             Ok(audit) => audit,
         };
         let record = &audit.record;
@@ -157,17 +171,17 @@ impl AuditedSession {
                 .join(", ")
             )
         } else {
-            format!("REJECTED (unmet claims: {})", self.unmet.join(", "))
+            format!("REJECTED (unmet claims: {})", safe(&self.unmet.join(", ")))
         };
         format!(
             "{verdict} {}\n  upstream={} verifier={} valid {window}\n  claims: {}",
-            self.session_id,
-            field("upstream_name"),
-            field("verifier_id"),
+            safe(&self.session_id),
+            safe(&field("upstream_name")),
+            safe(&field("verifier_id")),
             if claims.is_empty() {
                 "none recorded".to_string()
             } else {
-                claims.join(", ")
+                safe(&claims.join(", "))
             },
         )
     }
@@ -192,8 +206,22 @@ pub async fn audit_current_sessions(
     model: Option<&str>,
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        audit_current_sessions_inner(client, base_url, model, required_claims),
+    )
+    .await
+    .map_err(|_| "session audit timed out".to_string())?
+}
+
+async fn audit_current_sessions_inner(
+    client: &AciClient,
+    base_url: &str,
+    model: Option<&str>,
+    required_claims: &[RequiredClaim],
+) -> Result<Vec<AuditedSession>, String> {
     let listing = client
-        .get(sessions_url(base_url, model)?.as_str(), None)
+        .fetch_session_listing(sessions_url(base_url, model)?.as_str())
         .await?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;

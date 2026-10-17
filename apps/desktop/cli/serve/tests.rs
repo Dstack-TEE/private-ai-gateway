@@ -697,6 +697,11 @@ fn apply_constraints_tightens_plaintext_body() {
     assert_eq!(v["provider"]["aci_session_ids"][0], pins[0]);
     assert_eq!(v["provider"]["aci_verified"], true);
 
+    // A null provider has the same gateway semantics as an absent provider.
+    let out = apply_constraints(br#"{"model":"m","provider":null}"#.to_vec(), true, &[]).unwrap();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["provider"]["aci_verified"], true);
+
     // The client's own narrower set survives when local policy accepts it.
     let out = apply_constraints(
         format!(r#"{{"provider":{{"aci_session_ids":["{}"]}}}}"#, pins[0]).into_bytes(),
@@ -712,6 +717,15 @@ fn apply_constraints_tightens_plaintext_body() {
         "provider": { "aci_session_ids": ["b".repeat(64)] }
     });
     assert!(apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,).is_err());
+
+    for body in [
+        br#"[]"#.to_vec(),
+        br#"{"provider":[]}"#.to_vec(),
+        br#"{"provider":{"aci_session_ids":"not-an-array"}}"#.to_vec(),
+        br#"{"provider":{"aci_session_ids":[1]}}"#.to_vec(),
+    ] {
+        assert!(apply_constraints(body, true, &[]).is_err());
+    }
 
     // Non-JSON bodies pass through untouched.
     assert_eq!(

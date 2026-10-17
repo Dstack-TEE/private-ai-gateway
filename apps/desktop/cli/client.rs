@@ -55,6 +55,12 @@ pub fn host_of(url: &str) -> Result<String, String> {
 /// dozens of implementation events (§7.4) while bounding what an audit holds
 /// in memory and saves with usage.
 pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
+/// Generous bounds for attestation and session artifacts. These are large
+/// enough for quote collateral and evidence in normal deployments while
+/// preventing an untrusted service from making the CLI buffer indefinitely.
+pub const MAX_ATTESTATION_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_SESSION_LIST_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024;
 
 /// Why a bounded GET produced no response.
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +68,9 @@ pub enum GetError {
     /// The request or its body read failed.
     #[error("{0}")]
     Failed(String),
+    /// The request failed before a complete response was received.
+    #[error("request failed: {0}")]
+    Request(#[source] reqwest::Error),
     /// The body exceeded this many bytes.
     #[error("response body exceeds {} KiB", .0 / 1024)]
     TooLarge(usize),
@@ -95,6 +104,8 @@ pub enum ServiceError {
         "{host} answered HTTP {status} instead of an attestation report. Check the service URL."
     )]
     Status { host: String, status: u16 },
+    #[error("{host} sent an attestation or session document that is too large to verify safely.")]
+    ResponseTooLarge { host: String },
 }
 
 impl ServiceError {
@@ -128,6 +139,18 @@ impl ServiceError {
             Self::TimedOut { host }
         } else {
             Self::Unreachable { host }
+        }
+    }
+
+    pub fn from_get(error: &GetError, host: &str) -> Self {
+        match error {
+            GetError::Request(error) => Self::from_request(error, host),
+            GetError::TooLarge(_) => Self::ResponseTooLarge {
+                host: host.to_string(),
+            },
+            GetError::Failed(_) => Self::Unreachable {
+                host: host.to_string(),
+            },
         }
     }
 }
@@ -169,7 +192,7 @@ impl HttpResult {
         if content_type.contains("text/html") {
             return format!("(text/html body, {} bytes)", self.body.len());
         }
-        let text = String::from_utf8_lossy(&self.body);
+        let text = crate::safe(&String::from_utf8_lossy(&self.body));
         let text = text.trim();
         if text.chars().count() <= MAX_CHARS {
             text.to_string()
@@ -264,9 +287,10 @@ impl AciClient {
         bearer: Option<&str>,
         limit: usize,
     ) -> Result<HttpResult, GetError> {
-        let resp = self.send_get(url, bearer).await.map_err(|e| {
-            GetError::Failed(format!("GET {url} failed: {}", error_chain_message(&e)))
-        })?;
+        let resp = self
+            .send_get(url, bearer)
+            .await
+            .map_err(GetError::Request)?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = Limited::new(reqwest::Body::from(resp), limit)
@@ -305,8 +329,9 @@ impl AciClient {
 
     /// Fetch the attestation report. The caller classifies a failure with
     /// [`ServiceError::from_request`].
-    pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, reqwest::Error> {
-        self.read_get(url.as_str(), None).await
+    pub async fn fetch_attestation(&self, url: &Url) -> Result<HttpResult, GetError> {
+        self.get_limited(url.as_str(), None, MAX_ATTESTATION_BYTES)
+            .await
     }
 
     pub async fn fetch_receipt(
@@ -339,7 +364,21 @@ impl AciClient {
             return Err(format!("session id {session_id:?} is not a URL-safe id"));
         }
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
-        self.get(url.as_str(), None).await
+        self.get_limited(url.as_str(), None, MAX_SESSION_BYTES)
+            .await
+            .map_err(|error| match error {
+                GetError::Request(error) => {
+                    format!("GET {url} failed: {}", error_chain_message(&error))
+                }
+                GetError::Failed(error) => error,
+                GetError::TooLarge(limit) => {
+                    format!("GET {url} response body exceeds {} KiB", limit / 1024)
+                }
+            })
+    }
+
+    pub async fn fetch_session_listing(&self, url: &str) -> Result<HttpResult, GetError> {
+        self.get_limited(url, None, MAX_SESSION_LIST_BYTES).await
     }
 
     pub async fn fetch_models(

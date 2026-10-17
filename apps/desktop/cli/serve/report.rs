@@ -1,8 +1,6 @@
 //! Rendering: the one-line receipt summary, console request lines and the
 //! `--json-events` stream.
 
-use std::io::{self, Write};
-
 use desktop_runtime::verifier_session::{IdentityEvent, IdentitySourceProvenance, VerifierEvent};
 use serde_json::{json, Value};
 
@@ -10,6 +8,7 @@ use super::RequestOutcome;
 use crate::aci::types::AttestationReport;
 use crate::checks::EstablishedIdentity;
 use crate::transcript::{Status, Transcript};
+use crate::{safe, write_stdout};
 
 /// One-line receipt summary: every failed check first, then signature, wire
 /// hash, and the asserted upstream claims (e.g. `signature ok, wire hash ok,
@@ -108,9 +107,9 @@ pub(super) fn default_reporter(outcome: RequestOutcome) {
         line.push_str(&outcome.detail);
     }
     if outcome.verified == Some(false) {
-        tracing::warn!("!! {line}");
+        tracing::warn!("!! {}", safe(&line));
     } else {
-        println!("{line}");
+        let _ = write_stdout(format!("{}\n", safe(&line)).as_bytes());
     }
 }
 
@@ -186,12 +185,7 @@ pub(super) fn request_outcome_event(outcome: RequestOutcome) -> Value {
 pub(super) fn write_json_event(event: &impl serde::Serialize) -> Result<(), String> {
     let line = serde_json::to_string(event)
         .map_err(|error| format!("failed to serialize serve event: {error}"))?;
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
-    writeln!(writer, "{line}").map_err(|error| format!("failed to write serve event: {error}"))?;
-    writer
-        .flush()
-        .map_err(|error| format!("failed to flush serve event: {error}"))
+    write_stdout(format!("{line}\n").as_bytes()).map(|_| ())
 }
 
 pub(super) fn lifecycle_json(kind: &str, identity: IdentityEvent, extra: Option<Value>) -> Value {

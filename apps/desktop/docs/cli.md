@@ -36,6 +36,12 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
+Verification and receipt/session artifact reads are bounded (4 MiB for
+attestation and session documents, 64 KiB for receipts) and verification has
+an overall 30-second deadline. A timeout fails closed; a re-verification
+timeout keeps the previously trusted identity and releases queued requests to
+retry the normal failure path.
+
 Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
 to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
@@ -136,6 +142,12 @@ Requests:
 - Every JSON POST body gets `provider.aci_verified: true` (spec 5.3), so an
   aggregator refuses rather than serve the request through an unverified
   upstream. `--allow-unverified` drops this demand.
+- When verified serving or session pins are active, JSON request bodies must
+  have an object top level, and `provider` must be an object or `null`.
+  `provider: null` is treated like an absent provider and receives the local
+  constraints. If present, `provider.aci_session_ids` must be an array of
+  strings. Malformed JSON shapes are rejected locally with HTTP 400 before an
+  upstream call; non-JSON POST bodies pass through unchanged.
 - Session pinning is opt-in, in one of two ways that cannot be combined.
   - `--session <id>` (repeatable) defines a fixed accepted set. Each POST uses
     the intersection with its own pins, or this set when it has none, and a
@@ -149,6 +161,12 @@ Requests:
 
   Both imply verified serving and cannot be combined with
   `--allow-unverified`.
+
+`pap audit` receipt-only options (`--request-body`, `--response-body`,
+`--session`, `--require-claim`, `--pin`, and `--require-verified`) require
+`--receipt`; clap reports these as usage errors with exit code 2. A nonempty
+`--require-claim` policy always fails closed when no session can be audited,
+including direct services and unverified or missing-session receipts.
 
 Responses:
 

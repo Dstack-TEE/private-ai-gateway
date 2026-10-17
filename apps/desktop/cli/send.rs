@@ -4,7 +4,7 @@
 //! SPKI-pinned connection capturing the exact wire bytes, then fetches
 //! and verifies the receipt (spec 9.3) and the session it cites (9.2).
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 use crate::aci::types::{PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
 use desktop_core::sse::DataLines;
@@ -15,8 +15,8 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
-use crate::print_json;
 use crate::verify::{verify_service, ServiceVerification};
+use crate::{print_json, safe, write_stdout};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
@@ -25,9 +25,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let verification =
         verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
     if !args.json {
-        println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human());
-        println!();
+        write_stdout(
+            format!(
+                "== service verification: {} ==\n{}\n",
+                safe(&verification.base_url),
+                verification.transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     if !verification.transcript.verified() {
         if args.json {
@@ -62,10 +67,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let request_body = chat_request(&args, &model, &prompt, stream)?;
 
     if !args.json {
-        println!("model:  {model}");
-        println!("prompt: {prompt}");
-        print!("reply:  ");
-        let _ = std::io::stdout().flush();
+        write_stdout(
+            format!(
+                "model:  {}\nprompt: {}\nreply:  ",
+                safe(&model),
+                safe(&prompt)
+            )
+            .as_bytes(),
+        )?;
     }
     let mut collector = SseTextCollector::new(stream && !args.json);
     let response = client
@@ -85,7 +94,7 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
         // The `reply:  ` prefix was already printed (no newline); close the line
         // so the error does not glue onto it as if it were the reply.
         if !args.json {
-            println!();
+            write_stdout(b"\n")?;
         }
         return Err(e);
     }
@@ -97,10 +106,9 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     };
     if !args.json {
         if !stream {
-            print!("{response_text}");
+            write_stdout(safe(&response_text).as_bytes())?;
         }
-        println!();
-        println!();
+        write_stdout(b"\n\n")?;
     }
 
     let receipt_id = receipt_id(&response, args.allow_unverified && stream)?;
@@ -140,8 +148,14 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
         output["response_text"] = json!(response_text);
         print_json(&output)?;
     } else {
-        println!("== receipt verification: {receipt_id} ==");
-        print!("{}", transcript.render_human());
+        write_stdout(
+            format!(
+                "== receipt verification: {} ==\n{}",
+                safe(&receipt_id),
+                transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     Ok(if transcript.verified() { 0 } else { 1 })
 }
@@ -266,6 +280,7 @@ struct SseTextCollector {
     lines: DataLines,
     text: String,
     echo: bool,
+    output_alive: bool,
 }
 
 impl SseTextCollector {
@@ -274,31 +289,32 @@ impl SseTextCollector {
             lines: DataLines::new(),
             text: String::new(),
             echo,
+            output_alive: true,
         }
     }
 
     fn feed(&mut self, chunk: &[u8]) {
-        let (text, echo) = (&mut self.text, self.echo);
+        let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
         self.lines
-            .push(chunk, |data| append_delta(text, echo, data));
+            .push(chunk, |data| append_delta(text, echo, output_alive, data));
     }
 
     fn finish(&mut self) {
-        let (text, echo) = (&mut self.text, self.echo);
-        self.lines.finish(|data| append_delta(text, echo, data));
+        let (text, echo, output_alive) = (&mut self.text, self.echo, &mut self.output_alive);
+        self.lines
+            .finish(|data| append_delta(text, echo, output_alive, data));
     }
 }
 
 /// Appends an event's content delta; `[DONE]` and other events carry none.
-fn append_delta(text: &mut String, echo: bool, data: &str) {
+fn append_delta(text: &mut String, echo: bool, output_alive: &mut bool, data: &str) {
     let Ok(value) = serde_json::from_str::<Value>(data) else {
         return;
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if echo {
-            print!("{delta}");
-            let _ = std::io::stdout().flush();
+        if echo && *output_alive && !write_stdout(safe(delta).as_bytes()).unwrap_or(false) {
+            *output_alive = false;
         }
     }
 }

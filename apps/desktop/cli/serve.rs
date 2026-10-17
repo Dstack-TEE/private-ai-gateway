@@ -36,6 +36,7 @@ use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPoli
 use crate::client::AciClient;
 use crate::sessions::audit_current_sessions;
 use crate::verify::{verify_service, ServiceVerification, VerifyError};
+use crate::{safe, write_stdout};
 
 mod audit;
 mod control;
@@ -522,25 +523,26 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
         );
         write_json_event(&event)?;
     } else {
-        println!();
-        println!(
-            "private-ai-proxy serve: proxying {base_url} on {proxy_url} (plain HTTP, localhost)"
-        );
-        println!(
-            "forwarding every method and path; Authorization passed through unchanged; every \
+        let policy_note = if args.allow_unverified {
+            "verified serving NOT demanded (--allow-unverified)."
+        } else {
+            "every inference demands verified serving (provider.aci_verified, spec 5.3)."
+        };
+        let startup = format!(
+            "\nprivate-ai-proxy serve: proxying {} on {} (plain HTTP, localhost)\n\
+             forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
              body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
-             verify on demand: GET {control_url}/receipts lists recent exchanges, \
-             POST {control_url}/receipts/<id>/verify checks one (send Authorization \
-             if the receipt fetch needs it).\n{}",
-            if args.allow_unverified {
-                "verified serving NOT demanded (--allow-unverified)."
-            } else {
-                "every inference demands verified serving \
-                 (provider.aci_verified, spec 5.3)."
-            }
+             verify on demand: GET {}/receipts lists recent exchanges, \
+             POST {}/receipts/<id>/verify checks one (send Authorization \
+             if the receipt fetch needs it).\n{}\n",
+            safe(&base_url),
+            safe(&proxy_url),
+            safe(&control_url),
+            safe(&control_url),
+            policy_note,
         );
-        println!();
+        let _ = write_stdout(safe(&startup).as_bytes());
     }
 
     // Both serve until the process is interrupted.
@@ -592,8 +594,14 @@ async fn initialize(
 ) -> Result<(Arc<ProxyState>, IdentityEvent, String), VerifyError> {
     let verification = verify_service(&options.base_url, None, &options.policy, false).await?;
     if options.print_progress {
-        println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human());
+        write_stdout(
+            format!(
+                "== service verification: {} ==\n{}",
+                safe(&verification.base_url),
+                verification.transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     if !verification.transcript.verified() {
         return Err(VerifyError::Rejected(verification.transcript));
@@ -648,10 +656,11 @@ async fn initialize(
             ));
         }
         if options.print_progress {
-            println!("policy-accepted sessions pinned ({}):", pins.len());
+            let mut text = format!("policy-accepted sessions pinned ({}):\n", pins.len());
             for pin in &pins {
-                println!("  {pin}");
+                text.push_str(&format!("  {}\n", safe(pin)));
             }
+            write_stdout(text.as_bytes())?;
         }
         *state.policy_pins.lock().expect("policy pins poisoned") = pins;
     }
@@ -1201,24 +1210,35 @@ fn apply_constraints(
     let Ok(mut parsed) = serde_json::from_slice::<Value>(&body) else {
         return Ok(body);
     };
-    let Some(provider) = parsed
-        .as_object_mut()
-        .map(|members| members.entry("provider").or_insert_with(|| json!({})))
-        .and_then(Value::as_object_mut)
-    else {
-        return Ok(body);
+    let Some(members) = parsed.as_object_mut() else {
+        return Err("JSON request body must have an object top level".to_string());
+    };
+    let provider = members.entry("provider").or_insert_with(|| json!({}));
+    if provider.is_null() {
+        *provider = json!({});
+    }
+    let Some(provider) = provider.as_object_mut() else {
+        return Err("JSON request provider must be an object or null".to_string());
+    };
+    let supplied = match provider.get(PROVIDER_ACI_SESSION_IDS) {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_array()
+                .filter(|ids| ids.iter().all(Value::is_string))
+                .ok_or_else(|| "provider.aci_session_ids must be an array of strings".to_string())?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        ),
     };
     // Pinning implies verified serving (§5.3).
     provider.insert(PROVIDER_ACI_VERIFIED.to_string(), Value::Bool(true));
     if !pins.is_empty() {
-        let supplied = provider
-            .get(PROVIDER_ACI_SESSION_IDS)
-            .and_then(Value::as_array)
-            .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_string));
         let accepted: Vec<&String> = match supplied {
-            Some(ids) => ids
+            Some(ref ids) => ids
                 .iter()
-                .filter_map(Value::as_str)
                 .filter_map(|id| pins.iter().find(|pin| pin.as_str() == id))
                 .collect(),
             None => pins.iter().collect(),

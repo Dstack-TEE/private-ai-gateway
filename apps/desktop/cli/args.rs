@@ -158,24 +158,28 @@ pub struct AuditArgs {
     pub nonce: Option<String>,
     #[arg(
         long = "request-body",
+        requires = "receipt",
         value_name = "FILE",
         help = "Path to the saved raw request bytes, checked against the receipt (spec 9.3)."
     )]
     pub request_body: Option<String>,
     #[arg(
         long = "response-body",
+        requires = "receipt",
         value_name = "FILE",
         help = "Path to the saved raw response bytes, checked against the receipt (spec 9.3)."
     )]
     pub response_body: Option<String>,
     #[arg(
         long,
+        requires = "receipt",
         value_name = "FILE",
         help = "Path to the saved session document (spec 8) the receipt cites."
     )]
     pub session: Option<String>,
     #[arg(
         long = "require-claim",
+        requires = "receipt",
         value_name = "NAME[=SOURCE]",
         value_parser = RequiredClaim::parse,
         help = "Claim the audited session must assert (spec 9.2(3)), as NAME or \
@@ -184,6 +188,7 @@ pub struct AuditArgs {
     pub require_claims: Vec<RequiredClaim>,
     #[arg(
         long = "pin",
+        requires = "receipt",
         value_name = "SESSION_ID",
         value_parser = session_id,
         help = "Session id (spec 5.3) the cited session must match (spec 9.3(6)); repeatable."
@@ -191,6 +196,7 @@ pub struct AuditArgs {
     pub pins: Vec<String>,
     #[arg(
         long = "require-verified",
+        requires = "receipt",
         help = "Apply the spec 9.3(5)-(6) strict failures offline."
     )]
     pub require_verified: bool,
@@ -241,7 +247,7 @@ pub struct SendArgs {
     pub json: bool,
     #[arg(
         long = "allow-unverified",
-        conflicts_with = "sessions",
+        conflicts_with_all = ["sessions", "require_claims"],
         help = "Drop the default provider.aci_verified demand (spec 5.3). Cannot be \
                 combined with --session, which implies verified serving."
     )]
@@ -422,5 +428,40 @@ mod tests {
             args.curl_args,
             ["--json", "{}", "--data-binary", "@request.json"].map(OsString::from)
         );
+    }
+
+    #[test]
+    fn audit_receipt_only_flags_require_a_receipt() {
+        for flag in [
+            "--request-body",
+            "--response-body",
+            "--session",
+            "--require-claim",
+            "--pin",
+            "--require-verified",
+        ] {
+            let mut args = vec![
+                "pap".to_string(),
+                "audit".to_string(),
+                "--report".to_string(),
+                "report.json".to_string(),
+                flag.to_string(),
+            ];
+            if flag != "--require-verified" {
+                args.push(if flag == "--require-claim" {
+                    "tee_attested".to_string()
+                } else if flag == "--pin" {
+                    "a".repeat(64)
+                } else {
+                    "artifact".to_string()
+                });
+            }
+            assert!(
+                Command::augment_subcommands(clap::Command::new("pap"))
+                    .try_get_matches_from(args)
+                    .is_err(),
+                "{flag} must require --receipt"
+            );
+        }
     }
 }

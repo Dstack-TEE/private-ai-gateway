@@ -1,7 +1,5 @@
 //! Printing: compact JSON, or a human rendering chosen by the command.
 
-use std::io::{self, Write};
-
 use desktop_core::client::CallError;
 use serde_json::Value;
 
@@ -9,6 +7,7 @@ use super::{
     Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
 };
 use crate::Global;
+use private_ai_proxy::{safe, write_stdout as write_aci_stdout};
 
 /// Prints a command's result as one line of compact JSON or its human rendering.
 pub(super) fn print(action: &Action, global: &Global, value: &Value) -> Result<(), CallError> {
@@ -37,11 +36,7 @@ pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
 /// Writes to stdout, `Ok(false)` once the reader has gone away, as after
 /// `| head`: output then ends quietly.
 pub(super) fn write_stdout(bytes: &[u8]) -> Result<bool, String> {
-    match io::stdout().lock().write_all(bytes) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(_) => Err("Cannot write output".into()),
-    }
+    write_aci_stdout(bytes)
 }
 
 /// The human rendering of `action`'s result `value`; details by default.
@@ -461,22 +456,9 @@ fn text(value: &Value) -> String {
     }
 }
 
-pub(super) fn safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 fn label(key: &str) -> String {
     let mut label = String::new();
-    for (index, c) in safe(key).chars().enumerate() {
+    for (index, c) in crate::safe(key).chars().enumerate() {
         if index == 0 {
             label.extend(c.to_uppercase());
         } else if c.is_uppercase() {

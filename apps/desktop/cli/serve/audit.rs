@@ -209,6 +209,7 @@ impl From<GetError> for AuditFetchError {
     fn from(error: GetError) -> Self {
         match error {
             GetError::Failed(error) => Self::Transport(error),
+            GetError::Request(error) => Self::Transport(error.to_string()),
             GetError::TooLarge(limit) => Self::TooLarge(limit),
         }
     }
