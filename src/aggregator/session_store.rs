@@ -979,6 +979,51 @@ mod tests {
     }
 
     #[test]
+    fn grouped_tls_sessions_and_shared_evidence_reconstruct_after_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("groups.jsonl");
+        let evidence = EvidenceRef::from_bytes("application/json", br#"{"report":"shared"}"#);
+        let original = session_with("group", 100, 1000, evidence.clone());
+        let mut document = original.document().clone();
+        document.channel_binding = ["aa", "bb"]
+            .into_iter()
+            .map(|key| crate::aci::receipt::ChannelBinding::TlsSpkiSha256 {
+                origin: "https://group.example".into(),
+                spki_sha256: key.repeat(32),
+            })
+            .collect();
+        let group = AttestedSession::seal(document).unwrap();
+        let sibling = session_with("sibling", 100, 1000, evidence);
+        {
+            let store = open_store_at(&path, 100);
+            seal_into(&store, "complete-group-material", group.clone(), 2000, 100).unwrap();
+            seal_into(&store, "sibling-material", sibling.clone(), 2000, 100).unwrap();
+            assert_eq!(store.compact(101).unwrap(), 2);
+            assert_eq!(store.index.lock().unwrap().bundles.len(), 1);
+        }
+        let reopened = open_store_at(&path, 102);
+        assert_eq!(reopened.index.lock().unwrap().bundles.len(), 1);
+        for (fingerprint, original) in [
+            ("complete-group-material", group),
+            ("sibling-material", sibling),
+        ] {
+            let restored = reopened.get_session(original.session_id(), 102).unwrap();
+            assert_eq!(restored.bytes(), original.bytes());
+            assert!(restored.document().evidence.digest_matches_data());
+            assert_eq!(
+                reuse_only(&reopened, fingerprint, 2000, 102).unwrap(),
+                original.session_id()
+            );
+            assert_eq!(
+                AttestedSession::seal(restored.document().clone())
+                    .unwrap()
+                    .session_id(),
+                original.session_id()
+            );
+        }
+    }
+
+    #[test]
     fn replay_drops_lapsed_records_before_loading_them() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions.jsonl");

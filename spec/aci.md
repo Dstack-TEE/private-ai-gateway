@@ -718,6 +718,8 @@ the upstream. Defined shapes:
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
 
+A session may represent a logical TLS channel with several accepted keys. Its `channel_binding` array then records the complete verified set of alternatives enforced for that channel; a connection uses one of those alternatives. Changing the set changes the session material. Distinct independently selectable upstream instances remain distinct sessions.
+
 A published extension may define another binding type; see Appendix B.
 
 ### 8.3 Typed claims

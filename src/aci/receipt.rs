@@ -73,6 +73,9 @@ pub struct UpstreamVerifiedEvent {
     pub evidence: Option<Value>,
     pub channel_bindings: Vec<ChannelBinding>,
     pub provider_claims: Option<Value>,
+    /// The native ACI verifier's accepted binding, retaining the digest of the
+    /// original keyset JSON. Provider claims cannot supply this identity.
+    pub aci_identity: Option<aci_verify::report::ReportBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

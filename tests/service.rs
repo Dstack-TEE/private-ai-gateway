@@ -440,6 +440,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
             spki_sha256: "aa".repeat(32),
         }],
         provider_claims: None,
+        aci_identity: None,
     };
 
     let err = svc
@@ -1068,7 +1069,7 @@ fn constructor_rejects_zero_and_overflowing_session_ttl() {
 }
 
 #[tokio::test]
-async fn multiple_tls_bindings_enforce_the_cited_alternative_in_canonical_order() {
+async fn multiple_tls_bindings_enforce_the_complete_cited_group_in_canonical_order() {
     use admission::{request, Attempt, Harness};
     let h = Harness::new(vec![
         Attempt::Response {
@@ -1105,23 +1106,21 @@ async fn multiple_tls_bindings_enforce_the_cited_alternative_in_canonical_order(
             .unwrap()
             .document()
             .channel_binding,
-        vec![low.clone()]
+        vec![low.clone(), high.clone()]
     );
     assert_eq!(
         h.backend.events.lock().unwrap()[0].channel_bindings,
-        vec![low]
+        vec![low.clone(), high.clone()]
     );
-    let pinned = listed
-        .iter()
-        .find(|s| s.document().channel_binding == vec![high.clone()])
-        .unwrap();
+    assert_eq!(listed.len(), 1);
+    let pinned = &listed[0];
     h.service
         .forward_chat_completion_request(request(vec![pinned.session_id().to_string()]))
         .await
         .unwrap();
     assert_eq!(
         h.backend.events.lock().unwrap()[1].channel_bindings,
-        vec![high]
+        vec![low, high]
     );
 }
 
