@@ -15,8 +15,9 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
+use crate::sessions::SESSION_AUDIT_TIMEOUT;
 use crate::verify::{verify_service, ServiceVerification};
-use crate::{print_json, safe, write_stdout};
+use crate::{print_json, safe, safe_multiline, write_stdout};
 
 const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.";
 
@@ -122,7 +123,12 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let identity = identity.ok_or("verified run carried no established identity")?;
     // Audit the cited session (§9.2): its id is the hash of the parsed
     // document's JCS form, so any served encoding verifies.
-    let (session_resp, no_session_reason) = fetch_live_session(&client, &base_url, &receipt).await;
+    let (session_resp, no_session_reason) = tokio::time::timeout(
+        SESSION_AUDIT_TIMEOUT,
+        fetch_live_session(&client, &base_url, &receipt),
+    )
+    .await
+    .map_err(|_| "session audit timed out".to_string())?;
     run_response_checks(
         &mut transcript,
         &receipt,
@@ -324,7 +330,7 @@ fn append_delta(
     };
     if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
         text.push_str(delta);
-        if echo && *output_alive && !output(safe(delta).as_bytes()).unwrap_or(false) {
+        if echo && *output_alive && !output(safe_multiline(delta).as_bytes()).unwrap_or(false) {
             *output_alive = false;
         }
     }

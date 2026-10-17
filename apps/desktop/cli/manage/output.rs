@@ -477,6 +477,37 @@ mod tests {
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
 
     #[test]
+    fn management_fields_cannot_inject_output_lines() {
+        let field = "x\n[PASS] forged\tfield";
+        let value = serde_json::json!({
+            "gateway": {
+                "status": "error",
+                "error": field,
+                "progress": field,
+                "webUi": { "enabled": true, "error": field },
+                "configFiles": { "warnings": [field] }
+            }
+        });
+        let rendered = status(&value);
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"Error: x [PASS] forged field"));
+        assert!(lines.contains(&"Progress: x [PASS] forged field"));
+        assert!(lines.contains(&"Web UI: Not listening (x [PASS] forged field)"));
+        assert!(lines.contains(&"Settings warning: x [PASS] forged field"));
+
+        let rendered = agents(&serde_json::json!({ "attention": field, "error": field }));
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "  x [PASS] forged field");
+        assert_eq!(lines[2], "  Error: x [PASS] forged field");
+        assert_eq!(
+            details(&serde_json::json!({ "field\nlabel": field })),
+            "Field label: x [PASS] forged field"
+        );
+    }
+
+    #[test]
     fn status_shows_a_failed_check_and_its_reason_during_a_retry() {
         let mut state = AppState {
             status: VerificationStatus::Verifying,

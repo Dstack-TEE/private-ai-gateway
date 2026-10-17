@@ -236,9 +236,9 @@ impl Transcript {
                 out.push_str(&safe(&check.detail));
             }
             out.push('\n');
-            for line in check.explain.iter().flat_map(|explain| explain.lines()) {
+            if let Some(explain) = &check.explain {
                 out.push_str("        | ");
-                out.push_str(&safe(line));
+                out.push_str(&safe(explain));
                 out.push('\n');
             }
         }
@@ -320,16 +320,24 @@ mod tests {
     #[test]
     fn human_transcript_sanitizes_server_detail_without_changing_json() {
         let mut transcript = Transcript::default();
-        transcript.fail(ID_2, "bad\u{1b}[31m\u{202e}text\nnext\tfield");
+        transcript.fail(ID_2, "bad\u{1b}[31m\u{202e}text\n[PASS] forged\tfield");
+        transcript.explain("source\n[PASS] forged\texplanation");
         let json = transcript.to_json();
         assert_eq!(
             json["checks"][0]["detail"],
-            "bad\u{1b}[31m\u{202e}text\nnext\tfield"
+            "bad\u{1b}[31m\u{202e}text\n[PASS] forged\tfield"
+        );
+        assert_eq!(
+            json["checks"][0]["explain"],
+            "source\n[PASS] forged\texplanation"
         );
         let human = transcript.render_human();
         assert!(!human.contains('\u{1b}'));
         assert!(!human.contains('\u{202e}'));
-        assert!(human.contains("text\nnext\tfield"));
+        let lines: Vec<_> = human.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("text [PASS] forged field"));
+        assert_eq!(lines[1], "        | source [PASS] forged explanation");
     }
 
     #[test]

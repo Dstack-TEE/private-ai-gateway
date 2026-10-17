@@ -735,6 +735,49 @@ fn apply_constraints_tightens_plaintext_body() {
 }
 
 #[tokio::test]
+async fn malformed_constraint_shapes_return_the_reason_without_an_upstream_call() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().fallback({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }
+    });
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    Arc::get_mut(&mut state).unwrap().enforce_verified = true;
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let client = reqwest::Client::new();
+    for (body, reason) in [
+        ("[]", "JSON request body must have an object top level"),
+        (
+            r#"{"provider":[]}"#,
+            "JSON request provider must be an object or null",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":"not-an-array"}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":[1]}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+    ] {
+        let response = client
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.text().await.unwrap(), format!("{reason}\n"));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn proxy_rejects_e2ee_request_headers_without_contacting_upstream() {
     let upstream_calls = Arc::new(AtomicUsize::new(0));
     let counted_calls = upstream_calls.clone();
@@ -1595,7 +1638,8 @@ async fn verified_sessions_reject_rotated_listing_and_record_keys() {
         };
         let result = crate::sessions::run_verified(args, verification).await;
         if rotate_at == 1 {
-            assert!(result.is_err(), "rotated listing key was accepted");
+            let error = result.expect_err("rotated listing key was accepted");
+            assert!(error.contains("PinMismatch"), "{error}");
         } else {
             assert_eq!(result.unwrap(), 1, "rotated record key was accepted");
         }

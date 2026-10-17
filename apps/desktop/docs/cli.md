@@ -37,10 +37,15 @@ These commands are the relying party of the
 service or read the settings files.
 
 Verification and receipt/session artifact reads are bounded (4 MiB for
-attestation and session documents, 64 KiB for receipts) and verification has
-an overall 30-second deadline. A timeout fails closed; a re-verification
+attestation and session documents, 64 KiB for receipts). Verification and
+session audits, including the session fetch after `send`, have an overall
+30-second deadline. A timeout fails closed; a re-verification
 timeout keeps the previously trusted identity and releases queued requests to
 retry the normal failure path.
+
+Human-readable fields replace terminal controls, including line breaks and
+tabs, with spaces. Only echoed streamed replies in `send` preserve line breaks
+and tabs. JSON output and captured body bytes are unchanged.
 
 Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
@@ -81,6 +86,14 @@ Clients do not check whether the gateway runs a production or development dstack
 OS image. A development image permits operator access to the gateway. Users who
 need assurance about the OS image should verify the quote, event log, and VM
 configuration with an independent dstack verifier.
+
+### Offline audit
+
+`pap audit` receipt-only options (`--request-body`, `--response-body`,
+`--session`, `--require-claim`, `--pin`, and `--require-verified`) require
+`--receipt`; clap reports these as usage errors with exit code 2. A nonempty
+`--require-claim` policy always fails closed when no session can be audited,
+including direct services and unverified or missing-session receipts.
 
 ### One pinned curl request
 
@@ -161,12 +174,6 @@ Requests:
 
   Both imply verified serving and cannot be combined with
   `--allow-unverified`.
-
-`pap audit` receipt-only options (`--request-body`, `--response-body`,
-`--session`, `--require-claim`, `--pin`, and `--require-verified`) require
-`--receipt`; clap reports these as usage errors with exit code 2. A nonempty
-`--require-claim` policy always fails closed when no session can be audited,
-including direct services and unverified or missing-session receipts.
 
 Responses:
 

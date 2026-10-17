@@ -69,7 +69,7 @@ pub enum GetError {
     #[error("{0}")]
     Failed(String),
     /// The request failed before a complete response was received.
-    #[error("request failed: {0}")]
+    #[error("request failed: {}", error_chain_message(.0))]
     Request(#[source] reqwest::Error),
     /// The body exceeded this many bytes.
     #[error("response body exceeds {} KiB", .0 / 1024)]

@@ -19,14 +19,22 @@ pub mod verify;
 
 use std::io::{self, Write};
 
-/// Replace terminal control characters in human-readable output while keeping
-/// line structure and tabs intact. JSON and captured wire bytes do not use this
-/// presentation helper.
+/// Keep a human-readable field on one line and neutralize terminal controls.
+/// JSON and captured wire bytes do not use this presentation helper.
 pub fn safe(value: &str) -> String {
+    sanitize(value, false)
+}
+
+/// Preserve line breaks and tabs only in echoed streamed model reply text.
+pub(crate) fn safe_multiline(value: &str) -> String {
+    sanitize(value, true)
+}
+
+fn sanitize(value: &str, multiline: bool) -> String {
     value
         .chars()
         .map(|c| {
-            if matches!(c, '\n' | '\t') {
+            if multiline && matches!(c, '\n' | '\t') {
                 c
             } else if c.is_control()
                 || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
@@ -84,9 +92,9 @@ mod tests {
     use super::safe;
 
     #[test]
-    fn human_output_neutralizes_terminal_controls_but_keeps_layout() {
+    fn human_fields_neutralize_terminal_controls_and_stay_on_one_line() {
         let rendered = safe("ok\u{1b}[31m\r\u{202e}bad\n\tend");
-        assert_eq!(rendered, "ok [31m  bad\n\tend");
+        assert_eq!(rendered, "ok [31m  bad  end");
         assert!(!rendered.contains('\u{1b}'));
         assert!(!rendered.contains('\u{202e}'));
     }

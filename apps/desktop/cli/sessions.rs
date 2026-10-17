@@ -16,6 +16,8 @@ use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
 use desktop_core::now_secs;
 
+pub(crate) const SESSION_AUDIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn run(args: SessionsArgs) -> Result<i32, String> {
     let verification =
         verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
@@ -214,7 +216,7 @@ pub async fn audit_current_sessions(
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        SESSION_AUDIT_TIMEOUT,
         audit_current_sessions_inner(client, base_url, model, required_claims),
     )
     .await

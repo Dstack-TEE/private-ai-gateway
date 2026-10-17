@@ -548,7 +548,7 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             safe(&control_url),
             policy_note,
         );
-        let _ = write_stdout(safe(&startup).as_bytes());
+        let _ = write_stdout(startup.as_bytes());
     }
 
     // Both serve until the process is interrupted.
@@ -868,10 +868,7 @@ async fn proxy_inference(
             Ok(body) => body,
             Err(reason) => {
                 tracing::warn!("!! POST {path} -> 400: {reason}");
-                return text_response(
-                    StatusCode::BAD_REQUEST,
-                    "request session ids are not accepted by the local ACI policy\n",
-                );
+                return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
             }
         };
     let send = |body: Vec<u8>| {
@@ -918,10 +915,7 @@ async fn proxy_inference(
                     Ok(body) => body,
                     Err(reason) => {
                         tracing::warn!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
-                        return text_response(
-                            StatusCode::BAD_REQUEST,
-                            "request session ids are not accepted by the refreshed ACI policy\n",
-                        );
+                        return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
                     }
                 };
                 match race_delivery(&delivery, send(request_body.clone())).await {
@@ -1267,12 +1261,12 @@ async fn derive_policy_pins(state: &ProxyState) -> Result<Vec<String>, String> {
     for rejected in audited.iter().filter(|session| !session.accepted()) {
         tracing::warn!(
             "private-ai-proxy serve: session {} rejected ({})",
-            rejected.session_id,
-            match &rejected.audit {
+            safe(&rejected.session_id),
+            safe(&match &rejected.audit {
                 Err(e) => e.clone(),
                 Ok(_) if !rejected.integrity_ok() => "spec 9.2 integrity audit failed".to_string(),
                 Ok(_) => format!("unmet claims: {}", rejected.unmet.join(", ")),
-            }
+            })
         );
     }
     Ok(audited
@@ -1342,11 +1336,11 @@ fn send_error(
     text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n")
 }
 
-fn text_response(status: StatusCode, body: &'static str) -> Response {
+fn text_response(status: StatusCode, body: impl Into<Body>) -> Response {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain")
-        .body(Body::from(body))
+        .body(body.into())
         .unwrap_or_else(|_| internal_error())
 }
 
