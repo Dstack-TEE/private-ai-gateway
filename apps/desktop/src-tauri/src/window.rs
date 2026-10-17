@@ -51,9 +51,10 @@ pub fn create(app: &tauri::App, appearance: Appearance) -> Result<(), Box<dyn st
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
+            let presented = state(&app).presented;
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                close(&app, crate::tray::usable(&app).await);
+                close(&app, presented, crate::tray::usable(&app).await);
             });
         }
     });
@@ -61,25 +62,28 @@ pub fn create(app: &tauri::App, appearance: Appearance) -> Result<(), Box<dyn st
 }
 
 /// Hides the window to the tray. Without a usable tray it minimizes the
-/// window instead, so the taskbar or the Dock can still open it.
-fn close(app: &AppHandle, to_tray: bool) {
+/// window instead, so the taskbar or the Dock can still open it. A request to
+/// show the window made since the close (`presented` counts them) wins: its
+/// change runs on the main thread after this check.
+fn close(app: &AppHandle, presented: u64, to_tray: bool) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if state(&handle).presented != presented {
+            return;
+        }
         let Some(window) = handle.get_webview_window(MAIN) else {
             return;
         };
         if to_tray {
             let _ = window.hide();
             set_dock_visibility(&handle, false);
+            #[cfg(target_os = "windows")]
+            crate::windows_window::explain_close_to_tray(&handle);
         } else {
             tracing::info!("No usable tray: minimizing the window instead of hiding it");
             let _ = window.minimize();
         }
     });
-    #[cfg(target_os = "windows")]
-    if to_tray {
-        crate::windows_window::explain_close_to_tray(app);
-    }
 }
 
 /// How long a launch at login waits for a tray host, and how often it asks:
@@ -101,7 +105,12 @@ pub fn launch_hidden(app: &AppHandle) {
             }
         };
         if icon && tokio::time::timeout(LOGIN_TRAY_WAIT, host).await.is_ok() {
-            set_dock_visibility(&app, false);
+            // Unless the window was opened meanwhile. Under the lock, a later
+            // show's Dock change is sent after this one.
+            let state = state(&app);
+            if !state.show_requested {
+                set_dock_visibility(&app, false);
+            }
         } else {
             tracing::info!("No usable tray: showing the window minimized");
             present(&app, Presentation::Minimized);
@@ -139,6 +148,8 @@ pub struct WindowState {
     show_requested: bool,
     /// How the requested show presents the window.
     presentation: Presentation,
+    /// How many shows were requested, so a close they overtook is dropped.
+    presented: u64,
     navigation: Option<NavigationTarget>,
 }
 
@@ -167,6 +178,7 @@ fn present(app: &AppHandle, presentation: Presentation) {
     }
     state.show_requested = true;
     state.presentation = presentation;
+    state.presented += 1;
     if !state.loaded {
         return;
     }
