@@ -128,7 +128,7 @@ pub(super) fn audit_exchange(
 }
 
 pub(super) async fn verify_exchange(
-    state: &ProxyState,
+    state: &Arc<ProxyState>,
     trusted: &TrustedIdentity,
     exchange: &RecordedExchange,
     bearer: Option<&str>,
@@ -144,13 +144,25 @@ pub(super) async fn verify_exchange(
     // JSON is UTF-8 (RFC 8259 §8.1), so the checked document keeps its bytes.
     let document = String::from_utf8(receipt_resp.body).ok();
 
+    let receipt_identity = if let Some(identity) = state.receipt_identity(trusted, &receipt) {
+        identity
+    } else {
+        if let Some(digest) = receipt["workload_keyset_digest"].as_str() {
+            state.require_reverification(digest);
+        }
+        state.ensure_unblocked().await?;
+        state.receipt_identity(trusted, &receipt).ok_or_else(|| {
+            "receipt digest was not established for the admitted renewal family".to_string()
+        })?
+    };
+
     let mut transcript = Transcript::default();
     let (session_resp, no_session_reason) = fetch_session_for_audit(state, &receipt).await;
     let session_bytes = session_resp.map(|resp| resp.body);
     run_response_checks(
         &mut transcript,
         &receipt,
-        &trusted.identity,
+        &receipt_identity.identity,
         Some(&exchange.request),
         Some(&exchange.response),
         UpstreamContext {
@@ -159,7 +171,7 @@ pub(super) async fn verify_exchange(
             pinned: (!exchange.pinned_sessions.is_empty())
                 .then_some(exchange.pinned_sessions.as_slice()),
             requires_verified: state.enforce_verified || !exchange.pinned_sessions.is_empty(),
-            serving: &trusted.report.service_capabilities.serving,
+            serving: &receipt_identity.report.service_capabilities.serving,
             required_claims: &state.required_claims,
         },
     );
@@ -172,7 +184,7 @@ pub(super) async fn verify_exchange(
         summarize(
             &transcript,
             session.as_ref(),
-            &trusted.report.service_capabilities.serving,
+            &receipt_identity.report.service_capabilities.serving,
         )
     );
     if let ResponseDelivery::Failed(error) = &exchange.delivery {

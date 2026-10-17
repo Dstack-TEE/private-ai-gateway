@@ -6,7 +6,7 @@
  * by a party the client trusts (§9.3).
  */
 
-import { verifyEd25519, sha256Prefixed, jcsBytes, fromHex } from './crypto.js';
+import { verifyEd25519, sha256Prefixed, jcsBytes, jcsEqual, fromHex } from './crypto.js';
 import type {
   Check,
   ReceiptEnvelope,
@@ -15,6 +15,12 @@ import type {
   ReceiptVerification,
   WorkloadKeyset,
 } from './types.js';
+
+export function sameKeysetFamily(keyset: WorkloadKeyset, previous: WorkloadKeyset): boolean {
+  const { not_after: _currentExpiry, ...current } = keyset;
+  const { not_after: _previousExpiry, ...old } = previous;
+  return jcsEqual(current, old);
+}
 
 /**
  * §9.3 checks 1–2: the `signature` member verifies over JCS(document minus
@@ -77,14 +83,18 @@ export async function verifyReceipt(
     ok: versionOk,
     ...(versionOk ? {} : { detail: `api_version "${payload.api_version}" is not "aci/1"` }),
   });
-  // §9.3 check 2: the document binds back to the established keyset.
-  const ok = payload.workload_keyset_digest === establishedDigest;
+  // §9.3 check 2: the document binds back to the established keyset and was
+  // served before that keyset expired.
+  const ok = payload.workload_keyset_digest === establishedDigest
+    && Number.isSafeInteger(payload.served_at)
+    && payload.served_at >= 0
+    && payload.served_at < keyset.not_after;
   checks.push({
     name: 'workload_keyset_digest',
     ok,
     ...(ok
       ? {}
-      : { detail: `document ${payload.workload_keyset_digest} != established ${establishedDigest}` }),
+      : { detail: `document ${payload.workload_keyset_digest} does not match the established keyset valid at served_at` }),
   });
 
   return {

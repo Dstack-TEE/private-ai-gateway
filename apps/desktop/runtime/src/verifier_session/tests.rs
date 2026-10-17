@@ -348,6 +348,32 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     assert_eq!(state.status, VerificationStatus::Verified);
     assert_eq!(state.catalog.unwrap().models[0].id, "test-model");
     assert!(proxy.session().verified);
+    let renewed = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:renewed",
+        "keyset_not_after": 2_100_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {
+            "serving": "aggregator",
+            "supported_e2ee_versions": []
+        },
+        "verification": { "checks": [] }
+    }));
+    let before_epoch = manager.lock().unwrap().epoch;
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::IdentityRenewed { identity: renewed },
+        )
+        .unwrap();
+    let after = manager.snapshot();
+    let after_epoch = manager.lock().unwrap().epoch;
+    assert_eq!(after.status, VerificationStatus::Verified);
+    assert_eq!(after_epoch, before_epoch);
+    assert!(after.catalog.is_some());
+    assert!(proxy.session().verified);
     manager.stop().unwrap();
     server.abort();
     let _ = server.await;
