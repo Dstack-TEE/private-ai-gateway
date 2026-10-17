@@ -278,20 +278,24 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     // receipt-1 — the signature over JCS(document minus `signature`), under the
     // attested keyset entry `key_id` names; that entry decides the
     // algorithm (§7.2).
-    check_signature(transcript, &cx);
-
-    // receipt-2 — the payload binds back to the established keyset digest.
     let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
-    if payload_digest == Some(cx.workload_keyset_digest) {
+    let served_at = cx.receipt["served_at"].as_u64();
+    check_signature(transcript, &cx, cx.keyset);
+
+    // receipt-2 — the payload binds back to this established digest, and its
+    // keyset was still valid when the service served it.
+    if payload_digest == Some(cx.workload_keyset_digest)
+        && served_at.is_some_and(|served_at| served_at < cx.keyset.not_after)
+    {
         transcript.pass(
             RECEIPT_2,
-            "payload workload_keyset_digest matches the established digest",
+            "payload workload_keyset_digest matches the established keyset valid at served_at",
         );
     } else {
         transcript.fail(
             RECEIPT_2,
             format!(
-                "payload carries workload_keyset_digest {payload_digest:?}, established {}",
+                "payload carries workload_keyset_digest {payload_digest:?}, established {} valid at served_at",
                 cx.workload_keyset_digest
             ),
         );
@@ -372,13 +376,12 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     }
 }
 
-fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
+fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>, keyset: &WorkloadKeyset) {
     let Some(key_id) = cx.receipt["key_id"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no key_id");
         return;
     };
-    let Some(receipt_key) = cx
-        .keyset
+    let Some(receipt_key) = keyset
         .receipt_signing_keys
         .iter()
         .find(|key| key.key_id == key_id)
@@ -1060,6 +1063,38 @@ mod tests {
             assert_eq!(status_of(&t, id), Status::Pass, "check {id}");
         }
         assert!(t.verified());
+    }
+
+    #[test]
+    fn receipt_two_requires_matching_digest_and_unexpired_keyset() {
+        use ed25519_dalek::Signer;
+
+        let mut receipt = vector_receipt_envelope();
+        let identity = established_identity(&vector_report()).unwrap();
+        let resign = |receipt: &mut Value| {
+            let input = receipt_signing_input(receipt).unwrap();
+            receipt["signature"] = serde_json::json!(hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                    .sign(&input)
+                    .to_bytes()
+            ));
+        };
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Pass);
+
+        receipt["workload_keyset_digest"] = serde_json::json!("unknown");
+        resign(&mut receipt);
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Fail);
+
+        receipt["workload_keyset_digest"] = serde_json::json!(identity.keyset_digest);
+        receipt["served_at"] = serde_json::json!(KEYSET_NOT_AFTER);
+        resign(&mut receipt);
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Fail);
     }
 
     #[test]

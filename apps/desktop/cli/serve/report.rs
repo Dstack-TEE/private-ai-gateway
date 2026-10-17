@@ -126,6 +126,9 @@ pub(super) fn json_event_sink(event: VerifierEvent) {
         VerifierEvent::IdentityUpdated { identity } => {
             lifecycle_json("identity_updated", identity, None)
         }
+        VerifierEvent::IdentityRenewed { identity } => {
+            lifecycle_json("identity_renewed", identity, None)
+        }
         VerifierEvent::Blocked {
             code: Some(code),
             reason,
