@@ -63,22 +63,16 @@ pub fn show_failure(app: &AppHandle, title: &str, error: &str) {
     }
 }
 
+#[derive(Default)]
 pub struct Observer {
     faults: [bool; 2],
-    session: Option<String>,
-    failed_proof: u64,
+    /// The session and its failed proof count last seen; `None` until a
+    /// backend answers, since the count it starts with is history, not news.
+    proof: Option<(Option<String>, u64)>,
     last_alert: [Option<Instant>; 3],
 }
 
 impl Observer {
-    pub fn new(state: &AppState) -> Self {
-        Self {
-            faults: [false; 2],
-            session: state.session_id.clone(),
-            failed_proof: state.session_usage.failed_proof,
-            last_alert: [None; 3],
-        }
-    }
     fn next(
         &mut self,
         state: &AppState,
@@ -94,10 +88,11 @@ impl Observer {
                 ) || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
-        let proof = if self.session == state.session_id {
-            state.session_usage.failed_proof > self.failed_proof
-        } else {
-            state.session_usage.failed_proof > 0
+        let failed_proof = state.session_usage.failed_proof;
+        let proof = match &self.proof {
+            Some((session, seen)) if *session == state.session_id => failed_proof > *seen,
+            Some(_) => failed_proof > 0,
+            None => false,
         };
         let changed = [
             faults[0] && !self.faults[0],
@@ -105,8 +100,11 @@ impl Observer {
             proof,
         ];
         self.faults = faults;
-        self.session = state.session_id.clone();
-        self.failed_proof = state.session_usage.failed_proof;
+        if self.proof.is_some()
+            || (state.backend_instance.is_some() && state.backend_connected != Some(false))
+        {
+            self.proof = Some((state.session_id.clone(), failed_proof));
+        }
         let allowed = [config.gateway, config.local_api, config.verification];
         let messages = [
             ("Protection needs attention", "Protection or a Private AI Proxy operation encountered a problem. Open Private AI Proxy to review its status."),
@@ -152,8 +150,11 @@ mod tests {
     use super::*;
     #[test]
     fn categories_deduplicate_and_respect_foreground_and_master_switch() {
-        let mut state = AppState::default();
-        let mut observer = Observer::new(&state);
+        let mut state = AppState {
+            backend_instance: Some("first".into()),
+            ..AppState::default()
+        };
+        let mut observer = Observer::default();
         let now = Instant::now();
         let config = NotificationPreferences {
             gateway: false,
@@ -185,5 +186,25 @@ mod tests {
         assert_eq!(observer.next(&state, true, config, now).len(), 1);
         state.session_usage.failed_proof = 4;
         assert!(observer.next(&state, true, config, now).is_empty());
+    }
+
+    #[test]
+    fn failed_proofs_before_the_backend_answers_are_history() {
+        let mut observer = Observer::default();
+        let config = NotificationPreferences::default();
+        let now = Instant::now();
+        let mut state = AppState {
+            backend_instance: Some("first".into()),
+            backend_connected: Some(false),
+            session_id: Some("session".into()),
+            ..AppState::default()
+        };
+        state.session_usage.failed_proof = 3;
+        assert!(observer.next(&state, true, config, now).is_empty());
+        // The first state of a backend that answered sets the baseline.
+        state.backend_connected = None;
+        assert!(observer.next(&state, true, config, now).is_empty());
+        state.session_usage.failed_proof = 4;
+        assert_eq!(observer.next(&state, true, config, now).len(), 1);
     }
 }

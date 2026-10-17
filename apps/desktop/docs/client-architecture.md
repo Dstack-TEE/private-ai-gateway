@@ -138,6 +138,8 @@ protection problems, is stored under that key.
   and `start` explicitly launch it without opening a window.
 - Closing or quitting the UI leaves the backend and protection running. The tray's
   Stop All and Quit action requests confirmation, then shuts down the backend.
+- Notifications follow the saved preferences from startup. The failed proofs
+  a backend reports when it first answers are history; only later ones alert.
 - The desktop shell starts the backend in the background; until it answers,
   the window shows it as starting. A disconnected UI offers Start Backend. It does not silently restart a service
   during an updater operation or replay an earlier mutation.

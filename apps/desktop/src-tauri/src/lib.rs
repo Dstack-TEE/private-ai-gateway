@@ -86,7 +86,6 @@ pub fn run() {
         .manage(updates::PreparedUpdate::default())
         .manage(cli_registration::CliStartup::default())
         .manage(Mutex::new(window::WindowState::default()))
-        .manage(Mutex::new(NotificationPreferences::default()))
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .on_menu_event(menu::handle_event)
         .setup(setup);
@@ -132,6 +131,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Cannot prepare Agent Home access for the backend: {error}");
         }
     }
+    // Notifications follow the saved preferences until the backend answers
+    // with its own; settings that cannot be read keep them off until then.
+    let notifications = desktop_core::config::load()
+        .map(|saved| saved.notifications)
+        .unwrap_or(NotificationPreferences {
+            enabled: false,
+            ..NotificationPreferences::default()
+        });
+    app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     autostart::setup(app.handle())?;
     if updates::configured(app.handle()) {
@@ -188,7 +196,7 @@ fn follow_backend(app: &AppHandle, client: Arc<Client>) {
     let initial = states.borrow().clone();
     let mut projection = StateEventProjection::new(&initial);
     tray::sync(&app, &initial);
-    let mut alerts = notifications::Observer::new(&initial);
+    let mut alerts = notifications::Observer::default();
     let mut backend = BackendInstance::default();
     // The notification permission is asked for once per launch, once a
     // backend answers with its preferences.
