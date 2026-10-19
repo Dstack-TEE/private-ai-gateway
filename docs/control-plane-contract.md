@@ -165,9 +165,10 @@ so the gateway removes what the model could call. OpenAI documents
 use ([API reference](https://platform.openai.com/docs/api-reference/chat/create#chat-create-parallel_tool_calls));
 strict OpenAI-compatible APIs reject these controls when no tools are present.
 With neither tools nor tool controls, the request means no tool calls on every
-OpenAI-compatible provider. Anthropic candidates keep their tools, because
-Anthropic honors `none`. Legacy `functions` and `function_call` fields are
-forwarded unchanged by this rule.
+OpenAI-compatible provider. Anthropic candidates are unchanged by this rule
+and keep their `tools`; the gateway does not translate `tool_choice: "none"`
+for them today. Legacy `functions` and `function_call` fields are forwarded
+unchanged by this rule.
 
 ### Reasoning policy
 
