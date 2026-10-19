@@ -168,11 +168,10 @@ With neither tools nor tool controls, the request means no tool calls on every
 OpenAI-compatible provider. Anthropic candidates keep their `tools` and map
 `tool_choice: "none"` to Anthropic's `{ "type": "none" }`, which prevents
 Claude from using tools ([Anthropic docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools)).
-`parallel_tool_calls` is not attached to that choice:
-Anthropic's `disable_parallel_tool_use` field belongs to the `auto`, `any`, and
-`tool` choices, while `none` has only its `type`. Native Anthropic
-`/v1/messages` requests pass through unchanged. Legacy `functions` and
-`function_call` fields are forwarded unchanged by this rule.
+The chat-to-Anthropic transform drops `parallel_tool_calls` entirely; it never
+maps that field to `disable_parallel_tool_use`. Native Anthropic `/v1/messages`
+requests pass through unchanged. Legacy `functions` and `function_call` fields
+are forwarded unchanged by this rule.
 
 Before this mapping, the Anthropic adapter sent `tool_choice: null` for an
 OpenAI-style `tool_choice: "none"`. Anthropic rejects that shape with a

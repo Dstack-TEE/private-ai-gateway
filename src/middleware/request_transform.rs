@@ -1171,6 +1171,8 @@ fn anthropic_tool_choice(params: &Value) -> Result<Option<Value>, TransformError
             Value::String(s) if s == "required" => return Ok(Some(json!({ "type": "any" }))),
             Value::String(s) if s == "auto" => return Ok(Some(json!({ "type": "auto" }))),
             Value::String(s) if s == "none" => return Ok(Some(json!({ "type": "none" }))),
+            Value::Null => return Ok(None),
+            Value::String(_) => return Ok(Some(tool_choice.clone())),
             Value::Object(_) => {
                 let name = tool_choice
                     .get("function")
@@ -3721,6 +3723,14 @@ mod tests {
         assert!(anthropic_none["tool_choice"]
             .get("disable_parallel_tool_use")
             .is_none());
+
+        let anthropic_null = body(&anthropic, Value::Null);
+        assert!(anthropic_null.get("tool_choice").is_none());
+
+        for unknown in ["foo", "None"] {
+            let anthropic_unknown = body(&anthropic, json!(unknown));
+            assert_eq!(anthropic_unknown["tool_choice"], unknown);
+        }
 
         // Native Anthropic Messages requests are passed through unchanged.
         let native = json!({
