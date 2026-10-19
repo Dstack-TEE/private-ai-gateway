@@ -466,12 +466,17 @@ fn candidate_params(
 
 /// `tool_choice: "none"` forbids tool calls, but vLLM ignores it and calls the
 /// tool anyway or drops the turn (vllm-project/vllm#55080). With no `tools` the
-/// model has nothing to call, on any engine. `tool_choice` itself is kept, so a
-/// backend that honours it still sees the caller's intent.
+/// model has nothing to call, on any engine. OpenAI documents
+/// `parallel_tool_calls` as controlling parallel function calling during tool
+/// use (https://platform.openai.com/docs/api-reference/chat/create#chat-create-parallel_tool_calls),
+/// and strict OpenAI-compatible APIs reject both controls when no `tools` are
+/// present. Remove them together so the forwarded body means "no tool calls".
 fn strip_tools_when_tool_choice_none(params: &mut Value) {
     if params.get("tool_choice").and_then(Value::as_str) == Some("none") {
         if let Some(object) = params.as_object_mut() {
             object.remove("tools");
+            object.remove("tool_choice");
+            object.remove("parallel_tool_calls");
         }
     }
 }
@@ -3676,6 +3681,7 @@ mod tests {
                 "messages": [{ "role": "user", "content": "hi" }],
                 "tools": tools,
                 "tool_choice": tool_choice,
+                "parallel_tool_calls": true,
             });
             build_candidates(
                 &params,
@@ -3691,16 +3697,26 @@ mod tests {
 
         let none = body(&openai, json!("none"));
         assert!(none.get("tools").is_none());
-        assert_eq!(none["tool_choice"], json!("none"));
+        assert!(none.get("tool_choice").is_none());
+        assert!(none.get("parallel_tool_calls").is_none());
 
-        for choice in [json!("auto"), json!("required")] {
-            assert_eq!(body(&openai, choice)["tools"], tools);
+        for choice in [
+            json!("auto"),
+            json!("required"),
+            json!({ "type": "function", "function": { "name": "f" } }),
+        ] {
+            let body = body(&openai, choice.clone());
+            assert_eq!(body["tools"], tools);
+            assert_eq!(body["tool_choice"], choice);
+            assert_eq!(body["parallel_tool_calls"], json!(true));
         }
 
         // Anthropic has a native `none` and keeps its tools.
         let anthropic: RouteCandidate =
             serde_json::from_value(json!({ "routeId": "a:m", "format": "anthropic" })).unwrap();
-        assert!(body(&anthropic, json!("none")).get("tools").is_some());
+        let anthropic_none = body(&anthropic, json!("none"));
+        assert!(anthropic_none.get("tools").is_some());
+        assert_eq!(anthropic_none["tool_choice"], Value::Null);
     }
 
     fn hoisting_candidate(hoist: bool) -> RouteCandidate {
@@ -4038,7 +4054,11 @@ mod tests {
             );
             // The tool call itself must be untouched by the reasoning shaping;
             // only `none` drops the tools (see strip_tools_when_tool_choice_none).
-            assert_eq!(body["tool_choice"], tool_choice);
+            if tool_choice == "none" {
+                assert!(body.get("tool_choice").is_none());
+            } else {
+                assert_eq!(body["tool_choice"], tool_choice);
+            }
             assert_eq!(body["tools"].is_array(), tool_choice != "none");
         }
     }
