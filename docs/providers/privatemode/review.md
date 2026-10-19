@@ -82,12 +82,27 @@ current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 > This records a configuration change; production rollout and its effect on
 > TTFT, cache hits, and 429s remain unverified.
 
+> **Status (2026-10-19 PDT, canonical proxy flags):** the reference Compose now
+> uses `--api-key @/run/secrets/privatemode-api-key`,
+> `--nvidia-ocsp-allow-unknown=false`, and
+> `--nvidia-ocsp-revoked-grace-period=0`. The tagged [CLI][v159-cli] registers
+> the deprecated aliases with the same flag values and backing variables,
+> including the same `@file` read and whitespace trimming for the credential.
+> The canonical spellings preserve behavior, have no mutual-exclusion conflict
+> with the other Compose flags, and remove deprecation warnings. Strict OCSP
+> remains an admission condition: reject unknown status and allow no
+> revoked-certificate grace period. The [proxy handler][v159-handlers] uses the
+> inference secret to authenticate a per-request OCSP policy, and the
+> [worker][v159-worker] verifies its MAC and enforces it against driver, GPU,
+> and VBIOS statuses. The image digest and credential policy are unchanged.
+
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
 [v159-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.58.0...v1.59.0
 [v159-cli]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
 [v159-manifestlog]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
 [v159-setup]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/setup/setup.go
 [v159-handlers]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
+[v159-worker]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/inference-proxy/internal/adapter/inference/inference.go
 
 Provider: [Privatemode](https://www.privatemode.ai/) by Edgeless Systems.
 TCB source: [`edgelesssys/privatemode-public`](https://github.com/edgelesssys/privatemode-public).

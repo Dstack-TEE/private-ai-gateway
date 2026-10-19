@@ -9,6 +9,15 @@ internal origin. Everything else follows the
 
 Clients call the gateway exactly as they would with any other provider.
 
+## Testing and quota operations
+
+Use a separate Privatemode account for any testing, with independent quota
+confirmed by Privatemode. A different API key alone does not prove that quota
+is separate. Do not run load tests against the production account.
+
+Request quota or limit increases from Privatemode. Do not add gateway
+throttling, weight caps, or quota workarounds to compensate for provider limits.
+
 ## Deploy
 
 [`privatemode.env.example`](privatemode.env.example) lists all inputs.
@@ -47,7 +56,7 @@ are not in it. Both travel through Phala's encrypted environment and reach the
 containers as Compose secrets, which the rendered Compose names without their
 values. The gateway reads the admin token through
 `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. The API key is
-mounted into both services: the proxy reads it through `--apiKey @<file>`, and
+mounted into both services: the proxy reads it through `--api-key @<file>`, and
 the gateway only checks it against the measured digest at startup and never
 forwards it.
 
