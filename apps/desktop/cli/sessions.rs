@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
-use crate::client::AciClient;
+use crate::client::{AciClient, MAX_ATTESTATION_RESPONSE_BYTES};
 use crate::print_json;
 use crate::verify::verify_service;
 use desktop_core::endpoint;
@@ -193,8 +193,13 @@ pub async fn audit_current_sessions(
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
     let listing = client
-        .get(sessions_url(base_url, model)?.as_str(), None)
-        .await?;
+        .get_limited(
+            sessions_url(base_url, model)?.as_str(),
+            None,
+            MAX_ATTESTATION_RESPONSE_BYTES,
+        )
+        .await
+        .map_err(String::from)?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;
     let ids: Vec<String> = listing["sessions"]
@@ -235,6 +240,40 @@ pub async fn audit_current_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn session_listings_are_bounded_before_json_decoding() {
+        use axum::{body::Body, http::Response, routing::get, Router};
+        use bytes::Bytes;
+
+        let client = AciClient::new().unwrap();
+        for with_length in [false, true] {
+            let app = Router::new().route(
+                "/v1/aci/sessions",
+                get(move || async move {
+                    let mut response = Response::builder();
+                    if with_length {
+                        response =
+                            response.header("content-length", (33 * 1024 * 1024).to_string());
+                    }
+                    let chunks = futures_util::stream::iter((0..33).map(|_| {
+                        Ok::<_, std::io::Error>(Bytes::from_static(&[b' '; 1024 * 1024]))
+                    }));
+                    response.body(Body::from_stream(chunks)).unwrap()
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = audit_current_sessions(&client, &origin, None, &[]).await;
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+            assert!(result
+                .err()
+                .expect("oversized session listing was accepted")
+                .contains("response body exceeds 32768 KiB"));
+        }
+    }
 
     #[test]
     fn a_model_id_round_trips_through_the_listing_query() {

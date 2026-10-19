@@ -86,6 +86,7 @@
   },
   "dependencies": {
     "@phala/dcap-qvl": "^0.6.2",
+    "jsonc-parser": "^3.3.1",
     "undici": "7.29.0"
   }
 }

@@ -19,8 +19,13 @@ test('hex round trip, 0x prefix, and malformed input', () => {
   assert.equal(toHex(bytes), '0001abff');
   assert.deepEqual(fromHex('0001abff'), bytes);
   assert.deepEqual(fromHex('0x0001abff'), bytes);
+  assert.deepEqual(fromHex('0x0001ABFF'), bytes);
+  assert.deepEqual(fromHex(''), new Uint8Array());
   assert.throws(() => fromHex('abc'), AciFormatError);
   assert.throws(() => fromHex('zz'), AciFormatError);
+  for (const hex of ['1z', 'z1', ' 1', '-1', '0X0001ABFF']) {
+    assert.throws(() => fromHex(hex), AciFormatError);
+  }
 });
 
 test('base64 round trip over all byte values, and malformed input', () => {

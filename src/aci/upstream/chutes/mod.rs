@@ -22,6 +22,7 @@ use super::{
     transport_error, OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend,
     UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
+use crate::aci::attestation_http::read_attestation_body;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crypto::{
     build_chutes_e2ee_request, chutes_e2ee_pubkey_sha256, decrypt_chutes_response,
@@ -219,7 +220,9 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_attestation_body(resp)
+            .await
+            .map_err(UpstreamError::from)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -254,7 +257,9 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_attestation_body(resp)
+            .await
+            .map_err(UpstreamError::from)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -337,7 +342,9 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_attestation_body(resp)
+            .await
+            .map_err(UpstreamError::from)?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
