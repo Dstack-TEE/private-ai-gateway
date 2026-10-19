@@ -74,9 +74,11 @@ current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 > the default random salt generated once per proxy startup. All callers of a
 > replica then share its cache namespace unless they supply a valid `cache_salt`,
 > which takes precedence. The effective salt and prompt content also provide
-> shard affinity. This deliberately removes per-request cache isolation and
-> adopts the same shared-namespace posture as Tinfoil; the gateway does not
-> derive a tenant salt. See [Prompt cache](verification.md#prompt-cache).
+> shard affinity. This deliberately removes per-request cache isolation; the
+> gateway does not derive a tenant salt. Privatemode's namespace is limited to
+> each replica and proxy startup. Tinfoil's broader namespace derives from the
+> shared upstream credential, spanning replicas and surviving restarts. See
+> [Prompt cache](verification.md#prompt-cache).
 > This records a configuration change; production rollout and its effect on
 > TTFT, cache hits, and 429s remain unverified.
 

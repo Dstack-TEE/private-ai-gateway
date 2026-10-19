@@ -151,13 +151,17 @@ The reference Compose sets `--disable-prompt-cache=false`. The default
 without a caller-supplied salt share one cache namespace across all callers of
 that proxy replica. Restarts generate a new namespace; replicas do not share
 their startup salts. This removes the proxy's default per-request cache
-isolation and has the same shared-namespace posture as Tinfoil; see
+isolation. Tinfoil's namespace is broader: it derives from the shared upstream
+credential, spans replicas, and survives restarts. See
 [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
 
-A valid caller-supplied `cache_salt` takes precedence. The proxy derives shard
-affinity from the effective salt and prompt content, helping repeated prefixes
-reach the same workers. This does not guarantee a cache hit or a particular
-worker. The gateway preserves caller salts and does not derive a tenant salt.
+Sharing a prefix cache creates a cross-tenant prefix-timing side channel: a
+caller can infer whether another caller recently sent the same prompt prefix.
+Callers that need isolation can supply their own `cache_salt` (at least 32
+bytes), which takes precedence. The proxy derives shard affinity from the
+effective salt and prompt content, helping repeated prefixes reach the same
+workers. This does not guarantee a cache hit or a particular worker. The
+gateway preserves caller salts and does not derive a tenant salt.
 See the tagged v1.59.0 [CLI][cli-source], [handler][handler-source], and
 [shard-key implementation][shard-source].
 
