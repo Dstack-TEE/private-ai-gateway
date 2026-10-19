@@ -54,7 +54,7 @@ the measured static
 The route's `base_url` must match that origin; `bearer_token` and `path` are
 rejected.
 
-The proxy reads its credential once at startup through `--apiKey @file` for
+The proxy reads its credential once at startup through `--api-key @file` for
 its attested secret exchange and outbound authentication, with
 `--api-key-fallback=always`. The key is delivered to the proxy as a Compose
 secret. Its measured digest identifies the Privatemode account credential used
@@ -114,7 +114,7 @@ For route verification, the gateway:
 3. Emits the measured proxy binding and the explicitly unbound manifest
    observation.
 
-With `--apiKey` set, the proxy starts listening only after its initial Contrast
+With `--api-key` set, the proxy starts listening only after its initial Contrast
 verification and secret exchange succeed, so a readiness answer corroborates
 startup and liveness. It does not use or identify the current inference secret.
 The refresh loop now retries failed background updates with bounded backoff;
@@ -133,16 +133,47 @@ The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound because the Compose explicitly sets
 `--api-key-fallback=always`. Upstream v1.59 warns that the default will change
 to `never` in a future release; the explicit flag preserves this behavior.
-The Compose's `--apiKey`, `--nvidiaOCSPAllowUnknown`, and
-`--nvidiaOCSPRevokedGracePeriod` flags remain supported as deprecated aliases
-for the kebab-case spellings introduced in v1.58. The proxy supports
-`--listen-address`; its default remains `0.0.0.0`, appropriate for the private
-Compose network. The forwarding client rejects redirects and
+As of 2026-10-19 PDT, the Compose uses the canonical `--api-key`,
+`--nvidia-ocsp-allow-unknown=false`, and
+`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.59.0 [CLI][cli-source]
+shares each deprecated alias's flag value and backing variable with its
+canonical spelling, including the same `@file` credential loading and whitespace
+trimming. Switching spellings preserves behavior and removes deprecation
+warnings. The strict OCSP settings remain an admission condition: only good
+status is accepted, with no unknown-status tolerance or revoked-certificate
+grace period. On each encrypted request, the proxy authenticates the OCSP
+policy with an HMAC using the inference secret; the worker verifies that MAC
+and enforces the policy against its driver, GPU, and VBIOS statuses. See the
+[proxy handler][handler-source] and [worker enforcement][worker-source].
+
+The proxy supports `--listen-address`; its default remains `0.0.0.0`, appropriate
+for the private Compose network. The forwarding client rejects redirects and
 ignores HTTP proxy environment variables.
 
 Plain HTTP is intentional on the internal hop. Both services and the private
 network are inside the same attested dstack workload. Privatemode E2EE protects
 the request after it leaves that workload.
+
+## Prompt cache
+
+The reference Compose sets `--disable-prompt-cache=false`. The default
+`--prompt-cache-salt random` generates one salt per proxy startup, so requests
+without a caller-supplied salt share one cache namespace across all callers of
+that proxy replica. Restarts generate a new namespace; replicas do not share
+their startup salts. This removes the proxy's default per-request cache
+isolation. Tinfoil's namespace is broader: it derives from the shared upstream
+credential, spans replicas, and survives restarts. See
+[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+
+Sharing a prefix cache creates a cross-tenant prefix-timing side channel: a
+caller can infer whether another caller recently sent the same prompt prefix.
+Callers that need isolation can supply their own `cache_salt` (at least 32
+bytes), which takes precedence. The proxy derives shard affinity from the
+effective salt and prompt content, helping repeated prefixes reach the same
+workers. This does not guarantee a cache hit or a particular worker. The
+gateway preserves caller salts and does not derive a tenant salt.
+See the tagged v1.59.0 [CLI][cli-source], [handler][handler-source], and
+[shard-key implementation][shard-source].
 
 ## Session binding and claims
 
@@ -227,3 +258,7 @@ To test a Phala deployment, follow the
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
 [manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
+[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
+[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/internal/oss/mutators/mutators.go
+[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/inference-proxy/internal/adapter/inference/inference.go

@@ -52,6 +52,17 @@ attestation. The intended caller-controlled interface was to preserve
 `cache_salt` for Chutes and translate it to `user_cache_secret` for Tinfoil,
 without deriving or overriding it from RedPill tenant identity in the gateway.
 
+As of 2026-10-19, the Privatemode reference Compose enables
+`--disable-prompt-cache=false`. Its default random salt is generated once per
+proxy startup, sharing a cache namespace across callers of that replica. A
+valid caller-supplied `cache_salt` takes precedence; the gateway does not derive
+a tenant salt. This removes the default per-request isolation. Privatemode's
+namespace is narrower than Tinfoil's: Tinfoil derives its namespace from the
+shared upstream credential, so it spans replicas and survives restarts. See
+[Privatemode prompt cache](privatemode/verification.md#prompt-cache) for salt
+lifetime, shard affinity, and the timing side channel. Production rollout
+remains unverified.
+
 Revalidate provider code and deployment configuration before relying on cache
 partitioning. Attestation can bind a provider implementation, but it does not
 turn an unreviewed cache policy into tenant isolation.

@@ -52,11 +52,12 @@ services:
       - /var/lib/privatemode
       - --port
       - "8080"
-      - --apiKey
+      - --api-key
       - "@/run/secrets/privatemode-api-key"
       - --api-key-fallback=always
-      - --nvidiaOCSPAllowUnknown=false
-      - --nvidiaOCSPRevokedGracePeriod=0
+      - --disable-prompt-cache=false
+      - --nvidia-ocsp-allow-unknown=false
+      - --nvidia-ocsp-revoked-grace-period=0
     tmpfs:
       - /var/lib/privatemode:mode=0700
     volumes:
