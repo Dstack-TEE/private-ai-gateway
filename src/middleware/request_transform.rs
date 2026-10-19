@@ -1170,6 +1170,9 @@ fn anthropic_tool_choice(params: &Value) -> Result<Option<Value>, TransformError
         match tool_choice {
             Value::String(s) if s == "required" => return Ok(Some(json!({ "type": "any" }))),
             Value::String(s) if s == "auto" => return Ok(Some(json!({ "type": "auto" }))),
+            Value::String(s) if s == "none" => return Ok(Some(json!({ "type": "none" }))),
+            Value::Null => return Ok(None),
+            Value::String(_) => return Ok(Some(tool_choice.clone())),
             Value::Object(_) => {
                 let name = tool_choice
                     .get("function")
@@ -3715,8 +3718,42 @@ mod tests {
         let anthropic: RouteCandidate =
             serde_json::from_value(json!({ "routeId": "a:m", "format": "anthropic" })).unwrap();
         let anthropic_none = body(&anthropic, json!("none"));
-        assert!(anthropic_none.get("tools").is_some());
-        assert_eq!(anthropic_none["tool_choice"], Value::Null);
+        assert!(anthropic_none["tools"].is_array());
+        assert_eq!(anthropic_none["tool_choice"], json!({ "type": "none" }));
+        assert!(anthropic_none["tool_choice"]
+            .get("disable_parallel_tool_use")
+            .is_none());
+
+        let anthropic_null = body(&anthropic, Value::Null);
+        assert!(anthropic_null.get("tool_choice").is_none());
+
+        for unknown in ["foo", "None"] {
+            let anthropic_unknown = body(&anthropic, json!(unknown));
+            assert_eq!(anthropic_unknown["tool_choice"], unknown);
+        }
+
+        // Native Anthropic Messages requests are passed through unchanged.
+        let native = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{
+                "name": "f",
+                "description": "Function f",
+                "input_schema": { "type": "object" }
+            }],
+            "tool_choice": { "type": "none" }
+        });
+        assert_eq!(
+            transform_to_provider_request(
+                ProviderFormat::Anthropic,
+                &native,
+                Endpoint::Messages,
+                None,
+            )
+            .unwrap(),
+            native
+        );
     }
 
     fn hoisting_candidate(hoist: bool) -> RouteCandidate {
