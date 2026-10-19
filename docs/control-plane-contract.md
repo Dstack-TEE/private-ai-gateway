@@ -174,6 +174,11 @@ Anthropic's `disable_parallel_tool_use` field belongs to the `auto`, `any`, and
 `/v1/messages` requests pass through unchanged. Legacy `functions` and
 `function_call` fields are forwarded unchanged by this rule.
 
+Before this mapping, the Anthropic adapter sent `tool_choice: null` for an
+OpenAI-style `tool_choice: "none"`. Anthropic rejects that shape with a
+non-retried HTTP 400 (`tool_choice: Input should be an object`), so those
+requests to Claude models failed.
+
 ### Reasoning policy
 
 `reasoningPolicy` applies to chat completion bodies, including `/v1/responses`
