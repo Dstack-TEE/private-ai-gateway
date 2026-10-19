@@ -58,6 +58,12 @@ API; `bearer_token` is forbidden for Privatemode. To rotate the API key,
 rerender with the new `PRIVATEMODE_API_KEY` and redeploy both services; a
 mismatched secret fails closed.
 
+The proxy command sets `--disable-prompt-cache=false`, sharing one prompt-cache
+namespace across all callers of each proxy replica until it restarts. A valid
+caller-supplied `cache_salt` takes precedence. See
+[Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache) for
+salt lifetime, shard affinity, and the change from per-request isolation.
+
 After deployment, the gateway listens on port `8086` and serves inference like
 any other deployment. The admin API uses the admin token.
 

@@ -55,6 +55,7 @@ services:
       - --apiKey
       - "@/run/secrets/privatemode-api-key"
       - --api-key-fallback=always
+      - --disable-prompt-cache=false
       - --nvidiaOCSPAllowUnknown=false
       - --nvidiaOCSPRevokedGracePeriod=0
     tmpfs:

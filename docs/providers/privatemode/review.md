@@ -61,6 +61,25 @@ current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 > returned HTTP 200, and `pap audit --require-verified` had zero failures.
 > The session binds the v1.59.0 proxy image digest and credential digest.
 
+> **Status (2026-10-19 PDT, shared prompt cache):** the trailing 24-hour
+> request-stats sample for streaming `z-ai/glm-5.3` showed Privatemode deployment
+> 269 at p50/p95 TTFT 11.6/75 seconds with approximately 120K input tokens per
+> request and 508/1684 HTTP 429s (30%). Phala deployment 270 had p50 TTFT
+> 1.3 seconds with approximately 106K input tokens. The tagged [CLI][v159-cli]
+> and [handler][v159-handlers] confirm that the default
+> `--disable-prompt-cache=true` generates a fresh salt for each unsalted request,
+> preventing prefix reuse across requests. Those requests consume the reported
+> 200K uncached-token/minute bucket rather than the 750K cached-token/minute
+> bucket. The reference Compose now sets `--disable-prompt-cache=false`, keeping
+> the default random salt generated once per proxy startup. All callers of a
+> replica then share its cache namespace unless they supply a valid `cache_salt`,
+> which takes precedence. The effective salt and prompt content also provide
+> shard affinity. This deliberately removes per-request cache isolation and
+> adopts the same shared-namespace posture as Tinfoil; the gateway does not
+> derive a tenant salt. See [Prompt cache](verification.md#prompt-cache).
+> This records a configuration change; production rollout and its effect on
+> TTFT, cache hits, and 429s remain unverified.
+
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
 [v159-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.58.0...v1.59.0
 [v159-cli]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go

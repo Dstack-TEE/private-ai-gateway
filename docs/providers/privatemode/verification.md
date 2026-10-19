@@ -144,6 +144,23 @@ Plain HTTP is intentional on the internal hop. Both services and the private
 network are inside the same attested dstack workload. Privatemode E2EE protects
 the request after it leaves that workload.
 
+## Prompt cache
+
+The reference Compose sets `--disable-prompt-cache=false`. The default
+`--prompt-cache-salt random` generates one salt per proxy startup, so requests
+without a caller-supplied salt share one cache namespace across all callers of
+that proxy replica. Restarts generate a new namespace; replicas do not share
+their startup salts. This removes the proxy's default per-request cache
+isolation and has the same shared-namespace posture as Tinfoil; see
+[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+
+A valid caller-supplied `cache_salt` takes precedence. The proxy derives shard
+affinity from the effective salt and prompt content, helping repeated prefixes
+reach the same workers. This does not guarantee a cache hit or a particular
+worker. The gateway preserves caller salts and does not derive a tenant salt.
+See the tagged v1.59.0 [CLI][cli-source], [handler][handler-source], and
+[shard-key implementation][shard-source].
+
 ## Session binding and claims
 
 The receipt's `upstream.verified` event cites an immutable attested session.
@@ -227,3 +244,6 @@ To test a Phala deployment, follow the
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
 [manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
+[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
+[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/internal/oss/mutators/mutators.go
