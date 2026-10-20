@@ -73,7 +73,9 @@
     "lint:package": "npm run build && npm run build:bundle && publint && attw --pack --profile esm-only .",
     "clean": "rm -rf dist dist-test",
     "prepack": "npm run clean && npm run build && npm run build:bundle",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "check": "tsc -p tsconfig.test.json --noEmit",
+    "pack:check": "npm pack --dry-run"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",

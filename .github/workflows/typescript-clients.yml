@@ -4,13 +4,13 @@ on:
   pull_request:
     paths:
       - 'clients/**'
-      - '.github/workflows/pi-provider.yml'
+      - '.github/workflows/typescript-clients.yml'
   push:
     branches:
       - main
     paths:
       - 'clients/**'
-      - '.github/workflows/pi-provider.yml'
+      - '.github/workflows/typescript-clients.yml'
 
 jobs:
   test:

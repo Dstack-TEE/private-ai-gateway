@@ -2,14 +2,11 @@
   "name": "private-ai-gateway-clients",
   "version": "0.7.3",
   "private": true,
-  "description": "ACI TypeScript clients and coding-agent providers",
+  "description": "ACI TypeScript verifier and verified fetch client",
   "license": "MIT",
   "type": "module",
   "workspaces": [
-    "verifier-ts",
-    "provider",
-    "pi-provider/packages/*",
-    "opencode-provider/packages/*"
+    "verifier-ts"
   ],
   "scripts": {
     "clean": "npm run clean --workspaces --if-present",
@@ -21,19 +18,13 @@
     "format": "npm run format --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present",
     "pack:check": "npm run pack:check --workspaces --if-present",
-    "lint:packages": "bash package-lint.sh"
+    "lint:packages": "npm run lint:package -w @phala/aci-verifier"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@earendil-works/pi-ai": "^0.84.3",
-    "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@earendil-works/pi-tui": "^0.84.3",
-    "@j178/prek": "^0.4.14",
-    "@opencode-ai/plugin": "1.18.24",
     "@types/bun": "^1.4.0",
     "@types/node": "^24.0.0",
     "esbuild": "^0.25.0",
-    "opencode-ai": "1.18.24",
     "oxfmt": "^0.44.0",
     "oxlint": "^1.80.0",
     "publint": "^0.3.24",

@@ -1,7 +1,0 @@
-node_modules/
-*.tgz
-.claude/
-storage/
-.doc-review/
-pi-session-*.html
-.pi
