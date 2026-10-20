@@ -1,7 +1,5 @@
 //! Printing: compact JSON, or a human rendering chosen by the command.
 
-use std::io::{self, Write};
-
 use desktop_core::client::CallError;
 use serde_json::Value;
 
@@ -9,6 +7,8 @@ use super::{
     Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
 };
 use crate::Global;
+use private_ai_proxy::safe;
+pub(super) use private_ai_proxy::write_stdout;
 
 /// Prints a command's result as one line of compact JSON or its human rendering.
 pub(super) fn print(action: &Action, global: &Global, value: &Value) -> Result<(), CallError> {
@@ -32,16 +32,6 @@ pub(super) fn render_line(
 pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
     write_stdout(bytes)?;
     Ok(())
-}
-
-/// Writes to stdout, `Ok(false)` once the reader has gone away, as after
-/// `| head`: output then ends quietly.
-pub(super) fn write_stdout(bytes: &[u8]) -> Result<bool, String> {
-    match io::stdout().lock().write_all(bytes) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(_) => Err("Cannot write output".into()),
-    }
 }
 
 /// The human rendering of `action`'s result `value`; details by default.
@@ -461,19 +451,6 @@ fn text(value: &Value) -> String {
     }
 }
 
-pub(super) fn safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 fn label(key: &str) -> String {
     let mut label = String::new();
     for (index, c) in safe(key).chars().enumerate() {
@@ -493,6 +470,37 @@ fn label(key: &str) -> String {
 mod tests {
     use super::*;
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn management_fields_cannot_inject_output_lines() {
+        let field = "x\n[PASS] forged\tfield";
+        let value = serde_json::json!({
+            "gateway": {
+                "status": "error",
+                "error": field,
+                "progress": field,
+                "webUi": { "enabled": true, "error": field },
+                "configFiles": { "warnings": [field] }
+            }
+        });
+        let rendered = status(&value);
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"Error: x [PASS] forged field"));
+        assert!(lines.contains(&"Progress: x [PASS] forged field"));
+        assert!(lines.contains(&"Web UI: Not listening (x [PASS] forged field)"));
+        assert!(lines.contains(&"Settings warning: x [PASS] forged field"));
+
+        let rendered = agents(&serde_json::json!({ "attention": field, "error": field }));
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "  x [PASS] forged field");
+        assert_eq!(lines[2], "  Error: x [PASS] forged field");
+        assert_eq!(
+            details(&serde_json::json!({ "field\nlabel": field })),
+            "Field label: x [PASS] forged field"
+        );
+    }
 
     #[test]
     fn status_shows_a_failed_check_and_its_reason_during_a_retry() {

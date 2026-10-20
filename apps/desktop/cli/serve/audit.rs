@@ -208,8 +208,8 @@ impl From<String> for AuditFetchError {
 impl From<GetError> for AuditFetchError {
     fn from(error: GetError) -> Self {
         match error {
-            GetError::Failed(error) => Self::Transport(error),
             GetError::TooLarge(limit) => Self::TooLarge(limit),
+            other => Self::Transport(other.to_string()),
         }
     }
 }

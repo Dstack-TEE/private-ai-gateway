@@ -697,6 +697,11 @@ fn apply_constraints_tightens_plaintext_body() {
     assert_eq!(v["provider"]["aci_session_ids"][0], pins[0]);
     assert_eq!(v["provider"]["aci_verified"], true);
 
+    // A null provider has the same gateway semantics as an absent provider.
+    let out = apply_constraints(br#"{"model":"m","provider":null}"#.to_vec(), true, &[]).unwrap();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["provider"]["aci_verified"], true);
+
     // The client's own narrower set survives when local policy accepts it.
     let out = apply_constraints(
         format!(r#"{{"provider":{{"aci_session_ids":["{}"]}}}}"#, pins[0]).into_bytes(),
@@ -718,6 +723,49 @@ fn apply_constraints_tightens_plaintext_body() {
         apply_constraints(b"not json".to_vec(), true, &[]).unwrap(),
         b"not json"
     );
+}
+
+#[tokio::test]
+async fn malformed_constraint_shapes_return_the_reason_without_an_upstream_call() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().fallback({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }
+    });
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    Arc::get_mut(&mut state).unwrap().enforce_verified = true;
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let client = reqwest::Client::new();
+    for (body, reason) in [
+        ("[]", "JSON request body must have an object top level"),
+        (
+            r#"{"provider":[]}"#,
+            "JSON request provider must be an object or null",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":"not-an-array"}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":[1]}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+    ] {
+        let response = client
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.text().await.unwrap(), format!("{reason}\n"));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1517,6 +1565,79 @@ async fn a_repin_drops_connections_made_under_the_old_pin() {
     assert!(crate::aci::tls::is_pin_mismatch(&refused), "{refused:?}");
 }
 
+#[tokio::test]
+async fn verified_sessions_reject_rotated_listing_and_record_keys() {
+    use std::io::Write;
+
+    for rotate_at in [1, 2] {
+        let upstream = spawn_tls_upstream(
+            move |index| {
+                if index < rotate_at {
+                    &PINNED_KEY
+                } else {
+                    &ROTATED_KEY
+                }
+            },
+            |index, mut stream| {
+                read_request_head(&mut stream);
+                let body = if index == 1 {
+                    br#"{"sessions":[{"session_id":"test-session"}]}"#.to_vec()
+                } else {
+                    vector_session_bytes()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            },
+        );
+        let client = AciClient::new().unwrap();
+        let host = host_of(&upstream.base).unwrap();
+        // Observe the original key as verification does, before sessions pins it.
+        client.get(&upstream.base, None).await.unwrap();
+        assert_eq!(client.observed_spki(&host), Some(PINNED_KEY.spki()));
+        let mut transcript = Transcript::default();
+        for check in [
+            crate::transcript::ID_1,
+            crate::transcript::ID_2,
+            crate::transcript::ID_3,
+            crate::transcript::ID_4,
+            crate::transcript::ID_5,
+            crate::transcript::ID_6,
+        ] {
+            transcript.pass(check, "verified service fixture");
+        }
+        let verification = ServiceVerification {
+            transcript,
+            report: vector_report(),
+            identity: Some(crate::checks::established_identity(&vector_report()).unwrap()),
+            client,
+            base_url: upstream.base.clone(),
+            host,
+            observed_spki: Some(PINNED_KEY.spki()),
+            tls_pins: vec![PINNED_KEY.spki()],
+        };
+        let args = crate::args::SessionsArgs {
+            base_url: upstream.base.clone(),
+            policy: Default::default(),
+            model: None,
+            require_claims: Vec::new(),
+            json: true,
+        };
+        let result = crate::sessions::run_verified(args, verification).await;
+        if rotate_at == 1 {
+            let error = result.expect_err("rotated listing key was accepted");
+            assert!(error.contains("PinMismatch"), "{error}");
+        } else {
+            assert_eq!(result.unwrap(), 1, "rotated record key was accepted");
+        }
+        assert_eq!(upstream.completed.load(Ordering::SeqCst), rotate_at);
+    }
+}
+
 /// A base URL on a local port that refuses connections, with the socket
 /// holding it: bound but never listening, so connecting is refused (RST) on
 /// every platform, and no concurrent test can bind the port while the caller
@@ -1745,6 +1866,81 @@ async fn requests_queued_behind_a_heal_share_one_reverification() {
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
     // The shared failure is reported once, by the request that ran it.
     assert_eq!(blocked_codes(&mut events), vec![None]);
+}
+
+#[tokio::test]
+async fn timed_out_reverification_releases_waiters_and_keeps_old_pins() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let chunks = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/v1/aci/attestation",
+        get({
+            let (started, chunks, calls) = (started.clone(), chunks.clone(), calls.clone());
+            move || {
+                let (started, chunks) = (started.clone(), chunks.clone());
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let body = async_stream::stream! {
+                        started.notify_one();
+                        loop {
+                            chunks.fetch_add(1, Ordering::SeqCst);
+                            yield Ok::<_, std::convert::Infallible>(Bytes::from_static(b" "));
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    };
+                    Response::new(Body::from_stream(body))
+                }
+            }
+        }),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+    let stale = state.client.pinned_spkis(&state.host);
+    Arc::get_mut(&mut state).unwrap().verify_timeout = std::time::Duration::from_millis(100);
+    let mut events = capture_events(&mut state);
+    let observed = state.snapshot();
+    state.block_for_keyset_change(&observed, "test rotation".to_string());
+
+    let first = {
+        let state = state.clone();
+        tokio::spawn(async move { state.reverify_blocked(0, None).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("attestation request did not start");
+    let waiters = (0..6).map(|_| {
+        let state = state.clone();
+        async move { state.reverify_blocked(0, None).await }
+    });
+    let (first, waiters) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(first, futures_util::future::join_all(waiters))
+    })
+    .await
+    .expect("re-verification waiters did not complete");
+    let failure = first.unwrap().unwrap_err();
+    assert!(failure.contains("did not respond in time"), "{failure}");
+    assert!(waiters
+        .iter()
+        .all(|result| result.as_ref().err() == Some(&failure)));
+    assert!(
+        state.reverify.try_lock().is_ok(),
+        "reverify lock was not released"
+    );
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        chunks.load(Ordering::SeqCst) > 1,
+        "attestation did not trickle"
+    );
+    assert_eq!(state.client.pinned_spkis(&state.host), stale);
+    assert_eq!(
+        state.snapshot().identity.keyset_digest,
+        observed.identity.keyset_digest
+    );
+    assert!(state.is_blocked());
+    assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
 }
 
 /// A request refused by a pin that another request's heal is replacing

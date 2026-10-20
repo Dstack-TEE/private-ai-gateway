@@ -4,6 +4,8 @@
 //! whose leaf SPKI is recorded, then checks online: DCAP collateral
 //! fetched, observed channel bound.
 
+use std::time::Duration;
+
 use crate::aci::types::AttestationReport;
 use crate::aci::verifier::DEFAULT_PCCS_URL;
 use crate::args::VerifyArgs;
@@ -13,6 +15,7 @@ use crate::checks::{
 };
 use crate::client::{
     attestation_url, host_of, normalize_base_url, random_nonce_hex, AciClient, ServiceError,
+    VERIFICATION_TIMEOUT,
 };
 use crate::transcript::Transcript;
 
@@ -66,6 +69,32 @@ pub async fn verify_service(
     policy: &VerifierPolicy,
     explain: bool,
 ) -> Result<ServiceVerification, VerifyError> {
+    verify_service_with_timeout(base_url, nonce_arg, policy, explain, VERIFICATION_TIMEOUT).await
+}
+
+pub(crate) async fn verify_service_with_timeout(
+    base_url: &str,
+    nonce_arg: Option<&str>,
+    policy: &VerifierPolicy,
+    explain: bool,
+    timeout: Duration,
+) -> Result<ServiceVerification, VerifyError> {
+    tokio::time::timeout(
+        timeout,
+        verify_service_inner(base_url, nonce_arg, policy, explain),
+    )
+    .await
+    .map_err(|_| ServiceError::TimedOut {
+        host: host_of(&normalize_base_url(base_url)).unwrap_or_else(|_| "service".to_string()),
+    })?
+}
+
+async fn verify_service_inner(
+    base_url: &str,
+    nonce_arg: Option<&str>,
+    policy: &VerifierPolicy,
+    explain: bool,
+) -> Result<ServiceVerification, VerifyError> {
     let base_url = normalize_base_url(base_url);
     if base_url.is_empty() {
         return Err(VerifyError::Failed("base URL is empty".to_string()));
@@ -80,7 +109,7 @@ pub async fn verify_service(
     let resp = client
         .fetch_attestation(&url)
         .await
-        .map_err(|error| ServiceError::from_request(&error, &host))?;
+        .map_err(|error| ServiceError::from_get(&error, &host))?;
     if !(200..300).contains(&resp.status) {
         return Err(ServiceError::from_status(&host, resp.status).into());
     }
@@ -136,4 +165,68 @@ pub async fn run(args: VerifyArgs) -> Result<i32, String> {
     )
     .await?;
     verification.transcript.print(args.json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, response::Response, routing::get, Router};
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[tokio::test]
+    async fn a_trickling_attestation_hits_the_injected_total_deadline() {
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/aci/attestation",
+            get({
+                let chunks = chunks.clone();
+                move || {
+                    let chunks = chunks.clone();
+                    async move {
+                        let body = async_stream::stream! {
+                            loop {
+                                chunks.fetch_add(1, Ordering::SeqCst);
+                                yield Ok::<_, Infallible>(axum::body::Bytes::from_static(b" "));
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                        };
+                        Response::new(Body::from_stream(body))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            verify_service_with_timeout(
+                &base_url,
+                Some("test-nonce"),
+                &VerifierPolicy::default(),
+                false,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("verification did not enforce its total deadline");
+        assert!(matches!(
+            result,
+            Err(VerifyError::Service(ServiceError::TimedOut { .. }))
+        ));
+        assert!(
+            chunks.load(Ordering::SeqCst) > 1,
+            "attestation did not trickle"
+        );
+        server.abort();
+    }
 }
