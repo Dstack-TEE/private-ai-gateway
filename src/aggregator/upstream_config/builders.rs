@@ -147,19 +147,16 @@ fn build_provider_backend(
             .with_name(cfg.name.clone());
             Ok(Arc::new(backend))
         }
-        UpstreamProvider::ZeroGPrivateComputer => {
-            let mut backend = ZeroGProviderBackend::new_with_timeouts(
+        UpstreamProvider::ZeroGPrivateComputer => Ok(Arc::new(
+            ZeroGProviderBackend::new_with_timeouts(
                 cfg.base_url.clone(),
+                cfg.bearer_token.clone().unwrap_or_default(),
                 connect_timeout_seconds,
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
-            if let Some(token) = &cfg.bearer_token {
-                backend = backend.with_bearer_token(token.clone());
-            }
-            Ok(Arc::new(backend))
-        }
+            .with_name(cfg.name.clone()),
+        )),
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
@@ -318,31 +315,19 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            UpstreamProvider::ZeroGPrivateComputer => {
-                let (Some(rpc_url), Some(contract)) =
-                    (&cfg.zg_chain_rpc_url, &cfg.zg_serving_contract)
-                else {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
-                        "upstream {:?} provider 0g-private-computer requires zg_chain_rpc_url and zg_serving_contract",
-                        cfg.name
-                    )));
-                };
-                let mut verifier = ZeroGProviderVerifier::new(
+            // Validation guarantees the token, RPC and contract are present.
+            UpstreamProvider::ZeroGPrivateComputer => Arc::new(
+                ZeroGProviderVerifier::new(
                     cfg.base_url.clone(),
-                    rpc_url.clone(),
-                    contract.clone(),
+                    cfg.bearer_token.clone().unwrap_or_default(),
+                    cfg.zg_chain_rpc_url.clone().unwrap_or_default(),
+                    cfg.zg_serving_contract.clone().unwrap_or_default(),
                     cfg.pccs_url.clone().or_else(|| options.pccs_url.clone()),
-                    cfg.connect_timeout_seconds
-                        .unwrap_or(options.connect_timeout_seconds),
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .map_err(UpstreamConfigError::InvalidConfig)?;
-                if let Some(token) = &cfg.bearer_token {
-                    verifier = verifier.with_api_key(token.clone());
-                }
-                Arc::new(verifier)
-            }
+                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+            ),
             UpstreamProvider::ArmetAi => {
                 let mut verifier =
                     ArmetAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)

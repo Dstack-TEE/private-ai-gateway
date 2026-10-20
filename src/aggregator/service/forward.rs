@@ -687,7 +687,7 @@ impl AciService {
 
         // One content-addressed session per channel binding: a single-TEE
         // provider has one binding (its channel); Chutes and 0G have one per
-        // instance (provider), so each instance becomes its own session. This relies on every
+        // instance, so each instance becomes its own session. This relies on every
         // non-instance provider verifying a single channel with exactly one
         // binding; a channel that emitted several bindings would be split into
         // separate sessions here, which would be wrong for one logical channel.
@@ -699,23 +699,12 @@ impl AciService {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),
             };
-            // A per-instance response signer (0G) is that session's identity.
-            let identity = claims
-                .extra
-                .get("signing_address")
-                .and_then(Value::as_str)
-                .filter(|_| instance.is_some())
-                .map(|address| WorkloadIdentityRef {
-                    signing_address: Some(address.to_string()),
-                    ..Default::default()
-                })
-                .or_else(|| identity.clone());
             // Chutes evidence changes every round, so an instance session
             // leaves it out of the fingerprint and keeps re-verification on
             // the same session.
             let session_id = self.seal_attested_session(
                 event,
-                identity,
+                identity.clone(),
                 vec![binding.clone()],
                 claims,
                 now,

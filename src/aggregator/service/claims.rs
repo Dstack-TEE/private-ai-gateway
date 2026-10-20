@@ -45,10 +45,10 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
     claims
 }
 
-/// The instance a binding attests, if this is a per-instance channel: a Chutes
-/// instance id or a 0G provider address. Those providers seal one session per
-/// instance; every other provider has a single channel (None), so its
-/// claims/evidence apply to the event as a whole.
+/// The instance a binding attests (a Chutes instance id or a 0G provider
+/// address). Those providers seal one session per instance; every other
+/// provider has a single channel (None), so its claims/evidence apply to the
+/// event as a whole.
 pub(super) fn instance_id<'a>(
     event: &UpstreamVerifiedEvent,
     binding: &'a ChannelBinding,
@@ -78,12 +78,10 @@ pub(super) fn per_instance_session_claims(
         provider_type: event.provider_type.clone(),
         verifier_id: event.verifier_id.clone(),
         result: event.result,
-        provider_claims: Some(match event.provider_type.as_deref() {
-            Some("0g-private-computer") => {
-                zero_g_instance_claims(event.provider_claims.as_ref(), instance_id)
-            }
-            _ => per_instance_provider_claims(event.provider_claims.as_ref(), instance_id),
-        }),
+        provider_claims: Some(per_instance_provider_claims(
+            event.provider_claims.as_ref(),
+            instance_id,
+        )),
         ..Default::default()
     };
     session_claims_for_event(&instance_event)
@@ -127,6 +125,13 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
     {
         pc.insert("measurement".to_string(), measurement.clone());
     }
+    // 0G records each provider's facts under `instances`.
+    if let Some(Value::Object(instance)) = map
+        .get("instances")
+        .and_then(|instances| instances.get(instance_id))
+    {
+        pc.extend(instance.clone());
+    }
     // This instance's own GPU outcome (NOT the fleet aggregate), lifted to the
     // top of the slice so `gpu_attested` reflects this instance and the slice
     // stays stable when a sibling instance's GPU does not.
@@ -139,27 +144,6 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
                 pc.insert(key.to_string(), value.clone());
             }
         }
-    }
-    Value::Object(pc)
-}
-
-/// One 0G provider's claims: the shared facts plus that provider's own entry
-/// under `instances`, so its session does not change when a sibling does.
-fn zero_g_instance_claims(full: Option<&Value>, instance_id: &str) -> Value {
-    let mut pc = serde_json::Map::new();
-    let Some(Value::Object(map)) = full else {
-        return Value::Object(pc);
-    };
-    for (key, value) in map {
-        if key != "instances" {
-            pc.insert(key.clone(), value.clone());
-        }
-    }
-    if let Some(Value::Object(instance)) = map
-        .get("instances")
-        .and_then(|instances| instances.get(instance_id))
-    {
-        pc.extend(instance.clone());
     }
     Value::Object(pc)
 }
@@ -850,41 +834,15 @@ mod claim_mapping_tests {
         };
         let chutes = event(Some("chutes"), VerificationResult::Verified, None);
         let near = event(Some("near-ai"), VerificationResult::Verified, None);
-        assert_eq!(instance_id(&chutes, &e2ee), Some("inst-1"));
-        assert_eq!(instance_id(&chutes, &tls), None); // not an e2ee instance
-        assert_eq!(instance_id(&near, &e2ee), None); // not Chutes
         let zero_g = event(
             Some("0g-private-computer"),
             VerificationResult::Verified,
             None,
         );
+        assert_eq!(instance_id(&chutes, &e2ee), Some("inst-1"));
         assert_eq!(instance_id(&zero_g, &e2ee), Some("inst-1"));
-    }
-
-    #[test]
-    fn zero_g_instance_claims_keep_shared_facts_and_one_provider() {
-        use super::per_instance_session_claims;
-        let pc = json!({
-            "trust_boundary": "0g-provider-broker-tee",
-            "instances": {
-                "0xa": { "signing_address": "0x5a", "tcb_status": "UpToDate" },
-                "0xb": { "signing_address": "0x5b", "tcb_status": "OutOfDate" },
-            },
-        });
-        let ev = event(
-            Some("0g-private-computer"),
-            VerificationResult::Verified,
-            Some(pc),
-        );
-        let a = per_instance_session_claims(&ev, "0xa");
-        assert_eq!(a.tee_attested.source, Some(ClaimSource::HardwareProven));
-        assert_eq!(a.tcb_up_to_date.status, ClaimStatus::Asserted);
-        assert_eq!(a.gpu_attested.status, ClaimStatus::Unknown);
-        assert_eq!(a.extra.get("signing_address"), Some(&json!("0x5a")));
-        assert!(a.extra.contains_key("trust_boundary"));
-        assert!(!a.extra.contains_key("instances"));
-        let b = per_instance_session_claims(&ev, "0xb");
-        assert_eq!(b.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(instance_id(&chutes, &tls), None); // not an e2ee instance
+        assert_eq!(instance_id(&near, &e2ee), None); // not per-instance
     }
 
     #[test]
@@ -942,5 +900,23 @@ mod claim_mapping_tests {
         let c2 = per_instance_session_claims(&ev, "inst-2");
         assert_eq!(c2.tcb_up_to_date.status, ClaimStatus::Refuted);
         assert_eq!(c2.gpu_attested.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn zero_g_instance_claims_are_that_providers_entry() {
+        use super::per_instance_session_claims;
+        let pc = json!({"trust_boundary": "0g", "instances": {
+            "0xa": {"signing_address": "0x5a", "tcb_status": "UpToDate"},
+            "0xb": {"signing_address": "0x5b", "tcb_status": "OutOfDate"},
+        }});
+        let ev = event(
+            Some("0g-private-computer"),
+            VerificationResult::Verified,
+            Some(pc),
+        );
+        let a = per_instance_session_claims(&ev, "0xa");
+        assert_eq!(a.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(a.extra.get("signing_address"), Some(&json!("0x5a")));
+        assert!(!a.extra.contains_key("instances"));
     }
 }

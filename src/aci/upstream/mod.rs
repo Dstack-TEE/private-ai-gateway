@@ -39,7 +39,7 @@ pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
 pub use openai::OpenAICompatibleBackend;
-pub(crate) use privatemode::readiness_client;
+pub(crate) use privatemode::{forwarding_client, readiness_client};
 pub use privatemode::{
     PrivatemodeDeploymentConfigError, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
 };
@@ -47,10 +47,7 @@ pub use router::{ModelRoute, ModelRouterBackend};
 pub(crate) use streaming_usage::supports_streaming_usage;
 pub use streaming_usage::StreamingUsage;
 pub use tls::{observing_spki_client, SpkiObservations};
-pub(crate) use zero_g::{
-    broker_v1_base, parse_report_data, read_limited, zero_g_client, VerifiedProvider,
-    TRUST_MODE_HEADER, TRUST_MODE_PRIVATE,
-};
+pub(crate) use zero_g::{broker_api, VerifiedProvider, TRUST_MODE_HEADER};
 pub use zero_g::{ZeroGProviderBackend, ZERO_G_E2EE_ALGORITHM, ZERO_G_PROVIDER};
 
 use openai::request_model_id;

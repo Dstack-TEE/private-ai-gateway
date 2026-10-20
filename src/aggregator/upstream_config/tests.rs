@@ -259,37 +259,18 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
         .expect("0G route should build");
     assert!(state.verifier.is_some());
 
-    for (from, to, expected) in [
-        (
-            "https://router-api.0g.ai",
-            "http://router-api.0g.ai",
-            "root HTTPS base_url",
-        ),
-        (r#""bearer_token": "zg-key","#, "", "requires bearer_token"),
-        (
-            "https://evmrpc.0g.ai",
-            "http://evmrpc.0g.ai",
-            "HTTPS zg_chain_rpc_url",
-        ),
-        (
-            "0x47340d900bdFec2BD393c626E12ea0656F938d84",
-            "0x47340d",
-            "zg_serving_contract as 0x + 40 hex",
-        ),
-        (
-            r#""models""#,
-            r#""path": "/v1/messages", "models""#,
-            "forbids path",
-        ),
-        (
-            r#""0g-private-computer""#,
-            r#""openai-compatible""#,
-            "has 0G fields",
-        ),
+    for (from, to) in [
+        ("https://router-api.0g.ai", "http://router-api.0g.ai"),
+        (r#""bearer_token": "zg-key","#, ""),
+        ("https://evmrpc.0g.ai", "http://evmrpc.0g.ai"),
+        ("0x47340d900bdFec2BD393c626E12ea0656F938d84", "0x47340d"),
+        (r#""models""#, r#""path": "/v1/messages", "models""#),
+        (r#""0g-private-computer""#, r#""openai-compatible""#),
     ] {
-        let err = parse_config_text(&valid_text.replace(from, to))
-            .expect_err("0G config must be rejected");
-        assert!(err.to_string().contains(expected), "{expected}: {err}");
+        assert!(
+            parse_config_text(&valid_text.replace(from, to)).is_err(),
+            "{to}"
+        );
     }
 }
 

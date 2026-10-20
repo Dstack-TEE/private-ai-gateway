@@ -93,8 +93,7 @@ pub struct UpstreamConfig {
     pub chutes_e2ee_discovery_rounds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chutes_e2ee_discovery_interval_seconds: Option<u64>,
-    /// 0G chain JSON-RPC endpoint the verifier reads provider records from,
-    /// independently of the 0G router. May embed an RPC credential.
+    /// 0G chain RPC for provider records; may embed a credential.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zg_chain_rpc_url: Option<String>,
     /// 0G InferenceServing contract address.
@@ -199,8 +198,8 @@ pub enum UpstreamProvider {
     /// (`accepted_subjects`), with mandatory NRAS-verified GPU evidence, and
     /// bound to its attested TLS SPKI.
     ArmetAi,
-    /// 0G Private Computer through the 0G router: private-tier providers
-    /// verified natively and reached only over 0G's E2EE protocol.
+    /// 0G Private Computer's private tier through the 0G router, verified
+    /// per provider and reached only over 0G's E2EE protocol.
     #[serde(rename = "0g-private-computer")]
     ZeroGPrivateComputer,
 }

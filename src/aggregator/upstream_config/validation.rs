@@ -321,7 +321,36 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
-        validate_zero_g(upstream)?;
+        // The private trust tier and the TargetSeparated rule are code, not config.
+        if upstream.provider == UpstreamProvider::ZeroGPrivateComputer {
+            let rpc_is_https = upstream
+                .zg_chain_rpc_url
+                .as_deref()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .is_some_and(|url| url.scheme() == "https");
+            let contract_is_address = upstream.zg_serving_contract.as_deref().is_some_and(|v| {
+                v.len() == 42 && v.starts_with("0x") && hex::decode(&v[2..]).is_ok()
+            });
+            if !valid_root_https_origin(&upstream.base_url)
+                || upstream
+                    .bearer_token
+                    .as_deref()
+                    .is_none_or(|token| token.trim().is_empty())
+                || upstream.path.is_some()
+                || !rpc_is_https
+                || !contract_is_address
+            {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider 0g-private-computer requires the 0G router as a root HTTPS base_url, bearer_token, an HTTPS zg_chain_rpc_url and zg_serving_contract (0x + 40 hex), and forbids path",
+                    upstream.name
+                )));
+            }
+        } else if upstream.zg_chain_rpc_url.is_some() || upstream.zg_serving_contract.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} has 0G fields but provider is not 0g-private-computer",
+                upstream.name
+            )));
+        }
         if upstream.provider == UpstreamProvider::Privatemode && upstream.bearer_token.is_some() {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} provider privatemode forbids bearer_token; the measured proxy reads its credential from the shared Compose secret",
@@ -365,59 +394,6 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 )));
             }
         }
-    }
-    Ok(())
-}
-
-/// 0G Private Computer: the router origin, API key, chain RPC and serving
-/// contract are operator config; the private trust tier and the
-/// TargetSeparated rule are code.
-fn validate_zero_g(upstream: &UpstreamConfig) -> Result<(), UpstreamConfigError> {
-    let invalid = |reason: &str| {
-        Err(UpstreamConfigError::InvalidConfig(format!(
-            "upstream {:?} {reason}",
-            upstream.name
-        )))
-    };
-    if upstream.provider != UpstreamProvider::ZeroGPrivateComputer {
-        if upstream.zg_chain_rpc_url.is_some() || upstream.zg_serving_contract.is_some() {
-            return invalid("has 0G fields but provider is not 0g-private-computer");
-        }
-        return Ok(());
-    }
-    if !valid_root_https_origin(&upstream.base_url) {
-        return invalid("provider 0g-private-computer requires the 0G router as a root HTTPS base_url without userinfo, query, or fragment");
-    }
-    if upstream
-        .bearer_token
-        .as_deref()
-        .is_none_or(|token| token.trim().is_empty())
-    {
-        return invalid("provider 0g-private-computer requires bearer_token (the 0G API key)");
-    }
-    if upstream.path.is_some() {
-        return invalid(
-            "provider 0g-private-computer forbids path; it serves only /v1/chat/completions",
-        );
-    }
-    let rpc_is_https = upstream
-        .zg_chain_rpc_url
-        .as_deref()
-        .and_then(|url| reqwest::Url::parse(url).ok())
-        .is_some_and(|url| url.scheme() == "https" && url.host_str().is_some());
-    if !rpc_is_https {
-        return invalid("provider 0g-private-computer requires an HTTPS zg_chain_rpc_url");
-    }
-    let contract_is_address = upstream
-        .zg_serving_contract
-        .as_deref()
-        .is_some_and(|value| {
-            value.len() == 42
-                && value.starts_with("0x")
-                && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
-        });
-    if !contract_is_address {
-        return invalid("provider 0g-private-computer requires zg_serving_contract as 0x + 40 hex");
     }
     Ok(())
 }

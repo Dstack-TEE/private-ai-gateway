@@ -1,24 +1,7 @@
-// Command generator writes the 0G Private Computer interop fixture that PAG's
-// native implementation is tested against (src/aci/upstream/zero_g).
-//
-// Every sealed artifact is produced by 0G's own protocol library
-// (github.com/0gfoundation/0g-pc-e2ee/protocol, pinned in go.mod to the
-// release-2026.10.19.2 commit), so the Rust tests prove byte-level agreement
-// with the reference implementation rather than self-consistency:
-//
-//   - a chat request sealed by wire.SealRequestFor, which the Rust tests open
-//     with the recorded enclave key (request AAD, JCS, HPKE agreement);
-//   - a buffered and a streamed chat response sealed by wire.ResponseSealer,
-//     which the Rust tests open with the recorded client ephemeral key;
-//   - the §8 signed texts computed by proof.SignedTextE2EE[Stream], signed the
-//     way the broker signs (EIP-191 personal_sign, [R||S||V], V in {27,28}).
-//
-// HPKE encapsulation draws fresh randomness, so re-running produces different
-// ciphertexts; the tests only rely on the recorded keys and outputs.
-//
-// Regenerate from this directory with:
-//
-//	go run . > ../interop.json
+// Command generator writes interop.json: a chat request and buffered and
+// streamed responses sealed by 0G's own protocol library (pinned in go.mod),
+// with broker-style §8 signatures, for PAG's native implementation to open and
+// verify. HPKE randomness differs per run. Regenerate: go run . > ../interop.json
 package main
 
 import (
