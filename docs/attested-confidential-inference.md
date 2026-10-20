@@ -155,7 +155,12 @@ The receipt commits to:
 - the body forwarded after any gateway rewrite;
 - the upstream verification result and cited session;
 - the exact response bytes returned, including raw SSE framing; and
-- the gateway keyset digest current for the exchange.
+- the gateway keyset digest established for the exchange. The response header
+  and receipt carry that same digest; a renewal keeps the keys and provenance
+  and only extends `not_after`.
+
+Replicas may expose different expiry times for the same key family. A freshly
+verified family member remains continuous while its own keyset is unexpired.
 
 The receipt stores hashes, not plaintext request or response bodies. For an
 aggregator, its `upstream.verified` event cites a content-addressed attested
@@ -174,8 +179,9 @@ a relying party checks:
 1. The receipt `signature` verifies over the JCS form of the document without
    its `signature` member, using the `receipt_signing_keys` entry named by
    `key_id`.
-2. `api_version` is `aci/1`, and `workload_keyset_digest` matches the
-   established gateway identity.
+2. `api_version` is `aci/1`, and `workload_keyset_digest` names a digest the
+   client established in the admitted renewal family, with that keyset still
+   valid at `served_at`.
 3. `request.received.body_hash` matches the plaintext request wire body. For
    E2EE v2, it instead matches the compact JSON body reconstructed after
    replacing encrypted fields with their decrypted values.

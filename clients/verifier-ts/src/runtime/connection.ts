@@ -1,5 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 
+import { jcsEqual } from '../crypto.js';
+import { sameKeysetFamily } from '../receipt.js';
+
 import {
   bindReportTranscriptChannel,
   computeVerdict,
@@ -17,6 +20,7 @@ import {
   type AciConnection,
   type AciReceiptAudit,
   type ConnectAciOptions,
+  type EstablishedDigest,
   type RecordedAciExchange,
   type VerifiedAciIdentity,
 } from './types.js';
@@ -37,11 +41,19 @@ interface InternalExchange extends RecordedAciExchange {
 export async function connectAciWithTransport(
   options: ConnectAciOptions,
   createPinnedTransport: PinnedTransportFactory,
+  identityProvider: IdentityProvider = establishIdentity,
 ): Promise<AciConnection> {
-  const connection = new RuntimeAciConnection(options, createPinnedTransport);
+  const connection = new RuntimeAciConnection(options, createPinnedTransport, identityProvider);
   await connection.refresh();
   return connection;
 }
+
+type IdentityProvider = (
+  attestationURL: string,
+  origin: string,
+  hostname: string,
+  options: ConnectAciOptions,
+) => Promise<VerifiedAciIdentity>;
 
 class RuntimeAciConnection implements AciConnection {
   readonly baseURL: string;
@@ -52,14 +64,19 @@ class RuntimeAciConnection implements AciConnection {
   private readonly attestationURL: string;
   private readonly options: ConnectAciOptions;
   private readonly createPinnedTransport: PinnedTransportFactory;
+  private readonly identityProvider: IdentityProvider;
   private currentIdentity?: VerifiedAciIdentity;
   private transport: PinnedTransport | undefined;
   private refreshing: Promise<void> | undefined;
   private readonly exchanges: InternalExchange[] = [];
-  private rotationRequired = false;
+  private pendingDigest: string | undefined;
   private closed = false;
 
-  constructor(options: ConnectAciOptions, createPinnedTransport: PinnedTransportFactory) {
+  constructor(
+    options: ConnectAciOptions,
+    createPinnedTransport: PinnedTransportFactory,
+    identityProvider: IdentityProvider = establishIdentity,
+  ) {
     validateOptions(options);
     const target = normalizeBaseURL(options.baseURL);
     this.baseURL = target.baseURL;
@@ -68,6 +85,7 @@ class RuntimeAciConnection implements AciConnection {
     this.attestationURL = target.attestationURL;
     this.options = options;
     this.createPinnedTransport = createPinnedTransport;
+    this.identityProvider = identityProvider;
     this.fetch = (input, init) => this.secureFetch(input, init);
   }
 
@@ -100,11 +118,24 @@ class RuntimeAciConnection implements AciConnection {
     const id = exchange.receiptId;
     await exchange.completion;
     await this.ensureFreshIdentity();
-    const identity = exchange.identity;
     const receipt = await this.fetchJsonArtifact<ReceiptEnvelope>(
       `receipts/${encodeURIComponent(id)}`,
       exchange.authorization,
     );
+    let entry = this.receiptIdentity(receipt, exchange.identity);
+    if (!entry) {
+      if (typeof receipt.workload_keyset_digest === 'string') {
+        this.observeDigest(receipt.workload_keyset_digest);
+      }
+      await this.ensureFreshIdentity();
+      entry = this.receiptIdentity(receipt, exchange.identity);
+    }
+    if (!entry) {
+      throw new AciConnectionError(
+        'receipt_verification',
+        'receipt names an unknown or expired established keyset digest',
+      );
+    }
     const sessionId = citedSessionId(receipt);
     let session: SessionRecord | undefined;
     if (sessionId) {
@@ -114,11 +145,11 @@ class RuntimeAciConnection implements AciConnection {
         if (!(error instanceof AciConnectionError) || error.code !== 'receipt_fetch') throw error;
       }
     }
-    const serving = identity.report.service_capabilities?.serving;
+    const serving = entry.report.service_capabilities?.serving;
     const transcript = await receiptTranscriptFromDigests(
       receipt,
-      identity.keyset,
-      identity.workloadKeysetDigest,
+      entry.keyset,
+      entry.digest,
       {
         request: exchange.requestDigest,
         ...(exchange.responseDigest ? { response: exchange.responseDigest } : {}),
@@ -176,7 +207,12 @@ class RuntimeAciConnection implements AciConnection {
   }
 
   private async refreshOnce(): Promise<void> {
-    const identity = await establishIdentity(this.attestationURL, this.origin, this.hostname, this.options);
+    const identity = await this.identityProvider(
+      this.attestationURL,
+      this.origin,
+      this.hostname,
+      this.options,
+    );
     const candidate = this.createPinnedTransport({
       origin: this.origin,
       hostname: this.hostname,
@@ -218,10 +254,30 @@ class RuntimeAciConnection implements AciConnection {
     const boundIdentity: VerifiedAciIdentity = { ...identity, transcript };
 
     const previous = this.transport;
-    this.transport = candidate;
-    this.currentIdentity = boundIdentity;
-    this.rotationRequired = false;
-    if (previous) await previous.close();
+    const previousIdentity = this.currentIdentity;
+    const pendingBefore = this.pendingDigest;
+    const sameIdentity = previousIdentity !== undefined
+      && previousIdentity.workloadKeysetDigest === boundIdentity.workloadKeysetDigest
+      && sameProvenance(boundIdentity, previousIdentity);
+    const renewal = previousIdentity !== undefined
+      && sameIdentityFamily(boundIdentity, previousIdentity);
+    const keepTransport = previous !== undefined && (sameIdentity || renewal);
+    this.transport = keepTransport ? previous : candidate;
+    this.currentIdentity = keepTransport && previousIdentity
+      ? mergeIdentity(boundIdentity, previousIdentity)
+      : boundIdentity;
+    if (this.currentIdentity.digests.some((entry) => entry.digest === this.pendingDigest
+      && Date.now() < entry.notAfter)) {
+      this.pendingDigest = undefined;
+    }
+    if (keepTransport) await candidate.close();
+    else if (previous) await previous.close();
+    if (previousIdentity && pendingBefore !== undefined && !keepTransport) {
+      throw new AciConnectionError(
+        'identity_expired',
+        'ACI workload identity rotated; retry after establishing the new identity',
+      );
+    }
   }
 
   private async secureFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -235,9 +291,7 @@ class RuntimeAciConnection implements AciConnection {
     const prepared = await prepareRequest(input, init, this.options);
     const response = await transport.fetch(prepared.request);
     const observedDigest = response.headers.get('x-aci-keyset-digest');
-    if (observedDigest && observedDigest !== identity.workloadKeysetDigest) {
-      this.rotationRequired = true;
-    }
+    if (observedDigest) this.observeDigest(observedDigest);
     const receiptId = response.headers.get('x-receipt-id');
     if (
       prepared.request.method === 'POST' &&
@@ -262,9 +316,17 @@ class RuntimeAciConnection implements AciConnection {
   }
 
   private async ensureFreshIdentity(): Promise<void> {
-    if (!this.rotationRequired && Date.now() < this.identity.expiresAt) return;
+    if (!this.pendingDigest && this.identity.digests.some((entry) => Date.now() < entry.notAfter)) {
+      return;
+    }
     try {
       await this.refresh();
+      if (this.pendingDigest) {
+        throw new AciConnectionError(
+          'identity_expired',
+          'ACI response advertised an unestablished keyset digest',
+        );
+      }
     } catch (error) {
       throw new AciConnectionError(
         'identity_expired',
@@ -272,6 +334,31 @@ class RuntimeAciConnection implements AciConnection {
         { cause: error },
       );
     }
+  }
+
+  private observeDigest(digest: string): void {
+    const known = this.identity.digests.some((entry) =>
+      entry.digest === digest && Date.now() < entry.notAfter);
+    if (!known) this.pendingDigest = digest;
+  }
+
+  private receiptIdentity(
+    receipt: ReceiptEnvelope,
+    admitted: VerifiedAciIdentity,
+  ): EstablishedDigest | undefined {
+    const digest = receipt.workload_keyset_digest;
+    const servedAt = typeof receipt.served_at === 'number' ? receipt.served_at : undefined;
+    if (typeof digest !== 'string' || servedAt === undefined
+      || !Number.isSafeInteger(servedAt) || servedAt < 0) return undefined;
+    const current = this.identity;
+    const entry = admitted.digests.find((candidate) =>
+      candidate.digest === digest && servedAt * 1000 < candidate.notAfter);
+    const currentEntry = sameIdentityFamily(current, admitted)
+      ? current.digests.find((candidate) =>
+        candidate.digest === digest && servedAt * 1000 < candidate.notAfter)
+      : undefined;
+    const selected = entry ?? currentEntry;
+    return selected;
   }
 
   private recordExchange(
@@ -601,6 +688,7 @@ async function establishIdentity(
     tlsSpkiPins: pins,
     verifiedAt,
     expiresAt: keyset.not_after * 1000,
+    digests: [{ digest, notAfter: keyset.not_after * 1000, keyset, report }],
     transcript,
   };
 }
@@ -687,6 +775,39 @@ async function timedFetch(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function sameProvenance(identity: VerifiedAciIdentity, previous: VerifiedAciIdentity): boolean {
+  return identity.origin === previous.origin
+    && identity.composeHash === previous.composeHash
+    && identity.report.attestation.tee_type === previous.report.attestation.tee_type
+    && jcsEqual(
+      identity.report.attestation.source_provenance ?? null,
+      previous.report.attestation.source_provenance ?? null,
+    );
+}
+
+function sameIdentityFamily(identity: VerifiedAciIdentity, previous: VerifiedAciIdentity): boolean {
+  return sameKeysetFamily(identity.keyset, previous.keyset) && sameProvenance(identity, previous);
+}
+
+function mergeIdentity(
+  identity: VerifiedAciIdentity,
+  previous: VerifiedAciIdentity,
+): VerifiedAciIdentity {
+  const now = Date.now();
+  const digests: EstablishedDigest[] = [
+    ...identity.digests.filter((entry) => now < entry.notAfter),
+    ...previous.digests.filter((old) =>
+      now < old.notAfter && !identity.digests.some((current) => current.digest === old.digest)),
+  ];
+  return {
+    ...identity,
+    digests,
+    verifiedAt: identity.workloadKeysetDigest === previous.workloadKeysetDigest
+      ? previous.verifiedAt
+      : identity.verifiedAt,
+  };
 }
 
 function tlsPinsForHost(keyset: WorkloadKeyset, hostname: string): string[] {

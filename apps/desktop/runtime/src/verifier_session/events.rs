@@ -28,6 +28,13 @@ impl SessionManager {
                 runtime.identify(&identity);
                 load_catalog = true;
             }
+            VerifierEvent::IdentityRenewed { identity } => {
+                runtime.state.identity = Some(parse_identity(&identity));
+                runtime.state.checks = parse_checks(Some(&identity.verification));
+                runtime.state.verification_failed = false;
+                runtime.state.error = None;
+                runtime.identity_ready = true;
+            }
             // Verification lost: one atomic barrier (`lose_verification`).
             // The session goes on, also across a restart, until the user
             // stops it: agents stay pointed at the refusing Local API. A key
