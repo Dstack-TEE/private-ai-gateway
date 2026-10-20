@@ -2,6 +2,8 @@
 //! the same client as the window.
 
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use tauri::{
     image::Image,
@@ -129,6 +131,59 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Whether the tray can bring the app back: its icon was created and a host
+/// shows it. Without one, a hidden window could not be opened again.
+pub async fn usable(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some() && host_registered().await
+}
+
+#[cfg(target_os = "linux")]
+const HOST_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether a panel shows StatusNotifier items (stock GNOME has none). The
+/// host can start or stop at any time, so it is asked each time; a failed
+/// query counts as none.
+#[cfg(target_os = "linux")]
+pub async fn host_registered() -> bool {
+    match tokio::time::timeout(HOST_QUERY_TIMEOUT, status_notifier_host()).await {
+        Ok(Ok(registered)) => registered,
+        Ok(Err(error)) => {
+            tracing::debug!("No StatusNotifier host: {error}");
+            false
+        }
+        Err(_) => {
+            tracing::debug!("The StatusNotifier watcher did not answer in time");
+            false
+        }
+    }
+}
+
+/// The system always shows the tray (the menu bar on macOS).
+#[cfg(not(target_os = "linux"))]
+pub async fn host_registered() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+#[zbus::proxy(
+    interface = "org.kde.StatusNotifierWatcher",
+    default_service = "org.kde.StatusNotifierWatcher",
+    default_path = "/StatusNotifierWatcher"
+)]
+trait StatusNotifierWatcher {
+    #[zbus(property(emits_changed_signal = "false"))]
+    fn is_status_notifier_host_registered(&self) -> zbus::Result<bool>;
+}
+
+#[cfg(target_os = "linux")]
+async fn status_notifier_host() -> zbus::Result<bool> {
+    let connection = zbus::Connection::session().await?;
+    StatusNotifierWatcherProxy::new(&connection)
+        .await?
+        .is_status_notifier_host_registered()
+        .await
 }
 
 /// What a tray item, or the menu bar's Settings… item, which shares its id,
