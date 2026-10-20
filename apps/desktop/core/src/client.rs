@@ -544,7 +544,7 @@ fn wait_for_service(
             if child.is_none() {
                 if let Ok(Some(owner)) = crate::lock::instance_owner(data) {
                     return Err(format!(
-                        "Backend readiness timed out: backend PID {} recorded in the instance lock holds it, but its endpoint {} does not answer. Run private-ai-proxy doctor.",
+                        "Backend readiness timed out: backend PID {} recorded in the instance lock holds it, but its endpoint {} does not answer. Run pap doctor.",
                         owner.process_id, owner.endpoint
                     ));
                 }
