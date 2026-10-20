@@ -1,6 +1,7 @@
 //! The macOS menu bar, laid out like Tauri's default menu so every standard
-//! item keeps its system role and shortcut, with Settings… and a Help menu
-//! (documentation, then the source link). Other platforms are tray-only.
+//! item keeps its system role and shortcut, with Check for Updates… (in builds
+//! that update themselves), Settings… and a Help menu (documentation, then the
+//! source link). Other platforms are tray-only.
 
 use desktop_core::brand::AboutLink;
 use tauri::{menu::MenuEvent, AppHandle};
@@ -22,8 +23,13 @@ pub fn menu_bar(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
     // The accelerator sends the same navigate request as the renderer's
     // shortcut elsewhere; the window shows the page once a modal dialog closes.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
-    let application = SubmenuBuilder::new(app, PRODUCT_NAME)
-        .about_with_text(format!("About {PRODUCT_NAME}"), Some(about))
+    let mut application = SubmenuBuilder::new(app, PRODUCT_NAME)
+        .about_with_text(format!("About {PRODUCT_NAME}"), Some(about));
+    // Settings shows the update status and Restart to Update.
+    if crate::updates::configured(app) {
+        application = application.text("check-updates", "Check for Updates…");
+    }
+    let application = application
         .separator()
         .item(&settings)
         .separator()

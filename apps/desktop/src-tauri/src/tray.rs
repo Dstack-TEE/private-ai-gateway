@@ -186,8 +186,7 @@ async fn status_notifier_host() -> zbus::Result<bool> {
         .await
 }
 
-/// What a tray item, or the menu bar's Settings… item, which shares its id,
-/// does.
+/// What a tray item, or a menu bar item that shares its action, does.
 #[derive(Debug, PartialEq)]
 enum Action {
     Toggle,
@@ -213,7 +212,7 @@ impl Action {
         Some(match id {
             "toggle" => Self::Toggle,
             "open" => Self::Open,
-            "settings" => Self::Navigate(NavigationTarget::Settings),
+            "settings" | "check-updates" => Self::Navigate(NavigationTarget::Settings),
             "agents" => Self::Navigate(NavigationTarget::Agents),
             "profiles" => Self::Navigate(NavigationTarget::Profiles),
             "stop-all-quit" => Self::Navigate(NavigationTarget::ConfirmStopAll),
@@ -576,6 +575,10 @@ mod tests {
             ("open", Some(Action::Open)),
             (
                 "settings",
+                Some(Action::Navigate(NavigationTarget::Settings)),
+            ),
+            (
+                "check-updates",
                 Some(Action::Navigate(NavigationTarget::Settings)),
             ),
             ("agents", Some(Action::Navigate(NavigationTarget::Agents))),
