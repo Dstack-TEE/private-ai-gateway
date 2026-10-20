@@ -1,26 +1,25 @@
 import { useQuery } from "@tanstack/react-query";
-import type { ListenConfig } from "../../shared/contracts";
 import { desktopApi } from "../lib/environment";
-import { localAddressKind } from "../lib/local-api-config";
+import { localAddressKind, type ListenerDraft } from "../lib/local-api-config";
 import { Combobox, ComboboxContent, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
 import { NetworkWarning } from "./network-warning";
 import { Field, FieldError, FieldLabel } from "./ui/field";
 import { Input } from "./ui/input";
 import { FormField } from "./settings";
 
-/** Listen address, port and client host shared by the Local API and web UI settings. */
+/** Listen address, port and client host shared by the Local API and web UI settings; `listenerPort` checks them on save. */
 export function ListenerFields({ idPrefix, value, minPort, access, clientHostNote, disabled, onChange }: {
   idPrefix: string;
-  value: ListenConfig;
+  value: ListenerDraft;
   minPort: number;
   /** Completes the network warning: "Requests use unencrypted HTTP and …". */
   access?: string;
   clientHostNote: string;
   disabled: boolean;
-  onChange(value: ListenConfig): void;
+  onChange(value: ListenerDraft): void;
 }) {
   const addressKind = localAddressKind(value.listenAddress);
-  const update = <Key extends keyof ListenConfig>(key: Key, next: ListenConfig[Key]) => onChange({ ...value, [key]: next });
+  const update = <Key extends keyof ListenerDraft>(key: Key, next: ListenerDraft[Key]) => onChange({ ...value, [key]: next });
   return <>
     <div className="grid grid-cols-[minmax(0,1fr)_7rem] items-start gap-4">
       <Field>
@@ -29,7 +28,7 @@ export function ListenerFields({ idPrefix, value, minPort, access, clientHostNot
       </Field>
       <Field>
         <FieldLabel className="min-h-5" htmlFor={`${idPrefix}-port`}>Port</FieldLabel>
-        <Input id={`${idPrefix}-port`} type="number" min={minPort} max="65535" required autoComplete="off" value={value.port} disabled={disabled} onChange={(event) => update("port", Number(event.target.value))} />
+        <Input id={`${idPrefix}-port`} type="number" min={minPort} max="65535" required autoComplete="off" value={value.port} disabled={disabled} onChange={(event) => update("port", event.target.value)} />
       </Field>
     </div>
     <FormField id={`${idPrefix}-client-host`} label="Client host" description={addressKind === "unspecified" ? "Required for all-interface listeners. Use an address reachable by your clients." : clientHostNote}>

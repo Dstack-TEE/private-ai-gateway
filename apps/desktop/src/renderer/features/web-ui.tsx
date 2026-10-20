@@ -11,7 +11,7 @@ import { AppDialog, AppDialogBody, type DialogControl } from "../components/app-
 import { useConfirm } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { AuthoredError, errorMessage } from "../lib/error-message";
-import { localAddressKind } from "../lib/local-api-config";
+import { listenerDraft, listenerPort, localAddressKind, type ListenerDraft } from "../lib/local-api-config";
 import { desktopApi, web } from "../lib/environment";
 import { useCopy } from "../hooks/use-copy";
 import { useShell } from "../lib/shell";
@@ -19,6 +19,7 @@ import { useSetAppState } from "../lib/use-app-state";
 import { DEFAULT_WEB_UI_CONFIG, WEB_UI_PASSWORD_MIN_LENGTH as MIN_PASSWORD_LENGTH, type WebUiConfig, type WebUiStatus } from "../../shared/contracts";
 
 const PASSWORD_LABEL = "Web UI password";
+const WEB_UI_MIN_PORT = 1;
 
 /** The saved settings behind a status, without listener results. */
 function webUiConfig({ enabled, listenAddress, allowNetworkAccess, port, clientHost }: WebUiStatus): WebUiConfig {
@@ -33,7 +34,7 @@ function sameConfig(left: WebUiConfig, right: WebUiConfig): boolean {
 export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.Element {
   const status = useShell().state.webUi;
   const setState = useSetAppState();
-  const [draft, setDraft] = useState<WebUiConfig>(() => webUiConfig(status));
+  const [draft, setDraft] = useState<ListenerDraft<WebUiConfig>>(() => listenerDraft(webUiConfig(status)));
   // Browsers never see the password; the desktop app and CLI manage it.
   const client = useQueryClient();
   const { data: savedPassword, error: passwordError } = useQuery({ queryKey: ["web-ui-password"], queryFn: () => desktopApi.getWebUiPassword(), enabled: !web, staleTime: 0 });
@@ -74,16 +75,16 @@ export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.E
   // Resolves whether the settings were saved.
   const save = useMutation({
     mutationFn: async () => {
-      if (!addressKind) throw new AuthoredError("Enter a valid IPv4 or IPv6 listen address.");
+      const port = listenerPort(draft, WEB_UI_MIN_PORT);
       const passwordChanged = passwordDraft !== undefined && passwordDraft !== (savedPassword ?? "");
       if (passwordChanged && [...passwordDraft].length < MIN_PASSWORD_LENGTH) {
         throw new AuthoredError(`Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`);
       }
-      const config = { ...draft, allowNetworkAccess: networkAccess };
+      const config = { ...draft, port, allowNetworkAccess: networkAccess };
       const configChanged = !sameConfig(config, webUiConfig(status));
       if (configChanged && networkAccess && !await confirm({
         title: "Allow network access?",
-        message: `Listen on ${draft.listenAddress}:${draft.port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
+        message: `Listen on ${draft.listenAddress}:${port}? The web UI uses unencrypted HTTP, and a signed-in browser can change every setting and read the client key. Only use a trusted network, and never expose this port to the internet. An SSH tunnel or Tailscale is safer.`,
         confirmLabel: "Allow and Save",
       })) return false;
       if (web && status.enabled && !config.enabled && !await confirm({
@@ -108,13 +109,13 @@ export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.E
   const visibilityLabel = passwordVisible ? "Hide password" : "Show password";
   return (
     <AppDialog {...control} title="Web UI settings" className="sm:max-w-lg" dismissible={!saving} onClose={onClose}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+      <form className="flex min-h-0 flex-col gap-4" noValidate onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <AppDialogBody className="py-1">
           <FieldGroup>
             <SettingsList>
               <SettingsToggle label="Web UI" checked={draft.enabled} disabled={saving} onToggle={() => setDraft((current) => ({ ...current, enabled: !current.enabled }))} />
             </SettingsList>
-            <ListenerFields idPrefix="web-ui" value={draft} minPort={1} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
+            <ListenerFields idPrefix="web-ui" value={draft} minPort={WEB_UI_MIN_PORT} access="are protected only by the web UI password" clientHostNote="Optional host shown in the web UI address. Does not change the listener." disabled={saving} onChange={(listener) => setDraft((current) => ({ ...current, ...listener }))} />
             {!web && <>
               <FieldSeparator />
               <Field>
@@ -142,7 +143,7 @@ export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.E
         <FieldError>{error}</FieldError>
         {copyStatus}
         <DialogFooter>
-          <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...DEFAULT_WEB_UI_CONFIG, enabled: current.enabled }))}>Use Default</Button>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={saving} onClick={() => setDraft((current) => ({ ...listenerDraft(DEFAULT_WEB_UI_CONFIG), enabled: current.enabled }))}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
           <Button type="submit" variant="default" disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
         </DialogFooter>

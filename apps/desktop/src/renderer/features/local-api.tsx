@@ -3,7 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Check, Copy, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { ListenerFields } from "../components/listen-address";
-import { localAddressKind } from "../lib/local-api-config";
+import { listenerDraft, listenerPort, localAddressKind } from "../lib/local-api-config";
 import { Hint } from "../components/hint";
 import { Field, FieldGroup, FieldLabel, FieldError, FieldSeparator } from "../components/ui/field";
 import { Item } from "../components/ui/item";
@@ -12,10 +12,10 @@ import { IconButton } from "../components/controls";
 import { AppDialog, AppDialogBody, type DialogControl } from "../components/app-dialog";
 import { useConfirm, useReportFailure } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
-import { DEFAULT_LOCAL_API_CONFIG, type ListenConfig } from "../../shared/contracts";
+import { DEFAULT_LOCAL_API_CONFIG } from "../../shared/contracts";
 import { maskClientKey } from "../lib/format";
 import { desktopApi } from "../lib/environment";
-import { AuthoredError, errorMessage } from "../lib/error-message";
+import { errorMessage } from "../lib/error-message";
 import { useShell } from "../lib/shell";
 import { useSetAppState } from "../lib/use-app-state";
 import { useCopy } from "../hooks/use-copy";
@@ -82,12 +82,14 @@ function CopyRow({
   );
 }
 
+const LOCAL_API_MIN_PORT = 1024;
+
 /** The window reports a failed read of the key. */
 export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JSX.Element {
   const { state, clientKey, clientKeyVisible, toggleClientKey, rotateClientKey } = useShell();
   const setState = useSetAppState();
   const frozen = state.status === "verifying";
-  const [draft, setDraft] = useState<ListenConfig>(state.localApi);
+  const [draft, setDraft] = useState(() => listenerDraft(state.localApi));
   const addressKind = localAddressKind(draft.listenAddress);
   const networkAccess = Boolean(addressKind && addressKind !== "loopback");
   const [error, setError] = useState<string>();
@@ -109,13 +111,13 @@ export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JS
   // Resolves whether the settings were saved.
   const save = useMutation({
     mutationFn: async () => {
-      if (!addressKind) throw new AuthoredError("Enter a valid IPv4 or IPv6 listen address.");
+      const port = listenerPort(draft, LOCAL_API_MIN_PORT);
       if (networkAccess && !await confirm({
         title: "Allow network access?",
-        message: `Listen on ${draft.listenAddress}:${draft.port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
+        message: `Listen on ${draft.listenAddress}:${port}? The local API uses unencrypted HTTP. Only use a trusted network, and never expose this port to the internet.`,
         confirmLabel: "Allow and Save",
       })) return false;
-      setState(await desktopApi.saveLocalApiConfig({ ...draft, allowNetworkAccess: networkAccess }));
+      setState(await desktopApi.saveLocalApiConfig({ ...draft, port, allowNetworkAccess: networkAccess }));
       return true;
     },
     onMutate: () => setError(undefined),
@@ -129,10 +131,10 @@ export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JS
   };
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+      <form className="flex min-h-0 flex-col gap-4" noValidate onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <AppDialogBody className="py-1">
           <FieldGroup>
-          <ListenerFields idPrefix="local" value={draft} minPort={1024} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
+          <ListenerFields idPrefix="local" value={draft} minPort={LOCAL_API_MIN_PORT} clientHostNote="Optional host for client URLs and agent configs. Does not change the listener." disabled={frozen || saving} onChange={setDraft} />
           <FieldSeparator />
           <Field>
             <FieldLabel htmlFor="local-client-key">Local API key</FieldLabel>
@@ -151,7 +153,7 @@ export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JS
         <FieldError>{error}</FieldError>
         {status}
         <DialogFooter>
-          <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft(DEFAULT_LOCAL_API_CONFIG)}>Use Default</Button>
+          <Button type="button" variant="outline" className="sm:mr-auto" disabled={frozen || saving} onClick={() => setDraft(listenerDraft(DEFAULT_LOCAL_API_CONFIG))}>Use Default</Button>
           <Button type="button" variant="outline" onClick={onClose} disabled={saving}>{frozen ? "Done" : "Cancel"}</Button>
           <Button type="submit" variant="default" disabled={frozen || saving}>{saving ? "Saving…" : "Save"}</Button>
         </DialogFooter>

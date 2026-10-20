@@ -301,7 +301,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
 
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <form className="flex min-h-0 flex-col gap-4" noValidate onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <AppDialogBody className="py-1">
         <FieldGroup className="gap-4">
         <Field className="gap-2">
