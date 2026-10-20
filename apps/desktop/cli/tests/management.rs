@@ -49,7 +49,7 @@ fn legacy_aci_alias_output_matches_the_canonical_command() {
 }
 
 #[test]
-fn completions_register_the_invoked_alias() {
+fn completions_and_argument_errors_use_the_invoked_alias() {
     #[cfg(unix)]
     let directory = tempfile::tempdir().unwrap();
     for name in ["pap", "aci", "private-ai-proxy"] {
@@ -87,6 +87,36 @@ fn completions_register_the_invoked_alias() {
             }
             assert!(script.contains("profiles"));
             assert!(script.contains("verify"));
+        }
+        for value in [None, Some("dark")] {
+            for json in [false, true] {
+                let mut command = std::process::Command::new(&executable);
+                command.args(["settings", "set", "appearance", "--value-stdin"]);
+                command.args(value);
+                if json {
+                    command.arg("--json");
+                }
+                command.env(desktop_core::launch::ALIAS_ENV, name);
+                let output = command.output().unwrap();
+                assert_eq!(output.status.code(), Some(2), "{output:?}");
+                assert!(output.stdout.is_empty());
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                let message = if json {
+                    let error: Value = serde_json::from_str(&stderr).unwrap();
+                    assert_eq!(error["error"]["code"], "invalid_arguments");
+                    error["error"]["message"].as_str().unwrap().to_string()
+                } else {
+                    stderr
+                };
+                assert!(
+                    message.starts_with("error: Only web-ui.password reads its value from stdin"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("Usage: {name} [OPTIONS] <COMMAND>")),
+                    "{message}"
+                );
+            }
         }
     }
 }

@@ -147,12 +147,12 @@ fn legacy_alias_hint() {
     }
 }
 
-/// The completion script registers the alias this invocation uses.
-fn completion_command() -> (clap::Command, &'static str) {
+/// Custom usage and completion scripts use the invoked alias.
+fn invocation_command() -> (clap::Command, &'static str) {
     let argv0 = std::env::args_os().next();
     let alias = std::env::var_os(desktop_core::launch::ALIAS_ENV);
     let name = invocation_name(argv0.as_deref(), alias.as_deref());
-    (Cli::command(), name)
+    (Cli::command().bin_name(name), name)
 }
 
 fn invocation_name(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> &'static str {

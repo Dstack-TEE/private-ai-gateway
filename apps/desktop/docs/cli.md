@@ -679,7 +679,9 @@ errors use the backend's code, or `command_failed`. Classify failures by
 `code`, never by parsing message text, and do not assume all failures are
 retryable. `sessions --json` prints the service verification transcript on
 stdout when verification fails, while still exiting nonzero and reporting the
-failure on stderr.
+failure on stderr. Every rejected session includes a human-readable `error`
+describing fetch or audit failures, failed integrity checks, or unmet claims.
+Human output shows the same reason with terminal control characters neutralized.
 
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object

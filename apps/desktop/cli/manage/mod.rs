@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::CommandFactory;
 use desktop_core::{
     client::{CallError, Client, Watched},
     contracts::*,
@@ -40,16 +39,29 @@ pub fn has_profile_require_production_os(action: &Action) -> bool {
 }
 
 pub fn validate_arguments(action: &Action) -> Result<(), clap::Error> {
-    if matches!(
-        action,
-        Action::Settings {
-            command: Settings::Set { key, value_stdin: true, .. },
-        } if key.key != SettingsKey::WebUiPassword
-    ) {
-        return Err(crate::Cli::command().error(
-            clap::error::ErrorKind::ArgumentConflict,
-            "--value-stdin is only supported for web-ui.password",
-        ));
+    if let Action::Settings {
+        command:
+            Settings::Set {
+                key,
+                value,
+                value_stdin,
+            },
+    } = action
+    {
+        if key.key != SettingsKey::WebUiPassword {
+            if *value_stdin {
+                return Err(crate::invocation_command().0.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "Only web-ui.password reads its value from stdin",
+                ));
+            }
+            if value.is_none() {
+                return Err(crate::invocation_command().0.error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    format!("Missing the value for {}", key.key),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -132,7 +144,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             json!({"exported": path})
         }
         Action::Completions { shell } => {
-            let (mut command, name) = crate::completion_command();
+            let (mut command, name) = crate::invocation_command();
             let mut script = Vec::new();
             clap_complete::generate(*shell, &mut command, name, &mut script);
             return output::print_raw(&script);

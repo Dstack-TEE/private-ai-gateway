@@ -643,10 +643,9 @@ For more information, try '--help'.
 
 "#]]);
     fails(2, &["settings", "set", "appearance"]).stderr_eq(str![[r#"
-error: the following required arguments were not provided:
-  <VALUE>
+error: Missing the value for appearance
 
-Usage: private-ai-proxy settings set <KEY> <VALUE>
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
 
 For more information, try '--help'.
 
@@ -761,10 +760,9 @@ error: Expected true or false
         &["settings", "set", "appearance", "--value-stdin", "--yes"],
     )
     .stderr_eq(str![[r#"
-error: the following required arguments were not provided:
-  <VALUE>
+error: Only web-ui.password reads its value from stdin
 
-Usage: private-ai-proxy settings set --value-stdin --yes <KEY> <VALUE>
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
 
 For more information, try '--help'.
 
@@ -880,6 +878,7 @@ fn argument_failures_use_the_documented_exit_code_and_json_error_code() {
         vec!["settings", "set", "appearance"],
         vec!["settings", "set", "connectOnLaunch"],
         vec!["settings", "set", "appearance", "dark", "--value-stdin"],
+        vec!["settings", "set", "appearance", "--value-stdin"],
     ] {
         let output = pap().arg("--json").args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
@@ -892,30 +891,38 @@ fn argument_failures_use_the_documented_exit_code_and_json_error_code() {
 #[test]
 fn online_commands_refuse_url_credentials_without_echoing_them() {
     for command in ["verify", "send", "sessions", "serve", "curl"] {
-        let output = pap()
-            .args([
-                command,
-                "https://private-user:private-password@127.0.0.1:9",
-                "--json",
-            ])
-            .env("ACI_API_KEY", "test-key")
-            .output()
-            .unwrap();
-        assert_eq!(
-            output.status.code(),
-            Some(if command == "curl" { 125 } else { 1 }),
-            "{output:?}"
-        );
-        let output = format!(
-            "{}{}",
-            String::from_utf8(output.stdout).unwrap(),
-            String::from_utf8(output.stderr).unwrap()
-        );
-        assert!(
-            output.contains("must not contain credentials"),
-            "{command}: {output}"
-        );
-        assert!(!output.contains("private-user"), "{command}: {output}");
-        assert!(!output.contains("private-password"), "{command}: {output}");
+        for json in [false, true] {
+            let mut request = pap()
+                .args([command, "https://private-user:private-password@host"])
+                .env(desktop_core::launch::ALIAS_ENV, "pap")
+                .env("ACI_API_KEY", "test-key");
+            if json {
+                request = request.arg("--json");
+            }
+            let output = request.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if command == "curl" { 125 } else { 1 }),
+                "{output:?}"
+            );
+            let error = if command == "serve" && json {
+                assert!(output.stderr.is_empty(), "{output:?}");
+                let event: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(event["type"], "fatal");
+                event["message"].as_str().unwrap().to_string()
+            } else {
+                assert!(output.stdout.is_empty(), "{command}: {output:?}");
+                String::from_utf8(output.stderr).unwrap()
+            };
+            if !json {
+                assert!(error.starts_with("error: "), "{command}: {error}");
+            }
+            assert!(
+                error.contains("must not contain credentials"),
+                "{command}: {error}"
+            );
+            assert!(!error.contains("private-user"), "{command}: {error}");
+            assert!(!error.contains("private-password"), "{command}: {error}");
+        }
     }
 }

@@ -1,7 +1,7 @@
-use std::{fmt, path::PathBuf, sync::LazyLock};
+use std::{fmt, path::PathBuf};
 
 use clap::{
-    builder::{PossibleValue, PossibleValuesParser, TypedValueParser},
+    builder::{PossibleValuesParser, TypedValueParser},
     Args, Subcommand, ValueEnum,
 };
 use clap_complete::Shell;
@@ -506,23 +506,9 @@ pub enum Settings {
         /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable.
         /// "" clears local-api.client-host or web-ui.client-host. web-ui.password uses --value-stdin
         /// or the hidden prompt and cannot be cleared.
-        #[arg(required_if_eq_any = settings_value_conditions())]
         value: Option<String>,
         /// Read the web-ui.password value from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         value_stdin: bool,
     },
-}
-
-/// Passwords use a hidden prompt; every other key needs a positional value.
-fn settings_value_conditions() -> impl Iterator<Item = (&'static str, &'static str)> {
-    static KEYS: LazyLock<Vec<PossibleValue>> = LazyLock::new(|| {
-        SettingsKey::value_variants()
-            .iter()
-            .filter(|key| **key != SettingsKey::WebUiPassword)
-            .filter_map(ValueEnum::to_possible_value)
-            .collect()
-    });
-    KEYS.iter()
-        .flat_map(|value| value.get_name_and_aliases().map(|name| ("key", name)))
 }
