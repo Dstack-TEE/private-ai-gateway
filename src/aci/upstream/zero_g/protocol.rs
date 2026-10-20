@@ -184,10 +184,13 @@ impl ResponseOpener {
         let sealed: Map<String, Value> = serde_json::from_slice(&plaintext)
             .map_err(|_| ProtocolError("decrypted 0G response is not a JSON object".into()))?;
         frame.remove(E2EE);
-        if sealed.len() != sealed_fields.len()
-            || sealed_fields
-                .iter()
-                .any(|f| !sealed.contains_key(f) || frame.contains_key(f))
+        let mut declared = sealed_fields;
+        declared.sort();
+        // Map keys are unique, so equality also rejects duplicate declarations.
+        if !declared
+            .iter()
+            .eq(sealed.keys().collect::<std::collections::BTreeSet<_>>())
+            || sealed.keys().any(|key| frame.contains_key(key))
         {
             return fail("decrypted 0G response fields do not match sealed_fields");
         }

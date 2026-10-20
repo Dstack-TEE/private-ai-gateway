@@ -196,11 +196,11 @@ impl ZeroGProviderVerifier {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| format!("0G route preview failed: {e}"))?;
+            .map_err(|e| format!("0G route preview failed: {}", e.without_url()))?;
         let preview: PreviewResponse = response
             .json()
             .await
-            .map_err(|e| format!("malformed 0G route preview: {e}"))?;
+            .map_err(|e| format!("malformed 0G route preview: {}", e.without_url()))?;
         let mut candidates: Vec<PreviewCandidate> = Vec::new();
         for candidate in preview.providers {
             if !candidates
@@ -256,14 +256,14 @@ impl ZeroGProviderVerifier {
             .get(format!("{}/quote?legacy=false", broker_api(url)?))
             .send()
             .await
-            .map_err(|e| format!("quote fetch failed: {e}"))?;
+            .map_err(|e| format!("quote fetch failed: {}", e.without_url()))?;
         if response.status() != reqwest::StatusCode::OK {
             return Err(format!("quote endpoint returned {}", response.status()));
         }
         let reply: Value = response
             .json()
             .await
-            .map_err(|e| format!("malformed quote reply: {e}"))?;
+            .map_err(|e| format!("malformed quote reply: {}", e.without_url()))?;
         let (raw_quote, quote) = parse_quote_evidence(&reply).map_err(|e| e.to_string())?;
         let td = match &quote.report {
             Report::TD10(report) => report,
@@ -345,10 +345,11 @@ impl ZeroGProviderVerifier {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|e| format!("chain RPC failed: {e}"))?
+            // Errors omit the URL: the RPC URL may embed a credential.
+            .map_err(|e| format!("chain RPC failed: {}", e.without_url()))?
             .json()
             .await
-            .map_err(|e| format!("malformed chain RPC reply: {e}"))?;
+            .map_err(|e| format!("malformed chain RPC reply: {}", e.without_url()))?;
         let raw = reply["result"].as_str().unwrap_or_default().to_string();
         let bytes = hex::decode(raw.trim_start_matches("0x"))
             .map_err(|_| "chain RPC returned no result".to_string())?;

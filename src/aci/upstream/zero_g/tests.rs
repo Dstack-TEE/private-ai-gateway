@@ -107,8 +107,19 @@ impl ResponseSealer {
 
     fn seal(&mut self, mut frame: Map<String, Value>, is_final: bool) -> Value {
         let sealed = json!({"choices": frame.remove("choices").unwrap()});
+        self.seal_as(frame, sealed, json!(["choices"]), is_final)
+    }
+
+    /// Seal `sealed` into `frame` under an arbitrary `sealed_fields` claim.
+    fn seal_as(
+        &mut self,
+        mut frame: Map<String, Value>,
+        sealed: Value,
+        sealed_fields: Value,
+        is_final: bool,
+    ) -> Value {
         let mut meta =
-            json!({"sealed_fields": ["choices"], "unbound_fields": ["model"], "final": is_final});
+            json!({"sealed_fields": sealed_fields, "unbound_fields": ["model"], "final": is_final});
         if let Some(enc) = self.enc.take() {
             meta["v"] = 1.into();
             meta["enc"] = enc.into();
@@ -231,6 +242,22 @@ fn opener_refuses_tampered_reordered_and_unsealed_frames() {
     assert!(fixture_opener(&f)
         .open_frame(object(&f["response_plain"]))
         .is_err());
+}
+
+#[test]
+fn opener_refuses_duplicate_sealed_field_declarations() {
+    // Declaring `choices` twice must not let an undeclared encrypted `usage`
+    // overwrite the bound cleartext one.
+    let (secret, public) = Kem::derive_keypair(&[4; 32]);
+    let mut sealer = ResponseSealer::new(&public.to_bytes(), [0; 32]);
+    let frame = sealer.seal_as(
+        object(&json!({"usage": {"total_tokens": 1}})),
+        json!({"choices": [], "usage": {"total_tokens": 999}}),
+        json!(["choices", "choices"]),
+        true,
+    );
+    let mut opener = ResponseOpener::new(secret, [0; 32]);
+    assert!(opener.open_frame(object(&frame)).is_err());
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

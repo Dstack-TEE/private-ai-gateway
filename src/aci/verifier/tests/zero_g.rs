@@ -232,3 +232,31 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert!(verifier.cached(&request()).is_none());
     server.abort();
 }
+
+#[tokio::test]
+async fn rejection_reasons_never_carry_the_chain_rpc_credential() {
+    let (mock, _, server) = fixture().await;
+    let candidate = PreviewCandidate {
+        address: address("a"),
+        provider_identity: None,
+        canonical_id: None,
+    };
+    // An unreachable RPC and one that answers 404 both embed path and query
+    // secrets in their URL.
+    for rpc in [
+        "http://127.0.0.1:1/v2/DEMO_RPC_SECRET?api_key=DEMO_QUERY_SECRET".to_string(),
+        format!(
+            "{}/v2/DEMO_RPC_SECRET?api_key=DEMO_QUERY_SECRET",
+            mock.origin
+        ),
+    ] {
+        let verifier =
+            ZeroGProviderVerifier::new("http://127.0.0.1:1", "k", rpc, "0x00", None, 5, 0).unwrap();
+        let err = verifier
+            .verify_candidate(&candidate, MODEL)
+            .await
+            .unwrap_err();
+        assert!(!err.contains("DEMO_"), "{err}");
+    }
+    server.abort();
+}

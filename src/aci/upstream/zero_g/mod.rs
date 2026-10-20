@@ -233,7 +233,10 @@ impl SignatureCheck {
             }
             match self.client.get(&self.url).send().await {
                 Ok(response) if response.status().is_success() => {
-                    return response.json().await.map_err(|e| e.to_string());
+                    return response
+                        .json()
+                        .await
+                        .map_err(|e| e.without_url().to_string());
                 }
                 Ok(response) => {
                     last_error = format!("signature endpoint returned {}", response.status());
@@ -241,7 +244,7 @@ impl SignatureCheck {
                         break;
                     }
                 }
-                Err(err) => last_error = err.to_string(),
+                Err(err) => last_error = err.without_url().to_string(),
             }
         }
         Err(last_error)
