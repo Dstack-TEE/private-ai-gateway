@@ -57,7 +57,7 @@ export function LocalApiExamplesDialog(control: DialogControl) {
             <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
           </div>
           <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
-            <pre className="p-4 text-xs leading-relaxed"><code>{tokens
+            <pre className="select-text p-4 text-xs leading-relaxed"><code>{tokens
               ? tokens.map((line, index) => <Fragment key={index}>{index > 0 && "\n"}{line.map((token) => <span key={token.offset} className="text-(--shiki-light) dark:text-(--shiki-dark)" style={token.htmlStyle}>{token.content}</span>)}</Fragment>)
               : code ?? "Local API example unavailable."}</code></pre>
           </TabsContent>

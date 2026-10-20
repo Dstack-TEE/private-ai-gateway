@@ -15,7 +15,7 @@
     "build:web": "vite build --mode web",
     "build:sidecars": "node scripts/bundle-sidecars.mjs",
     "build:sidecars:debug": "node scripts/bundle-sidecars.mjs --debug",
-    "check": "tsc --noEmit && node --test scripts/agent-integrations.test.mjs scripts/app-state.test.mjs scripts/create-api.test.mjs scripts/dialog-queue.test.mjs scripts/error-message.test.mjs scripts/listener-config.test.mjs scripts/local-api-example.test.mjs",
+    "check": "tsc --noEmit && node --test scripts/agent-integrations.test.mjs scripts/app-state.test.mjs scripts/create-api.test.mjs scripts/dialog-queue.test.mjs scripts/error-message.test.mjs scripts/listener-config.test.mjs scripts/local-api-example.test.mjs scripts/native-interactions.test.mjs",
     "check:contracts": "node scripts/generate-contracts.mjs --check",
     "dev": "npm run build:sidecars:debug && tauri dev",
     "dev:renderer": "vite --host 127.0.0.1 --port 1420",
