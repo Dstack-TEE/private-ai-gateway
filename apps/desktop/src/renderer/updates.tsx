@@ -9,7 +9,7 @@ import { ItemContent, ItemTitle, ItemDescription, ItemActions } from "./componen
 import { SettingsItem } from "./components/settings";
 import { useConfirm } from "./components/confirm";
 import { desktopApi, distributionCapabilities } from "./lib/environment";
-import { checkForUpdatesNow } from "./lib/update-check";
+import { checkForUpdatesNow, latestUpdateCheck } from "./lib/update-check";
 
 const CHECK_INTERVAL = 6 * 60 * 60_000;
 
@@ -56,9 +56,7 @@ export function useUpdates() {
     scope: UPDATE_SCOPE,
     mutationFn: async () => {
       // The latest release, checked once: a failure ends the restart.
-      await client.cancelQueries({ queryKey: updateQuery.queryKey });
-      const latest = await desktopApi.prepareUpdate();
-      client.setQueryData(updateQuery.queryKey, latest);
+      const latest = await latestUpdateCheck(client, updateQuery);
       if (!latest.version) return;
       if (!await confirm({ title: "Restart to update?", message: `Version ${latest.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
       try {

@@ -1,4 +1,4 @@
-import type { QueryClient, QueryKey } from "@tanstack/react-query";
+import type { FetchQueryOptions, QueryClient, QueryKey } from "@tanstack/react-query";
 
 /**
  * Checks for updates now, joining a check already under way: cancelling the
@@ -8,4 +8,12 @@ import type { QueryClient, QueryKey } from "@tanstack/react-query";
  */
 export function checkForUpdatesNow(client: QueryClient, queryKey: QueryKey): Promise<void> {
   return client.refetchQueries({ queryKey, exact: true }, { cancelRefetch: false });
+}
+
+/**
+ * The latest update check before Restart to Update, which disables the
+ * query: a fresh check, or the one under way, for the same reason as above.
+ */
+export function latestUpdateCheck<T, K extends QueryKey>(client: QueryClient, query: FetchQueryOptions<T, Error, T, K>): Promise<T> {
+  return client.fetchQuery({ ...query, staleTime: 0 });
 }
