@@ -547,18 +547,20 @@ fn show_icon(app: &AppHandle, shown: &mut (bool, bool), icon: (bool, bool)) -> t
 /// given as an image, so the Linux icons are the white mark on a black disc,
 /// legible on any panel.
 fn icon_image((protected, dark): (bool, bool)) -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "linux")]
+    let bytes: &'static [u8] = {
+        let _ = dark;
+        if protected {
+            include_bytes!("../../assets/tray/protected-linux.png")
+        } else {
+            include_bytes!("../../assets/tray/unprotected-linux.png")
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     let bytes: &'static [u8] = match (protected, dark) {
-        #[cfg(target_os = "linux")]
-        (true, _) => include_bytes!("../../assets/tray/protected-linux.png"),
-        #[cfg(target_os = "linux")]
-        (false, _) => include_bytes!("../../assets/tray/unprotected-linux.png"),
-        #[cfg(not(target_os = "linux"))]
         (true, false) => include_bytes!("../../assets/tray/protected.png"),
-        #[cfg(not(target_os = "linux"))]
         (false, false) => include_bytes!("../../assets/tray/unprotected.png"),
-        #[cfg(not(target_os = "linux"))]
         (true, true) => include_bytes!("../../assets/tray/protected-dark.png"),
-        #[cfg(not(target_os = "linux"))]
         (false, true) => include_bytes!("../../assets/tray/unprotected-dark.png"),
     };
     Image::from_bytes(bytes)
