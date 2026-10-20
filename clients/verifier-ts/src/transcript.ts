@@ -638,7 +638,7 @@ async function upstreamLines(
   const problems: string[] = [];
   if ((await computeSessionId(record)) !== cited) problems.push('does not hash to the cited id');
   if (!checkSessionApiVersion(record)) problems.push('api_version is not "aci/1"');
-  if (!(payload.served_at >= record.established_at && payload.served_at <= record.expires_at)) {
+  if (!(payload.served_at >= record.established_at && payload.served_at < record.expires_at)) {
     problems.push('served_at is outside the validity window');
   }
   if (!(await checkSessionEvidence(record.evidence))) problems.push('evidence does not hash');

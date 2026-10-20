@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use common::admission;
 mod common;
 
 use async_trait::async_trait;
@@ -3155,5 +3156,55 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
     assert_eq!(
         hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
         id
+    );
+}
+
+#[tokio::test]
+async fn current_listing_remains_admissible_but_expired_history_cannot_satisfy_pins() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        ..
+    } = admission::Harness::new(vec![admission::Attempt::Response {
+        status: 200,
+        at: 109,
+    }]);
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "phala-direct", "base_url": "https://test.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let listed = listed_sessions(&h, "").await;
+    let id = listed[0]["session_id"].as_str().unwrap();
+    clock.set(109);
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], id);
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
+    clock.set(110);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{id}"), &[])
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let new_listing = listed_sessions(&h, "").await;
+    assert_ne!(new_listing[0]["session_id"], id);
+    let refused = pin_session(&h, id).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(
+        backend.events.lock().unwrap().len(),
+        1,
+        "expired history must not authorize another forward"
     );
 }

@@ -39,7 +39,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,23 @@ struct SessionLogRecord {
     payload_b64: String,
 }
 
+/// Process-local ownership of an immutable session, without its evidence bundle.
+/// The indexed entry retains the other token reference; eviction is allowed only
+/// after all leases have been dropped.
+#[derive(Debug, Clone)]
+pub struct SessionLease {
+    session_id: String,
+    pub established_at: u64,
+    pub expires_at: u64,
+    token: Arc<()>,
+}
+
+impl SessionLease {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 /// The session registry behind the audit endpoints.
 pub trait SessionStore: Send + Sync {
     /// Fetch a session by its full `bare 64-hex` id. Served until its
@@ -76,16 +93,19 @@ pub trait SessionStore: Send + Sync {
     /// may still be live (§8 retention).
     fn get_session(&self, session_id: &str, now: u64) -> Option<AttestedSession>;
 
-    /// The id of the channel's current session, with its retention extended to
-    /// at least `retention_until`. Without one, atomically seal and store a new
-    /// session, which must carry a complete evidence bundle.
+    /// Lease the channel's current valid session, extending retention to at least
+    /// `retention_until`. Without one, atomically seal, store and lease a new
+    /// session with a complete evidence bundle. Acquire under the index lock.
     fn current_or_seal(
         &self,
         fingerprint: &str,
         retention_until: u64,
         now: u64,
         seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<String>;
+    ) -> io::Result<SessionLease>;
+
+    /// Increase retention without changing the document or appending a log record.
+    fn extend_retention(&self, lease: &SessionLease, deadline: u64) -> io::Result<()>;
 }
 
 /// A session split for storage: its id, the document without `evidence.data`,
@@ -129,6 +149,7 @@ struct SessionEntry {
     content_type: String,
     fingerprint: String,
     retention_until: u64,
+    token: Arc<()>,
 }
 
 impl SessionEntry {
@@ -162,6 +183,7 @@ struct SessionIndex {
 
 impl SessionIndex {
     fn insert(&mut self, fingerprint: String, split: SplitSession, retention_until: u64) {
+        let retention_until = retention_until.max(split.stripped.expires_at);
         let SplitSession {
             session_id: id,
             stripped,
@@ -173,8 +195,16 @@ impl SessionIndex {
             stripped,
             content_type,
             fingerprint: fingerprint.clone(),
-            retention_until,
+            retention_until: self
+                .by_id
+                .get(&id)
+                .map_or(retention_until, |e| e.retention_until.max(retention_until)),
+            token: self
+                .by_id
+                .get(&id)
+                .map_or_else(|| Arc::new(()), |e| e.token.clone()),
         };
+        let retention_until = entry.retention_until;
         match self.by_id.insert(id.clone(), entry) {
             Some(prev) => self.drop_retention_hint(&id, prev.retention_until),
             None => {
@@ -207,15 +237,23 @@ impl SessionIndex {
     /// Pop every bucket whose retention deadline is at or before `now`, and
     /// drop bundles no retained session cites any more.
     fn evict_lapsed(&mut self, now: u64) {
-        while let Some((&retention_until, _)) = self.by_retention.first_key_value() {
-            if retention_until > now {
-                break;
-            }
-            let (_, ids) = self
-                .by_retention
-                .pop_first()
-                .expect("first_key_value just returned a bucket");
+        // Snapshot the deadlines: reinserting held entries must not revisit the
+        // same bucket forever in this eviction pass.
+        let deadlines: Vec<u64> = self.by_retention.range(..=now).map(|(&t, _)| t).collect();
+        for deadline in deadlines {
+            let ids = self.by_retention.remove(&deadline).unwrap_or_default();
             for id in ids {
+                // With the index locked, a count of one cannot grow: acquiring
+                // a first external lease also needs this lock. Existing leases
+                // may clone/drop concurrently, but keep the count above one.
+                if self
+                    .by_id
+                    .get(&id)
+                    .is_some_and(|e| Arc::strong_count(&e.token) > 1)
+                {
+                    self.by_retention.entry(deadline).or_default().insert(id);
+                    continue;
+                }
                 let Some(entry) = self.by_id.remove(&id) else {
                     continue;
                 };
@@ -247,23 +285,50 @@ impl SessionIndex {
         self.rebuild(session_id, entry)
     }
 
-    fn current(&mut self, fingerprint: &str, retention_until: u64, now: u64) -> Option<String> {
+    fn lease(&self, id: &str) -> SessionLease {
+        let entry = &self.by_id[id];
+        SessionLease {
+            session_id: id.to_string(),
+            established_at: entry.stripped.established_at,
+            expires_at: entry.stripped.expires_at,
+            token: entry.token.clone(),
+        }
+    }
+
+    fn extend(&mut self, lease: &SessionLease, deadline: u64) -> io::Result<()> {
+        let entry = self
+            .by_id
+            .get_mut(lease.session_id())
+            .filter(|e| Arc::ptr_eq(&e.token, &lease.token))
+            .ok_or_else(|| io::Error::other("session lease does not belong to this store"))?;
+        if deadline > entry.retention_until {
+            let old = entry.retention_until;
+            entry.retention_until = deadline;
+            self.drop_retention_hint(lease.session_id(), old);
+            self.by_retention
+                .entry(deadline)
+                .or_default()
+                .insert(lease.session_id.clone());
+        }
+        Ok(())
+    }
+
+    fn current(
+        &mut self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+    ) -> Option<SessionLease> {
         self.evict_lapsed(now);
         let id = self.by_fingerprint.get(fingerprint)?.clone();
-        let entry = self.by_id.get_mut(&id)?;
-        if now >= entry.stripped.expires_at {
-            return None; // validity lapsed; record stays for retention only
+        let entry = self.by_id.get(&id)?;
+        if !(entry.stripped.established_at <= now && now < entry.stripped.expires_at) {
+            return None;
         }
-        if retention_until > entry.retention_until {
-            let old = entry.retention_until;
-            entry.retention_until = retention_until;
-            self.drop_retention_hint(&id, old);
-            self.by_retention
-                .entry(retention_until)
-                .or_default()
-                .insert(id.clone());
-        }
-        Some(id)
+        let lease = self.lease(&id);
+        self.extend(&lease, retention_until)
+            .expect("lease acquired under index lock");
+        Some(lease)
     }
 
     fn bundle_persisted(&self, digest: &str) -> bool {
@@ -601,7 +666,9 @@ impl JsonlSessionStore {
         split: SplitSession,
         retention_until: u64,
         now: u64,
-    ) -> io::Result<u64> {
+    ) -> io::Result<(u64, SessionLease)> {
+        let retention_until = retention_until.max(split.stripped.expires_at);
+        let id = split.session_id.clone();
         let bundle_persisted = self
             .index
             .lock()
@@ -654,8 +721,9 @@ impl JsonlSessionStore {
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
         index.insert(fingerprint.to_string(), split, retention_until);
         index.mark_persisted(&digest);
+        let lease = index.lease(&id);
         index.evict_lapsed(now);
-        Ok(session_seq)
+        Ok((session_seq, lease))
     }
 
     /// Store `session` unconditionally, returning its log sequence number.
@@ -670,6 +738,7 @@ impl JsonlSessionStore {
         let split = SplitSession::new(session)?;
         let mut w = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         self.append(&mut w, fingerprint, split, retention_until, now)
+            .map(|(seq, _)| seq)
     }
 }
 
@@ -687,7 +756,7 @@ impl SessionStore for JsonlSessionStore {
         retention_until: u64,
         now: u64,
         seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<String> {
+    ) -> io::Result<SessionLease> {
         let current = |store: &Self| {
             store
                 .index
@@ -704,9 +773,26 @@ impl SessionStore for JsonlSessionStore {
             return Ok(id);
         }
         let split = SplitSession::new(seal()?)?;
-        let id = split.session_id.clone();
-        self.append(&mut w, fingerprint, split, retention_until, now)?;
-        Ok(id)
+        validate_admission_window(&split, now)?;
+        self.append(&mut w, fingerprint, split, retention_until, now)
+            .map(|(_, lease)| lease)
+    }
+    fn extend_retention(&self, lease: &SessionLease, deadline: u64) -> io::Result<()> {
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(lease, deadline)
+    }
+}
+
+fn validate_admission_window(split: &SplitSession, now: u64) -> io::Result<()> {
+    if split.stripped.established_at <= now && now < split.stripped.expires_at {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session is outside its admission validity window",
+        ))
     }
 }
 
@@ -732,16 +818,24 @@ impl SessionStore for InMemorySessionStore {
         retention_until: u64,
         now: u64,
         seal: &mut dyn FnMut() -> io::Result<AttestedSession>,
-    ) -> io::Result<String> {
+    ) -> io::Result<SessionLease> {
         let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(id) = index.current(fingerprint, retention_until, now) {
             return Ok(id);
         }
         let split = SplitSession::new(seal()?)?;
+        validate_admission_window(&split, now)?;
         let id = split.session_id.clone();
         index.insert(fingerprint.to_string(), split, retention_until);
+        let lease = index.lease(&id);
         index.evict_lapsed(now);
-        Ok(id)
+        Ok(lease)
+    }
+    fn extend_retention(&self, lease: &SessionLease, deadline: u64) -> io::Result<()> {
+        self.index
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(lease, deadline)
     }
 }
 
@@ -822,9 +916,11 @@ mod tests {
         retention: u64,
         now: u64,
     ) -> io::Result<String> {
-        store.current_or_seal(fp, retention, now, &mut || {
-            Err(io::Error::other("cache miss"))
-        })
+        store
+            .current_or_seal(fp, retention, now, &mut || {
+                Err(io::Error::other("cache miss"))
+            })
+            .map(|lease| lease.session_id().to_string())
     }
 
     fn seal_into(
@@ -834,7 +930,9 @@ mod tests {
         retention: u64,
         now: u64,
     ) -> io::Result<String> {
-        store.current_or_seal(fp, retention, now, &mut || Ok(session.clone()))
+        store
+            .current_or_seal(fp, retention, now, &mut || Ok(session.clone()))
+            .map(|lease| lease.session_id().to_string())
     }
 
     /// Replay must be proportional to the live set, not to everything appended
@@ -1155,7 +1253,9 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         let seals = AtomicU64::new(0);
         let ids = std::thread::scope(|scope| {
-            let tasks: Vec<_> = [1_000, 1_001]
+            // Both admissions use the same timestamp. A caller predating a
+            // concurrently sealed document must not reuse that future session.
+            let tasks: Vec<_> = [1_000, 1_000]
                 .into_iter()
                 .map(|now| {
                     let barrier = &barrier;
@@ -1168,6 +1268,8 @@ mod tests {
                                 Ok(session("https://shared", now, 5_000))
                             })
                             .unwrap()
+                            .session_id()
+                            .to_string()
                     })
                 })
                 .collect();
@@ -1202,8 +1304,86 @@ mod tests {
                 panic!("replayed session must be reused")
             })
             .unwrap();
-        assert_eq!(current, id);
+        assert_eq!(current.session_id(), id);
         assert_eq!(count_lines(&path), 2);
+    }
+
+    #[test]
+    fn leases_hold_expired_sessions_and_shared_evidence_through_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
+        let store = open_store(&path);
+        let a = session("a", 100, 110);
+        let b = session("b", 100, 110);
+        let a_lease = store
+            .current_or_seal("a", 110, 100, &mut || Ok(a.clone()))
+            .unwrap();
+        let b_lease = store
+            .current_or_seal("b", 110, 100, &mut || Ok(b.clone()))
+            .unwrap();
+        let a_clone = a_lease.clone();
+        assert_eq!(store.compact(120).unwrap(), 2);
+        assert_eq!(store.get_session(a.session_id(), 120), Some(a.clone()));
+        assert!(
+            reuse_only(&store, "a", 130, 120).is_err(),
+            "held history cannot authorize admission"
+        );
+        drop(a_lease);
+        assert_eq!(store.compact(120).unwrap(), 2, "one owner still holds a");
+        drop(a_clone);
+        assert_eq!(store.compact(120).unwrap(), 1);
+        assert!(store.get_session(a.session_id(), 120).is_none());
+        assert_eq!(store.get_session(b.session_id(), 120), Some(b));
+        assert_eq!(store.index.lock().unwrap().bundles.len(), 1);
+        drop(b_lease);
+        assert_eq!(store.compact(120).unwrap(), 0);
+        assert!(store.index.lock().unwrap().bundles.is_empty());
+    }
+
+    #[test]
+    fn retained_lease_extension_is_monotonic_and_replays_without_changing_validity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
+        let original = session("a", 100, 110);
+        {
+            let store = open_store(&path);
+            let lease = store
+                .current_or_seal("a", 105, 100, &mut || Ok(original.clone()))
+                .unwrap();
+            assert_eq!(
+                store.index.lock().unwrap().by_id[original.session_id()].retention_until,
+                110
+            );
+            let before = count_lines(&path);
+            store.extend_retention(&lease, 150).unwrap();
+            store.extend_retention(&lease, 130).unwrap();
+            assert_eq!(count_lines(&path), before, "extensions never append");
+            store.compact(120).unwrap();
+        }
+        let reopened = open_store_at(&path, 120);
+        assert_eq!(
+            reopened.get_session(original.session_id(), 149),
+            Some(original.clone())
+        );
+        assert!(reuse_only(&reopened, "a", 200, 149).is_err());
+        assert!(reopened.get_session(original.session_id(), 150).is_none());
+    }
+
+    #[test]
+    fn in_memory_leases_block_eviction_and_foreign_extensions_are_rejected() {
+        let store = InMemorySessionStore::default();
+        let other = InMemorySessionStore::default();
+        let original = session("a", 100, 110);
+        let lease = store
+            .current_or_seal("a", 110, 100, &mut || Ok(original.clone()))
+            .unwrap();
+        assert!(other.extend_retention(&lease, 150).is_err());
+        assert_eq!(
+            store.get_session(original.session_id(), 120),
+            Some(original.clone())
+        );
+        drop(lease);
+        assert!(store.get_session(original.session_id(), 120).is_none());
     }
 
     #[test]

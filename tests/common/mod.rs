@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod admission;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

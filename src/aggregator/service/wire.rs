@@ -156,6 +156,7 @@ pub struct MiddlewareStreamingForwarded {
 }
 
 pub struct MiddlewareReceiptDraft {
+    pub(super) session_lease: Option<crate::aggregator::session_store::SessionLease>,
     pub(super) receipt_id: String,
     pub(super) builder: ReceiptBuilder,
     pub(super) endpoint_path: String,
