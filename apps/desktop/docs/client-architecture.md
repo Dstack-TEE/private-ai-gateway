@@ -92,7 +92,9 @@ protection problems, is stored under that key.
   loaded and on each event, so a request made while the app starts is handled
   once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
-  answer is dropped, as with an alert. One app-level handler runs every native
+  answer is dropped, as with an alert. The macOS menu bar's Check for Updates…
+  also sends `pap://check-for-updates`, so the window checks again at once and
+  Settings shows the result. One app-level handler runs every native
   menu item, the tray's and the menu bar's. The window shows no success
   messages: the changed value, closed dialog or save panel is the feedback.
   Failures show inline in their dialog, form or settings row, and in an alert

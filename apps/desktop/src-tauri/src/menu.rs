@@ -3,8 +3,10 @@
 //! that update themselves), Settings… and a Help menu (documentation, then the
 //! source link). Other platforms are tray-only.
 
-use desktop_core::brand::AboutLink;
-use tauri::{menu::MenuEvent, AppHandle};
+use desktop_core::{
+    brand::AboutLink, contracts::NavigationTarget, ui_api::CHECK_FOR_UPDATES_EVENT,
+};
+use tauri::{menu::MenuEvent, AppHandle, Emitter};
 
 /// The menu bar, which `tauri::Builder::menu` sets on macOS.
 #[cfg(target_os = "macos")]
@@ -25,7 +27,6 @@ pub fn menu_bar(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
     let mut application = SubmenuBuilder::new(app, PRODUCT_NAME)
         .about_with_text(format!("About {PRODUCT_NAME}"), Some(about));
-    // Settings shows the update status and Restart to Update.
     if crate::updates::configured(app) {
         application = application.text("check-updates", "Check for Updates…");
     }
@@ -76,8 +77,16 @@ pub fn handle_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
         "documentation" => open_link(app, AboutLink::Documentation.url()),
         "github" => open_link(app, AboutLink::Github.url()),
+        "check-updates" => check_for_updates(app),
         id => crate::tray::handle_menu_event(app, id),
     }
+}
+
+/// Shows Settings, where the update status is, and has the window check for
+/// updates now. A window that is not listening yet checks as it loads.
+fn check_for_updates(app: &AppHandle) {
+    crate::window::navigate(app, NavigationTarget::Settings);
+    let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
 }
 
 /// Opens `url` in the default browser, reporting a failure in a notification.

@@ -78,6 +78,8 @@ export interface DesktopApi {
   onStateChange(listener: (state: AppState) => void): () => void;
   /** A request from the tray or the menu bar; one made before the window listened comes first. Desktop only. */
   onNavigate(listener: (target: NavigationTarget) => void): () => void;
+  /** The menu bar's Check for Updates…; desktop only. */
+  onCheckForUpdates(listener: () => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   /** Open a documented, allowlisted project resource in the system browser. */

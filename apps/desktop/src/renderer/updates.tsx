@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useEffect, useEffectEvent, useRef } from "react";
 import { queryOptions, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import type { UpdateChannel } from "../shared/contracts";
@@ -48,6 +48,12 @@ export function useUpdates() {
     await client.cancelQueries({ queryKey: updateQuery.queryKey });
     void refetch();
   };
+  // The menu bar's Check for Updates… shows Settings and checks now, unless
+  // a channel change or an install is under way.
+  const checkRequested = useEffectEvent(() => {
+    if (checks && !operating) void recheck();
+  });
+  useEffect(() => desktopApi.onCheckForUpdates(() => checkRequested()), []);
   const restart = useMutation({
     mutationKey: UPDATE_OPERATION,
     scope: UPDATE_SCOPE,
