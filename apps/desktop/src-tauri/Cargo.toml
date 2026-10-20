@@ -21,6 +21,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
+# The clipboard plugin's crate, to mark secrets it cannot.
+arboard = { version = "3", features = ["wayland-data-control"] }
 auto-launch = "0.6"
 desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 serde_json = { version = "1.0", features = ["preserve_order"] }

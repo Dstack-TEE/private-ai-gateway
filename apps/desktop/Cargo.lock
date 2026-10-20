@@ -5059,6 +5059,7 @@ dependencies = [
 name = "private-ai-proxy-desktop"
 version = "0.6.0"
 dependencies = [
+ "arboard",
  "auto-launch",
  "block2",
  "libc",

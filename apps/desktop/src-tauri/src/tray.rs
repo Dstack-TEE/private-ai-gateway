@@ -14,7 +14,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Wry,
 };
-use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_core::{
     agents::{Agent, AgentStatus},
@@ -26,7 +25,7 @@ use desktop_core::{
     ui_api::{LaunchPreference, LAUNCH_PREFERENCES_EVENT},
 };
 
-use crate::{notifications::show_failure, window};
+use crate::{clipboard, notifications::show_failure, window};
 
 pub(crate) const TRAY_ID: &str = "gateway";
 
@@ -244,9 +243,10 @@ impl Task {
         match self {
             Self::CopyEndpoint => {
                 let endpoint = client.state()?.proxy_url;
-                copy(app, endpoint.ok_or("The Local API is unavailable")?)
+                let endpoint = endpoint.ok_or("The Local API is unavailable")?;
+                clipboard::write_text(app, endpoint, false)
             }
-            Self::CopyKey => copy(app, client.call(rpc::GetClientKey)?),
+            Self::CopyKey => clipboard::write_text(app, client.call(rpc::GetClientKey)?, true),
             Self::ActivateProfile(profile_id) => {
                 client.call(rpc::ActivateProfile { profile_id })?;
                 Ok(())
@@ -288,12 +288,6 @@ fn in_background(app: &AppHandle, task: Task) {
             &client.state().unwrap_or_else(|_| client.cached_state()),
         );
     });
-}
-
-fn copy(app: &AppHandle, text: String) -> Result<(), String> {
-    app.clipboard()
-        .write_text(text)
-        .map_err(|_| "The clipboard is unavailable".into())
 }
 
 /// Connects a disconnected agent, or disconnects a connected one. Codex's

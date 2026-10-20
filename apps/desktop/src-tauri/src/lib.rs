@@ -6,6 +6,7 @@ mod commands;
 mod app_data;
 mod autostart;
 mod cli_registration;
+mod clipboard;
 mod distribution;
 mod menu;
 mod notifications;
