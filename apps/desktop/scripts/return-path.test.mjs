@@ -9,7 +9,7 @@ test("sign-in returns to a path of this app, with its search and hash", () => {
 });
 
 test("anything that would leave the app, or isn't a path, returns to the default page", () => {
-  for (const value of ["//evil.example", "/\\evil.example/", "/\t/evil.example", "https://evil.example/", "usage", "", undefined, ["/usage"]]) {
+  for (const value of ["//evil.example", "/\\evil.example/", "/\t/evil.example", "/.//evil.example", "//", "//[", "https://evil.example/", "usage", "", undefined, ["/usage"]]) {
     assert.equal(returnPath(value, origin), undefined, JSON.stringify(value));
   }
 });
