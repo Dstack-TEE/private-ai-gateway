@@ -114,7 +114,6 @@ pub fn launch_hidden(app: &AppHandle) {
                 }
             });
         } else {
-            tracing::info!("No usable tray: showing the window minimized");
             present(&app, Presentation::Minimized);
         }
     });
@@ -175,8 +174,11 @@ pub fn show(app: &AppHandle) {
 fn present(app: &AppHandle, presentation: Presentation) {
     let mut state = state(app);
     // A window the user opened while the app was starting stays open.
-    if presentation == Presentation::Minimized && state.show_requested {
-        return;
+    if presentation == Presentation::Minimized {
+        if state.show_requested {
+            return;
+        }
+        tracing::info!("No usable tray: showing the window minimized");
     }
     state.show_requested = true;
     state.presentation = presentation;
