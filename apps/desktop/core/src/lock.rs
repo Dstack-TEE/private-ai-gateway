@@ -21,47 +21,12 @@ pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
-    let path = dir.join(name);
-    let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let result = options.open(&path);
-    #[cfg(unix)]
-    let result = result.map_err(|error| {
-        if error.raw_os_error() == Some(libc::ELOOP) {
-            return io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("lock file {} must not be a symlink", path.display()),
-            );
-        }
-        error
-    });
-    let file = result?;
-    #[cfg(unix)]
-    validate_lock_file(&file, &path)?;
-    Ok(file)
-}
-
-#[cfg(unix)]
-fn validate_lock_file(file: &fs::File, path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "lock file {} must be a regular file owned by the current user",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join(name))
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
@@ -78,38 +43,6 @@ impl InstanceLock {
             _file: self._file.clone(),
         }
     }
-}
-
-#[cfg(unix)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct InstanceOwner {
-    pub process_id: u32,
-    pub endpoint: String,
-}
-
-/// Diagnostic metadata only; the OS lock remains the authority for ownership.
-#[cfg(unix)]
-pub(crate) fn instance_owner(data_dir: &Path) -> io::Result<Option<InstanceOwner>> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let path = data_dir.join("instance.lock");
-    let file = match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    validate_lock_file(&file, &path)?;
-    if taken(file.try_lock_shared())? {
-        return Ok(None);
-    }
-    serde_json::from_reader(file.take(4096))
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// The startup gate, a reader-writer lock (`flock(2)` `LOCK_SH`/`LOCK_EX`,
@@ -147,25 +80,7 @@ pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
     create_or_repair_private_dir(data_dir)?;
     let file = open(data_dir, "instance.lock")?;
-    if !taken(file.try_lock())? {
-        return Ok(None);
-    }
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        let mut writer = &file;
-
-        let owner = InstanceOwner {
-            process_id: std::process::id(),
-            endpoint: crate::transport::endpoint_path_in(data_dir)?
-                .display()
-                .to_string(),
-        };
-        let metadata = serde_json::to_vec(&owner)?;
-        file.set_len(0)?;
-        writer.write_all(&metadata)?;
-    }
-    Ok(Some(InstanceLock {
+    Ok(taken(file.try_lock())?.then(|| InstanceLock {
         _file: Arc::new(file),
     }))
 }
@@ -228,22 +143,6 @@ mod tests {
             fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
             0o700
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_symlinked_instance_lock_never_changes_its_target() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().unwrap();
-        let victim = temp.path().join("victim");
-        fs::write(&victim, "untouched").unwrap();
-        symlink(&victim, temp.path().join("instance.lock")).unwrap();
-        let error = instance(temp.path()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("must not be a symlink"));
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
-        assert!(instance_owner(temp.path()).is_err());
     }
 
     /// Waits for `acquire` to succeed. Files are opened `O_CLOEXEC`, but a

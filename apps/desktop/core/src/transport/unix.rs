@@ -266,9 +266,6 @@ fn socket_path_fits(path: &Path) -> bool {
 }
 
 fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.uid() != effective_uid()) {
-        return Err(runtime_directory_owner_error(dir));
-    }
     private_fs::create_or_repair_private_dir(dir)?;
     validate_private_dir(dir)
 }

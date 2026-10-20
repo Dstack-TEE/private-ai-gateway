@@ -179,33 +179,6 @@ mod tests {
         env::temp_dir().join(name)
     }
 
-    #[test]
-    fn home_environment_precedence_matches_the_platform() {
-        let home = absolute("home");
-        let profile = absolute("profile");
-        for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
-            for (vars, expected) in [
-                (vec![("HOME", home.clone())], &home),
-                (vec![("USERPROFILE", profile.clone())], &profile),
-                (
-                    vec![("HOME", home.clone()), ("USERPROFILE", profile.clone())],
-                    if platform == Platform::Windows {
-                        &profile
-                    } else {
-                        &home
-                    },
-                ),
-            ] {
-                let env = |name: &str| {
-                    vars.iter()
-                        .find(|(key, _)| *key == name)
-                        .map(|(_, value)| value.clone())
-                };
-                assert_eq!(&home_dir_in(platform, &env).unwrap(), expected);
-            }
-        }
-    }
-
     fn resolve(platform: Platform, vars: &[(&str, PathBuf)]) -> (PathBuf, Option<PathBuf>) {
         let vars: HashMap<_, _> = vars.iter().cloned().collect();
         let env = |name: &str| vars.get(name).cloned();

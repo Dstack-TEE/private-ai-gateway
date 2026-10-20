@@ -155,11 +155,7 @@ protection problems, is stored under that key.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
 - The service acquires its instance lock before loading state; a second
-  backend exits with status 75. The client waits up to the readiness deadline
-  for the winner to finish starting or recover its endpoint. On timeout, it
-  reports the PID and endpoint recorded in the Unix `instance.lock` file.
-  The record is diagnostic metadata and may be stale with an older backend;
-  the OS file lock decides ownership.
+  backend exits, and a client that started it waits for the one that won.
 - `startup.lock` is the installer gate, a reader-writer file lock: clients
   starting the backend hold it shared, so they never wait for each other;
   an installer or updater holds it exclusively while it stops the backend and
