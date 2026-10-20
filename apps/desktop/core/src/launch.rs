@@ -19,6 +19,21 @@ pub struct BackgroundService {
 }
 
 impl BackgroundService {
+    pub(crate) fn from_child(mut child: Child) -> Result<Self, String> {
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Cannot capture PAP service startup diagnostics")?;
+        let diagnostics = Arc::new(Mutex::new(Vec::new()));
+        let captured = diagnostics.clone();
+        let stderr_reader = std::thread::spawn(move || capture_stderr(stderr, captured));
+        Ok(Self {
+            child,
+            stderr_reader: Some(stderr_reader),
+            diagnostics,
+        })
+    }
+
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
@@ -112,7 +127,8 @@ pub const ALIAS_ENV: &str = "PRIVATE_AI_PROXY_ALIAS";
 
 /// The service's exit status when another backend owns the instance lock:
 /// `EX_TEMPFAIL` of `sysexits.h`, a temporary condition. A client that
-/// started it waits for the backend that won instead of reporting a failure.
+/// started it waits for the winner up to its readiness deadline, then reports
+/// the recorded lock owner when available.
 pub const EXIT_ALREADY_RUNNING: i32 = 75;
 
 /// A command for any process the CLI starts, without [`ALIAS_ENV`].
@@ -135,20 +151,9 @@ pub fn spawn_background() -> Result<BackgroundService, String> {
         .stderr(Stdio::piped());
     // Inherit runtime-selection variables unchanged. A child-only data override
     // would move its socket away from the parent's Linux or macOS endpoint.
-    let mut child = spawn_detached(&mut command)
+    let child = spawn_detached(&mut command)
         .map_err(|error| format!("Cannot start PAP service: {error}"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("Cannot capture PAP service startup diagnostics")?;
-    let diagnostics = Arc::new(Mutex::new(Vec::new()));
-    let captured = diagnostics.clone();
-    let stderr_reader = std::thread::spawn(move || capture_stderr(stderr, captured));
-    Ok(BackgroundService {
-        child,
-        stderr_reader: Some(stderr_reader),
-        diagnostics,
-    })
+    BackgroundService::from_child(child)
 }
 
 fn capture_stderr(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {

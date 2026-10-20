@@ -155,10 +155,11 @@ protection problems, is stored under that key.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
 - The service acquires its instance lock before loading state; a second
-  backend exits with status 75. The client checks the winner's endpoint once;
-  if it is unavailable, it reports the lock owner's PID and endpoint on Unix
-  instead of waiting for the startup deadline. The record in `instance.lock`
-  is diagnostic metadata; the OS file lock decides ownership.
+  backend exits with status 75. The client waits up to the readiness deadline
+  for the winner to finish starting or recover its endpoint. On timeout, it
+  reports the PID and endpoint recorded in the Unix `instance.lock` file.
+  The record is diagnostic metadata and may be stale with an older backend;
+  the OS file lock decides ownership.
 - `startup.lock` is the installer gate, a reader-writer file lock: clients
   starting the backend hold it shared, so they never wait for each other;
   an installer or updater holds it exclusively while it stops the backend and
@@ -214,8 +215,10 @@ are `0600`, and check the peer UID in both directions (`SO_PEERCRED` or
 instance-lock owner may reclaim a stale socket, and only the socket inode
 owned by a listener is removed when it closes. The listener checks its socket
 identity every second while accepting and rebinds the same endpoint if the
-socket or its runtime directory was removed. It repairs an existing directory's
-permissions to `0700` only when the directory is real and owned by the user;
+socket or its runtime directory was removed. If logind removes all of
+`/run/user/$UID`, recovery resumes once logind recreates that directory; the
+backend cannot recreate it under the root-owned `/run/user`. It repairs an
+existing directory's permissions to `0700` only when the directory is real and owned by the user;
 connecting clients reject insecure directories without changing them. A runtime
 directory owned by another user is reported explicitly.
 

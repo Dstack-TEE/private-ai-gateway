@@ -182,74 +182,11 @@ impl Client {
             }
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = Some(crate::launch::spawn_background()?);
-        // A backend that exits is reported immediately below; this only bounds a
-        // live but slow start.
-        let deadline = Instant::now() + BACKEND_START_TIMEOUT;
-        loop {
-            match block_on(open())? {
-                Ok(connection) if current(&connection.version) => {
-                    reap(child);
-                    return Ok(());
-                }
-                Ok(_) => {
-                    if let Some(mut child) = child {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
-                }
-                Err(error) if absent(&error) => {}
-                // A live backend can accept the socket and then stall before
-                // answering /api/version. Keep the startup deadline as the
-                // outer bound instead of returning early on one HELLO timeout.
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-                Err(error) => {
-                    reap(child);
-                    return Err(connection_error(error));
-                }
-            }
-            if let Some(running) = child.as_mut() {
-                if let Some(status) = running
-                    .try_wait()
-                    .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
-                {
-                    if status.code() == Some(crate::launch::EXIT_ALREADY_RUNNING) {
-                        let endpoint = transport::endpoint_path().map_err(connection_error)?;
-                        let connection = block_on(already_running_at(&data, &endpoint))??;
-                        reap(child);
-                        return if current(&connection.version) {
-                            Ok(())
-                        } else {
-                            Err(OTHER_BUILD.into())
-                        };
-                    } else {
-                        let diagnostic = running.startup_diagnostic();
-                        return Err(match diagnostic {
-                            Some(diagnostic) => {
-                                format!("Backend exited during startup ({status}): {diagnostic}")
-                            }
-                            None => format!("Backend exited during startup ({status})"),
-                        });
-                    }
-                }
-            }
-            if Instant::now() >= deadline {
-                // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
-                let diagnostic = child.as_ref().and_then(|child| child.diagnostic_snapshot());
-                if let Some(mut child) = child {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
-                return Err(match diagnostic {
-                    Some(diagnostic) => format!(
-                        "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
-                    ),
-                    None => "Backend readiness timed out. Run private-ai-proxy doctor.".into(),
-                });
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_for_service(
+            crate::launch::spawn_background()?,
+            &data,
+            BACKEND_START_TIMEOUT,
+        )
     }
 
     /// A client that starts the backend when needed and then follows its
@@ -547,26 +484,84 @@ fn acquire_startup(data: &Path, gate_wait: Duration) -> Result<crate::lock::Star
     }
 }
 
-/// A start exited 75. Check the winner once, rather than spending the startup
-/// deadline waiting for an orphaned endpoint while its process holds the lock.
-async fn already_running_at(data: &Path, endpoint: &Path) -> Result<Connection, String> {
-    match open_at(endpoint, HELLO_TIMEOUT).await {
-        Ok(connection) => Ok(connection),
-        Err(error) if absent(&error) || error.kind() == io::ErrorKind::TimedOut => {
-            #[cfg(unix)]
-            if let Ok(Some(owner)) = crate::lock::instance_owner(data) {
-                return Err(format!(
-                    "A backend already holds the instance lock (PID {}, endpoint {}), but its management endpoint is unavailable. Run private-ai-proxy doctor.",
-                    owner.process_id, owner.endpoint
-                ));
+/// Wait for the started backend or the instance-lock winner to answer.
+fn wait_for_service(
+    child: crate::launch::BackgroundService,
+    data: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = data;
+    let current = |version: &Version| version.version == protocol::BUILD_VERSION;
+    let mut child = Some(child);
+    // A failed start is reported immediately; a concurrent winner may still
+    // be starting or restoring its endpoint when our child exits 75.
+    let deadline = Instant::now() + timeout;
+    loop {
+        match block_on(open())? {
+            Ok(connection) if current(&connection.version) => {
+                reap(child);
+                return Ok(());
             }
-            let _ = data;
-            Err(format!(
-                "A backend already holds the instance lock, but its management endpoint {} is unavailable. Run private-ai-proxy doctor.",
-                endpoint.display()
-            ))
+            Ok(_) => {
+                if let Some(mut child) = child {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
+            }
+            Err(error) if absent(&error) => {}
+            // A live backend can accept the socket and then stall before
+            // answering /api/version. Keep the startup deadline as the
+            // outer bound instead of returning early on one HELLO timeout.
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => {
+                reap(child);
+                return Err(connection_error(error));
+            }
         }
-        Err(error) => Err(connection_error(error)),
+        if let Some(running) = child.as_mut() {
+            if let Some(status) = running
+                .try_wait()
+                .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
+            {
+                if status.code() == Some(crate::launch::EXIT_ALREADY_RUNNING) {
+                    child = None;
+                } else {
+                    let diagnostic = running.startup_diagnostic();
+                    return Err(match diagnostic {
+                        Some(diagnostic) => {
+                            format!("Backend exited during startup ({status}): {diagnostic}")
+                        }
+                        None => format!("Backend exited during startup ({status})"),
+                    });
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            // Never kill an unrelated winner or retry a mutation after an ambiguous timeout.
+            #[cfg(unix)]
+            if child.is_none() {
+                if let Ok(Some(owner)) = crate::lock::instance_owner(data) {
+                    return Err(format!(
+                        "Backend readiness timed out: backend PID {} recorded in the instance lock holds it, but its endpoint {} does not answer. Run private-ai-proxy doctor.",
+                        owner.process_id, owner.endpoint
+                    ));
+                }
+            }
+            let diagnostic = child.as_ref().and_then(|child| child.diagnostic_snapshot());
+            if let Some(mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            return Err(match diagnostic {
+                Some(diagnostic) => format!(
+                    "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
+                ),
+                None => "Backend readiness timed out. Run private-ai-proxy doctor.".into(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -806,25 +801,96 @@ mod tests {
         (temp, endpoint, listener)
     }
 
-    #[tokio::test]
-    async fn an_already_running_backend_with_no_endpoint_reports_its_owner_immediately() {
-        let (temp, endpoint, listener) = local_endpoint();
-        let _owner = crate::lock::instance(temp.path()).unwrap().unwrap();
-        let owner = crate::lock::instance_owner(temp.path()).unwrap().unwrap();
-        drop(listener);
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            super::already_running_at(temp.path(), &endpoint),
-        )
-        .await
-        .expect("exit 75 must not wait for the readiness deadline");
-        let error = match result {
-            Ok(_) => panic!("an orphaned endpoint unexpectedly answered"),
-            Err(error) => error,
+    #[test]
+    fn exit_75_waits_for_the_winner_and_names_the_recorded_owner_on_timeout() {
+        const ROLE: &str = "PAP_TEST_START_WAIT";
+        const SELECTOR: &str =
+            "client::tests::exit_75_waits_for_the_winner_and_names_the_recorded_owner_on_timeout";
+        let Ok(role) = std::env::var(ROLE) else {
+            for role in ["ready", "timeout"] {
+                let home = tempfile::tempdir().unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", SELECTOR, "--nocapture"])
+                    .env(ROLE, role)
+                    .env(crate::paths::HOME_OVERRIDE_ENV, home.path())
+                    .env_remove(crate::paths::APP_DATA_OVERRIDE_ENV)
+                    .env_remove(crate::paths::CONFIG_OVERRIDE_ENV)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                    "{role}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
         };
-        assert!(error.contains(&format!("PID {}", std::process::id())));
-        assert!(error.contains(&owner.endpoint));
-        assert!(error.contains("management endpoint is unavailable"));
+        let data = crate::paths::app_data_dir().unwrap();
+        let _owner = crate::lock::instance(&data).unwrap().unwrap();
+        let owner = crate::lock::instance_owner(&data).unwrap().unwrap();
+        let endpoint = crate::transport::endpoint_path().unwrap();
+        crate::private_fs::create_private_dir(endpoint.parent().unwrap()).unwrap();
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 75"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child = crate::launch::BackgroundService::from_child(child).unwrap();
+        assert_eq!(
+            child.wait().unwrap().code(),
+            Some(crate::launch::EXIT_ALREADY_RUNNING)
+        );
+        if role == "ready" {
+            let server = std::thread::spawn(move || {
+                super::block_on(async {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let listener = tokio::net::UnixListener::bind(endpoint).unwrap();
+                    let (mut stream, _) =
+                        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    request_headers(&mut stream).await;
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "apiVersion": crate::protocol::API_VERSION,
+                        "product": crate::brand::APP_IDENTIFIER,
+                        "version": crate::protocol::BUILD_VERSION,
+                        "instanceId": "concurrent-winner",
+                        "processId": std::process::id(),
+                        "executable": "test-backend"
+                    }))
+                    .unwrap();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                    stream.flush().await.unwrap();
+                })
+                .unwrap();
+            });
+            let result = super::wait_for_service(child, &data, Duration::from_secs(5));
+            server.join().unwrap();
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert_eq!(role, "timeout");
+            let started = Instant::now();
+            let timeout = Duration::from_millis(100);
+            let error = super::wait_for_service(child, &data, timeout).unwrap_err();
+            assert!(started.elapsed() >= timeout);
+            assert!(error.contains("Backend readiness timed out"));
+            assert!(error.contains(&format!(
+                "backend PID {} recorded in the instance lock",
+                owner.process_id
+            )));
+            assert!(error.contains(&owner.endpoint));
+            assert!(error.contains("does not answer"));
+        }
     }
 
     async fn request_headers(stream: &mut tokio::net::UnixStream) {
