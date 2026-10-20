@@ -1547,8 +1547,7 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
         ServiceError::UpstreamVerification(
             UpstreamVerificationError::NoEligibleAttestedRoute(_)
             | UpstreamVerificationError::NoEligibleAttestedSession(_),
-        )
-        | ServiceError::Upstream(UpstreamError::InvalidRequest(_)) => ErrorSource::Gateway,
+        ) => ErrorSource::Gateway,
         _ => ErrorSource::Upstream,
     }
 }
