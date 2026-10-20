@@ -74,15 +74,16 @@ pub fn menu_bar(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
 /// runs once; Settings… has the same id and action in both.
 pub fn handle_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
-        "documentation" => open_link(app, AboutLink::Documentation),
-        "github" => open_link(app, AboutLink::Github),
+        "documentation" => open_link(app, AboutLink::Documentation.url()),
+        "github" => open_link(app, AboutLink::Github.url()),
         id => crate::tray::handle_menu_event(app, id),
     }
 }
 
-fn open_link(app: &AppHandle, link: AboutLink) {
+/// Opens `url` in the default browser, reporting a failure in a notification.
+pub(crate) fn open_link(app: &AppHandle, url: &str) {
     use tauri_plugin_opener::OpenerExt;
-    if app.opener().open_url(link.url(), None::<&str>).is_err() {
+    if app.opener().open_url(url, None::<&str>).is_err() {
         crate::notifications::show_failure(
             app,
             "Could not open the link",
