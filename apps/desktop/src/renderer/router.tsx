@@ -11,17 +11,13 @@ import { UsagePage } from "./features/usage";
 import { distributionCapabilities, session, web } from "./lib/environment";
 import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/queries";
 import { queryClient } from "./lib/query-client";
+import { returnPath } from "./lib/return-path";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 
 // Loaders start the queries their page reads without awaiting them (TanStack
 // Query's router integration), so navigation never waits; the page shows
 // loading and failures itself.
 const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()({ notFoundComponent: PageNotFound });
-
-/** Only a same-origin path may be the page to return to after sign-in. */
-function returnPath(value: unknown): string | undefined {
-  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") ? value : undefined;
-}
 
 // The web UI signs in first; the desktop window has no session.
 const signInRoute = createRoute({

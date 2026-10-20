@@ -6,13 +6,20 @@ const draft = (fields) => ({ ...listenerDraft({ listenAddress: "127.0.0.1", allo
 
 test("the port saves as the number typed, within the listener's range", () => {
   assert.equal(listenerPort(draft({}), 1024), 4180);
+  assert.equal(listenerPort(draft({ port: "1024" }), 1024), 1024);
   assert.equal(listenerPort(draft({ port: "65535" }), 1024), 65535);
   assert.equal(listenerPort(draft({ port: "1" }), 1), 1);
+  // Spellings a number field accepts for the same integer.
+  for (const port of ["004180", "4180.0", "4.18e3", "4180e0"]) assert.equal(listenerPort(draft({ port }), 1024), 4180, port);
+  assert.equal(listenerPort(draft({ port: "1e4" }), 1024), 10000);
 });
 
-test("a cleared, partial or out-of-range port is refused, never saved as 0", () => {
-  for (const port of ["", " ", "0", "1023", "65536", "4180.5", "1e3", "-1", "99999999"]) {
+test("a cleared, fractional or out-of-range port is refused, never saved as 0", () => {
+  for (const port of ["", " ", "0", "1023", "65536", "4180.5", "1e3", "1e5", "-1", "99999999"]) {
     assert.throws(() => listenerPort(draft({ port }), 1024), { message: "Enter a port from 1024 to 65535." }, JSON.stringify(port));
+  }
+  for (const port of ["", "\t", "0", "0.5", "65536"]) {
+    assert.throws(() => listenerPort(draft({ port }), 1), { message: "Enter a port from 1 to 65535." }, JSON.stringify(port));
   }
 });
 

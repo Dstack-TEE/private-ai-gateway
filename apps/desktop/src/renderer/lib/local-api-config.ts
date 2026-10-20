@@ -21,8 +21,9 @@ export function listenerDraft<Config extends ListenConfig>(config: Config): List
 export function listenerPort(draft: ListenerDraft, minPort: number): number {
   const kind = localAddressKind(draft.listenAddress);
   if (!kind) throw new AuthoredError("Enter a valid IPv4 or IPv6 listen address.");
-  const port = /^\d{1,5}$/.test(draft.port) ? Number(draft.port) : Number.NaN;
-  if (!(port >= minPort && port <= 65_535)) throw new AuthoredError(`Enter a port from ${minPort} to 65535.`);
+  // As the number field reads it, so `004180` and `4.18e3` are 4180; `Number` would read blank as 0.
+  const port = draft.port.trim() ? Number(draft.port) : Number.NaN;
+  if (!Number.isInteger(port) || port < minPort || port > 65_535) throw new AuthoredError(`Enter a port from ${minPort} to 65535.`);
   if (kind === "unspecified" && !draft.clientHost?.trim()) throw new AuthoredError("Enter a client host for an all-interface listener.");
   return port;
 }
