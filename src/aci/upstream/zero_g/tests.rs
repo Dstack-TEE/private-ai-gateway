@@ -317,8 +317,6 @@ impl Fixture {
             provider_identity: None,
             endpoint: origin.clone(),
             model: MODEL.into(),
-            // The provider's own id for the model, which the router forwards.
-            model_id: "GLM-5.3".into(),
             signing_address: signer(2).1,
             e2ee_public_key: hex::encode(enc_pub),
         };
@@ -474,10 +472,7 @@ async fn buffered_request_is_sealed_pinned_and_verified() {
     assert_eq!(headers["x-0g-provider-allow-fallbacks"], "false");
     assert_eq!(headers["authorization"], "Bearer zg-test-key");
     assert!(!sent.to_string().contains("secret prompt"));
-    assert_eq!(
-        sent["model"], "GLM-5.3",
-        "the provider's model_id is sealed"
-    );
+    assert_eq!(sent["model"], MODEL, "the configured model is sealed");
 }
 
 #[tokio::test]

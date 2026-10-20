@@ -133,7 +133,8 @@ cargo test --test 0g_private_computer_live -- --ignored --nocapture
 ```
 
 It verifies the private-tier candidates for `glm-5.3`, or for the model in
-`PRIVATE_AI_GATEWAY_0G_MODEL` (route preview, on-chain
+`PRIVATE_AI_GATEWAY_0G_MODEL`, given as the provider's on-chain model id such as
+`0GM-1.0-35B-A3B` (route preview, on-chain
 record, DCAP quote, boot chain, signer), then sends one buffered and one
 streamed completion and requires each to open and its provider signature to
 verify; the stream must end in `[DONE]`. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`

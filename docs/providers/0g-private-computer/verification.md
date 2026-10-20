@@ -25,18 +25,18 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
   "accepted_subjects": [
     "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"
   ],
-  "models": {"glm-5.3": "glm-5.3"}
+  "models": {"glm-5.3": "glm-5.3", "0gm-1.0-35b-a3b": "0GM-1.0-35B-A3B"}
 }]
 ```
 
-`base_url` must be the 0G router itself (`router-api-cloud.0g.ai`), not the public entry `router-api.0g.ai`. The public entry is 0G's hosted gateway: it seals plaintext requests on the caller's behalf, so it would see the prompt, and it rejects an already-sealed request (`seal request: no sealed fields`). Pointing at it therefore fails closed. `models` is the model allowlist, keyed to the router's `canonical_id` for each model. `accepted_subjects` pins the provider OS images (see [Boot-chain pins](#boot-chain-pins)); it is required. The chain RPC is the independent source of provider records, so use one you trust independently of 0G's router. The private-tier header and the `TargetSeparated` rule are code, not config.
+`base_url` must be the 0G router itself (`router-api-cloud.0g.ai`), not the public entry `router-api.0g.ai`. The public entry is 0G's hosted gateway: it seals plaintext requests on the caller's behalf, so it would see the prompt, and it rejects an already-sealed request (`seal request: no sealed fields`). Pointing at it therefore fails closed. `models` is the model allowlist: each public name maps to the provider's on-chain model id, exactly as the InferenceServing record spells it. That configured id is the only model identity PAG trusts. `accepted_subjects` pins the provider OS images (see [Boot-chain pins](#boot-chain-pins)); it is required. The chain RPC is the independent source of provider records, so use one you trust independently of 0G's router. The private-tier header and the `TargetSeparated` rule are code, not config.
 
 ## Verification algorithm
 
 Per configured model, cached for `verifier_cache_seconds` (verified results only):
 
-1. `POST /v1/routing/preview` with the model, `service_type: chatbot` and `X-0G-Provider-Trust-Mode: private`. Candidates are deduplicated by address and capped at eight. A candidate's `canonical_id` must equal the configured model exactly. Its `model_id` is the provider's own id for that model, which is what the router forwards to the broker (glm-5.3 uses the same spelling for both; 0GM is `0gm-1.0-35b-a3b` / `0GM-1.0-35B-A3B`). These are 0G's own identifiers; 0G's client seals the `canonical_id` (`client/route/route.go`, `Provider`).
-2. `getService(address)` on the InferenceServing contract through `zg_chain_rpc_url`. Require `teeSignerAcknowledged`, the record's `model` equal to the candidate's `model_id` exactly, and `additionalInfo` declaring `"TargetSeparated": false`. A separated target means the broker forwards plaintext beyond its TEE; absent or unreadable is refused.
+1. `POST /v1/routing/preview` with the model, `service_type: chatbot` and `X-0G-Provider-Trust-Mode: private`. Candidates are deduplicated by address and capped at eight. A candidate's `model_id` must equal the configured upstream model exactly. The router's `canonical_id` is catalog metadata and is never used for identity.
+2. `getService(address)` on the InferenceServing contract through `zg_chain_rpc_url`. Require `teeSignerAcknowledged`, the record's `model` equal to the configured upstream model exactly, and `additionalInfo` declaring `"TargetSeparated": false`. A separated target means the broker forwards plaintext beyond its TEE; absent or unreadable is refused.
 3. `GET <record url>/v1/quote?legacy=false` from the broker directly, HTTPS only, no redirects, no ambient proxy.
 4. Verify the TDX quote to Intel's root with `dcap-qvl` (`pccs_url`, default Phala PCCS), which refuses invalid TCB statuses and debug TDs.
 5. Require the quote's boot chain to be one of the route's `accepted_subjects`.
@@ -61,13 +61,13 @@ printf '%s' "$MRTD$RTMR1$RTMR2" | xxd -r -p | sha256sum
 
 ## Adding a model
 
-Adding a model is configuration only: add it to the route's `models` under its router `canonical_id`, and make sure `accepted_subjects` covers the image its provider runs. It must be a chat-completions model whose private-tier provider has an acknowledged signer and `TargetSeparated: false`. Run the live test with `PRIVATE_AI_GATEWAY_0G_MODEL` set to the model before routing traffic to it.
+Adding a model is configuration only: map its public name in the route's `models` to the provider's on-chain model id (for example `"0gm-1.0-35b-a3b": "0GM-1.0-35B-A3B"`), and make sure `accepted_subjects` covers the image its provider runs. It must be a chat-completions model whose private-tier provider has an acknowledged signer and `TargetSeparated: false`. Run the live test with `PRIVATE_AI_GATEWAY_0G_MODEL` set to the model before routing traffic to it.
 
 ## Forwarding
 
 The backend uses the first provider, in preview order, whose recorded key hashes to a binding the current event carries.
 
-- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. Because the router forwards the provider's `model_id`, that is the `model` sealed: 0G's client leaves `model` unbound so the router can rewrite it, and PAG instead seals the value the router will forward. Any other field is refused with a 400 `invalid_request_error` instead of being sent in the clear. Only `/v1/chat/completions` is served.
+- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. The sealed `model` is the configured on-chain id, which the router forwards unchanged. 0G's client instead seals the `canonical_id` and leaves `model` unbound so the router can rewrite it. Any other field is refused with a 400 `invalid_request_error` instead of being sent in the clear. Only `/v1/chat/completions` is served.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response becomes a generic upstream error; its body is not returned.
 
@@ -90,7 +90,7 @@ A receipt cites the session of the provider that served it. That session's claim
 | `tcb_up_to_date` | Hardware-proven from the provider's TCB status. |
 | `os_known_good`, `gpu_attested`, `serving_software_known_good`, `model_weights_provenance` | Unknown. |
 
-`claims.extra` also records `boot_chain`, `model_id`, `compose_hash` (v1 `mr_config_id`), `onchain_verifiability` (recorded, not trusted) and `plaintext_destination_verified: false`.
+`claims.extra` also records `boot_chain`, `compose_hash` (v1 `mr_config_id`), `onchain_verifiability` (recorded, not trusted) and `plaintext_destination_verified: false`.
 
 ## Limitations
 

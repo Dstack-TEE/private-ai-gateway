@@ -26,25 +26,24 @@ const RTMR2: usize = 472;
 const BOOT_CHAIN: &str =
     "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc";
 
-/// Candidates: `a` is sound; `i` is sound under 0G's two model ids
-/// (`canonical_id` `0gm-1.0-35b-a3b`, `model_id` `0GM-1.0-35B-A3B`); each other
+/// Candidates: `a` is sound; `i` is sound for 0GM, whose on-chain id
+/// `0GM-1.0-35B-A3B` differs from the router's `canonical_id`; each other
 /// letter breaks one check.
 const NAMES: [&str; 9] = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
 
-/// What the router offers for `name`: (canonical_id, model_id).
-fn offered(name: &str) -> (&'static str, &'static str) {
-    match name {
-        "i" => ("0gm-1.0-35b-a3b", "0GM-1.0-35B-A3B"),
-        _ => (MODEL, MODEL),
+/// The model id the router offers for `name` (and its on-chain record serves).
+fn offered(name: &str) -> &'static str {
+    if name == "i" {
+        "0GM-1.0-35B-A3B"
+    } else {
+        MODEL
     }
 }
 
-fn candidate(name: &str) -> PreviewCandidate {
-    let (canonical_id, model_id) = offered(name);
+fn candidate(name: &str, model_id: &str) -> PreviewCandidate {
     PreviewCandidate {
         address: address(name),
         provider_identity: None,
-        canonical_id: canonical_id.into(),
         model_id: model_id.into(),
     }
 }
@@ -66,11 +65,7 @@ fn word(value: usize) -> Vec<u8> {
 /// ABI-encode a `getService` return for `name`.
 fn service_record(origin: &str, name: &str) -> String {
     // `d` serves a model other than the one the router names for it.
-    let model = if name == "d" {
-        "glm-5"
-    } else {
-        offered(name).1
-    };
+    let model = if name == "d" { "glm-5" } else { offered(name) };
     let separated = name == "b";
     let strings = [
         "chatbot".to_string(),
@@ -134,8 +129,8 @@ async fn preview(
         .unwrap()
         .iter()
         .map(|name| {
-            let (canonical_id, model_id) = offered(name);
-            json!({"address": address(name), "canonical_id": canonical_id, "model_id": model_id})
+            // canonical_id is catalog metadata, deliberately unequal here.
+            json!({"address": address(name), "canonical_id": "metadata-only", "model_id": offered(name)})
         })
         .collect();
     Json(json!({"providers": providers}))
@@ -216,7 +211,7 @@ async fn rejects_each_unsafe_candidate_before_sealing() {
         ("h", "collateral rejected"),
     ] {
         let err = verifier
-            .verify_candidate(&candidate(name), MODEL)
+            .verify_candidate(&candidate(name, MODEL), MODEL)
             .await
             .expect_err(name);
         assert!(err.contains(expected), "{name}: {err}");
@@ -225,28 +220,44 @@ async fn rejects_each_unsafe_candidate_before_sealing() {
 }
 
 #[tokio::test]
-async fn model_identity_follows_0g_canonical_and_provider_ids() {
+async fn model_identity_comes_only_from_configuration_and_chain() {
     let (_, verifier, server) = fixture().await;
-    // The configured model is the router's canonical_id; the on-chain model is
-    // the provider's model_id, which the backend seals. Both compare exactly.
+    // The configured upstream model is the on-chain id; the router must offer
+    // exactly it, whatever its canonical_id says.
     let verified = verifier
-        .verify_candidate(&candidate("i"), "0gm-1.0-35b-a3b")
+        .verify_candidate(&candidate("i", "0GM-1.0-35B-A3B"), "0GM-1.0-35B-A3B")
         .await
         .unwrap();
-    assert_eq!(verified.provider.model, "0gm-1.0-35b-a3b");
-    assert_eq!(verified.provider.model_id, "0GM-1.0-35B-A3B");
-    let verified = verifier
-        .verify_candidate(&candidate("a"), MODEL)
-        .await
-        .unwrap();
-    assert_eq!(verified.provider.model_id, MODEL);
+    assert_eq!(verified.provider.model, "0GM-1.0-35B-A3B");
 
-    for model in ["0GM-1.0-35B-A3B", "0gm-1.0-35b"] {
+    // A router substituting a legitimate provider for model B under a
+    // configured model A, either by offering B or by mislabelling it A, and
+    // the router's canonical spelling of 0GM, are all refused.
+    for (name, offered, configured, expected) in [
+        (
+            "a",
+            MODEL,
+            "router-invented-model-a",
+            "router offered model",
+        ),
+        (
+            "a",
+            "router-invented-model-a",
+            "router-invented-model-a",
+            "serves model",
+        ),
+        (
+            "i",
+            "0GM-1.0-35B-A3B",
+            "0gm-1.0-35b-a3b",
+            "router offered model",
+        ),
+    ] {
         let err = verifier
-            .verify_candidate(&candidate("i"), model)
+            .verify_candidate(&candidate(name, offered), configured)
             .await
-            .unwrap_err();
-        assert!(err.contains("canonical model"), "{model}: {err}");
+            .expect_err(configured);
+        assert!(err.contains(expected), "{configured}: {err}");
     }
     server.abort();
 }
@@ -291,7 +302,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
 #[tokio::test]
 async fn rejection_reasons_never_carry_the_chain_rpc_credential() {
     let (mock, _, server) = fixture().await;
-    let candidate = candidate("a");
+    let candidate = candidate("a", MODEL);
     // An unreachable RPC and one that answers 404 both embed path and query
     // secrets in their URL.
     for rpc in [

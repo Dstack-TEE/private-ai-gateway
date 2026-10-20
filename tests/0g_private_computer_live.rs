@@ -1,7 +1,7 @@
 //! Live 0G Private Computer test: private-tier verification, then one buffered
 //! and one streamed completion, each released only after the provider's
-//! signature verifies. `PRIVATE_AI_GATEWAY_0G_MODEL` overrides the model
-//! (default `glm-5.3`).
+//! signature verifies. `PRIVATE_AI_GATEWAY_0G_MODEL` overrides the model, as
+//! the provider's on-chain id (default `glm-5.3`; e.g. `0GM-1.0-35B-A3B`).
 //!
 //! `PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=/path/to/key cargo test --test 0g_private_computer_live -- --ignored --nocapture`
 

@@ -35,11 +35,9 @@ pub(super) struct PreviewCandidate {
     pub address: String,
     #[serde(default)]
     pub provider_identity: Option<String>,
-    /// The model id the caller names (0G's client seals this one).
-    #[serde(default)]
-    pub canonical_id: String,
-    /// The provider's own id for that model, as on chain and as the router
-    /// forwards it.
+    /// The provider's id for the model, which must equal the configured
+    /// upstream model. The router's `canonical_id` is catalog metadata and is
+    /// never used for identity.
     #[serde(default)]
     pub model_id: String,
 }
@@ -224,11 +222,10 @@ impl ZeroGProviderVerifier {
         candidate: &PreviewCandidate,
         model: &str,
     ) -> Result<VerifiedCandidate, String> {
-        if candidate.canonical_id != model {
-            return Err(format!(
-                "router offered canonical model {:?}",
-                candidate.canonical_id
-            ));
+        // The configured upstream model is the only trusted model id: the
+        // router's candidate and the on-chain record must both name it.
+        if candidate.model_id != model {
+            return Err(format!("router offered model {:?}", candidate.model_id));
         }
         let address = candidate.address.to_ascii_lowercase();
         if address.len() != 42 || !address.starts_with("0x") || hex::decode(&address[2..]).is_err()
@@ -240,11 +237,8 @@ impl ZeroGProviderVerifier {
         if !service.acknowledged {
             return Err("on-chain teeSignerAddress is not acknowledged".to_string());
         }
-        if candidate.model_id.is_empty() || *onchain_model != candidate.model_id {
-            return Err(format!(
-                "on-chain service serves model {onchain_model:?}, not {:?}",
-                candidate.model_id
-            ));
+        if onchain_model != model {
+            return Err(format!("on-chain service serves model {onchain_model:?}"));
         }
         let info: Value = serde_json::from_str(additional_info).unwrap_or_default();
         if info.get("TargetSeparated") != Some(&Value::Bool(false)) {
@@ -311,7 +305,6 @@ impl ZeroGProviderVerifier {
                 provider_identity: candidate.provider_identity.clone(),
                 endpoint: url.clone(),
                 model: model.to_string(),
-                model_id: candidate.model_id.clone(),
                 signing_address: signer,
                 e2ee_public_key: hex::encode(enc_pub),
             },
