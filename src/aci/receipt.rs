@@ -168,6 +168,7 @@ pub struct SignedReceipt {
     /// Lookup ids, duplicated out of the document so stores never parse it.
     pub receipt_id: String,
     pub chat_id: Option<String>,
+    pub workload_keyset_digest: String,
     /// The §7.2 receipt document bytes as served.
     pub document: Vec<u8>,
     pub key_id: String,
@@ -175,6 +176,10 @@ pub struct SignedReceipt {
 }
 
 impl SignedReceipt {
+    pub fn workload_keyset_digest(&self) -> &str {
+        &self.workload_keyset_digest
+    }
+
     /// Parse the stored document (for legacy surfaces and tests).
     pub fn document_json(&self) -> Result<Value, serde_json::Error> {
         serde_json::from_slice(&self.document)
@@ -216,6 +221,10 @@ impl ReceiptBuilder {
             served_at,
             events: Vec::new(),
         }
+    }
+
+    pub fn workload_keyset_digest(&self) -> &str {
+        &self.workload_keyset_digest
     }
 
     fn append(&mut self, event_type: &str, fields: Map<String, Value>) -> Result<(), ReceiptError> {
@@ -463,6 +472,7 @@ impl ReceiptBuilder {
         Ok(SignedReceipt {
             receipt_id: self.receipt_id,
             chat_id: self.chat_id,
+            workload_keyset_digest: self.workload_keyset_digest,
             document: digest::jcs_bytes(&document)?,
             key_id: receipt_key.key_id,
             signature_hex,

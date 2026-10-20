@@ -16,7 +16,7 @@ use crate::aci::e2ee::{
     is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
     E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V1, E2EE_VERSION_V2,
 };
-use crate::aci::identity::{attestation_statement, report_data};
+use crate::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
 use crate::aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
 use crate::aci::types::{AttestationEnvelope, AttestationReport};
 
@@ -36,10 +36,11 @@ impl AciService {
         nonce: Option<String>,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
-        let statement = attestation_statement(self.keyset.digest(), nonce.as_deref())?;
+        let keyset = self.current_keyset();
+        let statement = attestation_statement(keyset.digest(), nonce.as_deref())?;
         let rd = report_data(&statement);
         let quote = self.quoter.get_quote(rd).await?;
-        self.assemble_report(&rd, quote, domain)
+        self.assemble_report(&keyset, &rd, quote, domain)
     }
 
     /// Legacy dstack-vllm-proxy compatibility report. The quote binds
@@ -60,7 +61,7 @@ impl AciService {
     ) -> Result<AttestationReport, ServiceError> {
         let rd = self.legacy_report_data(signing_algo, version, nonce, domain)?;
         let quote = self.quoter.get_quote_raw(rd).await?;
-        self.assemble_report(&rd, quote, domain)
+        self.assemble_report(&self.current_keyset(), &rd, quote, domain)
     }
 
     /// Build `identity(32) ‖ nonce(32)`. The nonce is the raw 32 bytes when it
@@ -147,10 +148,11 @@ impl AciService {
     /// (v2 cannot be produced without one — matching the proxy).
     fn legacy_tls_spki_fingerprint(&self, domain: Option<&str>) -> Result<[u8; 32], ServiceError> {
         let key_err = |msg: String| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg));
+        let keyset = self.keyset();
         let spki_hex = domain
             .and_then(normalize_downstream_domain)
             .and_then(|domain| {
-                self.keyset()
+                keyset
                     .tls_public_keys
                     .iter()
                     .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -171,6 +173,7 @@ impl AciService {
 
     fn assemble_report(
         &self,
+        keyset: &SealedWorkloadKeyset,
         report_data_bytes: &[u8],
         quote: crate::aci::keys::Quote,
         domain: Option<&str>,
@@ -205,10 +208,10 @@ impl AciService {
 
         Ok(AttestationReport {
             api_version: "aci/1".to_string(),
-            workload_keyset_digest: self.keyset.digest().to_string(),
+            workload_keyset_digest: keyset.digest().to_string(),
             attestation: AttestationEnvelope {
                 tee_type: self.config.tee_type.clone(),
-                workload_keyset: self.keyset.to_value(),
+                workload_keyset: keyset.to_value(),
                 report_data_hex: hex::encode(report_data_bytes),
                 source_provenance: self.config.source_provenance.clone(),
                 evidence,
@@ -269,9 +272,8 @@ impl AciService {
         // The client selects an E2EE v2 §4 suite by the `algo` of the keyset
         // entry it encrypts to (§7). Match `X-Model-Pub-Key` against each suite entry
         // under that suite's own normalization; the first match fixes the suite.
-        let selected_key = self
-            .keyset
-            .keyset()
+        let keyset = self.keyset();
+        let selected_key = keyset
             .e2ee_public_keys
             .iter()
             .find(|key| {
