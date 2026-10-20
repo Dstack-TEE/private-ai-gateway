@@ -10,16 +10,17 @@
 use std::{
     fs, io,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::private_fs::create_private_dir;
+use crate::private_fs::create_or_repair_private_dir;
 
 /// The wait for a just-released instance lock, needed on Windows.
 pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
-    create_private_dir(dir)?;
+    create_or_repair_private_dir(dir)?;
     fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -29,8 +30,44 @@ fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
+#[derive(Debug)]
 pub struct InstanceLock {
-    _file: fs::File,
+    _file: Arc<fs::File>,
+}
+
+#[cfg(unix)]
+impl InstanceLock {
+    /// Keep ownership for the listener's lifetime, including socket recovery.
+    pub(crate) fn retain(&self) -> Self {
+        Self {
+            _file: self._file.clone(),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct InstanceOwner {
+    pub process_id: u32,
+    pub endpoint: String,
+}
+
+/// Diagnostic metadata only; the OS lock remains the authority for ownership.
+#[cfg(unix)]
+pub(crate) fn instance_owner(data_dir: &Path) -> io::Result<Option<InstanceOwner>> {
+    use std::io::Read;
+
+    let file = match fs::File::open(data_dir.join("instance.lock")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if taken(file.try_lock_shared())? {
+        return Ok(None);
+    }
+    serde_json::from_reader(file.take(4096))
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// The startup gate, a reader-writer lock (`flock(2)` `LOCK_SH`/`LOCK_EX`,
@@ -67,7 +104,27 @@ pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
     let file = open(data_dir, "instance.lock")?;
-    Ok(taken(file.try_lock())?.then_some(InstanceLock { _file: file }))
+    if !taken(file.try_lock())? {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        let mut writer = &file;
+
+        let owner = InstanceOwner {
+            process_id: std::process::id(),
+            endpoint: crate::transport::endpoint_path_in(data_dir)?
+                .display()
+                .to_string(),
+        };
+        let metadata = serde_json::to_vec(&owner)?;
+        file.set_len(0)?;
+        writer.write_all(&metadata)?;
+    }
+    Ok(Some(InstanceLock {
+        _file: Arc::new(file),
+    }))
 }
 
 /// [`instance`], waiting up to `wait` for a holder to release it: Windows may

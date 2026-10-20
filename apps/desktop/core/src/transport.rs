@@ -16,6 +16,8 @@ mod platform;
 #[cfg(not(any(unix, windows)))]
 compile_error!("desktop local IPC is supported only on Unix and Windows");
 
+#[cfg(unix)]
+pub(crate) use platform::RuntimeDirectoryOwnerError;
 pub use platform::{connect, ClientStream, Listener, Stream};
 
 const ENDPOINT_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -23,7 +25,11 @@ const ENDPOINT_HASH_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Resolve the endpoint used by both the backend and its local clients.
 pub fn endpoint_path() -> io::Result<PathBuf> {
-    platform::endpoint_path(&data_dir()?, platform::SOCKET_FILE)
+    endpoint_path_in(&data_dir()?)
+}
+
+pub(crate) fn endpoint_path_in(data_dir: &std::path::Path) -> io::Result<PathBuf> {
+    platform::endpoint_path(data_dir, platform::SOCKET_FILE)
 }
 
 /// The endpoint where a 0.1.4 to 0.2 beta backend answers its NDJSON protocol.

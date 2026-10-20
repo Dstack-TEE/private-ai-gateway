@@ -15,6 +15,9 @@ pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 pub struct DataLines {
     codec: LinesCodec,
     buffer: BytesMut,
+    event: String,
+    has_data: bool,
+    discarding_event: bool,
 }
 
 impl Default for DataLines {
@@ -22,6 +25,9 @@ impl Default for DataLines {
         Self {
             codec: LinesCodec::new_with_max_length(MAX_LINE_BYTES),
             buffer: BytesMut::new(),
+            event: String::new(),
+            has_data: false,
+            discarding_event: false,
         }
     }
 }
@@ -31,14 +37,14 @@ impl DataLines {
         Self::default()
     }
 
-    /// Feeds the next bytes, calling `data` with the value of every `data`
-    /// line they complete.
+    /// Feeds the next bytes, calling `data` for each completed event. Multiple
+    /// `data:` lines in an event are joined with a newline.
     pub fn push(&mut self, bytes: &[u8], mut data: impl FnMut(&str)) {
         self.buffer.extend_from_slice(bytes);
         // An over-long or non-UTF-8 line is an error for that line only.
         while let Some(line) = self.codec.decode(&mut self.buffer).transpose() {
-            if let Some(value) = line.ok().as_deref().and_then(data_value) {
-                data(value);
+            if let Ok(line) = line {
+                self.line(&line, &mut data);
             }
         }
     }
@@ -46,10 +52,41 @@ impl DataLines {
     /// Ends the stream; a last line without a line break still counts.
     pub fn finish(&mut self, mut data: impl FnMut(&str)) {
         while let Some(line) = self.codec.decode_eof(&mut self.buffer).transpose() {
-            if let Some(value) = line.ok().as_deref().and_then(data_value) {
-                data(value);
+            if let Ok(line) = line {
+                self.line(&line, &mut data);
             }
         }
+        self.dispatch(&mut data);
+    }
+
+    fn line(&mut self, line: &str, data: &mut impl FnMut(&str)) {
+        if line.is_empty() {
+            self.dispatch(data);
+        } else if let Some(value) = data_value(line) {
+            if self.discarding_event {
+                return;
+            }
+            if self.event.len() + usize::from(self.has_data) + value.len() > MAX_LINE_BYTES {
+                self.event.clear();
+                self.has_data = false;
+                self.discarding_event = true;
+                return;
+            }
+            if self.has_data {
+                self.event.push('\n');
+            }
+            self.event.push_str(value);
+            self.has_data = true;
+        }
+    }
+
+    fn dispatch(&mut self, data: &mut impl FnMut(&str)) {
+        if self.has_data {
+            data(&self.event);
+        }
+        self.event.clear();
+        self.has_data = false;
+        self.discarding_event = false;
     }
 }
 
@@ -84,6 +121,36 @@ mod tests {
             ["{\"a\":1}", "{\"b\":2}", " two spaces"]
         );
         assert!(collect(&[b"data"]).is_empty());
+    }
+
+    #[test]
+    fn an_event_joins_data_lines_including_empty_values() {
+        let mut parser = DataLines::new();
+        let mut values = Vec::new();
+        parser.push(b"data: first\r\ndata: sec", |value| {
+            values.push(value.to_owned())
+        });
+        assert!(values.is_empty());
+        parser.push(
+            b"ond\r\n: comment\r\ndata:\r\ndata: fourth\r\n\r\n\ndata:\n\n",
+            |value| values.push(value.to_owned()),
+        );
+        assert_eq!(values, ["first\nsecond\n\nfourth", ""]);
+    }
+
+    #[test]
+    fn an_oversized_event_is_skipped_up_to_the_next_event() {
+        let line = vec![b'x'; MAX_LINE_BYTES / 2];
+        assert_eq!(
+            collect(&[
+                b"data:",
+                &line,
+                b"\ndata:",
+                &line,
+                b"\ndata: tail\n\ndata: next\n\n"
+            ]),
+            ["next"]
+        );
     }
 
     #[test]

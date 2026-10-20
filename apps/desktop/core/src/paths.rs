@@ -164,6 +164,7 @@ fn home_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
     }
     env("HOME")
         .or_else(|| env("USERPROFILE"))
+        .or_else(std::env::home_dir)
         .ok_or_else(|| "Cannot determine the home directory".to_string())
 }
 
@@ -176,6 +177,33 @@ mod tests {
     /// An absolute path on every platform the tests run on.
     fn absolute(name: &str) -> PathBuf {
         env::temp_dir().join(name)
+    }
+
+    #[test]
+    fn home_environment_precedence_matches_the_platform() {
+        let home = absolute("home");
+        let profile = absolute("profile");
+        for platform in [Platform::Linux, Platform::MacOs, Platform::Windows] {
+            for (vars, expected) in [
+                (vec![("HOME", home.clone())], &home),
+                (vec![("USERPROFILE", profile.clone())], &profile),
+                (
+                    vec![("HOME", home.clone()), ("USERPROFILE", profile.clone())],
+                    if platform == Platform::Windows {
+                        &profile
+                    } else {
+                        &home
+                    },
+                ),
+            ] {
+                let env = |name: &str| {
+                    vars.iter()
+                        .find(|(key, _)| *key == name)
+                        .map(|(_, value)| value.clone())
+                };
+                assert_eq!(&home_dir_in(platform, &env).unwrap(), expected);
+            }
+        }
     }
 
     fn resolve(platform: Platform, vars: &[(&str, PathBuf)]) -> (PathBuf, Option<PathBuf>) {

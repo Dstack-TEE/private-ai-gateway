@@ -21,25 +21,43 @@ pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Create or repair one of the backend's own directories. Unlike
+/// [`create_private_dir`], this tightens an existing real directory, after
+/// checking ownership through a handle that does not follow symlinks.
+pub fn create_or_repair_private_dir(dir: &Path) -> io::Result<()> {
+    create_private_dir(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(dir)?;
+        let metadata = directory.metadata()?;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("directory {} is owned by another user", dir.display()),
+            ));
+        }
+        if metadata.mode() & 0o777 != 0o700 {
+            directory.set_permissions(fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 /// Create an owner-only file that must not exist yet (never follows a
 /// symlink). It is owner-only before it holds anything: mode 0600 on Unix, the
 /// owner-only DACL on Windows.
 pub fn write_private(path: &Path, content: &str) -> io::Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    crate::windows_acl::allow_dacl_change(&mut options);
-    use std::io::Write;
-    let mut file = options.open(path)?;
-    #[cfg(windows)]
-    crate::windows_acl::restrict_to_current_user(&file)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()
+    publish(path, Publish::NoClobber, |file| {
+        use std::io::Write;
+        #[cfg(windows)]
+        crate::windows_acl::restrict_to_current_user(file)?;
+        file.write_all(content.as_bytes())
+    })
 }
 
 /// Open a private file read-only without following symlinks (`O_NOFOLLOW`
@@ -194,8 +212,11 @@ fn replace(
 ) -> io::Result<()> {
     let dir = path
         .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    fs::create_dir_all(dir)?;
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !dir.is_dir() {
+        create_private_dir(dir)?;
+    }
     let existing = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(io::Error::new(
@@ -337,6 +358,81 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::*;
+
+    #[test]
+    fn private_directories_are_tightened_without_following_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("private");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        create_or_repair_private_dir(&dir).unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let link = temp.path().join("link");
+        symlink(&dir, &link).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(create_or_repair_private_dir(&link).is_err());
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+
+    #[test]
+    fn atomic_replacement_creates_private_parents() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("nested");
+        let dir = parent.join("private");
+        let path = dir.join("state");
+        write_private_atomic(&path, "secret", None).unwrap();
+        for path in [&parent, &dir] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn a_failed_private_publication_leaves_the_destination_available() {
+        use std::io::Write;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("secret");
+        let error = publish(&path, Publish::NoClobber, |file| {
+            file.write_all(b"partial")?;
+            Err(io::Error::other("interrupted write"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "interrupted write");
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+        write_private(&path, "complete").unwrap();
+        assert_eq!(
+            write_private(&path, "overwrite").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "complete");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let link = temp.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert_eq!(
+            write_private(&link, "overwrite").unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "complete");
+    }
 
     // Regression: the open(2) flags once came from hand-written constants
     // that were only O_DIRECTORY/O_NOFOLLOW on x86_64 Linux.

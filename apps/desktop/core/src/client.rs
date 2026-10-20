@@ -214,10 +214,15 @@ impl Client {
                     .try_wait()
                     .map_err(|error| format!("Cannot inspect backend startup: {error}"))?
                 {
-                    // Another client started a backend at the same time and it
-                    // holds the instance lock: wait for that one instead.
                     if status.code() == Some(crate::launch::EXIT_ALREADY_RUNNING) {
-                        child = None;
+                        let endpoint = transport::endpoint_path().map_err(connection_error)?;
+                        let connection = block_on(already_running_at(&data, &endpoint))??;
+                        reap(child);
+                        return if current(&connection.version) {
+                            Ok(())
+                        } else {
+                            Err(OTHER_BUILD.into())
+                        };
                     } else {
                         let diagnostic = running.startup_diagnostic();
                         return Err(match diagnostic {
@@ -437,7 +442,7 @@ impl Client {
     /// Stops the running backend, of this build or another, and waits for it
     /// to exit. With `expected`, only a backend of that installation.
     fn shutdown_owned(&self, expected: Option<&Path>, mode: ShutdownMode) -> Result<(), String> {
-        let process_id = block_on(async {
+        let process = block_on(async {
             let mut connection = match open().await {
                 Ok(connection) => connection,
                 Err(error) if absent(&error) => return legacy::shutdown(expected, mode).await,
@@ -449,6 +454,7 @@ impl Client {
                     return Err(OTHER_INSTALLATION.into());
                 }
             }
+            let process = crate::launch::observe_exit(before.process_id)?;
             self.expect_shutdown(Some(before.instance_id.clone()))?;
             let shutdown = Command::Shutdown {
                 instance_id: before.instance_id,
@@ -456,23 +462,20 @@ impl Client {
             };
             match connection.call(&shutdown).await {
                 // Busy: another client's shutdown of this instance is under way.
-                Ok(_) => Ok(before.process_id),
-                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => {
-                    Ok(before.process_id)
-                }
+                Ok(_) => Ok(process),
+                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => Ok(process),
                 Err(error) => {
                     self.expect_shutdown(None)?;
                     Err(error.to_string())
                 }
             }
         })??;
-        let stopped =
-            crate::launch::wait_for_exit(process_id, BACKEND_EXIT_TIMEOUT).and_then(|()| {
-                match block_on(open())? {
-                    Err(error) if absent(&error) => Ok(()),
-                    Err(error) => Err(connection_error(error)),
-                    Ok(_) => Err("Another backend started during shutdown".into()),
-                }
+        let stopped = process
+            .wait(BACKEND_EXIT_TIMEOUT)
+            .and_then(|()| match block_on(open())? {
+                Err(error) if absent(&error) => Ok(()),
+                Err(error) => Err(connection_error(error)),
+                Ok(_) => Err("Another backend started during shutdown".into()),
             });
         if stopped.is_err() {
             self.expect_shutdown(None)?;
@@ -541,6 +544,29 @@ fn acquire_startup(data: &Path, gate_wait: Duration) -> Result<crate::lock::Star
             return Err(STARTUP_IN_PROGRESS.into());
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A start exited 75. Check the winner once, rather than spending the startup
+/// deadline waiting for an orphaned endpoint while its process holds the lock.
+async fn already_running_at(data: &Path, endpoint: &Path) -> Result<Connection, String> {
+    match open_at(endpoint, HELLO_TIMEOUT).await {
+        Ok(connection) => Ok(connection),
+        Err(error) if absent(&error) || error.kind() == io::ErrorKind::TimedOut => {
+            #[cfg(unix)]
+            if let Ok(Some(owner)) = crate::lock::instance_owner(data) {
+                return Err(format!(
+                    "A backend already holds the instance lock (PID {}, endpoint {}), but its management endpoint is unavailable. Run private-ai-proxy doctor.",
+                    owner.process_id, owner.endpoint
+                ));
+            }
+            let _ = data;
+            Err(format!(
+                "A backend already holds the instance lock, but its management endpoint {} is unavailable. Run private-ai-proxy doctor.",
+                endpoint.display()
+            ))
+        }
+        Err(error) => Err(connection_error(error)),
     }
 }
 
@@ -733,6 +759,13 @@ fn absent(error: &io::Error) -> bool {
 }
 
 fn connection_error(error: io::Error) -> String {
+    #[cfg(unix)]
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<transport::RuntimeDirectoryOwnerError>())
+    {
+        return error.to_string();
+    }
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
             "Backend is not running. Run private-ai-proxy service start.".into()
@@ -771,6 +804,27 @@ mod tests {
         let endpoint = runtime.join("api.sock");
         let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
         (temp, endpoint, listener)
+    }
+
+    #[tokio::test]
+    async fn an_already_running_backend_with_no_endpoint_reports_its_owner_immediately() {
+        let (temp, endpoint, listener) = local_endpoint();
+        let _owner = crate::lock::instance(temp.path()).unwrap().unwrap();
+        let owner = crate::lock::instance_owner(temp.path()).unwrap().unwrap();
+        drop(listener);
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            super::already_running_at(temp.path(), &endpoint),
+        )
+        .await
+        .expect("exit 75 must not wait for the readiness deadline");
+        let error = match result {
+            Ok(_) => panic!("an orphaned endpoint unexpectedly answered"),
+            Err(error) => error,
+        };
+        assert!(error.contains(&format!("PID {}", std::process::id())));
+        assert!(error.contains(&owner.endpoint));
+        assert!(error.contains("management endpoint is unavailable"));
     }
 
     async fn request_headers(stream: &mut tokio::net::UnixStream) {

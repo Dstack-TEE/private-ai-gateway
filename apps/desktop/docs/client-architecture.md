@@ -155,7 +155,10 @@ protection problems, is stored under that key.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
 - The service acquires its instance lock before loading state; a second
-  backend exits, and a client that started it waits for the one that won.
+  backend exits with status 75. The client checks the winner's endpoint once;
+  if it is unavailable, it reports the lock owner's PID and endpoint on Unix
+  instead of waiting for the startup deadline. The record in `instance.lock`
+  is diagnostic metadata; the OS file lock decides ownership.
 - `startup.lock` is the installer gate, a reader-writer file lock: clients
   starting the backend hold it shared, so they never wait for each other;
   an installer or updater holds it exclusively while it stops the backend and
@@ -163,7 +166,10 @@ protection problems, is stored under that key.
 - Shutdown enters draining before taking the exclusive operation gate, waits
   for existing mutations, restores managed agent configuration (an update
   restart keeps it for the updated backend to resume), stops listeners,
-  and awaits process exit. When a client requested it, failure to restore
+  and awaits process exit. Before sending shutdown, a client opens its process
+  observer (Linux pidfd, macOS kqueue registration or Windows process handle),
+  so a reused PID cannot redirect the wait. Linux kernels without usable
+  pidfds retain signal-zero polling. When a client requested it, failure to restore
   leaves management available for recovery instead of closing the inference
   listener halfway through shutdown; a signal or the owning app's exit stops
   regardless.
@@ -206,7 +212,12 @@ socket peers. Unix endpoints live in a validated private per-user directory,
 are `0600`, and check the peer UID in both directions (`SO_PEERCRED` or
 `getpeereid`). Endpoint paths are shortened for Unix socket limits. Only an
 instance-lock owner may reclaim a stale socket, and only the socket inode
-owned by a listener is removed when it closes.
+owned by a listener is removed when it closes. The listener checks its socket
+identity every second while accepting and rebinds the same endpoint if the
+socket or its runtime directory was removed. It repairs an existing directory's
+permissions to `0700` only when the directory is real and owned by the user;
+connecting clients reject insecure directories without changing them. A runtime
+directory owned by another user is reported explicitly.
 
 The MAS service keeps its management socket in the short `pap-ipc` directory at
 the root of its own App Container. It does not fall back to `/private/tmp`, which
