@@ -34,8 +34,6 @@ npm --prefix clients run build
 npm --prefix clients run check
 npm --prefix clients test
 npm --prefix clients run test:bun
-npm --prefix clients run lint
-npm --prefix clients run format:check
 npm --prefix clients run lint:packages
 npm --prefix clients run pack:check
 npm --prefix clients pack --dry-run -w @phala/aci-verifier
@@ -49,8 +47,9 @@ their respective runtimes, and imports every public ESM entry.
 
 The root `lint`, `format`, and `format:check` commands skip the verifier because
 it has no corresponding scripts. Source linting and formatting are not release
-gates; `lint:packages` validates the published package with publint and Are The
-Types Wrong. Adding source gates requires a separate verifier cleanup.
+gates, and the CI and release workflows omit these no-op commands.
+`lint:packages` validates the published package with publint and Are The Types
+Wrong. Adding source gates requires a separate verifier cleanup.
 
 ## Trusted publishing
 

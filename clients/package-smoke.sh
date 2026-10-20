@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-scratch="$(mktemp -d /tmp/retire-clients-smoke.XXXXXX)"
+scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 
 packs="$scratch/packs"

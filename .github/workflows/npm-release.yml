@@ -49,8 +49,6 @@ jobs:
           npm --prefix clients run check
           npm --prefix clients test
           npm --prefix clients run test:bun
-          npm --prefix clients run lint
-          npm --prefix clients run format:check
           npm --prefix clients run lint:packages
           bash clients/package-smoke.sh
 
