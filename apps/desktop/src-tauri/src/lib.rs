@@ -203,7 +203,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn configure_account_return(app: &tauri::App) {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    // Installers register the scheme; a development build registers itself.
+    #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "windows")))]
     if let Err(error) = app.deep_link().register_all() {
         tracing::warn!("Cannot register app return link: {error}");
     }
