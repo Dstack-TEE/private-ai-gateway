@@ -14,6 +14,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
 
+use super::UpstreamError;
+
 pub(super) type Kem = X25519HkdfSha256;
 pub(super) const SEAL_INFO: &[u8] = b"0g-pc/v1/seal";
 pub(super) const RESP_INFO: &[u8] = b"0g-pc/v1/resp";
@@ -50,6 +52,12 @@ const CLEARTEXT_FIELDS: &[&str] = &[
 #[error("{0}")]
 pub(crate) struct ProtocolError(String);
 
+impl From<ProtocolError> for UpstreamError {
+    fn from(err: ProtocolError) -> Self {
+        UpstreamError::Transport(format!("0G E2EE: {err}"))
+    }
+}
+
 fn fail<T>(message: impl Into<String>) -> Result<T, ProtocolError> {
     Err(ProtocolError(message.into()))
 }
@@ -60,16 +68,18 @@ pub(crate) fn seal_chat_request(
     mut request: Map<String, Value>,
     enc_pub: &[u8; 32],
     signer: &str,
-) -> Result<(Value, ResponseOpener), ProtocolError> {
+) -> Result<(Value, ResponseOpener), UpstreamError> {
     if let Some(field) = request.keys().find(|key| {
         !SEALED_FIELDS.contains(&key.as_str()) && !CLEARTEXT_FIELDS.contains(&key.as_str())
     }) {
-        return fail(format!(
+        return Err(UpstreamError::InvalidRequest(format!(
             "request field {field:?} is not supported by the 0G E2EE transport"
-        ));
+        )));
     }
     if !request.contains_key("messages") {
-        return fail("0G E2EE chat requests must carry messages");
+        return Err(UpstreamError::InvalidRequest(
+            "0G E2EE chat requests must carry messages".to_string(),
+        ));
     }
     // As 0G's client does: a stream must request usage, and setting it before
     // sealing keeps `stream_options` bound instead of rewritten in transit.

@@ -206,6 +206,15 @@ impl UpstreamBackend for TeeAwareUpstream {
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        if req
+            .route_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("invalid-"))
+        {
+            return Err(UpstreamError::InvalidRequest(
+                "unsupported field".to_string(),
+            ));
+        }
         self.forward_prepared(req).await
     }
     // Streaming resolves through `forward_stream_prepared`, not
@@ -2615,6 +2624,25 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         forwarded.lock().unwrap().is_empty(),
         "the prompt must not reach a route before its current session matches"
     );
+}
+
+#[tokio::test]
+async fn a_request_the_route_cannot_carry_is_a_400() {
+    let control_url = spawn_control(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "invalid-a:gpt-test", "format": "openai" }] }),
+    )
+    .await;
+    let (service, forwarded) = build_tee_aware_service();
+    let (status, _, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["type"], json!("invalid_request_error"));
+    assert!(forwarded.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

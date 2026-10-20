@@ -369,6 +369,7 @@ impl From<&UpstreamError> for ErrorClass {
     fn from(err: &UpstreamError) -> Self {
         match err {
             UpstreamError::Routing(_) => Self::InternalError,
+            UpstreamError::InvalidRequest(_) => Self::RequestShapingFailed,
             UpstreamError::Transport(_) => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
             UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,

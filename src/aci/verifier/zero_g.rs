@@ -62,6 +62,15 @@ pub(super) struct PreviewCandidate {
     pub canonical_id: Option<String>,
 }
 
+/// A candidate that passed every check, with the facts recorded as claims.
+#[derive(Debug)]
+pub(super) struct VerifiedCandidate {
+    pub provider: VerifiedProvider,
+    pub enc_pub: [u8; 32],
+    pub claims: Map<String, Value>,
+    pub evidence: Value,
+}
+
 #[derive(Deserialize)]
 struct PreviewResponse {
     #[serde(default)]
@@ -142,23 +151,23 @@ impl ZeroGProviderVerifier {
         let mut rejected = Vec::new();
         for candidate in candidates {
             match self.verify_candidate(&candidate, &request.model_id).await {
-                Ok((provider, claims, quote)) => {
-                    let key = hex::decode(&provider.e2ee_public_key).unwrap_or_default();
+                Ok(verified) => {
+                    let address = verified.provider.provider_address.clone();
                     event
                         .channel_bindings
                         .push(ChannelBinding::E2eePublicKeySha256 {
                             provider: ZERO_G_PROVIDER.to_string(),
-                            key_id: Some(provider.provider_address.clone()),
+                            key_id: Some(address.clone()),
                             algorithm: ZERO_G_E2EE_ALGORITHM.to_string(),
-                            public_key_sha256: hex::encode(Sha256::digest(key)),
+                            public_key_sha256: hex::encode(Sha256::digest(verified.enc_pub)),
                         });
-                    let mut instance = match serde_json::to_value(&provider) {
-                        Ok(Value::Object(instance)) => instance,
-                        _ => Map::new(),
-                    };
-                    instance.extend(claims);
-                    instances.insert(provider.provider_address, Value::Object(instance));
-                    evidence.push(quote);
+                    let mut instance = json!(verified.provider);
+                    instance
+                        .as_object_mut()
+                        .expect("a struct serializes to an object")
+                        .extend(verified.claims);
+                    instances.insert(address, instance);
+                    evidence.push(verified.evidence);
                 }
                 Err(reason) => {
                     tracing::warn!(target: "zero_g", provider = %candidate.address, %reason, "0G candidate rejected before sealing");
@@ -223,7 +232,7 @@ impl ZeroGProviderVerifier {
         &self,
         candidate: &PreviewCandidate,
         model: &str,
-    ) -> Result<(VerifiedProvider, Map<String, Value>, Value), String> {
+    ) -> Result<VerifiedCandidate, String> {
         if candidate
             .canonical_id
             .as_deref()
@@ -232,9 +241,7 @@ impl ZeroGProviderVerifier {
             return Err("router offered a different model".to_string());
         }
         let address = candidate.address.to_ascii_lowercase();
-        if address.len() != 42
-            || !address.starts_with("0x")
-            || !address[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        if address.len() != 42 || !address.starts_with("0x") || hex::decode(&address[2..]).is_err()
         {
             return Err("router offered an invalid provider address".to_string());
         }
@@ -300,21 +307,25 @@ impl ZeroGProviderVerifier {
                 hex::encode(&td.mr_config_id[1..33]).into(),
             );
         }
-        let provider = VerifiedProvider {
-            provider_address: address.clone(),
-            provider_identity: candidate.provider_identity.clone(),
-            endpoint: url.clone(),
-            model: model.to_string(),
-            signing_address: signer,
-            e2ee_public_key: hex::encode(&report_data[..32]),
-        };
-        let evidence = json!({
-            "provider_address": address,
-            "quote": reply.get("quote"),
-            "event_log": reply.get("event_log"),
-            "service_record": service.raw,
-        });
-        Ok((provider, claims, evidence))
+        let enc_pub: [u8; 32] = report_data[..32].try_into().expect("32 bytes");
+        Ok(VerifiedCandidate {
+            provider: VerifiedProvider {
+                provider_address: address.clone(),
+                provider_identity: candidate.provider_identity.clone(),
+                endpoint: url.clone(),
+                model: model.to_string(),
+                signing_address: signer,
+                e2ee_public_key: hex::encode(enc_pub),
+            },
+            enc_pub,
+            claims,
+            evidence: json!({
+                "provider_address": address,
+                "quote": reply.get("quote"),
+                "event_log": reply.get("event_log"),
+                "service_record": service.raw,
+            }),
+        })
     }
 
     /// DCAP to Intel's root; dcap-qvl refuses invalid TCB statuses and debug TDs.

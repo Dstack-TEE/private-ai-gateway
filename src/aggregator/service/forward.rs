@@ -165,7 +165,8 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let verification_required = aci_required;
+        let verification_required =
+            aci_required || self.upstream.requires_verified_binding(&prepared);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -343,7 +344,8 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let verification_required = aci_required;
+        let verification_required =
+            aci_required || self.upstream.requires_verified_binding(&prepared);
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,

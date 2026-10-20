@@ -64,6 +64,10 @@ fn rejected(err: impl std::fmt::Display) -> UpstreamError {
     UpstreamError::Transport(format!("0G response rejected: {err}"))
 }
 
+fn unverified() -> UpstreamError {
+    UpstreamError::Transport("0G transport requires a verified provider binding".to_string())
+}
+
 pub struct ZeroGProviderBackend {
     name: String,
     router_base: String,
@@ -105,33 +109,26 @@ impl ZeroGProviderBackend {
         req: PreparedUpstreamRequest,
         event: &UpstreamVerifiedEvent,
     ) -> Result<(reqwest::Response, ResponseOpener, SignatureCheck), UpstreamError> {
-        if event.result != VerificationResult::Verified {
-            return Err(UpstreamError::Transport(
-                "0G transport requires a verified provider binding".to_string(),
-            ));
-        }
         if req.request.path.as_deref().unwrap_or(CHAT_COMPLETIONS_PATH) != CHAT_COMPLETIONS_PATH {
-            return Err(UpstreamError::Routing(
+            return Err(UpstreamError::InvalidRequest(
                 "0G Private Computer serves only /v1/chat/completions".to_string(),
             ));
         }
-        let request: Map<String, Value> = serde_json::from_slice(&req.request.body)
-            .map_err(|e| UpstreamError::Routing(format!("invalid JSON request body: {e}")))?;
+        let request: Map<String, Value> =
+            serde_json::from_slice(&req.request.body).map_err(|e| {
+                UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}"))
+            })?;
         let model = request
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let provider = bound_provider(event, model).ok_or_else(|| {
+        let (provider, enc_pub) = bound_provider(event, model).ok_or_else(|| {
             UpstreamError::ChannelBindingMismatch(format!(
                 "no verified 0G provider is bound for model {model:?}"
             ))
         })?;
-        let mut enc_pub = [0u8; 32];
-        hex::decode_to_slice(&provider.e2ee_public_key, &mut enc_pub)
-            .map_err(|_| UpstreamError::ChannelBindingMismatch("invalid 0G key".into()))?;
         let api = broker_api(&provider.endpoint).map_err(UpstreamError::Transport)?;
-        let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)
-            .map_err(|e| UpstreamError::Routing(e.to_string()))?;
+        let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)?;
 
         // No caller or route headers are forwarded, so no X-0G-* control can
         // be injected.
@@ -177,8 +174,15 @@ impl ZeroGProviderBackend {
 }
 
 /// The first provider, in preview order, whose recorded key hashes to a
-/// binding the event still carries (session pinning may have narrowed them).
-fn bound_provider(event: &UpstreamVerifiedEvent, model: &str) -> Option<VerifiedProvider> {
+/// binding the verified event still carries (session pinning may have narrowed
+/// them), with that key.
+fn bound_provider(
+    event: &UpstreamVerifiedEvent,
+    model: &str,
+) -> Option<(VerifiedProvider, [u8; 32])> {
+    if event.result != VerificationResult::Verified {
+        return None;
+    }
     let instances = event.provider_claims.as_ref()?.get("instances")?;
     event.channel_bindings.iter().find_map(|binding| {
         let ChannelBinding::E2eePublicKeySha256 {
@@ -192,13 +196,16 @@ fn bound_provider(event: &UpstreamVerifiedEvent, model: &str) -> Option<Verified
         };
         let verified: VerifiedProvider =
             serde_json::from_value(instances.get(address)?.clone()).ok()?;
-        let key = hex::decode(&verified.e2ee_public_key).ok()?;
+        let key: [u8; 32] = hex::decode(&verified.e2ee_public_key)
+            .ok()?
+            .try_into()
+            .ok()?;
         (provider == ZERO_G_PROVIDER
             && algorithm == ZERO_G_E2EE_ALGORITHM
             && hex::encode(Sha256::digest(key)).eq_ignore_ascii_case(public_key_sha256)
             && verified.provider_address.eq_ignore_ascii_case(address)
             && verified.model == model)
-            .then_some(verified)
+            .then_some((verified, key))
     })
 }
 
@@ -261,10 +268,12 @@ impl UpstreamBackend for ZeroGProviderBackend {
         Some(&self.router_base)
     }
 
+    fn requires_verified_binding(&self, _req: &PreparedUpstreamRequest) -> bool {
+        true
+    }
+
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        Err(UpstreamError::Transport(
-            "0G transport requires a verified provider binding".to_string(),
-        ))
+        Err(unverified())
     }
 
     async fn forward_verified_prepared(
@@ -274,10 +283,8 @@ impl UpstreamBackend for ZeroGProviderBackend {
     ) -> Result<UpstreamResponse, UpstreamError> {
         let (response, mut opener, check) = self.send(req, event).await?;
         let frame = response.json().await.map_err(rejected)?;
-        let body = opener.open_frame(frame).map_err(rejected)?;
-        check
-            .verify(&opener.signed_text(false).map_err(rejected)?)
-            .await?;
+        let body = opener.open_frame(frame)?;
+        check.verify(&opener.signed_text(false)?).await?;
         Ok(UpstreamResponse {
             status_code: 200,
             body: serde_json::to_vec(&body).map_err(rejected)?,
@@ -290,9 +297,7 @@ impl UpstreamBackend for ZeroGProviderBackend {
         &self,
         _req: UpstreamRequest,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        Err(UpstreamError::Transport(
-            "0G transport requires a verified provider binding".to_string(),
-        ))
+        Err(unverified())
     }
 
     async fn forward_stream_verified_prepared(
@@ -359,7 +364,7 @@ fn verified_event_stream(
                         break 'read;
                     }
                     let frame = serde_json::from_slice(&event).map_err(rejected)?;
-                    let opened = opener.open_frame(frame).map_err(rejected)?;
+                    let opened = opener.open_frame(frame)?;
                     let mut out = b"data: ".to_vec();
                     out.extend(serde_json::to_vec(&opened).map_err(rejected)?);
                     out.extend_from_slice(b"\n\n");
@@ -370,7 +375,7 @@ fn verified_event_stream(
                 break;
             }
         }
-        check.verify(&opener.signed_text(true).map_err(rejected)?).await?;
+        check.verify(&opener.signed_text(true)?).await?;
         yield Bytes::from_static(b"data: [DONE]\n\n");
     })
 }

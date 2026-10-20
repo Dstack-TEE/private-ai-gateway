@@ -540,6 +540,6 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
         .forward_verified_prepared(request, &fixture.event)
         .await
         .unwrap_err();
-    assert!(matches!(err, UpstreamError::Routing(_)));
+    assert!(matches!(err, UpstreamError::InvalidRequest(_)));
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
 }

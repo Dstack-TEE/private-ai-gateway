@@ -216,6 +216,11 @@ impl UpstreamBackend for ModelRouterBackend {
         })
     }
 
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        self.route_from_prepared(req)
+            .is_ok_and(|route| route.upstream.requires_verified_binding(req))
+    }
+
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let prepared = self.prepare(req)?;
         self.forward_prepared(prepared).await

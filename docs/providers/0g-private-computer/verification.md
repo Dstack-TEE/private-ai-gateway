@@ -10,7 +10,7 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 | Enforced binding | `e2ee_public_key_sha256`, `key_id` = provider address |
 | Transport | 0G E2EE v1 (HPKE base, X25519 / HKDF-SHA256 / ChaCha20-Poly1305) through the router, `src/aci/upstream/zero_g/` |
 | Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.10.19.2` (`6d823311`) |
-| Audit | Not yet audited; assessment in [PR #439](https://github.com/Dstack-TEE/private-ai-gateway/pull/439) |
+| Audit | [Acceptable with conditions](review.md), 2026-10-20 |
 
 ## Configuration
 
@@ -39,13 +39,13 @@ Per configured model, cached for `verifier_cache_seconds` (verified results only
 5. Require MRTD, RTMR1 and RTMR2 to match an allowlisted dstack image: `dstack-nvidia-0.5.9` or `dstack-nvidia-0.5.4.1`. The values come from 0G's `client/evidence/brokerimages.json` at the pinned release, which documents a dstack-mr derivation from each published release; PAG has not recomputed them.
 6. Require `report_data` = `enc_pub(32) ‖ signer(20) ‖ version 1 ‖ zero(8)` and the signer to equal the on-chain `teeSignerAddress`.
 
-A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed` and no prompt is sent. On 2026-10-20 only compute-network-19 passed; compute-network-41 and the Baidu/Tencent relays declare `TargetSeparated: true`.
+A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed`, no prompt is sent, and the request is refused like any other verification failure (503 `upstream_verification_failed` with a refusal receipt), whether or not the caller required verification. On 2026-10-20 only compute-network-19 passed. compute-network-41 and the Baidu/Tencent relays declare `TargetSeparated: true`; compute-network-41 forwards to RedPill's gateway, so a gateway request never reaches the provider that forwards to RedPill.
 
 ## Forwarding
 
 The backend uses the first provider, in preview order, whose recorded key hashes to a binding the current event carries.
 
-- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. Any other field is refused instead of being sent in the clear. Only `/v1/chat/completions` is served.
+- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. Any other field is refused with a 400 `invalid_request_error` instead of being sent in the clear. Only `/v1/chat/completions` is served.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response becomes a generic upstream error; its body is not returned.
 
@@ -78,10 +78,6 @@ A receipt cites the session of the provider that served it. That session's claim
 - A send failure does not fall back to another verified provider.
 - Receipts carry no per-response signature-status field: the outcome is implied by the receipt existing (buffered) or by the stream ending in `[DONE]` (streamed).
 - Response cleartext floats could fail to open, because `serde_json` float parsing is not guaranteed correctly rounded. This fails closed; current responses carry none.
-
-## RedPill routing-loop rule
-
-compute-network-41 (`0x6446fE52…`) forwards glm-5.3 to RedPill's gateway (`TargetTeeAddress` = the `api.redpill.ai` signing address). This adapter refuses it. Independently, a deployment that exposes this adapter must not route glm-5.3, including fallbacks, to a 0G route that can reach RedPill. Otherwise a request can loop PAG → 0G → RedPill → PAG. This is an operator routing rule; this change does not alter production routing.
 
 ## Tests
 
