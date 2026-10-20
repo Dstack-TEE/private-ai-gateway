@@ -248,11 +248,7 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = "application/json,.json";
-    // The first of the events below ends the choice.
-    const chosen = new AbortController();
-    const { signal } = chosen;
     input.addEventListener("change", () => {
-      chosen.abort();
       const file = input.files?.[0];
       if (!file) {
         resolve(null);
@@ -263,22 +259,8 @@ function selectProfileBackup(): Promise<ProfileBackup | null> {
         return;
       }
       void parseProfileBackup(file).then(resolve, reject);
-    }, { signal });
-    input.addEventListener("cancel", () => {
-      chosen.abort();
-      resolve(null);
-    }, { signal });
-    // A browser that doesn't report a cancelled chooser still returns focus to
-    // the page; without a file by then, nothing was chosen, so the Profiles
-    // dialog isn't left waiting.
-    window.addEventListener("focus", () => {
-      const timer = window.setTimeout(() => {
-        if (input.files?.length) return;
-        chosen.abort();
-        resolve(null);
-      }, 1_000);
-      signal.addEventListener("abort", () => window.clearTimeout(timer), { once: true });
-    }, { signal });
+    }, { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
     input.click();
   });
 }

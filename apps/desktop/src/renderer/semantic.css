@@ -2,8 +2,6 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
 }
-/* The desktop app's window, which the shell marks with its platform; a browser has none. */
-@custom-variant desktop (&:where([data-platform] *));
 @theme inline {
   --color-success: var(--success);
   --color-warning: var(--warning);
