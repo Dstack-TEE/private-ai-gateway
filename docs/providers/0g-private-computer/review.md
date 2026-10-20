@@ -50,7 +50,7 @@ acceptance runs below):
 | Check | Result |
 | --- | --- |
 | TDX quotes of the private-tier `glm-5.3` providers | Verified independently with `dcap-qvl` and 0G's `pcverify`; TCB `UpToDate` |
-| Boot chain | `dstack-nvidia-0.5.4.1`, in 0G's audited allowlist |
+| Boot chains | `dstack-nvidia-0.5.4.1` and `dstack-nvidia-0.5.9`; pinned per route as `accepted_subjects` and checked against 0G's allowlist and live quote bytes |
 | report_data signer vs on-chain `teeSignerAddress` | Equal and acknowledged |
 | Running broker | Signed release `v0.5.5` per RTMR3 replay |
 | Recorded upstream set | Absent on every provider |
@@ -62,15 +62,20 @@ The router's `TeeTLS`/`TeeML` labels and the on-chain `verifiability` string
 do not separate relays from local serving: relays also declare `TeeML` on
 chain. The adapter does not use either.
 
-Acceptance runs of the native adapter:
+Acceptance runs of the native adapter at #464 head `e25c1b99`, 2026-10-20:
 
-- Local, 2026-10-20: buffered and streamed `glm-5.3` completions passed with
-  live DCAP and signature verification. Only the `TargetSeparated: false`
-  provider was selected.
-- Throwaway dstack CVM, 2026-10-20: the same, through the deployed gateway.
-  Client-supplied `X-0G-*` headers had no effect. Unsupported request fields and
-  unverifiable models failed before sending. The session carried the
+- Local: buffered and streamed completions for `glm-5.3` and
+  `0GM-1.0-35B-A3B` passed with live DCAP and signature verification. Only
+  `TargetSeparated: false` providers were selected.
+- Throwaway dstack CVM: the same through the deployed gateway. Client-supplied
+  `X-0G-*` headers had no effect; an unsupported request field returned 400; an
+  unconfigured model returned 404. Each session carried the
   `e2ee_public_key_sha256` binding of the selected provider.
+- Private AI Proxy: `audit` of five response receipts had no failed check
+  (receipt signature, request and response hashes, cited 0G session and
+  binding). Online `verify` of the gateway passed id-1 to id-5 with the Phala KMS
+  root and app-id policy; id-6 failed only because the test deployment had no
+  in-CVM TLS termination, as in earlier test deployments.
 
 ## Conditions
 
@@ -78,18 +83,22 @@ Acceptance runs of the native adapter:
    client `X-0G-*` headers, and seals only to a provider that passes DCAP, TCB
    policy, the boot-chain allowlist, report_data-to-on-chain signer equality,
    on-chain acknowledgement, a model match, and `TargetSeparated: false`.
-2. **Declared, not attested.** `TargetSeparated` and the router's candidate list
+2. **Model identity from configuration.** Each route maps a public name to the
+   provider's on-chain model id; the router's candidate and the on-chain record
+   must both equal it. Router catalog ids are ignored.
+3. **Declared, not attested.** `TargetSeparated` and the router's candidate list
    are trusted inputs. Receipts identify the serving provider; they do not
    claim plaintext confinement after the broker.
-3. **Response authenticity.** HPKE base mode does not authenticate the sender.
+4. **Response authenticity.** HPKE base mode does not authenticate the sender.
    Buffered responses are released only after the broker signature verifies;
    streamed chunks are provisional and the stream ends in `[DONE]` only after
    verification. Receipts carry no per-response signature-status field.
-4. **Not claimed.** GPU execution, model weights, and quote freshness: 0G quotes
+5. **Not claimed.** GPU execution, model weights, and quote freshness: 0G quotes
    take no client nonce.
-5. **Re-review triggers.** A protocol or envelope change in `0g-pc-e2ee`, a new
-   broker release line, a provider enabling `recordUpstreamSet`, or a new
-   private-tier provider declaring `TargetSeparated: false`.
+6. **Re-review triggers.** A protocol or envelope change in `0g-pc-e2ee`, a new
+   broker release line, a provider enabling `recordUpstreamSet`, a new
+   private-tier provider declaring `TargetSeparated: false`, or a new boot-chain
+   pin.
 
 ## Not required
 
