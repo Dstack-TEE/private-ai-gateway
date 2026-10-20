@@ -101,8 +101,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
         .run(|_app, event| match event {
-            #[cfg(feature = "mac-app-store")]
-            tauri::RunEvent::Exit => stop_app_store_backend(_app),
+            tauri::RunEvent::Exit => {
+                clipboard::release();
+                #[cfg(feature = "mac-app-store")]
+                stop_app_store_backend(_app);
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => window::show(_app),
             _ => {}

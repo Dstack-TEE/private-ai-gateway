@@ -14,7 +14,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 const UNAVAILABLE: &str = "The clipboard is unavailable";
 
 /// The clipboard for secrets, kept like the plugin's: on X11 the app serves
-/// what it copied while it holds one.
+/// what it copied while it holds one, and `release` drops it on exit.
 static SECRET_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
 pub fn write_text(app: &AppHandle, text: String, secret: bool) -> Result<(), String> {
@@ -28,6 +28,17 @@ pub fn write_text(app: &AppHandle, text: String, secret: bool) -> Result<(), Str
         tracing::warn!("Cannot copy a secret: {error}");
         UNAVAILABLE.into()
     })
+}
+
+/// Drops the clipboard for secrets as the app exits, as the plugin drops its
+/// own: on X11 the last arboard clipboard dropped hands what the app copied
+/// to the clipboard manager, or, for a secret, gives up its ownership so no
+/// manager keeps it.
+pub fn release() {
+    SECRET_CLIPBOARD
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
 }
 
 fn write_secret(text: String) -> Result<(), arboard::Error> {

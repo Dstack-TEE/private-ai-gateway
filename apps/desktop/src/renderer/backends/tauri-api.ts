@@ -48,7 +48,7 @@ const platform: UiPlatform = {
   // Goes through the window's close request, which hides it to the tray.
   closeWindow: () => getCurrentWebviewWindow().close(),
   quit: () => invoke("quit_app"),
-  copyText: (text) => invoke("copy_text", { text }),
+  copyText: (text, secret) => invoke("copy_text", { text, secret }),
   // The shell shows the system file panels and reads or writes the chosen file.
   selectProfileBackup: () => invoke("select_profile_backup"),
   saveProfileExport: () => invoke("export_profiles"),

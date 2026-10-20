@@ -49,7 +49,8 @@ export interface DesktopApi {
   closeWindow: (() => Promise<void>) | undefined;
   /** Quits the app and leaves the background service running. */
   quit: (() => Promise<void>) | undefined;
-  copyText(text: string): Promise<void>;
+  /** A `secret`, such as the Local API key, stays out of clipboard history where the platform allows. */
+  copyText(text: string, secret?: boolean): Promise<void>;
   getClientKey(): UiResult<"get_client_key">;
   rotateClientKey(): UiResult<"rotate_client_key">;
   saveLocalApiConfig(config: ListenConfig): UiResult<"save_local_api_config">;
