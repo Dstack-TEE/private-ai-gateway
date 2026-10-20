@@ -44,12 +44,14 @@ use std::time::{Duration, Instant};
 // 400/422 stay excluded: those describe the request body, which every candidate
 // receives identically.
 /// Status recorded for a candidate that produced no HTTP response: 504 when the
-/// gateway's own connect/read deadline expired, 502 for every other failure.
-fn abandoned_status(err: &UpstreamError) -> u16 {
-    if matches!(err, UpstreamError::Timeout(_)) {
-        504
-    } else {
-        502
+/// gateway's own connect/read deadline expired, 502 for every other failure, and
+/// none for a request the route cannot carry — the caller's fault, which must
+/// not count against the provider.
+fn abandoned_status(err: &UpstreamError) -> Option<u16> {
+    match err {
+        UpstreamError::Timeout(_) => Some(504),
+        UpstreamError::InvalidRequest(_) => None,
+        _ => Some(502),
     }
 }
 
@@ -501,7 +503,7 @@ impl AciService {
                                 2
                             };
                             upgrade_err(&mut aggregated_err, priority, err);
-                            Err(502)
+                            Err(Some(502))
                         }
                         ReverifyOutcome::Failed(err) => {
                             // Terminal binding mismatch and transport errors
@@ -517,7 +519,9 @@ impl AciService {
                     let upstream_response = match upstream_response {
                         Ok(response) => response,
                         Err(status) => {
-                            abandon(&mut failed_attempts, status);
+                            if let Some(status) = status {
+                                abandon(&mut failed_attempts, status);
+                            }
                             continue;
                         }
                     };
@@ -657,7 +661,7 @@ impl AciService {
                             2
                         };
                         upgrade_err(&mut aggregated_err, priority, err);
-                        Err(502)
+                        Err(Some(502))
                     }
                     ReverifyOutcome::Failed(err) => {
                         // Terminal binding mismatch and transport errors
@@ -673,7 +677,9 @@ impl AciService {
                 let upstream_response = match upstream_response {
                     Ok(response) => response,
                     Err(status) => {
-                        abandon(&mut failed_attempts, status);
+                        if let Some(status) = status {
+                            abandon(&mut failed_attempts, status);
+                        }
                         continue;
                     }
                 };

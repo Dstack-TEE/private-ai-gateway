@@ -39,6 +39,8 @@ fn test_upstream_config(
         chutes_chute_ids: None,
         chutes_e2ee_discovery_rounds: None,
         chutes_e2ee_discovery_interval_seconds: None,
+        zg_chain_rpc_url: None,
+        zg_serving_contract: None,
     }
 }
 
@@ -83,6 +85,10 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::ArmetAi.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
+    assert_eq!(
+        UpstreamProvider::ZeroGPrivateComputer.attestation_scope(),
+        PerInstance
+    );
     assert_eq!(
         UpstreamProvider::OpenAiCompatible.attestation_scope(),
         PerModel
@@ -231,6 +237,51 @@ fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_stat
         );
         let err = parse_config_text(&candidate).expect_err("field must be rejected");
         assert!(err.to_string().contains(expected), "{field}: {err}");
+    }
+}
+
+#[test]
+fn parse_zero_g_requires_router_key_chain_rpc_contract_and_boot_chain() {
+    let valid_text = r#"[{
+          "name": "zero-g",
+          "provider": "0g-private-computer",
+          "base_url": "https://router-api-cloud.0g.ai",
+          "bearer_token": "zg-key",
+          "zg_chain_rpc_url": "https://evmrpc.0g.ai",
+          "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
+          "accepted_subjects": ["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"],
+          "models": {"glm-5.3": "glm-5.3"}
+        }]"#;
+    let valid = parse_config_text(valid_text).expect("0G route should parse");
+    assert_eq!(valid[0].provider, UpstreamProvider::ZeroGPrivateComputer);
+    // The RPC URL may embed a credential, so the admin view omits it.
+    assert!(!serde_json::to_string(&valid[0].redacted())
+        .unwrap()
+        .contains("evmrpc"));
+    let state = build_state(&valid, &runtime_options(UpstreamVerifierMode::None))
+        .expect("0G route should build");
+    assert!(state.verifier.is_some());
+
+    for (from, to) in [
+        (
+            "https://router-api-cloud.0g.ai",
+            "http://router-api-cloud.0g.ai",
+        ),
+        (r#""bearer_token": "zg-key","#, ""),
+        ("https://evmrpc.0g.ai", "http://evmrpc.0g.ai"),
+        ("0x47340d900bdFec2BD393c626E12ea0656F938d84", "0x47340d"),
+        (r#""models""#, r#""path": "/v1/messages", "models""#),
+        (r#""0g-private-computer""#, r#""openai-compatible""#),
+        (
+            r#"["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"]"#,
+            "[]",
+        ),
+        ("tdx-boot-chain:", "tdx-measurement:"),
+    ] {
+        assert!(
+            parse_config_text(&valid_text.replace(from, to)).is_err(),
+            "{to}"
+        );
     }
 }
 

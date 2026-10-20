@@ -1563,6 +1563,7 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         ) => 412,
         ServiceError::UpstreamVerification(_) => 503,
         ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
+        ServiceError::Upstream(UpstreamError::InvalidRequest(_)) => 400,
         // The gateway's own connect/read deadline expired: the upstream was
         // reachable but never answered in time.
         ServiceError::Upstream(UpstreamError::Timeout(_)) => 504,

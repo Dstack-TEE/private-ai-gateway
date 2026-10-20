@@ -23,6 +23,7 @@ use crate::aggregator::upstream_config::AttestationScope;
 
 mod aci_service;
 mod session_pinning;
+mod zero_g;
 
 fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()

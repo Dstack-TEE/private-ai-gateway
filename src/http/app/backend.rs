@@ -142,6 +142,9 @@ async fn forward_to_backend_inner(
             Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
                 routing_error_response(message)
             }
+            Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
+                invalid_request_response(message)
+            }
             Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
                 gateway_timeout_response(
                     surface_for_path(input.endpoint_path),
@@ -195,6 +198,9 @@ async fn forward_to_backend_inner(
         Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
         Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
             routing_error_response(message)
+        }
+        Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
+            invalid_request_response(message)
         }
         Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
             surface_for_path(input.endpoint_path),
@@ -465,6 +471,10 @@ pub(super) fn upstream_direct_response(
 pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
     tracing::warn!(error = %err, "upstream proxy request failed");
     error_response(StatusCode::BAD_GATEWAY, "upstream_error", err.to_string())
+}
+
+fn invalid_request_response(message: String) -> Response {
+    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
 }
 
 pub(super) fn routing_error_response(message: String) -> Response {

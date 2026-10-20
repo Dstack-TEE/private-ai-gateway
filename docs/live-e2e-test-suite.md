@@ -121,6 +121,28 @@ export NEARAI_API_KEY='...'
 export CHUTES_API_KEY='...'
 ```
 
+The ignored 0G Private Computer live test exercises the native
+`0g-private-computer` provider directly against the 0G router
+(`router-api-cloud.0g.ai`), without a
+gateway process. It reads the 0G API key from a file outside the repository,
+for example `~/.config/private-ai-gateway/0g-api-key`:
+
+```sh
+export PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=~/.config/private-ai-gateway/0g-api-key
+cargo test --test 0g_private_computer_live -- --ignored --nocapture
+```
+
+It verifies the private-tier candidates for `glm-5.3`, or for the model in
+`PRIVATE_AI_GATEWAY_0G_MODEL`, given as the provider's on-chain model id such as
+`0GM-1.0-35B-A3B` (route preview, on-chain
+record, DCAP quote, boot chain, signer), then sends one buffered and one
+streamed completion and requires each to open and its provider signature to
+verify; the stream must end in `[DONE]`. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`
+overrides the default chain RPC `https://evmrpc.0g.ai`. The test skips when the
+key file variable is unset, missing, or empty. The key is held only in memory
+and never printed. It sends live inference, so it is an operator check and does
+not run in CI.
+
 The runner loads a dotenv file before reading the environment. Its default is `.env` in the parent directory of this repository, not `.env` inside the repository. Override it explicitly when needed:
 
 ```sh
