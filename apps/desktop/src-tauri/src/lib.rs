@@ -147,7 +147,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     };
     app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    autostart::setup(app.handle())?;
+    if let Err(error) = autostart::setup(app.handle()) {
+        tracing::warn!("Open at Login is unavailable: {error}");
+    }
     if updates::configured(app.handle()) {
         app.handle()
             .plugin(tauri_plugin_updater::Builder::new().build())?;
