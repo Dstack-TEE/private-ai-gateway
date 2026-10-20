@@ -518,7 +518,7 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             Some(json!({
                 "proxy_url": proxy_url,
                 "control_url": control_url,
-                "remote_url": crate::client::diagnostic_url(&base_url),
+                "remote_url": base_url,
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
                     "accepted_composes": args.policy.accepted_composes,
@@ -544,7 +544,7 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
              verify on demand: GET {control}/receipts lists recent exchanges, \
              POST {control}/receipts/<id>/verify checks one (send Authorization \
              if the receipt fetch needs it).\n{policy_note}\n",
-            base = safe(&crate::client::diagnostic_url(&base_url)),
+            base = safe(&base_url),
             proxy = safe(&proxy_url),
             control = safe(&control_url),
         );
@@ -680,7 +680,7 @@ async fn initialize(
         write_stdout(
             format!(
                 "== service verification: {} ==\n{}",
-                safe(&crate::client::diagnostic_url(&verification.base_url)),
+                safe(&verification.base_url),
                 verification.transcript.render_human()
             )
             .as_bytes(),

@@ -30,7 +30,7 @@ pub(crate) async fn run_verified(
         write_stdout(
             format!(
                 "== service verification: {} ==\n{}\n",
-                safe(&crate::client::diagnostic_url(&verification.base_url)),
+                safe(&verification.base_url),
                 verification.transcript.render_human()
             )
             .as_bytes(),

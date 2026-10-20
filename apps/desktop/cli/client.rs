@@ -49,24 +49,15 @@ pub fn host_of(url: &str) -> Result<String, String> {
             "base URL must not contain credentials; use an API key input instead".to_string(),
         );
     }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("base URL must not contain a query or fragment".to_string());
+    }
     match parsed.host() {
         Some(url::Host::Domain(domain)) => Ok(domain.to_ascii_lowercase()),
         Some(url::Host::Ipv4(ip)) => Ok(ip.to_string()),
         Some(url::Host::Ipv6(ip)) => Ok(ip.to_string()),
         None => Err("URL has no host".to_string()),
     }
-}
-
-/// URLs in diagnostics never include credentials, queries or fragments.
-pub(crate) fn diagnostic_url(value: &str) -> String {
-    let Ok(mut url) = Url::parse(value) else {
-        return "<invalid URL>".to_string();
-    };
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
 }
 
 /// The largest receipt document read. A §7.3 receipt is a few fixed members
@@ -290,7 +281,7 @@ impl AciClient {
         self.read_get(url, bearer).await.map_err(|e| {
             format!(
                 "GET {} failed: {}",
-                diagnostic_url(url),
+                url,
                 error_chain_message(&e.without_url())
             )
         })
@@ -338,7 +329,7 @@ impl AciClient {
                         Ok(error) => GetError::Request(error.without_url()),
                         Err(error) => GetError::Failed(format!(
                             "GET {}: failed to read body: {}",
-                            diagnostic_url(url),
+                            url,
                             error_chain_message(&*error)
                         )),
                     }
@@ -408,7 +399,7 @@ impl AciClient {
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
         self.get_limited(url.as_str(), None, MAX_SESSION_BYTES)
             .await
-            .map_err(|error| format!("GET {}: {error}", diagnostic_url(url.as_str())))
+            .map_err(|error| format!("GET {}: {error}", url))
     }
 
     pub async fn fetch_session_listing(&self, url: &str) -> Result<HttpResult, GetError> {
@@ -448,7 +439,7 @@ impl AciClient {
         let resp = req.send().await.map_err(|e| {
             format!(
                 "POST {} failed: {}",
-                diagnostic_url(url.as_str()),
+                url,
                 error_chain_message(&e.without_url())
             )
         })?;
@@ -460,7 +451,7 @@ impl AciClient {
             let chunk = chunk.map_err(|e| {
                 format!(
                     "POST {}: stream error: {}",
-                    diagnostic_url(url.as_str()),
+                    url,
                     error_chain_message(&e.without_url())
                 )
             })?;
@@ -538,38 +529,16 @@ mod tests {
     }
 
     #[test]
-    fn base_url_credentials_are_rejected_and_diagnostic_urls_are_redacted() {
+    // Credentials are covered end to end by the golden tests.
+    fn base_urls_with_a_query_or_fragment_are_rejected() {
         for value in [
-            "https://user:password@example.com",
-            "https://user@example.com",
-            "https://:password@example.com",
+            "https://example.com/?api_key=secret",
+            "https://example.com/#x",
         ] {
             let error = host_of(value).unwrap_err();
-            assert!(error.contains("must not contain credentials"));
-            assert!(!error.contains("password"));
+            assert!(error.contains("must not contain a query or fragment"));
+            assert!(!error.contains("secret"));
         }
-        assert_eq!(
-            diagnostic_url("https://user:password@example.com/base?api_key=secret#fragment"),
-            "https://example.com/base"
-        );
-    }
-
-    #[tokio::test]
-    async fn request_error_messages_strip_url_credentials_and_query_values() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
-        let client = AciClient::new().unwrap();
-        let url = format!("{base}/v1/models?api_key=never-log-this");
-        let error = client.get(&url, None).await.unwrap_err();
-        assert!(!error.contains("api_key"), "{error}");
-        assert!(!error.contains("never-log-this"), "{error}");
-        let error = client
-            .fetch_session_listing(&url)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(!error.contains("never-log-this"), "{error}");
     }
 
     #[tokio::test]

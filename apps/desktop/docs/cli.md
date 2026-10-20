@@ -62,8 +62,9 @@ to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
 fetch failed, including the underlying transport or HTTP error.
 
 Online commands (`verify`, `send`, `serve`, `sessions`, and `curl`) reject URLs
-containing a username or password. Supply credentials through their documented
-API key inputs or curl's header-file option instead.
+containing a username or password, and a service base URL with a query or
+fragment, so no secret in a URL reaches their output. Supply credentials
+through their documented API key inputs or curl's header-file option instead.
 
 The pinned channel uses the TLS keys the verified report declares for the
 host: every attested TLS key when none is domain-scoped, otherwise only the

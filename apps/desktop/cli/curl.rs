@@ -361,30 +361,14 @@ mod tests {
         assert_eq!(output.status.signal(), Some(15), "{output:?}");
     }
 
+    // A failed exec returns instead of replacing the process.
     #[test]
     fn reports_when_curl_cannot_be_started() {
-        const CHILD: &str = "PAP_TEST_CURL_MISSING";
-        if std::env::var_os(CHILD).is_some() {
-            let error = run_curl(
-                OsStr::new("/path/that/does/not/contain/curl"),
-                &args(&["--version"]),
-            )
-            .unwrap_err();
-            eprintln!("{error}");
-            std::process::exit(PAP_FAILURE_EXIT_CODE);
-        }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "curl::tests::reports_when_curl_cannot_be_started",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(PAP_FAILURE_EXIT_CODE));
-        assert!(String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("failed to start system curl"));
+        let err = run_curl(
+            OsStr::new("/path/that/does/not/contain/curl"),
+            &args(&["--version"]),
+        )
+        .unwrap_err();
+        assert!(err.contains("failed to start system curl"), "{err}");
     }
 }

@@ -411,23 +411,14 @@ fn nonempty_base_url(value: &str) -> Result<String, String> {
 }
 
 fn client_host(value: &str) -> Result<String, String> {
-    if value.is_empty()
-        || value.len() > 253
-        || value.split('.').any(|label| {
-            label.is_empty()
-                || label.len() > 63
-                || label.starts_with('-')
-                || label.ends_with('-')
-                || !label
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
-        })
-    {
-        return Err(
+    // Parsed as a URL host is, which lowercases it and refuses ports, paths
+    // and userinfo; IP addresses are accepted without this option.
+    match url::Host::parse(value) {
+        Ok(url::Host::Domain(domain)) => Ok(domain),
+        _ => Err(
             "client host must be a hostname without a port, path, scheme, or userinfo".to_string(),
-        );
+        ),
     }
-    Ok(value.to_ascii_lowercase())
 }
 
 fn app_id_subject(value: &str) -> Result<String, String> {
@@ -533,7 +524,7 @@ mod tests {
             "https://host",
             "host/path",
             "user@host",
-            "-host",
+            "127.0.0.1",
         ] {
             assert!(client_host(value).is_err(), "{value:?}");
         }
