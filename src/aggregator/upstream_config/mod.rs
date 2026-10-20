@@ -141,10 +141,6 @@ pub struct PublicUpstreamConfig {
     pub chutes_e2ee_discovery_rounds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chutes_e2ee_discovery_interval_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub zg_chain_rpc_url_configured: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub zg_serving_contract: Option<String>,
 }
 
 impl UpstreamConfig {
@@ -172,8 +168,6 @@ impl UpstreamConfig {
             chutes_chute_ids: self.chutes_chute_ids.clone(),
             chutes_e2ee_discovery_rounds: self.chutes_e2ee_discovery_rounds,
             chutes_e2ee_discovery_interval_seconds: self.chutes_e2ee_discovery_interval_seconds,
-            zg_chain_rpc_url_configured: self.zg_chain_rpc_url.is_some(),
-            zg_serving_contract: self.zg_serving_contract.clone(),
         }
     }
 }

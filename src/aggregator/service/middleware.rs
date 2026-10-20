@@ -432,11 +432,9 @@ impl AciService {
                 }
 
                 // Fail-closed when the effective policy requires it: a TEE-only
-                // endpoint, the request's §5.3 constraint (§1.2), or a route
-                // that cannot be served unverified. Unconstrained requests
-                // still record the verifier outcome.
-                let candidate_required =
-                    aci_required || self.upstream.requires_verified_binding(&prepared);
+                // endpoint or the request's §5.3 constraint (§1.2).
+                // Unconstrained requests still record the verifier outcome.
+                let candidate_required = aci_required;
 
                 let mut recorded_event = match self
                     .recorded_upstream_event(

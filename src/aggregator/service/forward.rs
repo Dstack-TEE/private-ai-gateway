@@ -165,8 +165,7 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let verification_required =
-            aci_required || self.upstream.requires_verified_binding(&prepared);
+        let verification_required = aci_required;
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -344,8 +343,7 @@ impl AciService {
         }
         let forwarded_body = prepared.request.body.clone();
         let caller_supplied_upstream_event = req.upstream_verification_event.is_some();
-        let verification_required =
-            aci_required || self.upstream.requires_verified_binding(&prepared);
+        let verification_required = aci_required;
         let mut recorded_event = self
             .recorded_upstream_event(
                 &prepared,
@@ -486,6 +484,8 @@ impl AciService {
         verification_required: bool,
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<UpstreamVerifiedEvent, ServiceError> {
+        let verification_required =
+            verification_required || self.upstream.requires_verified_binding(prepared);
         let mut upstream_verification_event = match upstream_verification_event {
             Some(event) => Some(event),
             None => match &self.upstream_verifier {
@@ -499,7 +499,8 @@ impl AciService {
         };
         if let Some(event) = upstream_verification_event.as_mut() {
             // `required` is the effective policy for this request — a TEE-only
-            // serving endpoint or the client's §5.3 constraint. The verifier
+            // serving endpoint, the client's §5.3 constraint, or a route that
+            // cannot be served unverified. The verifier
             // may report the upstream result, but the service owns the
             // client-facing decision recorded in the receipt (§7.5).
             event.required = verification_required;

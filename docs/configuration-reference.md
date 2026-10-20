@@ -274,7 +274,7 @@ request time.
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
-| `zg_chain_rpc_url` | string | required for `0g-private-computer` | HTTPS 0G chain JSON-RPC endpoint the verifier reads provider records from, independently of the router. Treated as a credential: the admin API reports only `zg_chain_rpc_url_configured`. `0g-private-computer` only. |
+| `zg_chain_rpc_url` | string | required for `0g-private-computer` | HTTPS 0G chain JSON-RPC endpoint the verifier reads provider records from, independently of the router. Treated as a credential: the admin API does not return it. `0g-private-computer` only. |
 | `zg_serving_contract` | string | required for `0g-private-computer` | 0G InferenceServing contract address, `0x` + 40 hex (mainnet: `0x47340d900bdFec2BD393c626E12ea0656F938d84`). `0g-private-computer` only. |
 
 See [Cache and background refresh](upstream-verification-lifecycle.md#cache-and-background-refresh)

@@ -253,8 +253,10 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
         }]"#;
     let valid = parse_config_text(valid_text).expect("0G route should parse");
     assert_eq!(valid[0].provider, UpstreamProvider::ZeroGPrivateComputer);
-    let public = valid[0].redacted();
-    assert!(public.zg_chain_rpc_url_configured && public.bearer_token_configured);
+    // The RPC URL may embed a credential, so the admin view omits it.
+    assert!(!serde_json::to_string(&valid[0].redacted())
+        .unwrap()
+        .contains("evmrpc"));
     let state = build_state(&valid, &runtime_options(UpstreamVerifierMode::None))
         .expect("0G route should build");
     assert!(state.verifier.is_some());
