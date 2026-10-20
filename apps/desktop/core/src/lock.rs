@@ -21,12 +21,12 @@ pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
-    fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir.join(name))
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    // A planted link, even a dangling one, must not create or lock a file elsewhere.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    options.open(dir.join(name))
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
@@ -143,6 +143,16 @@ mod tests {
             fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lock_file_is_refused_without_creating_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, temp.path().join("instance.lock")).unwrap();
+        assert!(instance(temp.path()).is_err());
+        assert!(!target.exists());
     }
 
     /// Waits for `acquire` to succeed. Files are opened `O_CLOEXEC`, but a
