@@ -2,7 +2,10 @@
 @layer base {
   * { @apply border-border outline-ring/50; }
 }
+/* The desktop app's window, which the shell marks with its platform; a browser has none. */
+@custom-variant desktop (&:where([data-platform] *));
 @theme inline {
+  --color-success: var(--success);
   --color-warning: var(--warning);
 }
 :root {
@@ -21,10 +24,13 @@
   --chart-10: var(--color-indigo-500);
 
   --sidebar-width: 196px;
+  /* Text tones; the primary green stays for fills, too light for text on light surfaces. */
+  --success: var(--color-lime-700);
   --warning: var(--color-amber-700);
 }
 :root.dark {
   color-scheme: dark;
+  --success: var(--primary);
   --warning: var(--color-amber-400);
   --chart-1: var(--color-blue-400);
   --chart-2: var(--color-emerald-400);
@@ -49,7 +55,7 @@
     --tw-exit-translate-x: 0;
     --tw-exit-translate-y: 0;
   }
-  .animate-spin { animation: none; }
+  .animate-spin, .animate-control-spin { animation: none; }
 }
 /* High contrast: switches use the system's control colors, with the highlight
    for on, and dialogs keep an outline where their ring (a shadow) is dropped. */
