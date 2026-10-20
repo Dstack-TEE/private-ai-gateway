@@ -14,13 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::private_fs::create_or_repair_private_dir;
+use crate::private_fs::{create_or_repair_private_dir, create_private_dir};
 
 /// The wait for a just-released instance lock, needed on Windows.
 pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
-    create_or_repair_private_dir(dir)?;
+    create_private_dir(dir)?;
     let path = dir.join(name);
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -145,6 +145,7 @@ pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
 /// Try to become the primary instance; `None` when another process holds it.
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
+    create_or_repair_private_dir(data_dir)?;
     let file = open(data_dir, "instance.lock")?;
     if !taken(file.try_lock())? {
         return Ok(None);
@@ -207,6 +208,27 @@ pub fn with_apply_lock<T, E: From<ApplyLockError>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_backend_instance_repairs_the_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        drop(startup_shared(temp.path()).unwrap().unwrap());
+        drop(eventually(|| startup(temp.path()).unwrap()));
+        with_apply_lock(temp.path(), || Ok::<_, String>(())).unwrap();
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let _owner = instance(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 
     #[cfg(unix)]
     #[test]
