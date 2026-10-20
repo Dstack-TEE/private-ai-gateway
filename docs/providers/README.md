@@ -8,6 +8,7 @@ Each provider has a living `verification.md` page for the current adapter and, o
 
 | Provider | Attested boundary | Enforced binding | Living reference | Dated audit decision |
 | --- | --- | --- | --- | --- |
+| 0G Private Computer | Per-provider 0G broker TEE (dstack), private tier only | `e2ee_public_key_sha256` | [Verification](0g-private-computer/verification.md) | Not yet audited; [assessment](https://github.com/Dstack-TEE/private-ai-gateway/pull/439) |
 | ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
 | ArmetAI | Per-model Intel TDX + NVIDIA CC GPU endpoint (non-dstack), measurement-pinned | `tls_spki_sha256` | [Verification](armet-ai/verification.md) | Not yet audited; [self-assessment](armet-ai/review.md), 2026-09-29 |
 | Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Accepted for limited traffic](chutes/review.md), 2026-05-18 |

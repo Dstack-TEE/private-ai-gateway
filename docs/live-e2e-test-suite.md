@@ -121,22 +121,24 @@ export NEARAI_API_KEY='...'
 export CHUTES_API_KEY='...'
 ```
 
-The ignored 0G Private Computer smoke test uses a credential file and does not
-run as part of the provider matrix. On this host, the local credential file is
-`/home/kingsley/.config/private-ai-gateway/0g-api-key`; point
-`PRIVATE_AI_GATEWAY_0G_API_KEY_FILE` at it (or another local file) when the key
-has been provisioned:
+The ignored 0G Private Computer live test exercises the native
+`0g-private-computer` provider directly against the 0G router, without a
+gateway process. It reads the 0G API key from a file outside the repository,
+for example `~/.config/private-ai-gateway/0g-api-key`:
 
 ```sh
-export PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=/home/kingsley/.config/private-ai-gateway/0g-api-key
-cargo test --test 0g_private_computer_live -- --ignored
+export PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=~/.config/private-ai-gateway/0g-api-key
+cargo test --test 0g_private_computer_live -- --ignored --nocapture
 ```
 
-The test skips when `PRIVATE_AI_GATEWAY_0G_API_KEY_FILE` is unset, missing, or
-empty. It uses `http://127.0.0.1:8086` by default; set
-`PRIVATE_AI_GATEWAY_0G_TEST_ENDPOINT` to override the gateway origin. The key
-is read only in memory and is never copied into the repository or written to
-test output. Live inference remains an operator check and is not run in CI.
+It verifies the private-tier `glm-5.3` candidates (route preview, on-chain
+record, DCAP quote, boot chain, signer), then sends one buffered and one
+streamed completion and requires each to open and its provider signature to
+verify; the stream must end in `[DONE]`. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`
+overrides the default chain RPC `https://evmrpc.0g.ai`. The test skips when the
+key file variable is unset, missing, or empty. The key is held only in memory
+and never printed. It sends live inference, so it is an operator check and does
+not run in CI.
 
 The runner loads a dotenv file before reading the environment. Its default is `.env` in the parent directory of this repository, not `.env` inside the repository. Override it explicitly when needed:
 

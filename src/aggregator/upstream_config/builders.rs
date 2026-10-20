@@ -12,13 +12,13 @@ use crate::aci::digest;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
-    UpstreamBackend,
+    UpstreamBackend, ZeroGProviderBackend,
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ArmetAiProviderVerifier,
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     PreverifiedUpstreamVerifier, PrivatemodeProviderVerifier, RoutingUpstreamVerifier,
-    SecretAiProviderVerifier, TinfoilProviderVerifier,
+    SecretAiProviderVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -84,7 +84,8 @@ pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::SecretAi
         | UpstreamProvider::Privatemode
         | UpstreamProvider::PhalaDirect
-        | UpstreamProvider::ArmetAi => true,
+        | UpstreamProvider::ArmetAi
+        | UpstreamProvider::ZeroGPrivateComputer => true,
     }
 }
 
@@ -144,6 +145,19 @@ fn build_provider_backend(
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
             .with_name(cfg.name.clone());
+            Ok(Arc::new(backend))
+        }
+        UpstreamProvider::ZeroGPrivateComputer => {
+            let mut backend = ZeroGProviderBackend::new_with_timeouts(
+                cfg.base_url.clone(),
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone());
+            if let Some(token) = &cfg.bearer_token {
+                backend = backend.with_bearer_token(token.clone());
+            }
             Ok(Arc::new(backend))
         }
         UpstreamProvider::OpenAiCompatible
@@ -301,6 +315,31 @@ pub(super) fn build_verifier(
                 );
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
+                }
+                Arc::new(verifier)
+            }
+            UpstreamProvider::ZeroGPrivateComputer => {
+                let (Some(rpc_url), Some(contract)) =
+                    (&cfg.zg_chain_rpc_url, &cfg.zg_serving_contract)
+                else {
+                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                        "upstream {:?} provider 0g-private-computer requires zg_chain_rpc_url and zg_serving_contract",
+                        cfg.name
+                    )));
+                };
+                let mut verifier = ZeroGProviderVerifier::new(
+                    cfg.base_url.clone(),
+                    rpc_url.clone(),
+                    contract.clone(),
+                    cfg.pccs_url.clone().or_else(|| options.pccs_url.clone()),
+                    cfg.connect_timeout_seconds
+                        .unwrap_or(options.connect_timeout_seconds),
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .map_err(UpstreamConfigError::InvalidConfig)?;
+                if let Some(token) = &cfg.bearer_token {
+                    verifier = verifier.with_api_key(token.clone());
                 }
                 Arc::new(verifier)
             }

@@ -1,0 +1,230 @@
+{
+  "client_eph_private_key": "jwMQ3SaMZfPYcY3U2xODg7sq6ktDNN_BlNU3jQ95rCk",
+  "enc_private_key": "0q6OgcGBjGn9TSMzIXJleUKfEDn5s7z9ztEQvA0V3iQ",
+  "enc_public_key": "sn1TsMvFhkq4c8C1o9dYEO51zBSyk9X9wMxVk1f0qGw",
+  "request_binding_hash": "6d2a7ab9c51092a77004922711fc7a2eb8911808fa6d1995e2bf0643bcc4a86d",
+  "request_plain": {
+    "logit_bias": {
+      "50256": -100,
+      "1000": 5
+    },
+    "max_tokens": 64,
+    "messages": [
+      {
+        "role": "system",
+        "content": "Be brief."
+      },
+      {
+        "role": "user",
+        "content": "Say ok \u003cnow\u003e \u0026 é"
+      }
+    ],
+    "model": "glm-5.3",
+    "seed": 12345678901234567890,
+    "stop": [
+      "\u003c/s\u003e",
+      "fin \u003c\u0026\u003e é"
+    ],
+    "stream": true,
+    "temperature": 0.7,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "lookup",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "request_sealed": {
+    "_e2ee": {
+      "v": 1,
+      "kem_id": "0x0020",
+      "key_id": "mQK4V2PLjAE",
+      "signer_addr": "0x1563915e194d8cfba1943570603f7606a3115508",
+      "client_eph_pub": "Tn2105xyekQzg4Cdh2kBPieM47-GkJcTlyjqXzHwJGw",
+      "enc": "HvQCHb-f0_xrUSATBiHzV11cuZjSlc6-Pd3PwRKBiic",
+      "sealed_fields": [
+        "messages",
+        "tools"
+      ],
+      "ciphertext": "-UCU-jd_4Y9w2PfgRkSImOqLmeLgIOOGQ9a82SFBlSK9nifOnAy-4buzJ1mkX3FBFEbfdZzw1G6_1K66QdDz9Kr0r_34xicbZ4-kPUjQ6tBfyy0avlXO9v4M2oWOE0V2avqeLUZDhcS5Wn7AHyvjCyrl-LzMDotszhRFZOqfZ3g8H6mnXlRm5yAqHkiWHFFlj0em_rGnec0l3J5rTA0dSHkfRoUO5kANW5J6noPN93lGhyZPINJAbW_cV7rNgPRqGRQC9sDCNM3yzZvzeu0yg-Mt61XfC45jinygi3c"
+    },
+    "logit_bias": {
+      "50256": -100,
+      "1000": 5
+    },
+    "max_tokens": 64,
+    "model": "glm-5.3",
+    "seed": 12345678901234567890,
+    "stop": [
+      "\u003c/s\u003e",
+      "fin \u003c\u0026\u003e é"
+    ],
+    "stream": true,
+    "temperature": 0.7
+  },
+  "response_plain": {
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "created": 1760000000,
+    "id": "chatcmpl-fixture",
+    "model": "glm-5.3",
+    "object": "chat.completion",
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 1,
+      "total_tokens": 13
+    }
+  },
+  "response_sealed": {
+    "_e2ee": {
+      "v": 1,
+      "enc": "lTuBaqsmy3wkoNc_Y6XZ2yB3x-SMoHyUJmzRklioZxk",
+      "sealed_fields": [
+        "choices"
+      ],
+      "unbound_fields": [
+        "model"
+      ],
+      "final": true,
+      "ciphertext": "eOqkDKamPU_rnjjfrTqtqgs9vBWubu1dHIrofyUorSw075dmeDwS8e6-8PGkf1zRYGk0JB-XVhhnZSXSShE57TskkNfP1OkE9NEzkpQ-4stp62GqydS8cJ1cqrvEImsXwpS0Oze7PBbZXEKepbE"
+    },
+    "created": 1760000000,
+    "id": "chatcmpl-fixture",
+    "model": "glm-5.3",
+    "object": "chat.completion",
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 1,
+      "total_tokens": 13
+    }
+  },
+  "response_signature": {
+    "text": "zg-sig-v1/e2ee-ct:6d2a7ab9c51092a77004922711fc7a2eb8911808fa6d1995e2bf0643bcc4a86d:2a844c42161760aa6816163ce3aaf4d991e8f377f0182d2efb07defde173908f",
+    "signature": "0xd1170760ee459d6a5e65244bf17fcb14f4ace68955387eb9a6cbef594ceec2796f836d918772e5aa31c912fd6e05765d0aacd7a8dfd2e4d95cb46c291f58230b1b",
+    "signing_address": "0x1563915e194d8cfba1943570603f7606a3115508",
+    "signing_algo": "ecdsa"
+  },
+  "signer_address": "0x1563915e194d8cfba1943570603f7606a3115508",
+  "source": "github.com/0gfoundation/0g-pc-e2ee/protocol@6d823311abcbf8ba41656f38395cc50f19360c1b",
+  "stream_frames": [
+    {
+      "_e2ee": {
+        "v": 1,
+        "enc": "cjb3uxoG0WIZjNAWvmzo9PfcuMp5OGLVro3xY2eF6gU",
+        "sealed_fields": [
+          "choices"
+        ],
+        "unbound_fields": [
+          "model"
+        ],
+        "final": false,
+        "ciphertext": "PrdzxgxoAHV5NGarnSZ9i0m9luak2zTT36lZRVcEzV0UCCnVWAxYwzkKhvE4WMx4QAXCW3dzSVyZ13UZz3SWNT4oyBQLE2LwMTjByLqQNf48njxsOSpPQApySgWPI9dUvUmuvUMtJ68I"
+      },
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "_e2ee": {
+        "sealed_fields": [
+          "choices"
+        ],
+        "unbound_fields": [
+          "model"
+        ],
+        "final": false,
+        "ciphertext": "19okmi7QMH2N6VPNV-yp7vlTBswFWtyLuHZ-vQr3Aszgg1wc_5iDuFdrDaeeamDDjJF6bthe4Z_2Okv7fsL9WkgeVhsE2u7x17U6e9x1QYpi0F0aWI8I1Q"
+      },
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "_e2ee": {
+        "sealed_fields": [
+          "choices"
+        ],
+        "unbound_fields": [
+          "model"
+        ],
+        "final": true,
+        "ciphertext": "Qnvg3jyXL7_r5opxDBXqo4tpdJIzpuewsofFPQvm"
+      },
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk",
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 2,
+        "total_tokens": 14
+      }
+    }
+  ],
+  "stream_plain": [
+    {
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "role": "assistant",
+            "content": "o"
+          },
+          "finish_reason": null
+        }
+      ],
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [
+        {
+          "index": 0,
+          "delta": {
+            "content": "k"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk"
+    },
+    {
+      "choices": [],
+      "created": 1760000000,
+      "id": "chatcmpl-fixture",
+      "model": "glm-5.3",
+      "object": "chat.completion.chunk",
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 2,
+        "total_tokens": 14
+      }
+    }
+  ],
+  "stream_signature": {
+    "text": "zg-sig-v1/e2ee-ct-stream:6d2a7ab9c51092a77004922711fc7a2eb8911808fa6d1995e2bf0643bcc4a86d:2ecb7fda3002796e908d088a16da1d87d820b8e47cbc546fc82b8ca0e93a5050",
+    "signature": "0xab6b3e93eddd80a1cfe22c2426408d24845e15dd30f4a463abb982d2df0a3fd10dedd792aae4a136be289c9326d2004acf3e841fb59cb48b2ce86e05a01a83e71c",
+    "signing_address": "0x1563915e194d8cfba1943570603f7606a3115508",
+    "signing_algo": "ecdsa"
+  }
+}

@@ -24,6 +24,9 @@ aci-verify = { path = "crates/aci-verify" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# Full RFC 8785 JCS (ES6 number formatting, UTF-16 key order) for the 0G
+# Private Computer AAD, which binds arbitrary cleartext JSON.
+serde_json_canonicalizer = "0.4"
 dstack-sdk = "0.1.2"
 bytes = "1"
 rust_decimal = "1"
@@ -40,6 +43,9 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 flate2 = "1"
 hkdf = "0.12"
+# RFC 9180 HPKE (base mode, DHKEM-X25519 / HKDF-SHA256 / ChaCha20Poly1305) for
+# the 0G Private Computer E2EE protocol; 0.12 reuses the RustCrypto versions above.
+hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
 ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
 rand_core = "0.6"

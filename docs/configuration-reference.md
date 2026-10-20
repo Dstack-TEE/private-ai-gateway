@@ -242,6 +242,7 @@ client-observed body and the provider-facing body.
 | `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
 | `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
 | `armet-ai` | TEE | Per-model non-dstack Intel TDX endpoint: DCAP quote, report_data bound to nonce, TLS SPKI, GPU evidence and model, measurement pin, mandatory NRAS GPU check, and TLS-SPKI enforcement through the Python bridge. |
+| `0g-private-computer` | TEE | 0G router, private tier only: native verification of each provider broker (on-chain record, DCAP quote, boot chain, signer) and native 0G E2EE with signature-verified responses. `base_url` is the 0G router as a root HTTPS URL; requires `bearer_token`, `zg_chain_rpc_url` and `zg_serving_contract`; forbids `path`. See [0G Private Computer verification](providers/0g-private-computer/verification.md). |
 
 TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at
@@ -253,7 +254,7 @@ request time.
 | --- | --- | --- | --- |
 | `name` | string | required | Unique non-empty upstream name. |
 | `provider` | enum | `openai-compatible` | One provider value from the table above. |
-| `base_url` | string | required | Non-empty provider origin. `secret-ai` and `armet-ai` require a root HTTPS URL without user info, path, query, or fragment. |
+| `base_url` | string | required | Non-empty provider origin. `secret-ai`, `armet-ai` and `0g-private-computer` require a root HTTPS URL without user info, path, query, or fragment. |
 | `path` | string | unset | Upstream path for chat requests. Leading `/` is added when missing. See [Chat request path](#chat-request-path). |
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
@@ -262,7 +263,7 @@ request time.
 | `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
 | `accepted_dstack_kms_root_public_keys` | string array | unset | ACI-service accepted dstack KMS root public keys. |
-| `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service DCAP verifier. |
+| `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service and 0G DCAP verifiers. |
 | `verifier_cache_seconds` | positive integer | `300` | Provider-verification cache lifetime. Zero is rejected. |
 | `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
 | `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
@@ -273,6 +274,8 @@ request time.
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
 | `chutes_e2ee_discovery_rounds` | integer from 1 to 10 | `3` | Evidence discovery attempts per verification. Chutes only. |
 | `chutes_e2ee_discovery_interval_seconds` | non-negative integer | `0` | Delay between discovery rounds. Chutes only. |
+| `zg_chain_rpc_url` | string | required for `0g-private-computer` | HTTPS 0G chain JSON-RPC endpoint the verifier reads provider records from, independently of the router. Treated as a credential: the admin API reports only `zg_chain_rpc_url_configured`. `0g-private-computer` only. |
+| `zg_serving_contract` | string | required for `0g-private-computer` | 0G InferenceServing contract address, `0x` + 40 hex (mainnet: `0x47340d900bdFec2BD393c626E12ea0656F938d84`). `0g-private-computer` only. |
 
 See [Cache and background refresh](upstream-verification-lifecycle.md#cache-and-background-refresh)
 for scheduling, failure retries, concurrency, and cache-warmth limits.
@@ -291,7 +294,7 @@ upstream's chat format, go to the upstream's `path`. Without `path` they go to
 `/v1/messages`. `/v1/completions`, `/v1/embeddings`, and `/v1/responses` keep
 their public path.
 
-Chutes-specific fields on another provider are rejected. For private Chutes
+Chutes-specific and `zg_*` fields on another provider are rejected. For private Chutes
 origins that use Basic authentication, follow the
 [private Chutes configuration](providers/chutes/configuration.md).
 
