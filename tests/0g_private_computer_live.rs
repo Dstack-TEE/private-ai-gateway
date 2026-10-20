@@ -13,7 +13,7 @@ use private_ai_gateway::aci::verifier::ZeroGProviderVerifier;
 use private_ai_gateway::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use serde_json::Value;
 
-const ROUTER: &str = "https://router-api.0g.ai";
+const ROUTER: &str = "https://router-api-cloud.0g.ai";
 const SERVING_CONTRACT: &str = "0x47340d900bdFec2BD393c626E12ea0656F938d84";
 const MODEL: &str = "glm-5.3";
 

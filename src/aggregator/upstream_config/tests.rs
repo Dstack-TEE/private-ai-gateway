@@ -245,7 +245,7 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
     let valid_text = r#"[{
           "name": "zero-g",
           "provider": "0g-private-computer",
-          "base_url": "https://router-api.0g.ai",
+          "base_url": "https://router-api-cloud.0g.ai",
           "bearer_token": "zg-key",
           "zg_chain_rpc_url": "https://evmrpc.0g.ai",
           "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
@@ -260,7 +260,10 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
     assert!(state.verifier.is_some());
 
     for (from, to) in [
-        ("https://router-api.0g.ai", "http://router-api.0g.ai"),
+        (
+            "https://router-api-cloud.0g.ai",
+            "http://router-api-cloud.0g.ai",
+        ),
         (r#""bearer_token": "zg-key","#, ""),
         ("https://evmrpc.0g.ai", "http://evmrpc.0g.ai"),
         ("0x47340d900bdFec2BD393c626E12ea0656F938d84", "0x47340d"),

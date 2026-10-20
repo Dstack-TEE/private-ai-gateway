@@ -492,8 +492,8 @@ async fn buffered_response_without_a_verified_signature_is_a_generic_error() {
 
 #[tokio::test]
 async fn stream_ends_in_done_only_after_the_signature_verifies() {
-    let events: Vec<String> = Fixture::new(Mode::Ok)
-        .await
+    let fixture = Fixture::new(Mode::Ok).await;
+    let events: Vec<String> = fixture
         .stream()
         .await
         .into_iter()
@@ -502,6 +502,9 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
     assert_eq!(events.len(), 4);
     assert!(events[0].contains(r#""content":"o""#) && !events[0].contains(E2EE));
     assert_eq!(events[3], "data: [DONE]\n\n");
+    // Usage is requested before sealing, as 0G's client does, so it stays bound.
+    let sent = fixture.broker.requests.lock().unwrap()[0].1.clone();
+    assert_eq!(sent["stream_options"]["include_usage"], true);
 
     for (mode, delivered) in [
         (Mode::WrongSigner, 3),

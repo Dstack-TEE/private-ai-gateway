@@ -57,7 +57,7 @@ fn fail<T>(message: impl Into<String>) -> Result<T, ProtocolError> {
 /// Seal a chat request to `enc_pub`, pinned to `signer`. Returns the envelope
 /// and the opener for its response.
 pub(crate) fn seal_chat_request(
-    request: Map<String, Value>,
+    mut request: Map<String, Value>,
     enc_pub: &[u8; 32],
     signer: &str,
 ) -> Result<(Value, ResponseOpener), ProtocolError> {
@@ -70,6 +70,17 @@ pub(crate) fn seal_chat_request(
     }
     if !request.contains_key("messages") {
         return fail("0G E2EE chat requests must carry messages");
+    }
+    // As 0G's client does: a stream must request usage, and setting it before
+    // sealing keeps `stream_options` bound instead of rewritten in transit.
+    if request.get("stream") == Some(&Value::Bool(true)) {
+        let options = request
+            .entry("stream_options")
+            .or_insert_with(|| serde_json::json!({}));
+        if !options.is_object() {
+            *options = serde_json::json!({});
+        }
+        options["include_usage"] = true.into();
     }
     let recipient = <Kem as hpke::Kem>::PublicKey::from_bytes(enc_pub)
         .map_err(|_| ProtocolError("invalid provider encryption key".into()))?;

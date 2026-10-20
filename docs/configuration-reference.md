@@ -242,7 +242,7 @@ client-observed body and the provider-facing body.
 | `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
 | `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
 | `armet-ai` | TEE | Per-model non-dstack Intel TDX endpoint: DCAP quote, report_data bound to nonce, TLS SPKI, GPU evidence and model, measurement pin, mandatory NRAS GPU check, and TLS-SPKI enforcement through the Python bridge. |
-| `0g-private-computer` | TEE | 0G router, private tier only: native verification of each provider broker (on-chain record, DCAP quote, boot chain, signer) and native 0G E2EE with signature-verified responses. `base_url` is the 0G router as a root HTTPS URL; requires `bearer_token`, `zg_chain_rpc_url` and `zg_serving_contract`; forbids `path`. See [0G Private Computer verification](providers/0g-private-computer/verification.md). |
+| `0g-private-computer` | TEE | 0G router, private tier only: native verification of each provider broker (on-chain record, DCAP quote, boot chain, signer) and native 0G E2EE with signature-verified responses. `base_url` is the 0G router itself as a root HTTPS URL (`https://router-api-cloud.0g.ai`, not the hosted gateway at `router-api.0g.ai`); requires `bearer_token`, `zg_chain_rpc_url` and `zg_serving_contract`; forbids `path`. See [0G Private Computer verification](providers/0g-private-computer/verification.md). |
 
 TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at

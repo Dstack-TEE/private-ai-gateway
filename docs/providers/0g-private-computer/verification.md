@@ -18,7 +18,7 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 [{
   "name": "zero-g",
   "provider": "0g-private-computer",
-  "base_url": "https://router-api.0g.ai",
+  "base_url": "https://router-api-cloud.0g.ai",
   "bearer_token": "<0G API key>",
   "zg_chain_rpc_url": "https://evmrpc.0g.ai",
   "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
@@ -26,7 +26,7 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 }]
 ```
 
-`models` is the model allowlist. The chain RPC is the independent source of provider records, so use one you trust independently of 0G's router. The private-tier header and the `TargetSeparated` rule are code, not config.
+`base_url` must be the 0G router itself (`router-api-cloud.0g.ai`), not the public entry `router-api.0g.ai`. The public entry is 0G's hosted gateway: it seals plaintext requests on the caller's behalf, so it would see the prompt, and it rejects an already-sealed request (`seal request: no sealed fields`). Pointing at it therefore fails closed. `models` is the model allowlist. The chain RPC is the independent source of provider records, so use one you trust independently of 0G's router. The private-tier header and the `TargetSeparated` rule are code, not config.
 
 ## Verification algorithm
 
@@ -45,7 +45,7 @@ A failing candidate is skipped and logged under target `zero_g`. With none left,
 
 The backend uses the first provider, in preview order, whose recorded key hashes to a binding the current event carries.
 
-- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. Any other field is refused instead of being sent in the clear. Only `/v1/chat/completions` is served.
+- `messages`, `tools` and `tool_choice` are sealed (§5.1 default). As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. Any other field is refused instead of being sent in the clear. Only `/v1/chat/completions` is served.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response becomes a generic upstream error; its body is not returned.
 

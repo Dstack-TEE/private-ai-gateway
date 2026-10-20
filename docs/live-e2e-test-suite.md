@@ -122,7 +122,8 @@ export CHUTES_API_KEY='...'
 ```
 
 The ignored 0G Private Computer live test exercises the native
-`0g-private-computer` provider directly against the 0G router, without a
+`0g-private-computer` provider directly against the 0G router
+(`router-api-cloud.0g.ai`), without a
 gateway process. It reads the 0G API key from a file outside the repository,
 for example `~/.config/private-ai-gateway/0g-api-key`:
 
