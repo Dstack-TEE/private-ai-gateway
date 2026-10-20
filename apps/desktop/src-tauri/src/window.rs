@@ -105,12 +105,14 @@ pub fn launch_hidden(app: &AppHandle) {
             }
         };
         if icon && tokio::time::timeout(LOGIN_TRAY_WAIT, host).await.is_ok() {
-            // Unless the window was opened meanwhile. Under the lock, a later
-            // show's Dock change is sent after this one.
-            let state = state(&app);
-            if !state.show_requested {
-                set_dock_visibility(&app, false);
-            }
+            // A window opened meanwhile keeps its Dock icon. Checked on the
+            // main thread, which runs each show's Dock change in turn.
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                if !state(&handle).show_requested {
+                    set_dock_visibility(&handle, false);
+                }
+            });
         } else {
             tracing::info!("No usable tray: showing the window minimized");
             present(&app, Presentation::Minimized);
