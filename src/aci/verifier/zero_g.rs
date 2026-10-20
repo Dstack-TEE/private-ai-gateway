@@ -30,36 +30,18 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 const MAX_CANDIDATES: usize = 8;
 
-/// Boot chains (MRTD, RTMR1, RTMR2) of the production dstack images 0G
-/// providers run, from 0G's provider allowlist (`client/evidence/
-/// brokerimages.json` at 0g-pc-e2ee release-2026.10.19.2), which derives each
-/// entry with dstack-mr from the published release.
-const ALLOWED_BOOT_CHAINS: &[(&str, [&str; 3])] = &[
-    (
-        "dstack-nvidia-0.5.9",
-        [
-            "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
-            "07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878c",
-            "f1c82667a354194467cd8419efd14a714560dd9b85b4c13b25c11e44bf4e126248c2255fad58c303fb0ca2921765d53a",
-        ],
-    ),
-    (
-        "dstack-nvidia-0.5.4.1",
-        [
-            "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
-            "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7",
-            "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57",
-        ],
-    ),
-];
-
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct PreviewCandidate {
     pub address: String,
     #[serde(default)]
     pub provider_identity: Option<String>,
+    /// The model id the caller names (0G's client seals this one).
     #[serde(default)]
-    pub canonical_id: Option<String>,
+    pub canonical_id: String,
+    /// The provider's own id for that model, as on chain and as the router
+    /// forwards it.
+    #[serde(default)]
+    pub model_id: String,
 }
 
 /// A candidate that passed every check, with the facts recorded as claims.
@@ -87,6 +69,7 @@ pub struct ZeroGProviderVerifier {
     chain_rpc_url: String,
     serving_contract: String,
     pccs_url: String,
+    accepted_subjects: Vec<String>,
     client: reqwest::Client,
     cache_ttl_seconds: u64,
     cache: RwLock<HashMap<String, CachedProviderEvent>>,
@@ -111,6 +94,7 @@ impl ZeroGProviderVerifier {
             chain_rpc_url: chain_rpc_url.into(),
             serving_contract: serving_contract.into(),
             pccs_url: pccs_url.unwrap_or_else(|| dcap_qvl::PHALA_PCCS_URL.to_string()),
+            accepted_subjects: Vec::new(),
             client: readiness_client(
                 super::DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
                 request_timeout_seconds,
@@ -121,6 +105,13 @@ impl ZeroGProviderVerifier {
             #[cfg(test)]
             quote_status: None,
         })
+    }
+
+    /// Boot-chain pins (`tdx-boot-chain:sha256:<hex>`); with none, every
+    /// candidate is refused.
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        self.accepted_subjects = subjects.into_iter().collect();
+        self
     }
 
     #[cfg(test)]
@@ -233,12 +224,11 @@ impl ZeroGProviderVerifier {
         candidate: &PreviewCandidate,
         model: &str,
     ) -> Result<VerifiedCandidate, String> {
-        if candidate
-            .canonical_id
-            .as_deref()
-            .is_some_and(|id| id != model)
-        {
-            return Err("router offered a different model".to_string());
+        if candidate.canonical_id != model {
+            return Err(format!(
+                "router offered canonical model {:?}",
+                candidate.canonical_id
+            ));
         }
         let address = candidate.address.to_ascii_lowercase();
         if address.len() != 42 || !address.starts_with("0x") || hex::decode(&address[2..]).is_err()
@@ -250,8 +240,11 @@ impl ZeroGProviderVerifier {
         if !service.acknowledged {
             return Err("on-chain teeSignerAddress is not acknowledged".to_string());
         }
-        if onchain_model != model {
-            return Err(format!("on-chain service serves model {onchain_model:?}"));
+        if candidate.model_id.is_empty() || *onchain_model != candidate.model_id {
+            return Err(format!(
+                "on-chain service serves model {onchain_model:?}, not {:?}",
+                candidate.model_id
+            ));
         }
         let info: Value = serde_json::from_str(additional_info).unwrap_or_default();
         if info.get("TargetSeparated") != Some(&Value::Bool(false)) {
@@ -278,11 +271,15 @@ impl ZeroGProviderVerifier {
             Report::SgxEnclave(_) => return Err("quote is not a TDX quote".to_string()),
         };
         let tcb_status = self.verify_quote(&raw_quote).await?;
-        let boot_chain = [td.mr_td, td.rt_mr1, td.rt_mr2].map(hex::encode);
-        let (os_image, _) = ALLOWED_BOOT_CHAINS
-            .iter()
-            .find(|(_, chain)| *chain == boot_chain)
-            .ok_or("quote boot chain is not an allowlisted dstack image")?;
+        // The OS image: firmware, kernel, and cmdline (rootfs verity hash)
+        // with initrd. RTMR0 (VM shape) and RTMR3 (the app) vary per provider.
+        let boot_chain = format!(
+            "tdx-boot-chain:sha256:{}",
+            hex::encode(Sha256::digest([td.mr_td, td.rt_mr1, td.rt_mr2].concat()))
+        );
+        if !self.accepted_subjects.contains(&boot_chain) {
+            return Err(format!("quote boot chain {boot_chain} is not accepted"));
+        }
         // report_data (§4.2): enc_pub(32) ‖ signer(20) ‖ version u32 BE = 1 ‖ zero(8).
         let report_data = &td.report_data;
         if report_data[52..56] != [0, 0, 0, 1] || report_data[56..].iter().any(|b| *b != 0) {
@@ -298,7 +295,7 @@ impl ZeroGProviderVerifier {
 
         let mut claims = Map::new();
         claims.insert("tcb_status".into(), tcb_status.into());
-        claims.insert("os_image".into(), (*os_image).into());
+        claims.insert("boot_chain".into(), boot_chain.into());
         claims.insert("onchain_verifiability".into(), verifiability.clone().into());
         claims.insert("plaintext_destination_verified".into(), false.into());
         if td.mr_config_id[0] == 1 && td.mr_config_id[33..].iter().all(|b| *b == 0) {
@@ -314,6 +311,7 @@ impl ZeroGProviderVerifier {
                 provider_identity: candidate.provider_identity.clone(),
                 endpoint: url.clone(),
                 model: model.to_string(),
+                model_id: candidate.model_id.clone(),
                 signing_address: signer,
                 e2ee_public_key: hex::encode(enc_pub),
             },

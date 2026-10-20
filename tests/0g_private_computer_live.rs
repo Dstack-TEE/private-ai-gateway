@@ -1,6 +1,7 @@
 //! Live 0G Private Computer test: private-tier verification, then one buffered
-//! and one streamed glm-5.3 completion, each released only after the
-//! provider's signature verifies.
+//! and one streamed completion, each released only after the provider's
+//! signature verifies. `PRIVATE_AI_GATEWAY_0G_MODEL` overrides the model
+//! (default `glm-5.3`).
 //!
 //! `PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=/path/to/key cargo test --test 0g_private_computer_live -- --ignored --nocapture`
 
@@ -15,11 +16,20 @@ use serde_json::Value;
 
 const ROUTER: &str = "https://router-api-cloud.0g.ai";
 const SERVING_CONTRACT: &str = "0x47340d900bdFec2BD393c626E12ea0656F938d84";
-const MODEL: &str = "glm-5.3";
+/// Boot-chain pins for the dstack images 0G publishes for its providers
+/// (`client/evidence/brokerimages.json`): dstack-nvidia-0.5.4.1 and 0.5.9.
+const BOOT_CHAINS: [&str; 2] = [
+    "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc",
+    "tdx-boot-chain:sha256:bebbc1f26600aa7e415962d919d1919613d7be1d3ce9f4043c19f6785da11c0e",
+];
+
+fn model() -> String {
+    std::env::var("PRIVATE_AI_GATEWAY_0G_MODEL").unwrap_or_else(|_| "glm-5.3".to_string())
+}
 
 fn prepared(stream: bool) -> PreparedUpstreamRequest {
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": model(),
         "stream": stream,
         "messages": [{"role": "user", "content": "Reply with the word ok."}],
         "max_completion_tokens": 256,
@@ -32,15 +42,15 @@ fn prepared(stream: bool) -> PreparedUpstreamRequest {
         },
         upstream_name: "zero-g".to_string(),
         url_origin: Some(ROUTER.to_string()),
-        model_id: MODEL.to_string(),
+        model_id: model(),
         route_id: None,
         is_tee: Some(true),
     }
 }
 
 #[tokio::test]
-#[ignore = "requires PRIVATE_AI_GATEWAY_0G_API_KEY_FILE and sends live glm-5.3 inference"]
-async fn glm_5_3_is_sealed_verified_and_signed() {
+#[ignore = "requires PRIVATE_AI_GATEWAY_0G_API_KEY_FILE and sends live inference"]
+async fn completion_is_sealed_verified_and_signed() {
     let api_key = std::env::var_os("PRIVATE_AI_GATEWAY_0G_API_KEY_FILE")
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|key| key.trim().to_string())
@@ -54,12 +64,13 @@ async fn glm_5_3_is_sealed_verified_and_signed() {
 
     let verifier =
         ZeroGProviderVerifier::new(ROUTER, &api_key, chain_rpc, SERVING_CONTRACT, None, 60, 0)
-            .unwrap();
+            .unwrap()
+            .with_accepted_subjects(BOOT_CHAINS.map(String::from));
     let event = verifier
         .verify(UpstreamVerificationRequest {
             upstream_name: "zero-g".to_string(),
             url_origin: Some(ROUTER.to_string()),
-            model_id: MODEL.to_string(),
+            model_id: model(),
             forwarded_body_hash: String::new(),
             required: true,
         })

@@ -22,8 +22,32 @@ const QUOTE_HEX: &str =
 const REPORT_DATA: usize = 568;
 const RTMR2: usize = 472;
 
-/// Candidates: `a` is sound; each other letter breaks one check.
-const NAMES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+/// The compute-network-19 quote's boot chain (dstack-nvidia-0.5.4.1).
+const BOOT_CHAIN: &str =
+    "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc";
+
+/// Candidates: `a` is sound; `i` is sound under 0G's two model ids
+/// (`canonical_id` `0gm-1.0-35b-a3b`, `model_id` `0GM-1.0-35B-A3B`); each other
+/// letter breaks one check.
+const NAMES: [&str; 9] = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+
+/// What the router offers for `name`: (canonical_id, model_id).
+fn offered(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "i" => ("0gm-1.0-35b-a3b", "0GM-1.0-35B-A3B"),
+        _ => (MODEL, MODEL),
+    }
+}
+
+fn candidate(name: &str) -> PreviewCandidate {
+    let (canonical_id, model_id) = offered(name);
+    PreviewCandidate {
+        address: address(name),
+        provider_identity: None,
+        canonical_id: canonical_id.into(),
+        model_id: model_id.into(),
+    }
+}
 
 fn address(name: &str) -> String {
     format!("0x{}", hex::encode([name.as_bytes()[0]; 20]))
@@ -41,7 +65,12 @@ fn word(value: usize) -> Vec<u8> {
 
 /// ABI-encode a `getService` return for `name`.
 fn service_record(origin: &str, name: &str) -> String {
-    let model = if name == "d" { "glm-5" } else { MODEL };
+    // `d` serves a model other than the one the router names for it.
+    let model = if name == "d" {
+        "glm-5"
+    } else {
+        offered(name).1
+    };
     let separated = name == "b";
     let strings = [
         "chatbot".to_string(),
@@ -104,7 +133,10 @@ async fn preview(
         .lock()
         .unwrap()
         .iter()
-        .map(|name| json!({"address": address(name), "canonical_id": MODEL}))
+        .map(|name| {
+            let (canonical_id, model_id) = offered(name);
+            json!({"address": address(name), "canonical_id": canonical_id, "model_id": model_id})
+        })
         .collect();
     Json(json!({"providers": providers}))
 }
@@ -156,6 +188,7 @@ async fn fixture() -> (
         300,
     )
     .unwrap()
+    .with_accepted_subjects([BOOT_CHAIN.to_string()])
     .with_quote_status(quote_status);
     (mock, verifier, server)
 }
@@ -182,16 +215,38 @@ async fn rejects_each_unsafe_candidate_before_sealing() {
         ("g", "307"),
         ("h", "collateral rejected"),
     ] {
-        let candidate = PreviewCandidate {
-            address: address(name),
-            provider_identity: None,
-            canonical_id: None,
-        };
         let err = verifier
-            .verify_candidate(&candidate, MODEL)
+            .verify_candidate(&candidate(name), MODEL)
             .await
             .expect_err(name);
         assert!(err.contains(expected), "{name}: {err}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn model_identity_follows_0g_canonical_and_provider_ids() {
+    let (_, verifier, server) = fixture().await;
+    // The configured model is the router's canonical_id; the on-chain model is
+    // the provider's model_id, which the backend seals. Both compare exactly.
+    let verified = verifier
+        .verify_candidate(&candidate("i"), "0gm-1.0-35b-a3b")
+        .await
+        .unwrap();
+    assert_eq!(verified.provider.model, "0gm-1.0-35b-a3b");
+    assert_eq!(verified.provider.model_id, "0GM-1.0-35B-A3B");
+    let verified = verifier
+        .verify_candidate(&candidate("a"), MODEL)
+        .await
+        .unwrap();
+    assert_eq!(verified.provider.model_id, MODEL);
+
+    for model in ["0GM-1.0-35B-A3B", "0gm-1.0-35b"] {
+        let err = verifier
+            .verify_candidate(&candidate("i"), model)
+            .await
+            .unwrap_err();
+        assert!(err.contains("canonical model"), "{model}: {err}");
     }
     server.abort();
 }
@@ -219,7 +274,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     let instance = &event.provider_claims.unwrap()["instances"][address("a")];
     assert_eq!(instance["signing_address"], signer("a"));
     assert_eq!(instance["tcb_status"], "UpToDate");
-    assert_eq!(instance["os_image"], "dstack-nvidia-0.5.4.1");
+    assert_eq!(instance["boot_chain"], BOOT_CHAIN);
     let (headers, body) = mock.preview_requests.lock().unwrap()[0].clone();
     assert_eq!(headers["x-0g-provider-trust-mode"], "private");
     assert_eq!(body, json!({"model": MODEL, "service_type": "chatbot"}));
@@ -236,11 +291,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
 #[tokio::test]
 async fn rejection_reasons_never_carry_the_chain_rpc_credential() {
     let (mock, _, server) = fixture().await;
-    let candidate = PreviewCandidate {
-        address: address("a"),
-        provider_identity: None,
-        canonical_id: None,
-    };
+    let candidate = candidate("a");
     // An unreachable RPC and one that answers 404 both embed path and query
     // secrets in their URL.
     for rpc in [

@@ -315,7 +315,7 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            // Validation guarantees the token, RPC and contract are present.
+            // Validation guarantees the token, RPC, contract and subjects are present.
             UpstreamProvider::ZeroGPrivateComputer => Arc::new(
                 ZeroGProviderVerifier::new(
                     cfg.base_url.clone(),
@@ -326,7 +326,8 @@ pub(super) fn build_verifier(
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default()),
             ),
             UpstreamProvider::ArmetAi => {
                 let mut verifier =

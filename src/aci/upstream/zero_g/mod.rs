@@ -40,7 +40,11 @@ pub(crate) struct VerifiedProvider {
     pub provider_identity: Option<String>,
     /// The serving URL from the provider's on-chain record.
     pub endpoint: String,
+    /// The configured model (the router's `canonical_id`).
     pub model: String,
+    /// The provider's own model id, which the router forwards; sealed in place
+    /// of `model` so the field stays bound.
+    pub model_id: String,
     pub signing_address: String,
     /// Hex X25519 key from the verified quote's report_data.
     pub e2ee_public_key: String,
@@ -114,7 +118,7 @@ impl ZeroGProviderBackend {
                 "0G Private Computer serves only /v1/chat/completions".to_string(),
             ));
         }
-        let request: Map<String, Value> =
+        let mut request: Map<String, Value> =
             serde_json::from_slice(&req.request.body).map_err(|e| {
                 UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}"))
             })?;
@@ -128,6 +132,7 @@ impl ZeroGProviderBackend {
             ))
         })?;
         let api = broker_api(&provider.endpoint).map_err(UpstreamError::Transport)?;
+        request.insert("model".into(), provider.model_id.clone().into());
         let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)?;
 
         // No caller or route headers are forwarded, so no X-0G-* control can

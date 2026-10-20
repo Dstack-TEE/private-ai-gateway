@@ -241,7 +241,7 @@ fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_stat
 }
 
 #[test]
-fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
+fn parse_zero_g_requires_router_key_chain_rpc_contract_and_boot_chain() {
     let valid_text = r#"[{
           "name": "zero-g",
           "provider": "0g-private-computer",
@@ -249,6 +249,7 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
           "bearer_token": "zg-key",
           "zg_chain_rpc_url": "https://evmrpc.0g.ai",
           "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
+          "accepted_subjects": ["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"],
           "models": {"glm-5.3": "glm-5.3"}
         }]"#;
     let valid = parse_config_text(valid_text).expect("0G route should parse");
@@ -271,6 +272,11 @@ fn parse_zero_g_requires_router_key_chain_rpc_and_contract() {
         ("0x47340d900bdFec2BD393c626E12ea0656F938d84", "0x47340d"),
         (r#""models""#, r#""path": "/v1/messages", "models""#),
         (r#""0g-private-computer""#, r#""openai-compatible""#),
+        (
+            r#"["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"]"#,
+            "[]",
+        ),
+        ("tdx-boot-chain:", "tdx-measurement:"),
     ] {
         assert!(
             parse_config_text(&valid_text.replace(from, to)).is_err(),
