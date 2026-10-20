@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useCallback, useId, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { usageFilters, usagePageQuery } from "../lib/queries";
@@ -62,7 +62,9 @@ function UsageAmount({ value, unit, pause, className }: { value: string; unit: s
 export function UsagePage(): React.JSX.Element {
   const shell = useShell();
   const agents = shell.agents.agents;
-  const onInspect = (activity: RequestActivity) => shell.openDialog({ kind: "usage-proof", activity });
+  const { openDialog } = shell;
+  // Stable, so the table keeps its columns between renders.
+  const onInspect = useCallback((activity: RequestActivity) => openDialog({ kind: "usage-proof", activity }), [openDialog]);
   const search = useSearch({ from: "/_app/usage" });
   const navigate = useNavigate({ from: "/usage" });
   // Filtering keeps the page where it is scrolled.
