@@ -28,6 +28,10 @@ const signInRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sign-in",
   validateSearch: (search: Record<string, unknown>): { redirect?: string } => ({ redirect: returnPath(search.redirect) }),
+  // A browser with a session, such as one that went back to this page, continues to the page instead.
+  beforeLoad: async ({ search }) => {
+    if (session && await session.check().catch(() => false)) throw redirect({ href: search.redirect ?? "/", replace: true });
+  },
   component: SignInPage,
   errorComponent: WindowError,
 });

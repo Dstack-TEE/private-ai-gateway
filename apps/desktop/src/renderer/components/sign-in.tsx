@@ -21,7 +21,8 @@ export function SignInPage() {
       if (!session) throw new Error("Sign-in is only needed in the web UI");
       await session.signIn(password);
     },
-    onSuccess: () => router.history.push(redirect ?? "/"),
+    // Replaces this page, so Back doesn't return to the form.
+    onSuccess: () => router.history.replace(redirect ?? "/"),
   });
   // Stays busy after signing in, until the page asked for replaces this one.
   const busy = signIn.isPending || signIn.isSuccess;
