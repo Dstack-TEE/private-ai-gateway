@@ -48,7 +48,8 @@ struct Shown {
     profiles: Option<Vec<(String, String, CheckMenuItem<Wry>)>>,
     /// The backend instance and agents revision the agent items show.
     agents: Option<(Option<String>, u64)>,
-    /// Whether the icon shows protection, and whether it is the dark variant.
+    /// Whether the icon shows protection, and whether it is the dark variant
+    /// (Windows follows the taskbar theme).
     icon: (bool, bool),
 }
 
@@ -516,8 +517,9 @@ fn tooltip(status: &str) -> String {
     format!("{PRODUCT_NAME} – {status}")
 }
 
-/// System theme observers call this independently of the application's theme.
-#[cfg(not(target_os = "macos"))]
+/// The taskbar theme observer calls this independently of the application's
+/// theme.
+#[cfg(target_os = "windows")]
 pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
@@ -546,12 +548,23 @@ fn show_icon(app: &AppHandle, shown: &mut (bool, bool), icon: (bool, bool)) -> t
     Ok(())
 }
 
-/// Black icons are the macOS template and the light-theme icons elsewhere.
+/// Black icons are the macOS template and the light-theme icons on Windows.
+/// StatusNotifier hosts neither report the panel's color nor recolor an icon
+/// given as an image, so the Linux icons are the white mark on a black disc,
+/// legible on any panel.
 fn icon_image((protected, dark): (bool, bool)) -> tauri::Result<Image<'static>> {
     let bytes: &'static [u8] = match (protected, dark) {
+        #[cfg(target_os = "linux")]
+        (true, _) => include_bytes!("../../assets/tray/protected-linux.png"),
+        #[cfg(target_os = "linux")]
+        (false, _) => include_bytes!("../../assets/tray/unprotected-linux.png"),
+        #[cfg(not(target_os = "linux"))]
         (true, false) => include_bytes!("../../assets/tray/protected.png"),
+        #[cfg(not(target_os = "linux"))]
         (false, false) => include_bytes!("../../assets/tray/unprotected.png"),
+        #[cfg(not(target_os = "linux"))]
         (true, true) => include_bytes!("../../assets/tray/protected-dark.png"),
+        #[cfg(not(target_os = "linux"))]
         (false, true) => include_bytes!("../../assets/tray/unprotected-dark.png"),
     };
     Image::from_bytes(bytes)

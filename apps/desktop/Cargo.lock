@@ -5061,7 +5061,6 @@ version = "0.6.0"
 dependencies = [
  "auto-launch",
  "block2",
- "futures-util",
  "libc",
  "objc2",
  "objc2-core-services",

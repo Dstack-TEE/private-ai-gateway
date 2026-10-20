@@ -10,7 +10,7 @@ mod distribution;
 mod menu;
 mod notifications;
 mod tray;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 mod tray_theme;
 mod ui_api;
 mod updates;
@@ -164,7 +164,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = tray::setup(app.handle()) {
         tracing::warn!("The system tray is unavailable: {error}");
     } else {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        #[cfg(target_os = "windows")]
         if let Err(error) = tray_theme::setup(app.handle()) {
             tracing::warn!("Cannot observe system tray appearance: {error}");
         }
