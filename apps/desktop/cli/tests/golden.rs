@@ -246,7 +246,7 @@ Global Options:
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["88ac3b8a1747da161f6b17004ba49dc34bbae553d68ea62fab090041a501062e"]
+        str!["c85c4b7da2741840594460e0a329dc6bef562920de04133237c5169af034a40c"]
     );
 }
 
@@ -879,6 +879,12 @@ fn argument_failures_use_the_documented_exit_code_and_json_error_code() {
         vec!["settings", "set", "connectOnLaunch"],
         vec!["settings", "set", "appearance", "dark", "--value-stdin"],
         vec!["settings", "set", "appearance", "--value-stdin"],
+        vec![
+            "serve",
+            "https://example.com",
+            "--client-host",
+            "https://host/path",
+        ],
     ] {
         let output = pap().arg("--json").args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");

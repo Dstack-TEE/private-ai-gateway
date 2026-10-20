@@ -562,8 +562,13 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
         with_host_guard(
             build_control_router(state.clone()),
             control_local.ip().is_loopback(),
+            &args.client_hosts,
         ),
-        with_host_guard(build_proxy_router(state), local.ip().is_loopback()),
+        with_host_guard(
+            build_proxy_router(state),
+            local.ip().is_loopback(),
+            &args.client_hosts,
+        ),
     );
     tokio::join!(
         async {
@@ -603,21 +608,25 @@ async fn listener_addresses(
 }
 
 /// Like the web UI, standalone listeners refuse names a web page could rebind.
-fn with_host_guard(router: Router, loopback_listener: bool) -> Router {
+fn with_host_guard(router: Router, loopback_listener: bool, client_hosts: &[String]) -> Router {
+    let client_hosts = Arc::new(client_hosts.to_vec());
     router.layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| async move {
-            if !valid_host(request.headers(), loopback_listener) {
-                return text_response(
-                    StatusCode::FORBIDDEN,
-                    "Host must be an IP address or a local listener's localhost name\n",
-                );
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let client_hosts = Arc::clone(&client_hosts);
+            async move {
+                if !valid_host(request.headers(), loopback_listener, &client_hosts) {
+                    return text_response(
+                        StatusCode::FORBIDDEN,
+                        "Host must be an IP address, an allowed client hostname, or a local listener's localhost name\n",
+                    );
+                }
+                next.run(request).await
             }
-            next.run(request).await
         },
     ))
 }
 
-fn valid_host(headers: &HeaderMap, loopback_listener: bool) -> bool {
+fn valid_host(headers: &HeaderMap, loopback_listener: bool, client_hosts: &[String]) -> bool {
     let mut hosts = headers.get_all(axum::http::header::HOST).iter();
     let Some(host) = hosts.next().and_then(|value| value.to_str().ok()) else {
         return false;
@@ -637,7 +646,11 @@ fn valid_host(headers: &HeaderMap, loopback_listener: bool) -> bool {
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host);
-    host.parse::<IpAddr>().is_ok() || loopback_listener && host.eq_ignore_ascii_case("localhost")
+    host.parse::<IpAddr>().is_ok()
+        || loopback_listener && host.eq_ignore_ascii_case("localhost")
+        || client_hosts
+            .iter()
+            .any(|client_host| host.eq_ignore_ascii_case(client_host))
 }
 
 /// The verification policy one proxy state is built from: standalone `serve`

@@ -174,11 +174,24 @@ including wildcard binds, require `--allow-network-access`. These listeners
 use plain HTTP, so allow network access only on a trusted network.
 
 Both listeners reject a request with HTTP 403 unless `Host` is an IP literal
-(IPv4 or bracketed IPv6, optionally with a port), or `localhost` on a loopback
-listener. Other names, missing or duplicate Host headers, and malformed
-hosts are refused before handling the request. IP literals cannot be rebound
-by DNS; refusing other names protects against DNS rebinding. When opting into
-network access, connect by IP address.
+(IPv4 or bracketed IPv6, optionally with a port), `localhost` on a loopback
+listener, or a name supplied with repeatable `--client-host NAME`. A supplied
+name is accepted with or without the listener's port, case-insensitively, on
+both listeners. The value must be a hostname without a port, path, scheme or
+userinfo. Other names, missing or duplicate Host headers, and malformed hosts
+are refused before handling the request. IP literals and `localhost` cannot be
+rebound by DNS; adding a `--client-host` name is an explicit DNS-rebinding
+trade-off, so add only names you control.
+
+For example, a Docker container can reach a host-running proxy by its Docker
+host name:
+
+```sh
+pap serve https://gateway.example \
+  --listen 0.0.0.0:4180 --control 0.0.0.0:4183 \
+  --allow-network-access --client-host host.docker.internal
+curl http://host.docker.internal:4180/v1/models
+```
 
 A re-verification timeout keeps the previously trusted identity and releases
 queued requests to retry the normal failure path.

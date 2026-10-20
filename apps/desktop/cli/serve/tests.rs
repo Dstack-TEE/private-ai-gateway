@@ -2167,7 +2167,7 @@ async fn standalone_listeners_require_network_access_opt_in() {
 #[test]
 fn host_guard_refuses_missing_duplicate_and_malformed_hosts() {
     let mut headers = HeaderMap::new();
-    assert!(!valid_host(&headers, true));
+    assert!(!valid_host(&headers, true, &[]));
     for host in [
         "localhost:",
         "localhost:invalid",
@@ -2178,11 +2178,11 @@ fn host_guard_refuses_missing_duplicate_and_malformed_hosts() {
         "localhost.attacker.example",
     ] {
         headers.insert("host", host.parse().unwrap());
-        assert!(!valid_host(&headers, true), "{host}");
+        assert!(!valid_host(&headers, true, &[]), "{host}");
     }
     headers.insert("host", "localhost".parse().unwrap());
     headers.append("host", "127.0.0.1".parse().unwrap());
-    assert!(!valid_host(&headers, true));
+    assert!(!valid_host(&headers, true, &[]));
 }
 
 #[tokio::test]
@@ -2206,7 +2206,8 @@ async fn both_standalone_listeners_refuse_rebindable_hosts_before_handling_reque
             (build_proxy_router(state.clone()), true),
             (build_control_router(state.clone()), false),
         ] {
-            let listener = spawn_server(with_host_guard(router, loopback)).await;
+            let client_hosts = vec!["docker.internal".to_string()];
+            let listener = spawn_server(with_host_guard(router, loopback, &client_hosts)).await;
             for (host, accepted) in [
                 ("127.0.0.1", true),
                 ("127.0.0.1:4180", true),
@@ -2214,6 +2215,8 @@ async fn both_standalone_listeners_refuse_rebindable_hosts_before_handling_reque
                 ("[::1]:4180", true),
                 ("192.0.2.1:4180", true),
                 ("LOCALHOST:4180", loopback),
+                ("docker.internal", true),
+                ("DOCKER.INTERNAL:4180", true),
                 ("attacker.example:4180", false),
                 ("localhost.attacker.example", false),
             ] {

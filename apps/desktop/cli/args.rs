@@ -362,6 +362,13 @@ pub struct ServeArgs {
     )]
     pub allow_network_access: bool,
     #[arg(
+        long = "client-host",
+        value_name = "NAME",
+        value_parser = client_host,
+        help = "Accept this hostname in Host headers on both listeners; repeatable"
+    )]
+    pub client_hosts: Vec<String>,
+    #[arg(
         long = "json-events",
         help = "Emit the serve lifecycle and request activity as JSON Lines on stdout. \
                 Human-readable diagnostics remain on stderr"
@@ -401,6 +408,26 @@ fn nonempty_base_url(value: &str) -> Result<String, String> {
     } else {
         Ok(value.to_string())
     }
+}
+
+fn client_host(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value.len() > 253
+        || value.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+    {
+        return Err(
+            "client host must be a hostname without a port, path, scheme, or userinfo".to_string(),
+        );
+    }
+    Ok(value.to_ascii_lowercase())
 }
 
 fn app_id_subject(value: &str) -> Result<String, String> {
@@ -494,6 +521,21 @@ mod tests {
                     .is_err(),
                 "{flag} must require --receipt"
             );
+        }
+    }
+
+    #[test]
+    fn client_host_accepts_names_and_rejects_urls_or_ports() {
+        assert_eq!(client_host("Docker.Internal").unwrap(), "docker.internal");
+        for value in [
+            "",
+            "host:4180",
+            "https://host",
+            "host/path",
+            "user@host",
+            "-host",
+        ] {
+            assert!(client_host(value).is_err(), "{value:?}");
         }
     }
 }
