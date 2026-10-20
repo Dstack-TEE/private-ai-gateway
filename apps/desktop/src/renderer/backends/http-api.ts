@@ -31,6 +31,7 @@ export function createBackend(): Backend {
   const transport: UiTransport = { call: rpc, subscribe };
   const session: WebSession = {
     check,
+    active: () => signedIn,
     signIn,
     signOut,
     onEnded: (listener) => {
