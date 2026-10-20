@@ -88,9 +88,10 @@ cargo test --workspace --all-targets
 python3 -m compileall scripts
 ```
 
-The TypeScript verifier, shared provider, and Pi and OpenCode adapters use one
-workspace. Run these commands from the repository root after changing anything
-under `clients/` or a shared ACI construction:
+The TypeScript workspace contains only `@phala/aci-verifier`. Use
+[`pap`](../apps/desktop/docs/cli.md) for coding agents and provider access. Run
+these commands from the repository root after changing anything under
+`clients/` or a shared ACI construction:
 
 ```bash
 npm --prefix clients ci

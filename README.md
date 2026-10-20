@@ -111,9 +111,9 @@ defines each constraint and what happens without one.
 ## Choose a client
 
 Use `pap curl`, `pap send`, or `pap serve` from the command line, the
-Private AI Proxy desktop app, the TypeScript verifier and provider packages, or
-the Pi and OpenCode integrations. [ACI clients](clients/README.md) says which
-fits your host.
+Private AI Proxy desktop app, or the TypeScript verifier. Use `pap` for coding
+agents and provider access. [ACI clients](clients/README.md) says which fits
+your host.
 
 ## Run your own gateway
 
@@ -157,7 +157,7 @@ reference by reader and task.
 | `apps/desktop/` | Private AI Proxy: the `pap` CLI (ACI verification, curl, send, and local proxy), the desktop app, and the per-user backend service |
 | `src/aggregator/` | routing, receipt, session, and metrics services |
 | `src/middleware/` | control-plane client, transforms, failover, and pricing |
-| `clients/` | TypeScript verifier, provider kernel, Pi, and OpenCode adapters |
+| `clients/` | TypeScript verifier and pinned Node and Bun transports |
 | `deploy/` | dstack git-launcher deployment example |
 | `examples/control-plane/` | Reference control-plane server |
 | `docs/` | guides, references, security notes, and review records |

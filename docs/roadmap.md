@@ -2,7 +2,7 @@
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-10-02.
+Last reviewed: 2026-10-20.
 
 ## Implemented
 
@@ -15,7 +15,7 @@ Last reviewed: 2026-10-02.
 - Multi-domain downstream TLS identities and TEE-only hostnames.
 - E2EE v2 for chat, completions, and embeddings.
 - Private AI Proxy: the desktop app, per-user backend, and `pap` CLI (`verify`, `audit`, `sessions`, `curl`, `send`, `serve`), with coding-agent setup.
-- TypeScript packages: `@phala/aci-verifier` (browser verification, and pinned Node and Bun transports that audit receipts and sessions), `@phala/aci-provider`, and Pi and OpenCode adapters for generic ACI, RedPill, and Phala Cloud. The Pi and OpenCode adapters verify each receipt and its cited session before a response completes.
+- TypeScript package: `@phala/aci-verifier` (browser verification, and pinned Node and Bun transports that audit receipts and sessions). Use `pap` for coding agents and provider access; see [Retired packages](../clients/README.md#retired-packages).
 - Unit and integration tests, ACI test vectors, and a live provider suite.
 
 Providers prove different claims; see [Provider verification](providers/README.md).
