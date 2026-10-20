@@ -43,13 +43,30 @@ pub fn attestation_url(base_url: &str, nonce: &str) -> Result<Url, String> {
 /// by (a rustls `ServerName`): a lowercase DNS name, or an IP address without
 /// the brackets an IPv6 literal carries in a URL.
 pub fn host_of(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(
+            "base URL must not contain credentials; use an API key input instead".to_string(),
+        );
+    }
     match parsed.host() {
         Some(url::Host::Domain(domain)) => Ok(domain.to_ascii_lowercase()),
         Some(url::Host::Ipv4(ip)) => Ok(ip.to_string()),
         Some(url::Host::Ipv6(ip)) => Ok(ip.to_string()),
-        None => Err(format!("URL {url:?} has no host")),
+        None => Err("URL has no host".to_string()),
     }
+}
+
+/// URLs in diagnostics never include credentials, queries or fragments.
+pub(crate) fn diagnostic_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return "<invalid URL>".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 /// The largest receipt document read. A §7.3 receipt is a few fixed members
@@ -270,9 +287,13 @@ impl AciClient {
     }
 
     pub async fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResult, String> {
-        self.read_get(url, bearer)
-            .await
-            .map_err(|e| format!("GET {url} failed: {}", error_chain_message(&e)))
+        self.read_get(url, bearer).await.map_err(|e| {
+            format!(
+                "GET {} failed: {}",
+                diagnostic_url(url),
+                error_chain_message(&e.without_url())
+            )
+        })
     }
 
     /// A GET read whole, failing with the request's own error.
@@ -303,7 +324,7 @@ impl AciClient {
         let resp = self
             .send_get(url, bearer, Some(self.artifact_timeout))
             .await
-            .map_err(GetError::Request)?;
+            .map_err(|error| GetError::Request(error.without_url()))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = Limited::new(reqwest::Body::from(resp), limit)
@@ -314,9 +335,10 @@ impl AciClient {
                     GetError::TooLarge(limit)
                 } else {
                     match error.downcast::<reqwest::Error>() {
-                        Ok(error) => GetError::Request(*error),
+                        Ok(error) => GetError::Request(error.without_url()),
                         Err(error) => GetError::Failed(format!(
-                            "GET {url}: failed to read body: {}",
+                            "GET {}: failed to read body: {}",
+                            diagnostic_url(url),
                             error_chain_message(&*error)
                         )),
                     }
@@ -386,7 +408,7 @@ impl AciClient {
         let url = endpoint(base_url, &["v1", "aci", "sessions", session_id])?;
         self.get_limited(url.as_str(), None, MAX_SESSION_BYTES)
             .await
-            .map_err(|error| format!("GET {url}: {error}"))
+            .map_err(|error| format!("GET {}: {error}", diagnostic_url(url.as_str())))
     }
 
     pub async fn fetch_session_listing(&self, url: &str) -> Result<HttpResult, GetError> {
@@ -423,17 +445,25 @@ impl AciClient {
         if let Some(token) = bearer {
             req = req.bearer_auth(token);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("POST {url} failed: {}", error_chain_message(&e)))?;
+        let resp = req.send().await.map_err(|e| {
+            format!(
+                "POST {} failed: {}",
+                diagnostic_url(url.as_str()),
+                error_chain_message(&e.without_url())
+            )
+        })?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let mut wire = Vec::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| format!("POST {url}: stream error: {}", error_chain_message(&e)))?;
+            let chunk = chunk.map_err(|e| {
+                format!(
+                    "POST {}: stream error: {}",
+                    diagnostic_url(url.as_str()),
+                    error_chain_message(&e.without_url())
+                )
+            })?;
             wire.extend_from_slice(&chunk);
             on_chunk(&chunk)?;
         }
@@ -505,6 +535,41 @@ mod tests {
         // Pins are keyed like rustls server names: no IPv6 brackets.
         assert_eq!(host_of("https://[::1]:8443/v1").unwrap(), "::1");
         assert_eq!(host_of("https://127.0.0.1:8443").unwrap(), "127.0.0.1");
+    }
+
+    #[test]
+    fn base_url_credentials_are_rejected_and_diagnostic_urls_are_redacted() {
+        for value in [
+            "https://user:password@example.com",
+            "https://user@example.com",
+            "https://:password@example.com",
+        ] {
+            let error = host_of(value).unwrap_err();
+            assert!(error.contains("must not contain credentials"));
+            assert!(!error.contains("password"));
+        }
+        assert_eq!(
+            diagnostic_url("https://user:password@example.com/base?api_key=secret#fragment"),
+            "https://example.com/base"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_error_messages_strip_url_credentials_and_query_values() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = AciClient::new().unwrap();
+        let url = format!("{base}/v1/models?api_key=never-log-this");
+        let error = client.get(&url, None).await.unwrap_err();
+        assert!(!error.contains("api_key"), "{error}");
+        assert!(!error.contains("never-log-this"), "{error}");
+        let error = client
+            .fetch_session_listing(&url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("never-log-this"), "{error}");
     }
 
     #[tokio::test]

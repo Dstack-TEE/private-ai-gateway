@@ -120,7 +120,7 @@ async fn verify_service_inner(
     let mut transcript = Transcript::default();
     let channel = match &observed_spki {
         Some(spki) => ChannelEvidence::Observed {
-            origin: &base_url,
+            origin: &crate::client::diagnostic_url(&base_url),
             spki_sha256: spki,
         },
         None => ChannelEvidence::NotObserved {

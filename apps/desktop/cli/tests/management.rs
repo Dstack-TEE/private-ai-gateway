@@ -48,6 +48,49 @@ fn legacy_aci_alias_output_matches_the_canonical_command() {
     }
 }
 
+#[test]
+fn completions_register_the_invoked_alias() {
+    #[cfg(unix)]
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["pap", "aci", "private-ai-proxy"] {
+        #[cfg(unix)]
+        let executable = {
+            let alias = directory.path().join(name);
+            std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_private-ai-proxy"));
+        for shell in ["bash", "zsh"] {
+            let mut command = std::process::Command::new(&executable);
+            command.args(["completions", shell]);
+            #[cfg(unix)]
+            command.env_remove(desktop_core::launch::ALIAS_ENV);
+            #[cfg(not(unix))]
+            command.env(desktop_core::launch::ALIAS_ENV, name);
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let script = String::from_utf8(output.stdout).unwrap();
+            if shell == "bash" {
+                assert!(
+                    script
+                        .lines()
+                        .any(|line| line.trim().starts_with("complete -F ")
+                            && line.ends_with(&format!(" {name}"))),
+                    "{name}: missing bash registration"
+                );
+            } else {
+                assert!(
+                    script.contains(&format!("#compdef {name}\n")),
+                    "{name}: missing zsh registration"
+                );
+            }
+            assert!(script.contains("profiles"));
+            assert!(script.contains("verify"));
+        }
+    }
+}
+
 const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]

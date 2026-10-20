@@ -28,7 +28,7 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
         write_stdout(
             format!(
                 "== service verification: {} ==\n{}\n",
-                safe(&verification.base_url),
+                safe(&crate::client::diagnostic_url(&verification.base_url)),
                 verification.transcript.render_human()
             )
             .as_bytes(),

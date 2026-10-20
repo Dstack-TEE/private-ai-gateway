@@ -81,8 +81,9 @@ carry it in `argv[0]`, and the npm package's `aci` entry passes it as `argv0`
 to the native binary. A `.cmd` script cannot set `argv[0]`, so the Windows
 shims, written like npm's `cmd-shim` with `setlocal` and `%~dp0`, set
 `PRIVATE_AI_PROXY_ALIAS=%~n0` for the executable instead; processes the CLI
-starts never inherit it. `pap cli install` replaces the shims earlier releases
-wrote, which lack that line, as its own; that migration is removed in 0.3 (see
+starts never inherit it, including system curl (`pap curl` replaces the CLI
+process on Unix and starts and waits for curl on Windows). `pap cli install`
+replaces the shims earlier releases wrote, which lack that line, as its own; that migration is removed in 0.3 (see
 [Removal in 0.3](configuration.md#removal-in-03)).
 
 Linux also publishes CLI-only DEB, RPM, and Arch Linux packages. They install the three real

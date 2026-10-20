@@ -1,7 +1,7 @@
-use std::{fmt, path::PathBuf};
+use std::{fmt, path::PathBuf, sync::LazyLock};
 
 use clap::{
-    builder::{PossibleValuesParser, TypedValueParser},
+    builder::{PossibleValue, PossibleValuesParser, TypedValueParser},
     Args, Subcommand, ValueEnum,
 };
 use clap_complete::Shell;
@@ -203,6 +203,7 @@ pub struct AccountLoginOptions {
     /// Provider for a new profile (defaults to RedPill).
     #[arg(long, value_enum)]
     pub provider: Option<Provider>,
+    /// Display name for the account profile
     #[arg(long)]
     pub name: Option<String>,
     /// Workspace ID; required if the organization has several workspaces.
@@ -211,6 +212,7 @@ pub struct AccountLoginOptions {
     /// Print the authorization URL without launching a browser.
     #[arg(long)]
     pub no_browser: bool,
+    /// Maximum sign-in wait in seconds
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=900))]
     pub timeout: u64,
 }
@@ -297,7 +299,10 @@ pub enum Profiles {
         id: String,
     },
     /// Delete a profile and its stored credential.
-    Remove { id: String },
+    Remove {
+        /// Saved profile ID
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -306,7 +311,7 @@ pub enum Agents {
     List,
     /// Connect an agent to the Local API.
     Connect {
-        /// Agent ID reported by `private-ai-proxy agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Optional default model from the verified catalog.
         #[arg(long)]
@@ -320,7 +325,7 @@ pub enum Agents {
     },
     /// Disconnect an agent and restore its managed configuration.
     Disconnect {
-        /// Agent ID reported by `private-ai-proxy agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Preview changes and return a revision without applying them.
         #[arg(long, conflicts_with = "revision")]
@@ -373,6 +378,7 @@ pub enum Usage {
     },
     /// Show one usage record by ID.
     Show {
+        /// Usage record ID
         id: String,
         /// Print the signed receipt document its audit checked, exactly as the service returned it.
         #[arg(long)]
@@ -385,6 +391,7 @@ pub enum Usage {
         /// New destination path. Existing files are never overwritten.
         #[arg(long)]
         output: PathBuf,
+        /// Export file format
         #[arg(long, default_value = "csv", value_parser = ["csv"])]
         format: String,
     },
@@ -496,10 +503,26 @@ pub enum Settings {
         /// The setting's dotted path in config.toml, for example web-ui.enabled.
         #[arg(value_parser = SettingsKeyArg::parser())]
         key: SettingsKeyArg,
-        /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it.
+        /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable.
+        /// "" clears local-api.client-host or web-ui.client-host. web-ui.password uses --value-stdin
+        /// or the hidden prompt and cannot be cleared.
+        #[arg(required_if_eq_any = settings_value_conditions())]
         value: Option<String>,
         /// Read the web-ui.password value from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         value_stdin: bool,
     },
+}
+
+/// Passwords use a hidden prompt; every other key needs a positional value.
+fn settings_value_conditions() -> impl Iterator<Item = (&'static str, &'static str)> {
+    static KEYS: LazyLock<Vec<PossibleValue>> = LazyLock::new(|| {
+        SettingsKey::value_variants()
+            .iter()
+            .filter(|key| **key != SettingsKey::WebUiPassword)
+            .filter_map(ValueEnum::to_possible_value)
+            .collect()
+    });
+    KEYS.iter()
+        .flat_map(|value| value.get_name_and_aliases().map(|name| ("key", name)))
 }

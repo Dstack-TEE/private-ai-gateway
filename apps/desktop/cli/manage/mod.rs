@@ -39,6 +39,21 @@ pub fn has_profile_require_production_os(action: &Action) -> bool {
     )
 }
 
+pub fn validate_arguments(action: &Action) -> Result<(), clap::Error> {
+    if matches!(
+        action,
+        Action::Settings {
+            command: Settings::Set { key, value_stdin: true, .. },
+        } if key.key != SettingsKey::WebUiPassword
+    ) {
+        return Err(crate::Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--value-stdin is only supported for web-ui.password",
+        ));
+    }
+    Ok(())
+}
+
 pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
     warn_deprecated_os_flags(action);
     let client = Client::new();
@@ -92,7 +107,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             Registration::Status => value(install::status()?)?,
             Registration::Install { directory } => value(install::install(directory.clone())?)?,
             Registration::Uninstall { directory } => {
-                confirm(global, "Unregister the private-ai-proxy command?")?;
+                confirm(global, "Unregister the pap command?")?;
                 value(install::uninstall(directory.clone())?)?
             }
         },
@@ -117,8 +132,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             json!({"exported": path})
         }
         Action::Completions { shell } => {
-            let mut command = crate::Cli::command();
-            let name = command.get_name().to_owned();
+            let (mut command, name) = crate::completion_command();
             let mut script = Vec::new();
             clap_complete::generate(*shell, &mut command, name, &mut script);
             return output::print_raw(&script);
@@ -171,7 +185,7 @@ fn watch_status(global: &Global) -> Result<(), CallError> {
             Watched::State(state) => *state,
             Watched::Busy => {
                 if !std::mem::replace(&mut waiting, true) {
-                    eprintln!("private-ai-proxy: every event stream of the backend is in use; waiting for one to close");
+                    eprintln!("pap: every event stream of the backend is in use; waiting for one to close");
                 }
                 return true;
             }
@@ -271,7 +285,7 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
             _ => return Err(unverified(&state)),
         }
         if Instant::now() >= deadline {
-            return Err("Verification wait timed out; the backend may still be verifying. Inspect private-ai-proxy status before retrying.".into());
+            return Err("Verification wait timed out; the backend may still be verifying. Inspect pap status before retrying.".into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -281,11 +295,11 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
 /// typed as a verification failure when the service did not pass.
 fn unverified(state: &AppState) -> CallError {
     let Some(error) = &state.error else {
-        return "Protection did not become verified. Inspect private-ai-proxy status.".into();
+        return "Protection did not become verified. Inspect pap status.".into();
     };
     let mut message = format!("Protection did not become verified. {error}");
     if state.reconnecting {
-        message.push_str(" The backend retries in the background until private-ai-proxy stop.");
+        message.push_str(" The backend retries in the background until pap stop.");
     }
     if state.verification_failed {
         CallError::Api(protocol::Error::new(
@@ -1013,11 +1027,16 @@ fn confirm(global: &Global, prompt: &str) -> Result<(), String> {
     io::stdin()
         .read_line(&mut answer)
         .map_err(|_| "Cannot read confirmation")?;
-    if answer.trim().eq_ignore_ascii_case("y") {
+    if affirmative(&answer) {
         Ok(())
     } else {
         Err("Cancelled".into())
     }
+}
+
+fn affirmative(answer: &str) -> bool {
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
 fn read_key(global: &Global, stdin: bool) -> Result<String, String> {
@@ -1092,6 +1111,16 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn confirmations_accept_y_and_yes_without_case_sensitivity() {
+        for answer in ["y", "Y", "yes", "YES", " YeS "] {
+            assert!(affirmative(answer));
+        }
+        for answer in ["", "n", "no", "yesterday"] {
+            assert!(!affirmative(answer));
+        }
+    }
+
+    #[test]
     fn a_failed_verification_fails_start_with_its_reason() {
         let mut state = AppState {
             status: VerificationStatus::Error,
@@ -1106,7 +1135,7 @@ mod tests {
         assert_eq!(error.code, protocol::ErrorCode::ServiceVerificationFailed);
         assert_eq!(
             error.message,
-            "Protection did not become verified. Service verification failed: id-6 … protection stays off. The backend retries in the background until private-ai-proxy stop."
+            "Protection did not become verified. Service verification failed: id-6 … protection stays off. The backend retries in the background until pap stop."
         );
         // A connection failure is not a verification result.
         state.verification_failed = false;

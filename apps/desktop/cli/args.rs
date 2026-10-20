@@ -10,36 +10,42 @@ use crate::checks::{RequiredClaim, VerifierPolicy};
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(
-        about = "Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks \
+        about = "Verify an ACI service and print the identity checks",
+        long_about = "Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks \
                  under the dstack tdx verifier policy (spec 1.3), and print a \
                  verification transcript. Exits 0 only if the verdict is VERIFIED."
     )]
     Verify(VerifyArgs),
     #[command(
-        about = "Offline verification of saved artifacts using the same transcript engine as verify."
+        about = "Verify saved ACI artifacts offline",
+        long_about = "Offline verification of saved artifacts using the same transcript engine as verify."
     )]
     Audit(AuditArgs),
     #[command(
-        about = "Verify the service (fail closed), list its current attested sessions, \
+        about = "Audit a service's current attested sessions",
+        long_about = "Verify the service (fail closed), list its current attested sessions, \
                  and run the spec 9.2 audit on each — the ids that pass are what a \
                  client pins (spec 5.3)."
     )]
     Sessions(SessionsArgs),
     #[command(
-        about = "Verify the service (fail closed), send one chat completion over an \
+        about = "Send a pinned chat completion and verify its receipt",
+        long_about = "Verify the service (fail closed), send one chat completion over an \
                  SPKI-pinned connection, then fetch and verify its receipt. The API key \
                  is read from stdin with --api-key-stdin or from the ACI_API_KEY \
                  environment variable."
     )]
     Send(SendArgs),
     #[command(
-        about = "Verify the target's ACI service (fail closed), then run the system curl \
+        about = "Run system curl with the attested TLS key pinned",
+        long_about = "Verify the target's ACI service (fail closed), then run the system curl \
                  with the attested TLS key pinned. Exits 125 when pap refuses the request, \
                  otherwise with curl's exit code."
     )]
     Curl(CurlArgs),
     #[command(
-        about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
+        about = "Run a local verifying proxy that audits response receipts",
+        long_about = "Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). \
                  Verifies the service on startup and refuses to start unless VERIFIED, \
                  accepts plaintext API requests only, forwards them over the pinned attested \
                  TLS channel, and verifies each POST response's receipt after the fact."
@@ -56,23 +62,27 @@ pub struct PolicyArgs {
         value_name = "HEX",
         help = "Compose hash to accept (spec 1.3 verifier policy); repeatable. Without \
                 it the compose measurement is verified and reported, and you appraise \
-                the provenance yourself."
+                the provenance yourself"
     )]
     pub accepted_composes: Vec<String>,
     #[arg(
         long = "accept-subject",
+        requires = "accepted_dstack_kms_root_public_keys",
+        value_parser = app_id_subject,
         value_name = "app-id:0xHEX",
         help = "Measured dstack app-id to accept for key custody (spec 9.1(5)); \
                 repeatable. Custody is checked when this and \
                 --accept-dstack-kms-root-public-key are given; with neither, id-5 is \
-                skipped."
+                skipped"
     )]
     pub accepted_subjects: Vec<String>,
     #[arg(
         long = "accept-dstack-kms-root-public-key",
+        requires = "accepted_subjects",
+        value_parser = kms_root_public_key,
         value_name = "HEX",
         help = "dstack KMS root public key the receipt-key custody chain must end at \
-                (spec 3.3, 9.1(5)); repeatable."
+                (spec 3.3, 9.1(5)); repeatable"
     )]
     pub accepted_dstack_kms_root_public_keys: Vec<String>,
 }
@@ -113,24 +123,25 @@ impl PolicyArgs {
 
 #[derive(Debug, Args)]
 pub struct VerifyArgs {
-    #[arg(help = "Base URL of the ACI service to verify.")]
+    #[arg(value_parser = nonempty_base_url, help = "Base URL of the ACI service to verify")]
     pub base_url: String,
     #[command(flatten)]
     pub policy: PolicyArgs,
     #[arg(
         long,
         help = "Nonce to send with the attestation request; a fresh random one is \
-                generated when omitted."
+                generated when omitted"
     )]
     pub nonce: Option<String>,
     #[arg(
         long,
-        help = "Print the verification transcript as JSON instead of the human-readable form."
+        help_heading = "Global Options",
+        help = "Emit JSON instead of human-readable output"
     )]
     pub json: bool,
     #[arg(
         long,
-        help = "Print a one-line explanation for every check, not just failures."
+        help = "Print a one-line explanation for every check, not just failures"
     )]
     pub explain: bool,
 }
@@ -140,7 +151,7 @@ pub struct AuditArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Path to the saved spec 9.1 attestation report JSON."
+        help = "Path to the saved spec 9.1 attestation report JSON"
     )]
     pub report: String,
     #[command(flatten)]
@@ -148,33 +159,33 @@ pub struct AuditArgs {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Path to the saved receipt document (spec 7.2) to verify alongside the report."
+        help = "Path to the saved receipt document (spec 7.2) to verify alongside the report"
     )]
     pub receipt: Option<String>,
     #[arg(
         long,
-        help = "Nonce the report was originally fetched with, to check the id-3 freshness check (spec 9.1)."
+        help = "Nonce the report was originally fetched with, to check the id-3 freshness check (spec 9.1)"
     )]
     pub nonce: Option<String>,
     #[arg(
         long = "request-body",
         requires = "receipt",
         value_name = "FILE",
-        help = "Path to the saved raw request bytes, checked against the receipt (spec 9.3)."
+        help = "Path to the saved raw request bytes, checked against the receipt (spec 9.3)"
     )]
     pub request_body: Option<String>,
     #[arg(
         long = "response-body",
         requires = "receipt",
         value_name = "FILE",
-        help = "Path to the saved raw response bytes, checked against the receipt (spec 9.3)."
+        help = "Path to the saved raw response bytes, checked against the receipt (spec 9.3)"
     )]
     pub response_body: Option<String>,
     #[arg(
         long,
         requires = "receipt",
         value_name = "FILE",
-        help = "Path to the saved session document (spec 8) the receipt cites."
+        help = "Path to the saved session document (spec 8) the receipt cites"
     )]
     pub session: Option<String>,
     #[arg(
@@ -183,7 +194,7 @@ pub struct AuditArgs {
         value_name = "NAME[=SOURCE]",
         value_parser = RequiredClaim::parse,
         help = "Claim the audited session must assert (spec 9.2(3)), as NAME or \
-                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable."
+                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable"
     )]
     pub require_claims: Vec<RequiredClaim>,
     #[arg(
@@ -191,46 +202,47 @@ pub struct AuditArgs {
         requires = "receipt",
         value_name = "SESSION_ID",
         value_parser = session_id,
-        help = "Session id (spec 5.3) the cited session must match (spec 9.3(6)); repeatable."
+        help = "Session id (spec 5.3) the cited session must match (spec 9.3(6)); repeatable"
     )]
     pub pins: Vec<String>,
     #[arg(
         long = "require-verified",
         requires = "receipt",
-        help = "Apply the spec 9.3(5)-(6) strict failures offline."
+        help = "Apply the spec 9.3(5)-(6) strict failures offline"
     )]
     pub require_verified: bool,
-    #[arg(long = "skip-expiry", help = "Skip the report expiry check (id-3).")]
+    #[arg(long = "skip-expiry", help = "Skip the report expiry check (id-3)")]
     pub skip_expiry: bool,
     #[arg(
         long,
-        help = "Print the verification transcript as JSON instead of the human-readable form."
+        help_heading = "Global Options",
+        help = "Emit JSON instead of human-readable output"
     )]
     pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SendArgs {
-    #[arg(help = "Base URL of the ACI service to send the request to.")]
+    #[arg(help = "Base URL of the ACI service to send the request to")]
     pub base_url: String,
     #[command(flatten)]
     pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
-        help = "Model id to request; defaults to the first model the service advertises."
+        help = "Model id to request; defaults to the first model the service advertises"
     )]
     pub model: Option<String>,
     #[arg(
         long,
         value_name = "TEXT",
-        help = "Prompt text to send; defaults to a canned greeting."
+        help = "Prompt text to send; defaults to a canned greeting"
     )]
     pub prompt: Option<String>,
     #[arg(
         long = "api-key-stdin",
         help = "Read the bearer API key from stdin; otherwise it is read from the \
-                ACI_API_KEY environment variable."
+                ACI_API_KEY environment variable"
     )]
     pub api_key_stdin: bool,
     /// Deprecated: a key in argv is visible to other local processes. Removed in 0.3.
@@ -241,15 +253,19 @@ pub struct SendArgs {
         conflicts_with = "api_key_stdin"
     )]
     pub api_key: Option<String>,
-    #[arg(long = "no-stream", help = "Request a non-streaming chat completion.")]
+    #[arg(long = "no-stream", help = "Request a non-streaming chat completion")]
     pub no_stream: bool,
-    #[arg(long, help = "Print the verification transcript and result as JSON.")]
+    #[arg(
+        long,
+        help_heading = "Global Options",
+        help = "Emit JSON instead of human-readable output"
+    )]
     pub json: bool,
     #[arg(
         long = "allow-unverified",
         conflicts_with_all = ["sessions", "require_claims"],
         help = "Drop the default provider.aci_verified demand (spec 5.3). Cannot be \
-                combined with --session, which implies verified serving."
+                combined with --session, which implies verified serving"
     )]
     pub allow_unverified: bool,
     #[arg(
@@ -257,7 +273,7 @@ pub struct SendArgs {
         value_name = "NAME[=SOURCE]",
         value_parser = RequiredClaim::parse,
         help = "Claim the audited session must assert (spec 9.2(3)), as NAME or \
-                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable."
+                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable"
     )]
     pub require_claims: Vec<RequiredClaim>,
     #[arg(
@@ -266,20 +282,21 @@ pub struct SendArgs {
         value_parser = session_id,
         help = "Session id (spec 5.3) to pin via provider.aci_session_ids; the receipt's \
                 cited session is checked against this list (spec 9.3(6)); repeatable. \
-                Implies verified serving."
+                Implies verified serving"
     )]
     pub sessions: Vec<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct CurlArgs {
-    #[arg(help = "HTTPS URL to request after its ACI service has been verified.")]
+    #[arg(help = "HTTPS URL to request after its ACI service has been verified")]
     pub url: String,
     #[command(flatten)]
     pub policy: PolicyArgs,
     #[arg(
         long,
-        help = "Print the verification transcript as JSON on stderr; stdout stays curl's."
+        help_heading = "Global Options",
+        help = "Print the verification transcript as JSON on stderr; stdout stays curl's"
     )]
     pub json: bool,
     #[arg(
@@ -287,21 +304,21 @@ pub struct CurlArgs {
         allow_hyphen_values = true,
         value_name = "CURL_ARG",
         help = "Supported request options passed to system curl. Put them after `--`; \
-                pap owns the URL and transport-security options."
+                pap owns the URL and transport-security options"
     )]
     pub curl_args: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
 pub struct SessionsArgs {
-    #[arg(help = "Base URL of the ACI service whose attested sessions to audit.")]
+    #[arg(help = "Base URL of the ACI service whose attested sessions to audit")]
     pub base_url: String,
     #[command(flatten)]
     pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "MODEL",
-        help = "Only list sessions for upstreams serving this model."
+        help = "Only list sessions for upstreams serving this model"
     )]
     pub model: Option<String>,
     #[arg(
@@ -309,41 +326,50 @@ pub struct SessionsArgs {
         value_name = "NAME[=SOURCE]",
         value_parser = RequiredClaim::parse,
         help = "Claim an accepted session must assert (spec 9.2(3)), as NAME or \
-                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable."
+                NAME=SOURCE, e.g. tee_attested=hardware_proven; repeatable"
     )]
     pub require_claims: Vec<RequiredClaim>,
-    #[arg(long, help = "Print the audited sessions as JSON.")]
+    #[arg(
+        long,
+        help_heading = "Global Options",
+        help = "Emit JSON instead of human-readable output"
+    )]
     pub json: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    #[arg(help = "Base URL of the ACI service to proxy to.")]
+    #[arg(help = "Base URL of the ACI service to proxy to")]
     pub base_url: String,
     #[command(flatten)]
     pub policy: PolicyArgs,
     #[arg(
         long,
         value_name = "ADDR:PORT",
-        help = "Local address to listen on (default 127.0.0.1:4180)."
+        help = "Local address to listen on (default 127.0.0.1:4180)"
     )]
     pub listen: Option<String>,
     #[arg(
         long,
         value_name = "ADDR:PORT",
         help = "Local control endpoint for on-demand receipt verification \
-                (default 127.0.0.1:4183)."
+                (default 127.0.0.1:4183)"
     )]
     pub control: Option<String>,
     #[arg(
+        long,
+        help = "Allow --listen and --control to bind non-loopback addresses (plain HTTP)"
+    )]
+    pub allow_network_access: bool,
+    #[arg(
         long = "json-events",
         help = "Emit the serve lifecycle and request activity as JSON Lines on stdout. \
-                Human-readable diagnostics remain on stderr."
+                Human-readable diagnostics remain on stderr"
     )]
     pub json_events: bool,
     #[arg(
         long = "allow-unverified",
-        help = "Drop the default provider.aci_verified demand (spec 5.3)."
+        help = "Drop the default provider.aci_verified demand (spec 5.3)"
     )]
     pub allow_unverified: bool,
     #[arg(
@@ -354,7 +380,7 @@ pub struct ServeArgs {
         help = "Session id (spec 5.3) accepted by the local policy; repeatable. \
                 Each POST uses the intersection with its own pins, or this set \
                 when it supplies none. A disjoint request is rejected locally. \
-                Implies verified serving."
+                Implies verified serving"
     )]
     pub sessions: Vec<String>,
     #[arg(
@@ -364,9 +390,27 @@ pub struct ServeArgs {
         conflicts_with = "allow_unverified",
         help = "Derive the pinned session set from the service's current attested \
                 sessions: only sessions asserting this claim are pinned (spec 9.2(3)); \
-                repeatable. The set refreshes when the service refuses a pin (HTTP 412)."
+                repeatable. The set refreshes when the service refuses a pin (HTTP 412)"
     )]
     pub require_claims: Vec<RequiredClaim>,
+}
+
+fn nonempty_base_url(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        Err("base URL must not be empty".to_string())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn app_id_subject(value: &str) -> Result<String, String> {
+    crate::aci::verifier::parse_app_id_subject(value)
+        .map(|_| value.to_string())
+        .map_err(|error| error.to_string())
+}
+
+fn kms_root_public_key(value: &str) -> Result<String, String> {
+    aci_verify::dstack::compressed_k256_public_key_hex(value).map(|_| value.to_string())
 }
 
 /// A bare 64-character lowercase-hex session id (spec 5.3, spec 8).

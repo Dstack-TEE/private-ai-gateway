@@ -69,7 +69,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             Profiles::Export { .. } => exported(value),
             Profiles::Use { id } => format!("Selected profile: {}\n{}", safe(id), status(value)),
             Profiles::Login(_) => format!(
-                "Account saved. Use private-ai-proxy start to enable protection.\n{}",
+                "Account saved. Use pap start to enable protection.\n{}",
                 status(value)
             ),
             Profiles::Remove { id } => format!("Deleted profile: {}", safe(id)),
@@ -164,7 +164,7 @@ fn agents(value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: private-ai-proxy service start\nStart protection: private-ai-proxy start".into();
+        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {

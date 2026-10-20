@@ -30,13 +30,16 @@ pub(crate) async fn run_verified(
         write_stdout(
             format!(
                 "== service verification: {} ==\n{}\n",
-                safe(&verification.base_url),
+                safe(&crate::client::diagnostic_url(&verification.base_url)),
                 verification.transcript.render_human()
             )
             .as_bytes(),
         )?;
     }
     if !verification.transcript.verified() {
+        if args.json {
+            print_json(&verification.transcript.to_json())?;
+        }
         return Err("service verification failed; not auditing sessions (fail closed)".to_string());
     }
     verification
@@ -299,7 +302,7 @@ mod tests {
                 transcript.pass(check, "verified service fixture");
             }
             let mut pins = vec!["c0".repeat(32)];
-            if case == "failed-human" {
+            if case.starts_with("failed") {
                 transcript.fail(crate::transcript::ID_6, "no attested TLS key");
                 pins.clear();
             }
@@ -368,6 +371,7 @@ mod tests {
             ("direct-json-claims", 1),
             ("direct-human-claims", 1),
             ("failed-human", 1),
+            ("failed-json", 1),
             ("gateway-json", 1),
             ("gateway-human-claims", 1),
         ] {
@@ -393,7 +397,12 @@ mod tests {
             let stderr = String::from_utf8(output.stderr).unwrap();
             if case.contains("json") {
                 let value: Value = serde_json::from_str(stdout).unwrap();
-                if case.starts_with("direct") {
+                if case == "failed-json" {
+                    assert_eq!(value["verdict"]["verified"], false);
+                    assert!(value["checks"].as_array().unwrap().iter().any(|check| {
+                        check["id"] == "id-6" && check["detail"] == "no attested TLS key"
+                    }));
+                } else if case.starts_with("direct") {
                     assert_eq!(value, json!({ "sessions": [] }));
                 } else {
                     assert_eq!(
@@ -401,7 +410,7 @@ mod tests {
                         "session fetch returned HTTP 502: first\nsecond"
                     );
                 }
-            } else if case == "failed-human" {
+            } else if case.starts_with("failed") {
                 assert!(stdout.contains("no attested TLS key"));
                 assert_eq!(
                     stderr,
@@ -419,7 +428,12 @@ mod tests {
                     assert!(stdout.contains("under policy tee_attested [PASS] forged\n"));
                 }
             }
-            if case != "failed-human" {
+            if case.starts_with("failed") {
+                assert_eq!(
+                    stderr,
+                    "service verification failed; not auditing sessions (fail closed)\n"
+                );
+            } else {
                 assert!(stderr.is_empty(), "{case}: {stderr}");
             }
             if !case.starts_with("gateway") {

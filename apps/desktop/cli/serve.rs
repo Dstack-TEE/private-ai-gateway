@@ -14,6 +14,7 @@
 //! refused is treated as the same rotation: block, re-verify, and re-pin.
 
 use std::collections::VecDeque;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -467,6 +468,10 @@ const DEFAULT_CONTROL: &str = "127.0.0.1:4183";
 const MAX_CONNECTIONS: usize = 128;
 
 async fn run_inner(args: ServeArgs) -> Result<i32, String> {
+    let listen = args.listen.as_deref().unwrap_or("127.0.0.1:4180");
+    let control = args.control.as_deref().unwrap_or(DEFAULT_CONTROL);
+    let listen_addresses = listener_addresses(listen, args.allow_network_access).await?;
+    let control_addresses = listener_addresses(control, args.allow_network_access).await?;
     let reporter: Reporter = if args.json_events {
         Arc::new(json_reporter)
     } else {
@@ -492,15 +497,13 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
     )
     .await?;
 
-    let listen = args.listen.as_deref().unwrap_or("127.0.0.1:4180");
-    let listener = tokio::net::TcpListener::bind(listen)
+    let listener = tokio::net::TcpListener::bind(listen_addresses.as_slice())
         .await
         .map_err(|e| format!("cannot bind {listen}: {e}"))?;
     let local = listener
         .local_addr()
         .map_err(|e| format!("cannot read listen address: {e}"))?;
-    let control = args.control.as_deref().unwrap_or(DEFAULT_CONTROL);
-    let control_listener = tokio::net::TcpListener::bind(control)
+    let control_listener = tokio::net::TcpListener::bind(control_addresses.as_slice())
         .await
         .map_err(|e| format!("cannot bind control address {control}: {e}"))?;
     let control_local = control_listener
@@ -515,7 +518,7 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             Some(json!({
                 "proxy_url": proxy_url,
                 "control_url": control_url,
-                "remote_url": base_url,
+                "remote_url": crate::client::diagnostic_url(&base_url),
                 "policy": {
                     "enforce_verified": !args.allow_unverified,
                     "accepted_composes": args.policy.accepted_composes,
@@ -534,14 +537,14 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
             "every inference demands verified serving (provider.aci_verified, spec 5.3)."
         };
         let startup = format!(
-            "\nprivate-ai-proxy serve: proxying {base} on {proxy} (plain HTTP, localhost)\n\
+            "\nprivate-ai-proxy serve: proxying {base} on {proxy} (plain HTTP)\n\
              forwarding every method and path; Authorization passed through unchanged; every \
              upstream hop pinned to the attested TLS key; each POST response's receipt id and \
              body digests recorded; responses stream immediately and receipts are audited after delivery.\n\
              verify on demand: GET {control}/receipts lists recent exchanges, \
              POST {control}/receipts/<id>/verify checks one (send Authorization \
              if the receipt fetch needs it).\n{policy_note}\n",
-            base = safe(&base_url),
+            base = safe(&crate::client::diagnostic_url(&base_url)),
             proxy = safe(&proxy_url),
             control = safe(&control_url),
         );
@@ -556,8 +559,11 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
 
     // Both serve until the process is interrupted.
     let (control, proxy) = (
-        build_control_router(state.clone()),
-        build_proxy_router(state),
+        with_host_guard(
+            build_control_router(state.clone()),
+            control_local.ip().is_loopback(),
+        ),
+        with_host_guard(build_proxy_router(state), local.ip().is_loopback()),
     );
     tokio::join!(
         async {
@@ -577,6 +583,61 @@ async fn run_inner(args: ServeArgs) -> Result<i32, String> {
         },
     );
     Ok(0)
+}
+
+async fn listener_addresses(
+    address: &str,
+    allow_network_access: bool,
+) -> Result<Vec<SocketAddr>, String> {
+    let addresses: Vec<_> = tokio::net::lookup_host(address)
+        .await
+        .map_err(|error| format!("cannot resolve listen address {address}: {error}"))?
+        .collect();
+    if addresses.is_empty() {
+        return Err(format!("listen address {address} resolved to no addresses"));
+    }
+    if !allow_network_access && addresses.iter().any(|address| !address.ip().is_loopback()) {
+        return Err("non-loopback listeners require --allow-network-access".to_string());
+    }
+    Ok(addresses)
+}
+
+/// Like the web UI, standalone listeners refuse names a web page could rebind.
+fn with_host_guard(router: Router, loopback_listener: bool) -> Router {
+    router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            if !valid_host(request.headers(), loopback_listener) {
+                return text_response(
+                    StatusCode::FORBIDDEN,
+                    "Host must be an IP address or a local listener's localhost name\n",
+                );
+            }
+            next.run(request).await
+        },
+    ))
+}
+
+fn valid_host(headers: &HeaderMap, loopback_listener: bool) -> bool {
+    let mut hosts = headers.get_all(axum::http::header::HOST).iter();
+    let Some(host) = hosts.next().and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    if hosts.next().is_some() {
+        return false;
+    }
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let host = authority.host();
+    let suffix = &authority.as_str()[host.len()..];
+    if authority.as_str().contains('@') || !suffix.is_empty() && authority.port_u16().is_none() {
+        return false;
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().is_ok() || loopback_listener && host.eq_ignore_ascii_case("localhost")
 }
 
 /// The verification policy one proxy state is built from: standalone `serve`
@@ -606,7 +667,7 @@ async fn initialize(
         write_stdout(
             format!(
                 "== service verification: {} ==\n{}",
-                safe(&verification.base_url),
+                safe(&crate::client::diagnostic_url(&verification.base_url)),
                 verification.transcript.render_human()
             )
             .as_bytes(),
@@ -1329,6 +1390,7 @@ fn send_error(
     err: reqwest::Error,
     context: Option<ForwardContext>,
 ) -> Response {
+    let err = err.without_url();
     (state.reporter)(RequestOutcome {
         method,
         path,
