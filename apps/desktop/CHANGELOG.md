@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.0...desktop-v0.6.1-beta.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **cli:** harden pap verification and output paths ([#461](https://github.com/Dstack-TEE/private-ai-gateway/issues/461)) ([d5341af](https://github.com/Dstack-TEE/private-ai-gateway/commit/d5341affa189e3824442426e75bff826df21743a))
+* **cli:** polish pap's interface and harden standalone commands ([#469](https://github.com/Dstack-TEE/private-ai-gateway/issues/469)) ([64b2ded](https://github.com/Dstack-TEE/private-ai-gateway/commit/64b2dede59c7c47a662cd6a511d5a9af129471bf))
+* **core:** recover a lost management endpoint and harden private files ([#468](https://github.com/Dstack-TEE/private-ai-gateway/issues/468)) ([752c820](https://github.com/Dstack-TEE/private-ai-gateway/commit/752c820ce92684b342e728a3bc121d5e4cd790d5))
+* **desktop:** keep the client reachable and its state current ([#460](https://github.com/Dstack-TEE/private-ai-gateway/issues/460)) ([389ba2f](https://github.com/Dstack-TEE/private-ai-gateway/commit/389ba2fa523c350d08b9cfc12bfc0ff7856424eb))
+* **desktop:** open target=_blank links in the browser ([#472](https://github.com/Dstack-TEE/private-ai-gateway/issues/472)) ([2201348](https://github.com/Dstack-TEE/private-ai-gateway/commit/2201348660fce875e245c7b11d81dadceec35646))
+* **desktop:** polish native shell behavior ([#470](https://github.com/Dstack-TEE/private-ai-gateway/issues/470)) ([976b924](https://github.com/Dstack-TEE/private-ai-gateway/commit/976b92422541f2648c5efac286c3be85e84fbfb3))
+* **desktop:** polish UI readability, forms and accessibility ([#471](https://github.com/Dstack-TEE/private-ai-gateway/issues/471)) ([1594248](https://github.com/Dstack-TEE/private-ai-gateway/commit/159424810139c7dbce603eb063c3a086f603cedc))
+
 ## [0.6.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.5.1...desktop-v0.6.0) (2026-10-16)
 
 
