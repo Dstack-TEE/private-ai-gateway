@@ -2,7 +2,7 @@
 //! the `pap` command. On macOS a launch registers it once a backend answers,
 //! unless the user turned that off.
 
-use std::{sync::Arc, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use desktop_core::{
     client::{CallError, Client},
@@ -10,7 +10,7 @@ use desktop_core::{
     protocol::{rpc, Preference},
 };
 use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::{process::CommandEvent, ShellExt};
+use tokio::io::AsyncReadExt;
 
 use crate::{distribution, run_blocking};
 
@@ -19,6 +19,9 @@ const INSTALL: [&str; 3] = ["cli", "install", "--json"];
 /// `pap cli` only reads and writes a few local files; one still running after
 /// this is stuck, and holding the registration lock.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `pap cli --json` prints one small JSON object.
+const MAX_OUTPUT: u64 = 64 * 1024;
 
 /// The automatic registration of a launch. It holds the lock while it
 /// runs, so reading or changing the registration waits for it.
@@ -32,40 +35,64 @@ struct CliStartupState {
     last_error: Option<String>,
 }
 
-async fn run(app: &AppHandle, arguments: &[&str]) -> Result<CommandRegistration, String> {
-    let (mut events, child) = app
-        .shell()
-        .sidecar("private-ai-proxy")
-        .map_err(|_| "The bundled pap command is unavailable in this installation")?
-        .args(arguments)
-        .spawn()
-        .map_err(|_| "The pap command could not complete")?;
-    let finished = async {
-        let (mut stdout, mut code) = (Vec::new(), None);
-        while let Some(event) = events.recv().await {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    stdout.extend(line);
-                    stdout.push(b'\n');
-                }
-                CommandEvent::Terminated(payload) => code = payload.code,
-                _ => {}
-            }
-        }
-        (stdout, code)
-    };
-    let Ok((stdout, code)) = tokio::time::timeout(TIMEOUT, finished).await else {
-        let _ = child.kill();
-        return Err("The pap command did not finish in time".to_string());
-    };
-    if code != Some(0) {
-        return Err("The pap command could not update command-line access".to_string());
-    }
-    if stdout.len() > 64 * 1024 {
-        return Err("The pap command returned an invalid response".to_string());
-    }
+/// Runs the bundled `pap`. Tauri bundles it next to the app's executable
+/// (`Contents/MacOS` in a macOS bundle), where its shell plugin finds sidecars.
+async fn run(arguments: &[&str]) -> Result<CommandRegistration, String> {
+    let directory = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(ToOwned::to_owned))
+        .ok_or("The bundled pap command is unavailable in this installation")?;
+    let mut command = tokio::process::Command::new(
+        directory.join(format!("private-ai-proxy{}", std::env::consts::EXE_SUFFIX)),
+    );
+    command.args(arguments);
+    let stdout = output(command, TIMEOUT).await?;
     serde_json::from_slice(&stdout)
         .map_err(|_| "The pap command returned an invalid response".to_string())
+}
+
+/// The output of `command` once it succeeds. One that writes more than
+/// `MAX_OUTPUT` or runs past `timeout` is killed, and at most `MAX_OUTPUT`
+/// and a byte is ever read.
+async fn output(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // CREATE_NO_WINDOW: the console-subsystem `pap` opens no console window.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let mut child = command
+        .spawn()
+        .map_err(|_| "The pap command could not complete")?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("The pap command could not complete")?;
+    let finished = tokio::time::timeout(timeout, async {
+        let mut output = Vec::new();
+        stdout.take(MAX_OUTPUT + 1).read_to_end(&mut output).await?;
+        if output.len() as u64 > MAX_OUTPUT {
+            return Ok(None);
+        }
+        Ok::<_, std::io::Error>(Some((child.wait().await?, output)))
+    })
+    .await;
+    let error = match finished {
+        Ok(Ok(Some((status, output)))) if status.success() => return Ok(output),
+        Ok(Ok(Some(_))) => {
+            return Err("The pap command could not update command-line access".to_string())
+        }
+        Ok(Ok(None)) => "The pap command returned an invalid response",
+        Ok(Err(_)) => "The pap command could not complete",
+        Err(_) => "The pap command did not finish in time",
+    };
+    let _ = child.kill().await;
+    Err(error.to_string())
 }
 
 /// Registers the command once per launch, when a backend first answers.
@@ -98,7 +125,7 @@ pub(crate) fn register_on_startup(app: &AppHandle) {
         state.attempted = enabled.is_ok();
         let result = match enabled {
             Ok(true) => match stable_location() {
-                Ok(()) => run(&app, &INSTALL).await.map(|_| ()),
+                Ok(()) => run(&INSTALL).await.map(|_| ()),
                 Err(error) => Err(error),
             },
             other => other.map(|_| ()),
@@ -145,7 +172,7 @@ pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistrati
     require_registration()?;
     let startup = app.state::<CliStartup>().inner().clone();
     let state = startup.0.lock().await;
-    let registration = run(&app, &["cli", "status", "--json"]).await?;
+    let registration = run(&["cli", "status", "--json"]).await?;
     Ok(CliRegistration {
         registration,
         startup_error: state.last_error.clone(),
@@ -165,12 +192,12 @@ pub(crate) async fn set_cli_registration(
     let mut state = startup.0.lock().await;
     let client = app.state::<Arc<Client>>().inner().clone();
     let registration = if installed {
-        let registration = run(&app, &INSTALL).await?;
+        let registration = run(&INSTALL).await?;
         set_automatic(client, true).await?;
         registration
     } else {
         set_automatic(client, false).await?;
-        run(&app, &["cli", "uninstall", "--json", "--yes"]).await?
+        run(&["cli", "uninstall", "--json", "--yes"]).await?
     };
     state.last_error = None;
     Ok(CliRegistration {
@@ -191,7 +218,52 @@ async fn set_automatic(client: Arc<Client>, enabled: bool) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
     use super::transient_macos_app_path;
+    #[cfg(unix)]
+    use super::{output, MAX_OUTPUT};
+
+    #[cfg(unix)]
+    fn shell(script: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_writes_too_much_is_stopped() {
+        let started = Instant::now();
+        let result =
+            tauri::async_runtime::block_on(output(shell("exec yes"), Duration::from_secs(10)));
+        assert_eq!(
+            result,
+            Err("The pap command returned an invalid response".to_string())
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The limit is inclusive.
+        let script = format!("head -c {MAX_OUTPUT} /dev/zero");
+        let result =
+            tauri::async_runtime::block_on(output(shell(&script), Duration::from_secs(10)));
+        assert_eq!(result.map(|output| output.len() as u64), Ok(MAX_OUTPUT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_runs_too_long_is_stopped() {
+        let started = Instant::now();
+        let result = tauri::async_runtime::block_on(output(
+            shell("exec sleep 30"),
+            Duration::from_millis(200),
+        ));
+        assert_eq!(
+            result,
+            Err("The pap command did not finish in time".to_string())
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn automatic_registration_rejects_transient_macos_locations() {

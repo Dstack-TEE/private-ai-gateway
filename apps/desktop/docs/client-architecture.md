@@ -103,13 +103,15 @@ protection problems, is stored under that key.
   window show the state that applies, and system notifications report
   background failures.
 - The window shows only the app's own pages (and the development server in a
-  development build); any other link or `window.open` opens in the default
-  browser. Copying the Local API key, from the tray or from a copy the
-  renderer marks secret (`copy_text` with `secret`), keeps it out of
-  clipboard history: Windows' history, cloud and monitoring exclusion
-  formats, macOS's `org.nspasteboard.ConcealedType`, and on Linux, which has
-  no standard, KDE's `x-kde-passwordManagerHint`, which other clipboard
-  managers may ignore.
+  development build); other http(s) links, `target=_blank` ones included, and
+  `window.open` open in the default browser, and other schemes are blocked.
+  The opener plugin's link handler opens `target=_blank` links; the capability
+  lets it open only `http://` and `https://` URLs. Copying the Local API key,
+  from the tray or from a copy the renderer marks secret (`copy_text` with
+  `secret`), keeps it out of clipboard history: Windows' history, cloud and
+  monitoring exclusion formats, macOS's `org.nspasteboard.ConcealedType`, and
+  on Linux, which has no standard, KDE's `x-kde-passwordManagerHint`, which
+  other clipboard managers may ignore.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.
