@@ -255,11 +255,10 @@ fn native_passthrough(params: &Value) -> Result<Value, TransformError> {
 /// Responses endpoint; every other candidate gets `params`, the chat body.
 ///
 /// A candidate that cannot shape THIS request is skipped (never surfaced to
-/// the client), and the remaining candidates keep the
-/// request alive: with capability filtering upstream, one mis-described
-/// backend must cost an attempt, not the whole request. Only when every
-/// candidate fails does the first error surface — that is a request nothing
-/// could serve.
+/// the client), and the remaining candidates keep the request alive: with
+/// capability filtering upstream, one mis-described backend must cost an
+/// attempt, not the whole request. Only when every candidate fails does the
+/// first error surface — that is a request nothing could serve.
 pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
@@ -268,7 +267,7 @@ pub fn build_candidates(
     responses: Option<ResponsesCandidateInput<'_>>,
 ) -> Result<Vec<(String, Value, Endpoint)>, TransformError> {
     let mut shaped = Vec::new();
-    let mut first_error: Option<TransformError> = None;
+    let mut skipped = Vec::new();
     // Converted once; every Chat candidate of a Messages request shares it.
     let messages_chat = (endpoint == Endpoint::Messages
         && candidates
@@ -294,32 +293,39 @@ pub fn build_candidates(
             Ok((upstream_endpoint, body)) => {
                 shaped.push((candidate.route_id.clone(), body, upstream_endpoint))
             }
-            Err(err) => {
-                // A route that cannot express what the request asks for, or
-                // serve its endpoint, loses traffic silently, so it is a warning.
-                // Those messages are fixed strings; a body fault fails every
-                // candidate alike and its message may quote caller identifiers.
-                if err.route_id().is_some() || matches!(err, TransformError::Unsupported { .. }) {
-                    tracing::warn!(
-                        route_id = %candidate.route_id,
-                        error = %err,
-                        "candidate cannot shape this request; skipping"
-                    );
-                } else {
-                    tracing::debug!(
-                        route_id = %candidate.route_id,
-                        error = %err,
-                        "candidate cannot shape this request; skipping"
-                    );
-                }
-                first_error.get_or_insert(err);
-            }
+            Err(err) => skipped.push((&candidate.route_id, err)),
         }
     }
-    match (shaped.is_empty(), first_error) {
-        (true, Some(err)) => Err(err),
-        _ => Ok(shaped),
+    if shaped.is_empty() {
+        // Nothing serves the request, so the first error becomes its 400.
+        for (route_id, err) in &skipped {
+            tracing::debug!(%route_id, error = %err, "candidate cannot shape this request");
+        }
+        return skipped
+            .into_iter()
+            .next()
+            .map_or(Ok(shaped), |(_, err)| Err(err));
     }
+    // Another candidate shaped the same request, so each skip depends on this
+    // route (its endpoints, format or reasoning dialect) and would otherwise
+    // lose it traffic silently. Route-attributed and endpoint errors are fixed
+    // text; a conversion error may quote the caller's values, so it is not
+    // logged.
+    for (route_id, err) in &skipped {
+        let reason =
+            if err.route_id().is_some() || matches!(err, TransformError::Unsupported { .. }) {
+                err.to_string()
+            } else {
+                "the request cannot be converted for this route".to_string()
+            };
+        tracing::warn!(
+            %route_id,
+            endpoint = endpoint.path(),
+            %reason,
+            "candidate cannot shape this request; skipping"
+        );
+    }
+    Ok(shaped)
 }
 
 /// The Chat bridge a request may take to a Chat-only candidate.
@@ -4405,6 +4411,42 @@ mod tests {
         assert_eq!(bodies[0].0, "effort:m");
         assert_eq!(bodies[0].1["reasoning_effort"], "low");
         assert!(bodies[0].1.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_budget_buckets_at_their_boundaries() {
+        for dialect in ["reasoning_effort", "thinking_type"] {
+            let candidate: RouteCandidate = serde_json::from_value(json!({
+                "routeId": "vendor:m",
+                "format": "openai",
+                "reasoningFormat": dialect,
+            }))
+            .unwrap();
+            for (budget, effort) in [
+                (1024, "low"),
+                (1025, "medium"),
+                (8192, "medium"),
+                (8193, "high"),
+            ] {
+                let requested = ReasoningConfig {
+                    max_tokens: Some(budget),
+                    enabled: Some(true),
+                    ..Default::default()
+                };
+                let bodies = build_candidates(
+                    &json!({ "model": "m", "messages": [] }),
+                    Endpoint::ChatComplete,
+                    std::slice::from_ref(&candidate),
+                    Some(&requested),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    bodies[0].1["reasoning_effort"], effort,
+                    "{dialect} {budget}"
+                );
+            }
+        }
     }
 
     #[test]

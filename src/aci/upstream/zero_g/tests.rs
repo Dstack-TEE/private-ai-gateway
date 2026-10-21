@@ -577,13 +577,17 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
     let fixture = Fixture::new(Mode::Ok).await;
     let schema = json!({"type": "json_schema", "json_schema": {"name": "secret_schema"}});
     // The middleware's reasoning controls for a `reasoning_effort` route, a
-    // direct caller's chat template switch, and fields OpenAI SDKs and agents
-    // send that the transport has no rule for.
+    // direct caller's chat template switch, sampling controls that can carry
+    // private text or token ids, and fields OpenAI SDKs and agents send that
+    // the transport has no rule for.
     let sealed = json!({
         "messages": [{"role": "user", "content": "secret prompt"}],
         "response_format": schema,
         "reasoning_effort": "high",
         "chat_template_kwargs": {"enable_thinking": true},
+        "temperature": 0.5,
+        "stop": ["secret-stop"],
+        "logit_bias": {"42": -100},
         "user": "secret-user",
         "store": false,
         "metadata": {"session": "secret-session"},
@@ -591,7 +595,7 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
     });
     let mut body = object(&sealed);
     body.extend(object(
-        &json!({"model": MODEL, "stream": false, "temperature": 0.5}),
+        &json!({"model": MODEL, "stream": false, "max_tokens": 64}),
     ));
     fixture
         .backend
@@ -601,7 +605,7 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
     let sent = object(&fixture.broker.requests.lock().unwrap()[0].1);
     let mut cleartext: Vec<_> = sent.keys().map(String::as_str).collect();
     cleartext.sort_unstable();
-    assert_eq!(cleartext, [E2EE, "model", "stream", "temperature"]);
+    assert_eq!(cleartext, [E2EE, "max_tokens", "model", "stream"]);
     assert!(!Value::Object(sent.clone()).to_string().contains("secret"));
     let (opened, _, _) = open_request(&fixture.broker.secret, &sent).unwrap();
     for (field, value) in object(&sealed) {
@@ -610,6 +614,6 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
 
     // Cleartext fields are bound: rewriting one fails the enclave's `Open`.
     let mut rewritten = sent;
-    rewritten["temperature"] = 1.into();
+    rewritten["max_tokens"] = 4096.into();
     assert!(open_request(&fixture.broker.secret, &rewritten).is_none());
 }
