@@ -68,13 +68,15 @@ Adding a model is configuration only: map its public name in the route's `models
 The backend uses the first provider, in preview order, whose recorded key hashes to a binding the current event carries.
 
 - `messages`, `tools` and `tool_choice` are sealed (§5.1 default), and so are `response_format`, `reasoning_effort` and `chat_template_kwargs`: §5.1 lets a client seal additional fields, and the broker merges them back into the request it serves. As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Routing and sampling fields (`model`, `stream`, `temperature`, `max_tokens`, …) stay cleartext but are bound in the AAD; nothing is unbound, so a rewritten `model` fails the provider's `Open`. The sealed `model` is the configured on-chain id, which the router forwards unchanged. 0G's client instead seals the `canonical_id` and leaves `model` unbound so the router can rewrite it. Any other field is refused with a 400 `invalid_request_error` instead of being sent in the clear. Only `/v1/chat/completions` is served.
-- OpenRouter's `reasoning` object, which direct callers and the middleware's default `reasoning` dialect send, becomes a sealed `reasoning_effort`. It is encoded the same way as the middleware's `reasoning_effort` dialect: the explicit effort, `medium` for `enabled: true`, and `none` for `enabled: false`. The provider cannot honour a reasoning token budget (`reasoning.max_tokens`) or drop reasoning from its response (`reasoning.exclude: true`, `include_reasoning: false`), so those are refused.
+- OpenRouter's `reasoning` object, which direct callers and the middleware's default `reasoning` dialect send, becomes a sealed `reasoning_effort`. It is encoded the same way as the middleware's `reasoning_effort` dialect (the explicit effort, or `none` for `enabled: false`), with one exception: a bare `enabled: true` sends no effort. The provider reasons by default, while its `medium`, which the shared dialect would send, barely reasons. The provider cannot honour a reasoning token budget (`reasoning.max_tokens`) or drop reasoning from its response (`reasoning.exclude: true`, `include_reasoning: false`), so those are refused.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response becomes a generic upstream error; its body is not returned.
 
 ## Responses
 
 Every frame must be sealed, seal `choices`, not seal `usage` or `model`, not unbind `usage`, and decrypt to exactly its declared fields. Frames open in order under one HPKE context, so reordering, dropping or tampering fails.
+
+The router adds an unbound cleartext `x_0g_trace` (billing amounts, provider address) to frames. Nothing may trust it (§8.2), so it is removed from every buffered body and streamed chunk after the frame opens. A streamed frame left with only an empty `choices` is not emitted. The §8 binding is still computed over the frames as received.
 
 The §8 signature is fetched from `<record url>/v1/proxy/signature/<ZG-Res-Key>` on the broker, not the router, with three attempts on 404, 5xx and transport errors. Its text must equal the binding computed locally over the sealed request and every frame (`zg-sig-v1/e2ee-ct` or `zg-sig-v1/e2ee-ct-stream`), and it must recover (EIP-191) to the verified signer.
 
@@ -88,7 +90,7 @@ A receipt cites the session of the provider that served it. That session's claim
 These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this adapter and with redpill-model-tests. They come from the provider and model, not the transport:
 
 - Reasoning cannot be turned off. `reasoning_effort` `none` or `minimal`, or `chat_template_kwargs.enable_thinking: false`, stop the provider from returning reasoning separately, but the model still reasons. Its thinking and a closing `</think>` then land in `content`, and a long run can hit the token limit.
-- On short prompts, `reasoning_effort` `low` and `medium` produce about one reasoning token, and `high` through `max` only a little more. Without `reasoning_effort`, the model reasons by default. So `reasoning: {"enabled": true}`, which maps to `medium`, can return no reasoning text.
+- On short prompts, `reasoning_effort` `low` and `medium` produce about one reasoning token, and `high` through `max` only a little more. Without `reasoning_effort`, the model reasons by default, which is why a bare `enabled: true` sends none.
 - All effort levels from `minimal` to `max` are accepted. `response_format` `json_object` and `json_schema` are honoured. A `thinking: {"type": "disabled"}` field is ignored, so it stays refused.
 - Usage reports `reasoning_tokens` at the top level. The middleware moves it into `completion_tokens_details`; direct mode passes it through unchanged.
 - A cold prompt of about 810K tokens got a router 502 after about 20 seconds. The same request succeeded, buffered and streamed, once the provider had cached the prompt.
@@ -117,6 +119,6 @@ These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this
 - `src/aci/upstream/zero_g/tests.rs`:
   - interop with `tests/fixtures/0g-private-computer/interop.json`, produced by 0G's Go protocol library at the pinned release (provenance in that directory's README), plus the broker signature KAT;
   - tampered, reordered, truncated and unsealed frames;
-  - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed `response_format` and reasoning controls, `reasoning` translation, refused fields, and binding mismatch.
+  - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed `response_format` and reasoning controls, `reasoning` translation, router-trace stripping, refused fields, and binding mismatch.
 - `src/aci/verifier/tests/zero_g.rs`: the real compute-network-19 quote with patched report_data. It covers TargetSeparated, unacknowledged signer, model mismatch, signer mismatch, boot chain, quote redirect, and root-check rejections, and failing closed when no candidate passes.
 - `tests/0g_private_computer_live.rs`: an ignored live glm-5.3 test, including a sealed JSON-mode request with `reasoning`. See [Live E2E test suite](../../live-e2e-test-suite.md).

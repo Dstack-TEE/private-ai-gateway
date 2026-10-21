@@ -118,8 +118,7 @@ impl ResponseSealer {
         sealed_fields: Value,
         is_final: bool,
     ) -> Value {
-        let mut meta =
-            json!({"sealed_fields": sealed_fields, "unbound_fields": ["model"], "final": is_final});
+        let mut meta = json!({"sealed_fields": sealed_fields, "unbound_fields": ["model", ROUTER_TRACE], "final": is_final});
         if let Some(enc) = self.enc.take() {
             meta["v"] = 1.into();
             meta["enc"] = enc.into();
@@ -391,6 +390,8 @@ fn completion(stream: bool) -> Vec<Map<String, Value>> {
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "o"}}]},
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}]},
             {"id": "c1", "model": MODEL, "usage": {"total_tokens": 5}, "choices": []},
+            // As live, the last frame carries nothing but the router trace.
+            {"choices": []},
         ])
     } else {
         json!([{"id": "c1", "model": MODEL, "usage": {"total_tokens": 4},
@@ -422,6 +423,10 @@ async fn chat(
         .enumerate()
         .map(|(i, f)| sealer.seal(f.clone(), i == last))
         .collect();
+    // The router adds its unbound trace to sealed frames in transit.
+    for frame in &mut frames {
+        frame[ROUTER_TRACE] = json!({"billing": {"total_cost": "42"}, "provider": ADDRESS});
+    }
     *broker.signed_text.lock().unwrap() = sealer.signed_text(stream);
     match broker.mode {
         Mode::Unsealed => frames = plain.into_iter().map(Value::Object).collect(),
@@ -463,6 +468,10 @@ async fn buffered_request_is_sealed_pinned_and_verified() {
     let response = fixture.buffered().await.unwrap();
     let body: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "ok");
+    assert!(
+        body.get(ROUTER_TRACE).is_none(),
+        "the router trace is stripped"
+    );
     assert_eq!(response.served_instance_id.as_deref(), Some(ADDRESS));
 
     let requests = fixture.broker.requests.lock().unwrap();
@@ -502,6 +511,7 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
         .collect();
     assert_eq!(events.len(), 4);
     assert!(events[0].contains(r#""content":"o""#) && !events[0].contains(E2EE));
+    assert!(events.iter().all(|event| !event.contains(ROUTER_TRACE)));
     assert_eq!(events[3], "data: [DONE]\n\n");
     // Usage is requested before sealing, as 0G's client does, so it stays bound.
     let sent = fixture.broker.requests.lock().unwrap()[0].1.clone();
@@ -509,7 +519,7 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
 
     for (mode, delivered) in [
         (Mode::WrongSigner, 3),
-        (Mode::Truncated, 2),
+        (Mode::Truncated, 3),
         (Mode::Reordered, 0),
         (Mode::Tampered, 1),
     ] {
@@ -538,6 +548,7 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
     for extra in [
         json!({"user": "u-1"}),
         json!({"reasoning": {"max_tokens": 1024}}),
+        json!({"reasoning": {"enabled": true, "max_tokens": 1024}}),
         json!({"reasoning": {"effort": "high", "exclude": true}}),
         json!({"include_reasoning": false}),
     ] {
@@ -557,9 +568,10 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
 async fn output_schema_and_reasoning_are_sealed_and_reasoning_is_translated() {
     let schema = json!({"type": "json_schema", "json_schema": {"name": "secret_schema"}});
     for (reasoning, effort) in [
-        (json!({"effort": "high"}), "high"),
-        (json!({"enabled": true}), "medium"),
-        (json!({"enabled": false}), "none"),
+        (json!({"effort": "high"}), json!("high")),
+        // The provider reasons by default; its `medium` barely does.
+        (json!({"enabled": true}), Value::Null),
+        (json!({"enabled": false}), json!("none")),
     ] {
         let fixture = Fixture::new(Mode::Ok).await;
         let request = fixture.request(json!({
@@ -588,7 +600,8 @@ async fn output_schema_and_reasoning_are_sealed_and_reasoning_is_translated() {
         }
         let (opened, _, _) = open_request(&fixture.broker.secret, &sent).unwrap();
         assert_eq!(opened["response_format"], schema);
-        assert_eq!(opened["reasoning_effort"], effort, "{reasoning}");
+        let sent_effort = opened.get("reasoning_effort").unwrap_or(&Value::Null);
+        assert_eq!(*sent_effort, effort, "{reasoning}");
         assert_eq!(opened["chat_template_kwargs"]["enable_thinking"], true);
         assert!(!opened.contains_key("reasoning"));
     }
