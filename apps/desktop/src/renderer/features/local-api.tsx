@@ -37,7 +37,7 @@ export function LocalApiPanel(): React.JSX.Element {
         displayValue={clientKey ? (clientKeyVisible ? clientKey : maskClientKey(clientKey)) : undefined}
         ariaValue={clientKey ? (clientKeyVisible ? clientKey : "hidden") : undefined}
         copied={isCopied(clientKey)}
-        onCopy={copy}
+        onCopy={(label, value) => copy(label, value, true)}
       >
         <IconButton className="relative z-2 ml-auto" label={clientKeyVisible ? "Hide Local API key" : "Show Local API key"} disabled={!clientKey} onClick={toggleClientKey}>{clientKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}</IconButton>
       </CopyRow>
