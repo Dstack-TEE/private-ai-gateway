@@ -509,6 +509,14 @@ async fn buffered_response_without_a_verified_signature_is_a_generic_error() {
             !err.to_string().contains("provider-controlled"),
             "{mode:?}: {err}"
         );
+        // The router's status survives for failover and the client; its body
+        // does not.
+        if mode == Mode::RouterError {
+            assert!(
+                matches!(err, UpstreamError::Upstream { status: 502 }),
+                "{err}"
+            );
+        }
     }
 }
 

@@ -117,8 +117,10 @@ pub enum UpstreamError {
     Timeout(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
-    /// Carries the status alone: an error's `Display` reaches logs, where a
-    /// response body has no place.
+    /// The upstream answered `status` and the adapter withheld the body, which
+    /// is unverified. Carries the status alone: an error's `Display` reaches
+    /// logs, where a response body has no place. The service forwards it as
+    /// that status with an empty body.
     #[error("upstream rejected request with status {status}")]
     Upstream { status: u16 },
 }

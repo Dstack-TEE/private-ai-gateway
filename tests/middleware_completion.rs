@@ -3082,11 +3082,14 @@ async fn downstream_abort_after_settle_does_not_double_report() {
 
 // A mock upstream that answers each forward with the next status in a script,
 // recording every contacted route — the capacity-retry tests need "429 first,
-// 200 on the delayed second pass" to be observable per attempt.
+// 200 on the delayed second pass" to be observable per attempt. With
+// `withhold`, its verified paths answer a non-200 as the 0G and Chutes
+// adapters do: the status alone, the body withheld.
 struct SequencedUpstream {
     forwarded: Arc<Mutex<Vec<String>>>,
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     statuses: Mutex<std::collections::VecDeque<u16>>,
+    withhold: bool,
 }
 
 #[async_trait]
@@ -3145,7 +3148,11 @@ impl UpstreamBackend for SequencedUpstream {
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        self.forward_prepared(req).await
+        let response = self.forward_prepared(req).await?;
+        match response.status_code {
+            status if self.withhold && status != 200 => Err(UpstreamError::Upstream { status }),
+            _ => Ok(response),
+        }
     }
     async fn forward_stream_prepared(
         &self,
@@ -3165,7 +3172,11 @@ impl UpstreamBackend for SequencedUpstream {
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        self.forward_stream_prepared(req).await
+        let response = self.forward_stream_prepared(req).await?;
+        match response.status_code {
+            status if self.withhold && status != 200 => Err(UpstreamError::Upstream { status }),
+            _ => Ok(response),
+        }
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         unreachable!("sequenced upstream forwards via prepared paths only")
@@ -3188,6 +3199,18 @@ fn build_sequenced_service(
     Arc<Mutex<Vec<String>>>,
     Arc<Mutex<Vec<Vec<u8>>>>,
 ) {
+    build_sequenced_service_with(statuses, false)
+}
+
+#[allow(clippy::type_complexity)]
+fn build_sequenced_service_with(
+    statuses: Vec<u16>,
+    withhold: bool,
+) -> (
+    Arc<AciService>,
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<Vec<u8>>>>,
+) {
     let forwarded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
     let service = Arc::new(
@@ -3198,6 +3221,7 @@ fn build_sequenced_service(
                 forwarded: forwarded.clone(),
                 bodies: bodies.clone(),
                 statuses: Mutex::new(statuses.into_iter().collect()),
+                withhold,
             }),
             Arc::new(OkVerifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -3232,6 +3256,115 @@ fn plain_candidate(route: &str) -> ForwardCandidate {
         route_id: route.to_string(),
         path: "/v1/chat/completions",
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
+    }
+}
+
+/// An adapter that withholds an unverified body (0G, Chutes) answers a
+/// non-200 as `UpstreamError::Upstream`. That answer counts exactly as the same
+/// status with an empty body: recorded with its status, failed over, retried on
+/// capacity, and committed as the upstream's status, never as a 502.
+#[tokio::test(start_paused = true)]
+async fn a_withheld_upstream_status_counts_as_that_status() {
+    for stream in [false, true] {
+        for (script, routes, committed, recorded, contacts) in [
+            // The only candidate is out of capacity on both passes.
+            (
+                vec![429, 429],
+                vec!["zg"],
+                ("zg", 429),
+                vec![("zg", 429)],
+                2,
+            ),
+            // A sibling serves after the 429.
+            (
+                vec![429, 200],
+                vec!["zg", "plain"],
+                ("plain", 200),
+                vec![("zg", 429)],
+                2,
+            ),
+            // Not a capacity signal, so no second pass; it commits as is.
+            (vec![503], vec!["zg"], ("zg", 503), vec![], 1),
+        ] {
+            let (service, forwarded, _) = build_sequenced_service_with(script.clone(), true);
+            let result = service
+                .forward_chat_completion_for_middleware(
+                    capacity_retry_request(None),
+                    routes.iter().map(|route| plain_candidate(route)).collect(),
+                    stream,
+                    MiddlewareReceiptJournal::default(),
+                )
+                .await
+                .unwrap();
+            let (route, status, body, failed) = match result {
+                MiddlewareForwardResult::Forwarded(f) => (
+                    f.selected_route,
+                    f.upstream_status,
+                    f.upstream_body,
+                    f.failed_attempts,
+                ),
+                MiddlewareForwardResult::Stream(s) => (
+                    s.selected_route,
+                    s.upstream_status,
+                    Vec::new(),
+                    s.failed_attempts,
+                ),
+                MiddlewareForwardResult::UpstreamError(e) => (
+                    e.selected_route,
+                    e.error.upstream_status,
+                    e.error.upstream_body,
+                    e.failed_attempts,
+                ),
+                MiddlewareForwardResult::AllFailed(_) => {
+                    panic!("stream={stream} {script:?}: a withheld status is an answer")
+                }
+            };
+            let case = format!("stream={stream} {script:?}");
+            assert_eq!((route.as_str(), status), committed, "{case}");
+            assert_eq!(
+                attempts(&failed),
+                recorded
+                    .iter()
+                    .map(|(route, status)| (route.to_string(), *status))
+                    .collect::<Vec<_>>(),
+                "{case}"
+            );
+            assert_eq!(forwarded.lock().unwrap().len(), contacts, "{case}");
+            if status != 200 {
+                assert!(body.is_empty(), "{case}: the withheld body stays withheld");
+            }
+        }
+    }
+}
+
+/// The live symptom: a 0G 429 reached the client as a 5xx. A withheld status
+/// reaches the client as the generic path maps it, with no provider text.
+#[tokio::test]
+async fn a_withheld_upstream_status_reaches_the_client_as_that_status() {
+    for stream in [false, true] {
+        for (script, client_status, error_type) in [
+            (vec![429, 429], 429, "rate_limit_error"),
+            (vec![503], 503, "service_unavailable"),
+        ] {
+            let control_url = spawn_control(
+                200,
+                json!({ "allow": true, "candidates": [{ "routeId": "zg:gpt-test", "format": "openai" }] }),
+            )
+            .await;
+            let (service, _, _) = build_sequenced_service_with(script.clone(), true);
+            let mut input = chat_input();
+            input.stream = stream;
+            let (status, _, body) = response_parts(
+                middleware(control_url)
+                    .handle_completion(&service, input)
+                    .await,
+            )
+            .await;
+            let case = format!("stream={stream} {script:?}");
+            assert_eq!(status, client_status, "{case}");
+            assert_eq!(body["error"]["type"], json!(error_type), "{case}: {body}");
+            assert_ne!(body["error"]["message"], json!("capacity"), "{case}");
+        }
     }
 }
 

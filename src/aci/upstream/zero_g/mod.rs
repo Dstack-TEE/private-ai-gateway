@@ -103,8 +103,9 @@ impl ZeroGProviderBackend {
 
     /// Seal the request to the first provider `event` binds for its model and
     /// send it through the router pinned to that provider. Only a 200 response
-    /// naming its signature continues; any other status becomes a generic
-    /// error, so provider-controlled bodies never reach the client unverified.
+    /// naming its signature continues; any other status is returned as its
+    /// status alone, so provider-controlled bodies never reach the client
+    /// unverified.
     async fn send(
         &self,
         req: PreparedUpstreamRequest,

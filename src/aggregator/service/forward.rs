@@ -8,7 +8,10 @@ use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
     VerificationResult,
 };
-use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
@@ -42,6 +45,34 @@ pub(super) enum ReverifyOutcome<R> {
     /// error. Both map to the caller's failure path; the helper has already
     /// applied any mismatch invalidation.
     Failed(UpstreamError),
+}
+
+/// A response with an upstream's status and no body: what an adapter that
+/// withholds unverified bodies answered ([`UpstreamError::Upstream`]).
+pub(super) trait WithheldResponse {
+    fn withheld(status_code: u16) -> Self;
+}
+
+impl WithheldResponse for UpstreamResponse {
+    fn withheld(status_code: u16) -> Self {
+        Self {
+            status_code,
+            body: Vec::new(),
+            headers: Default::default(),
+            served_instance_id: None,
+        }
+    }
+}
+
+impl WithheldResponse for UpstreamStreamResponse {
+    fn withheld(status_code: u16) -> Self {
+        Self {
+            status_code,
+            headers: Default::default(),
+            body: Box::pin(futures_util::stream::empty()),
+            served_instance_id: None,
+        }
+    }
 }
 
 /// A session sealed for one verified channel binding (one per Chutes instance).
@@ -576,6 +607,7 @@ impl AciService {
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
     where
+        R: WithheldResponse,
         Fwd: FnMut(PreparedUpstreamRequest, UpstreamVerifiedEvent) -> Fut,
         Fut: std::future::Future<Output = Result<R, UpstreamError>>,
     {
@@ -586,6 +618,13 @@ impl AciService {
             // and `prepared` was already cloned per attempt before this refactor.
             match forward(prepared.clone(), recorded_event.clone()).await {
                 Ok(response) => return ReverifyOutcome::Forwarded(response),
+                // The upstream answered; only its body was withheld. As that
+                // status with an empty body, every caller classifies it like
+                // any other upstream answer: the attempt's status, failover,
+                // the capacity retry and the client's status.
+                Err(UpstreamError::Upstream { status }) => {
+                    return ReverifyOutcome::Forwarded(R::withheld(status))
+                }
                 Err(UpstreamError::ChannelBindingMismatch(_))
                     if !caller_supplied_event
                         && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
