@@ -10,6 +10,7 @@ use desktop_core::{
     protocol::{rpc, Preference},
 };
 use tauri::{AppHandle, Manager};
+use tokio::io::AsyncReadExt;
 
 use crate::{distribution, run_blocking};
 
@@ -18,6 +19,9 @@ const INSTALL: [&str; 3] = ["cli", "install", "--json"];
 /// `pap cli` only reads and writes a few local files; one still running after
 /// this is stuck, and holding the registration lock.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `pap cli --json` prints one small JSON object.
+const MAX_OUTPUT: u64 = 64 * 1024;
 
 /// The automatic registration of a launch. It holds the lock while it
 /// runs, so reading or changing the registration waits for it.
@@ -41,8 +45,20 @@ async fn run(arguments: &[&str]) -> Result<CommandRegistration, String> {
     let mut command = tokio::process::Command::new(
         directory.join(format!("private-ai-proxy{}", std::env::consts::EXE_SUFFIX)),
     );
+    command.args(arguments);
+    let stdout = output(command, TIMEOUT).await?;
+    serde_json::from_slice(&stdout)
+        .map_err(|_| "The pap command returned an invalid response".to_string())
+}
+
+/// The output of `command` once it succeeds. One that writes more than
+/// `MAX_OUTPUT` or runs past `timeout` is killed, and at most `MAX_OUTPUT`
+/// and a byte is ever read.
+async fn output(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     command
-        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -50,21 +66,33 @@ async fn run(arguments: &[&str]) -> Result<CommandRegistration, String> {
     // CREATE_NO_WINDOW: the console-subsystem `pap` opens no console window.
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|_| "The pap command could not complete")?;
-    let Ok(output) = tokio::time::timeout(TIMEOUT, child.wait_with_output()).await else {
-        return Err("The pap command did not finish in time".to_string());
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("The pap command could not complete")?;
+    let finished = tokio::time::timeout(timeout, async {
+        let mut output = Vec::new();
+        stdout.take(MAX_OUTPUT + 1).read_to_end(&mut output).await?;
+        if output.len() as u64 > MAX_OUTPUT {
+            return Ok(None);
+        }
+        Ok::<_, std::io::Error>(Some((child.wait().await?, output)))
+    })
+    .await;
+    let error = match finished {
+        Ok(Ok(Some((status, output)))) if status.success() => return Ok(output),
+        Ok(Ok(Some(_))) => {
+            return Err("The pap command could not update command-line access".to_string())
+        }
+        Ok(Ok(None)) => "The pap command returned an invalid response",
+        Ok(Err(_)) => "The pap command could not complete",
+        Err(_) => "The pap command did not finish in time",
     };
-    let output = output.map_err(|_| "The pap command could not complete")?;
-    if !output.status.success() {
-        return Err("The pap command could not update command-line access".to_string());
-    }
-    if output.stdout.len() > 64 * 1024 {
-        return Err("The pap command returned an invalid response".to_string());
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|_| "The pap command returned an invalid response".to_string())
+    let _ = child.kill().await;
+    Err(error.to_string())
 }
 
 /// Registers the command once per launch, when a backend first answers.
@@ -190,7 +218,52 @@ async fn set_automatic(client: Arc<Client>, enabled: bool) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
+
     use super::transient_macos_app_path;
+    #[cfg(unix)]
+    use super::{output, MAX_OUTPUT};
+
+    #[cfg(unix)]
+    fn shell(script: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_writes_too_much_is_stopped() {
+        let started = Instant::now();
+        let result =
+            tauri::async_runtime::block_on(output(shell("exec yes"), Duration::from_secs(10)));
+        assert_eq!(
+            result,
+            Err("The pap command returned an invalid response".to_string())
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The limit is inclusive.
+        let script = format!("head -c {MAX_OUTPUT} /dev/zero");
+        let result =
+            tauri::async_runtime::block_on(output(shell(&script), Duration::from_secs(10)));
+        assert_eq!(result.map(|output| output.len() as u64), Ok(MAX_OUTPUT));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_runs_too_long_is_stopped() {
+        let started = Instant::now();
+        let result = tauri::async_runtime::block_on(output(
+            shell("exec sleep 30"),
+            Duration::from_millis(200),
+        ));
+        assert_eq!(
+            result,
+            Err("The pap command did not finish in time".to_string())
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn automatic_registration_rejects_transient_macos_locations() {
