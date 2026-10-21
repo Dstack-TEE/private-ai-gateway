@@ -94,7 +94,7 @@ export function ProfilesDialog({ repair, onClose, ...control }: {
                   <ItemDescription className="line-clamp-none truncate text-xs">{serviceHost(profile.remoteUrl)} · {status}</ItemDescription>
                 </ItemContent>
                 {(working || selected) && <ItemActions>
-                  {working ? <LoaderCircle className="animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+                  {working ? <LoaderCircle className="animate-control-spin" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
                 </ItemActions>}
               </ActionItem>
               <IconButton size="icon-sm" className="col-start-2 row-start-1 justify-self-center" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({ profile })}><Pencil /></IconButton>
@@ -301,7 +301,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
 
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <form className="flex min-h-0 flex-col gap-4" noValidate onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <AppDialogBody className="py-1">
         <FieldGroup className="gap-4">
         <Field className="gap-2">

@@ -1,7 +1,7 @@
 import type { Tone } from "../../shared/contracts";
 
 export const toneTextClass: Record<Tone, string> = {
-  success: "text-primary",
+  success: "text-success",
   warning: "text-warning",
   danger: "text-destructive",
   neutral: "text-muted-foreground",

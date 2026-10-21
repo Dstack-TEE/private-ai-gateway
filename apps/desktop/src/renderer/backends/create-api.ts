@@ -23,6 +23,8 @@ export type UiPlatform = Pick<DesktopApi, "showEditMenu" | "getAppVersion" | "se
 export interface WebSession {
   /** Whether this browser has a live session; starts the event stream when it does. */
   check(): Promise<boolean>;
+  /** Whether this page confirmed a session that has not ended since; asks nothing, so it never fails. */
+  active(): boolean;
   /** Exchanges the web UI password for an `HttpOnly` session cookie. */
   signIn(password: string): Promise<void>;
   signOut(): Promise<void>;

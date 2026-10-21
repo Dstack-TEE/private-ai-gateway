@@ -11,6 +11,7 @@ import { UsagePage } from "./features/usage";
 import { distributionCapabilities, session, web } from "./lib/environment";
 import { cliRegistrationQuery, usageFilters, usagePageQuery } from "./lib/queries";
 import { queryClient } from "./lib/query-client";
+import { returnPath } from "./lib/return-path";
 import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 
 // Loaders start the queries their page reads without awaiting them (TanStack
@@ -18,16 +19,16 @@ import { USAGE_SEARCH_DEFAULTS, validateUsageSearch } from "./lib/usage-dates";
 // loading and failures itself.
 const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()({ notFoundComponent: PageNotFound });
 
-/** Only a same-origin path may be the page to return to after sign-in. */
-function returnPath(value: unknown): string | undefined {
-  return typeof value === "string" && value.startsWith("/") && !value.startsWith("//") ? value : undefined;
-}
-
 // The web UI signs in first; the desktop window has no session.
 const signInRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sign-in",
   validateSearch: (search: Record<string, unknown>): { redirect?: string } => ({ redirect: returnPath(search.redirect) }),
+  // A page that is signed in, such as one that went back to this form, continues to the page instead.
+  // Without one it asks nothing: the server would answer 401.
+  beforeLoad: ({ search }) => {
+    if (session?.active()) throw redirect({ href: search.redirect ?? "/", replace: true });
+  },
   component: SignInPage,
   errorComponent: WindowError,
 });
