@@ -437,7 +437,7 @@ impl Client {
     /// Stops the running backend, of this build or another, and waits for it
     /// to exit. With `expected`, only a backend of that installation.
     fn shutdown_owned(&self, expected: Option<&Path>, mode: ShutdownMode) -> Result<(), String> {
-        let process_id = block_on(async {
+        let process = block_on(async {
             let mut connection = match open().await {
                 Ok(connection) => connection,
                 Err(error) if absent(&error) => return legacy::shutdown(expected, mode).await,
@@ -449,6 +449,7 @@ impl Client {
                     return Err(OTHER_INSTALLATION.into());
                 }
             }
+            let process = crate::launch::observe_exit(before.process_id)?;
             self.expect_shutdown(Some(before.instance_id.clone()))?;
             let shutdown = Command::Shutdown {
                 instance_id: before.instance_id,
@@ -456,23 +457,20 @@ impl Client {
             };
             match connection.call(&shutdown).await {
                 // Busy: another client's shutdown of this instance is under way.
-                Ok(_) => Ok(before.process_id),
-                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => {
-                    Ok(before.process_id)
-                }
+                Ok(_) => Ok(process),
+                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => Ok(process),
                 Err(error) => {
                     self.expect_shutdown(None)?;
                     Err(error.to_string())
                 }
             }
         })??;
-        let stopped =
-            crate::launch::wait_for_exit(process_id, BACKEND_EXIT_TIMEOUT).and_then(|()| {
-                match block_on(open())? {
-                    Err(error) if absent(&error) => Ok(()),
-                    Err(error) => Err(connection_error(error)),
-                    Ok(_) => Err("Another backend started during shutdown".into()),
-                }
+        let stopped = process
+            .wait(BACKEND_EXIT_TIMEOUT)
+            .and_then(|()| match block_on(open())? {
+                Err(error) if absent(&error) => Ok(()),
+                Err(error) => Err(connection_error(error)),
+                Ok(_) => Err("Another backend started during shutdown".into()),
             });
         if stopped.is_err() {
             self.expect_shutdown(None)?;
@@ -733,6 +731,13 @@ fn absent(error: &io::Error) -> bool {
 }
 
 fn connection_error(error: io::Error) -> String {
+    #[cfg(unix)]
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<transport::RuntimeDirectoryOwnerError>())
+    {
+        return error.to_string();
+    }
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
             "Backend is not running. Run pap service start.".into()

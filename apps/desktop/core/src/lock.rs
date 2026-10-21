@@ -10,27 +10,39 @@
 use std::{
     fs, io,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::private_fs::create_private_dir;
+use crate::private_fs::{create_or_repair_private_dir, create_private_dir};
 
 /// The wait for a just-released instance lock, needed on Windows.
 pub const INSTANCE_RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 fn open(dir: &Path, name: &str) -> io::Result<fs::File> {
     create_private_dir(dir)?;
-    fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir.join(name))
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    // A planted link, even a dangling one, must not create or lock a file elsewhere.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    options.open(dir.join(name))
 }
 
 /// The primary-instance lock, held for the rest of the process lifetime.
+#[derive(Debug)]
 pub struct InstanceLock {
-    _file: fs::File,
+    _file: Arc<fs::File>,
+}
+
+#[cfg(unix)]
+impl InstanceLock {
+    /// Keep ownership for the listener's lifetime, including socket recovery.
+    pub(crate) fn retain(&self) -> Self {
+        Self {
+            _file: self._file.clone(),
+        }
+    }
 }
 
 /// The startup gate, a reader-writer lock (`flock(2)` `LOCK_SH`/`LOCK_EX`,
@@ -66,8 +78,11 @@ pub fn startup(data_dir: &Path) -> io::Result<Option<StartupLock>> {
 /// Try to become the primary instance; `None` when another process holds it.
 /// Closing the owned file releases the lock, including on initialization failure.
 pub fn instance(data_dir: &Path) -> io::Result<Option<InstanceLock>> {
+    create_or_repair_private_dir(data_dir)?;
     let file = open(data_dir, "instance.lock")?;
-    Ok(taken(file.try_lock())?.then_some(InstanceLock { _file: file }))
+    Ok(taken(file.try_lock())?.then(|| InstanceLock {
+        _file: Arc::new(file),
+    }))
 }
 
 /// [`instance`], waiting up to `wait` for a holder to release it: Windows may
@@ -108,6 +123,37 @@ pub fn with_apply_lock<T, E: From<ApplyLockError>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_the_backend_instance_repairs_the_private_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        drop(startup_shared(temp.path()).unwrap().unwrap());
+        drop(eventually(|| startup(temp.path()).unwrap()));
+        with_apply_lock(temp.path(), || Ok::<_, String>(())).unwrap();
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let _owner = instance(temp.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lock_file_is_refused_without_creating_its_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, temp.path().join("instance.lock")).unwrap();
+        assert!(instance(temp.path()).is_err());
+        assert!(!target.exists());
+    }
 
     /// Waits for `acquire` to succeed. Files are opened `O_CLOEXEC`, but a
     /// child another test is spawning shares their locks between its fork and

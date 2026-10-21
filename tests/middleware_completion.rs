@@ -206,6 +206,15 @@ impl UpstreamBackend for TeeAwareUpstream {
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        if req
+            .route_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("invalid-"))
+        {
+            return Err(UpstreamError::InvalidRequest(
+                "unsupported field".to_string(),
+            ));
+        }
         self.forward_prepared(req).await
     }
     // Streaming resolves through `forward_stream_prepared`, not
@@ -226,6 +235,15 @@ impl UpstreamBackend for TeeAwareUpstream {
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if req
+            .route_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("invalid-"))
+        {
+            return Err(UpstreamError::InvalidRequest(
+                "unsupported field".to_string(),
+            ));
+        }
         self.forward_stream_prepared(req).await
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -2615,6 +2633,55 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         forwarded.lock().unwrap().is_empty(),
         "the prompt must not reach a route before its current session matches"
     );
+}
+
+#[tokio::test]
+async fn a_request_the_route_cannot_carry_is_a_400_and_no_provider_failure() {
+    // The caller's own fault: answered 400 when no candidate can carry it,
+    // served by a later candidate that can, and never reported against the
+    // route that refused it.
+    for stream in [false, true] {
+        for (candidates, expected) in [
+            (vec!["invalid-a:gpt-test"], 400),
+            (vec!["invalid-a:gpt-test", "plain:gpt-test"], 200),
+        ] {
+            let candidates: Vec<Value> = candidates
+                .iter()
+                .map(|id| json!({ "routeId": id, "format": "openai" }))
+                .collect();
+            let (control_url, posts) =
+                spawn_control_capturing(200, json!({ "allow": true, "candidates": candidates }))
+                    .await;
+            let (service, forwarded) = build_tee_aware_service();
+            let mut input = chat_input();
+            input.stream = stream;
+            let (status, _, body) = response_parts(
+                middleware(control_url)
+                    .handle_completion(&service, input)
+                    .await,
+            )
+            .await;
+            assert_eq!(status, expected, "stream={stream}");
+            if expected == 200 {
+                wait_for_post(&posts, |r| r["selectedRouteId"] == json!("plain:gpt-test")).await;
+            } else {
+                assert_eq!(body["error"]["type"], json!("invalid_request_error"));
+                assert!(forwarded.lock().unwrap().is_empty());
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let posts = posts.lock().unwrap();
+            // A client 4xx is not recorded at all; a served request reports
+            // only the route that served it.
+            assert_eq!(
+                posts.len(),
+                usize::from(expected == 200),
+                "stream={stream}: {posts:?}"
+            );
+            assert!(posts
+                .iter()
+                .all(|r| r["selectedRouteId"] != json!("invalid-a:gpt-test")));
+        }
+    }
 }
 
 #[tokio::test]

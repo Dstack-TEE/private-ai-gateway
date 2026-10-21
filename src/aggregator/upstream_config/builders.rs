@@ -12,13 +12,13 @@ use crate::aci::digest;
 use crate::aci::upstream::{
     ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
-    UpstreamBackend,
+    UpstreamBackend, ZeroGProviderBackend,
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ArmetAiProviderVerifier,
     ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
     PreverifiedUpstreamVerifier, PrivatemodeProviderVerifier, RoutingUpstreamVerifier,
-    SecretAiProviderVerifier, TinfoilProviderVerifier,
+    SecretAiProviderVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -84,7 +84,8 @@ pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::SecretAi
         | UpstreamProvider::Privatemode
         | UpstreamProvider::PhalaDirect
-        | UpstreamProvider::ArmetAi => true,
+        | UpstreamProvider::ArmetAi
+        | UpstreamProvider::ZeroGPrivateComputer => true,
     }
 }
 
@@ -146,6 +147,16 @@ fn build_provider_backend(
             .with_name(cfg.name.clone());
             Ok(Arc::new(backend))
         }
+        UpstreamProvider::ZeroGPrivateComputer => Ok(Arc::new(
+            ZeroGProviderBackend::new_with_timeouts(
+                cfg.base_url.clone(),
+                cfg.bearer_token.clone().unwrap_or_default(),
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone()),
+        )),
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
@@ -304,6 +315,20 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
+            // Validation guarantees the token, RPC, contract and subjects are present.
+            UpstreamProvider::ZeroGPrivateComputer => Arc::new(
+                ZeroGProviderVerifier::new(
+                    cfg.base_url.clone(),
+                    cfg.bearer_token.clone().unwrap_or_default(),
+                    cfg.zg_chain_rpc_url.clone().unwrap_or_default(),
+                    cfg.zg_serving_contract.clone().unwrap_or_default(),
+                    cfg.pccs_url.clone().or_else(|| options.pccs_url.clone()),
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default()),
+            ),
             UpstreamProvider::ArmetAi => {
                 let mut verifier =
                     ArmetAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)

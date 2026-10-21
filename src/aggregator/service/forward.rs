@@ -15,7 +15,7 @@ use crate::aggregator::session::{
     SESSION_API_VERSION,
 };
 
-use super::claims::{chutes_instance_id, per_instance_session_claims, session_claims_for_event};
+use super::claims::{instance_id, per_instance_session_claims, session_claims_for_event};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
@@ -484,6 +484,8 @@ impl AciService {
         verification_required: bool,
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<UpstreamVerifiedEvent, ServiceError> {
+        let verification_required =
+            verification_required || self.upstream.requires_verified_binding(prepared);
         let mut upstream_verification_event = match upstream_verification_event {
             Some(event) => Some(event),
             None => match &self.upstream_verifier {
@@ -497,7 +499,8 @@ impl AciService {
         };
         if let Some(event) = upstream_verification_event.as_mut() {
             // `required` is the effective policy for this request — a TEE-only
-            // serving endpoint or the client's §5.3 constraint. The verifier
+            // serving endpoint, the client's §5.3 constraint, or a route that
+            // cannot be served unverified. The verifier
             // may report the upstream result, but the service owns the
             // client-facing decision recorded in the receipt (§7.5).
             event.required = verification_required;
@@ -686,15 +689,15 @@ impl AciService {
         let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
 
         // One content-addressed session per channel binding: a single-TEE
-        // provider has one binding (its channel); Chutes has one per instance, so
-        // each instance becomes its own session. This relies on every
+        // provider has one binding (its channel); Chutes and 0G have one per
+        // instance, so each instance becomes its own session. This relies on every
         // non-instance provider verifying a single channel with exactly one
         // binding; a channel that emitted several bindings would be split into
         // separate sessions here, which would be wrong for one logical channel.
         let identity = Self::identity_from_provider_claims(event.provider_claims.as_ref());
         let mut sealed = Vec::with_capacity(event.channel_bindings.len());
         for binding in &event.channel_bindings {
-            let instance = chutes_instance_id(event, binding);
+            let instance = instance_id(event, binding);
             let claims = match instance {
                 Some(instance_id) => per_instance_session_claims(event, instance_id),
                 None => session_claims_for_event(event),

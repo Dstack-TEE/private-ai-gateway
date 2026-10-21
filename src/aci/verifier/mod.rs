@@ -44,6 +44,7 @@ mod report;
 mod simple;
 #[cfg(test)]
 mod tests;
+mod zero_g;
 
 pub use aci_service::{
     dcap_report_data, AciServiceUpstreamVerifier, AciServiceVerifierConfigError,
@@ -66,6 +67,7 @@ pub use report::{
     validate_aci_report_binding, AciReportValidationError, ReportBinding, ValidatedAciReport,
 };
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
+pub use zero_g::ZeroGProviderVerifier;
 
 /// A verified event cached by a provider verifier, re-labelled per request.
 #[derive(Clone, Debug)]

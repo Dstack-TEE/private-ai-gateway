@@ -86,6 +86,10 @@ impl UpstreamBackend for DynamicUpstreamBackend {
         self.backend().prepare(req)
     }
 
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        self.backend().requires_verified_binding(req)
+    }
+
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.backend().forward(req).await
     }
