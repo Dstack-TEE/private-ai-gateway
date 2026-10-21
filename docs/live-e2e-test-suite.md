@@ -135,9 +135,11 @@ cargo test --test 0g_private_computer_live -- --ignored --nocapture
 It verifies the private-tier candidates for `glm-5.3`, or for the model in
 `PRIVATE_AI_GATEWAY_0G_MODEL`, given as the provider's on-chain model id such as
 `0GM-1.0-35B-A3B` (route preview, on-chain
-record, DCAP quote, boot chain, signer), then sends one buffered and one
-streamed completion and requires each to open and its provider signature to
-verify; the stream must end in `[DONE]`. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`
+record, DCAP quote, boot chain, signer), then sends a buffered completion, a
+streamed completion, and a buffered JSON-mode completion with `reasoning_effort`
+(both sealed). Each must open and its provider signature must verify; the
+stream must end in `[DONE]`, and the JSON-mode content must parse as a JSON
+object. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`
 overrides the default chain RPC `https://evmrpc.0g.ai`. The test skips when the
 key file variable is unset, missing, or empty. The key is held only in memory
 and never printed. It sends live inference, so it is an operator check and does

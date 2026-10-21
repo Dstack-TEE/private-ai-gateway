@@ -366,6 +366,11 @@ fn verified_event_stream(
                     }
                     let frame = serde_json::from_slice(&event).map_err(rejected)?;
                     let opened = opener.open_frame(frame)?;
+                    // Opening drops the unbound fields; a frame left without
+                    // a value carries nothing for the caller.
+                    if opened.values().all(is_empty) {
+                        continue;
+                    }
                     let mut out = b"data: ".to_vec();
                     out.extend(serde_json::to_vec(&opened).map_err(rejected)?);
                     out.extend_from_slice(b"\n\n");
@@ -379,6 +384,15 @@ fn verified_event_stream(
         check.verify(&opener.signed_text(true)?).await?;
         yield Bytes::from_static(b"data: [DONE]\n\n");
     })
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

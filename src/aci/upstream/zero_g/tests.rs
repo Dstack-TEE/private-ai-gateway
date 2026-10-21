@@ -23,6 +23,8 @@ use super::*;
 
 const MODEL: &str = "glm-5.3";
 const ADDRESS: &str = "0x7dcfe6aea70350c2090041524c9b4a9262dce87d";
+/// A field the broker declares unbound and the mock router injects.
+const ROUTER_NOTE: &str = "router_note";
 const INTEROP: &str = include_str!("../../../../tests/fixtures/0g-private-computer/interop.json");
 
 type Secret = <Kem as hpke::Kem>::PrivateKey;
@@ -118,8 +120,7 @@ impl ResponseSealer {
         sealed_fields: Value,
         is_final: bool,
     ) -> Value {
-        let mut meta =
-            json!({"sealed_fields": sealed_fields, "unbound_fields": ["model"], "final": is_final});
+        let mut meta = json!({"sealed_fields": sealed_fields, "unbound_fields": ["model", ROUTER_NOTE], "final": is_final});
         if let Some(enc) = self.enc.take() {
             meta["v"] = 1.into();
             meta["enc"] = enc.into();
@@ -165,7 +166,11 @@ fn fixture_opener(f: &Value) -> ResponseOpener {
         &mut request_hash,
     )
     .unwrap();
-    ResponseOpener::new(secret, request_hash)
+    ResponseOpener::new(
+        secret,
+        request_hash,
+        Some(f["request_plain"]["model"].clone()),
+    )
 }
 
 fn fixture_signature(value: &Value) -> ChatSignature {
@@ -256,7 +261,7 @@ fn opener_refuses_duplicate_sealed_field_declarations() {
         json!(["choices", "choices"]),
         true,
     );
-    let mut opener = ResponseOpener::new(secret, [0; 32]);
+    let mut opener = ResponseOpener::new(secret, [0; 32], None);
     assert!(opener.open_frame(object(&frame)).is_err());
 }
 
@@ -391,6 +396,9 @@ fn completion(stream: bool) -> Vec<Map<String, Value>> {
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "o"}}]},
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}]},
             {"id": "c1", "model": MODEL, "usage": {"total_tokens": 5}, "choices": []},
+            // As live, the last frame carries only an empty `choices` and
+            // the router's unbound fields.
+            {"choices": []},
         ])
     } else {
         json!([{"id": "c1", "model": MODEL, "usage": {"total_tokens": 4},
@@ -422,6 +430,13 @@ async fn chat(
         .enumerate()
         .map(|(i, f)| sealer.seal(f.clone(), i == last))
         .collect();
+    // In transit the router sets the frames' unbound fields as it likes.
+    for frame in &mut frames {
+        frame[ROUTER_NOTE] = json!({"billing": {"total_cost": "42"}, "provider": ADDRESS});
+        if frame.get("model").is_some() {
+            frame["model"] = "router-alias".into();
+        }
+    }
     *broker.signed_text.lock().unwrap() = sealer.signed_text(stream);
     match broker.mode {
         Mode::Unsealed => frames = plain.into_iter().map(Value::Object).collect(),
@@ -463,6 +478,12 @@ async fn buffered_request_is_sealed_pinned_and_verified() {
     let response = fixture.buffered().await.unwrap();
     let body: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "ok");
+    // Unbound fields do not reach the caller; bound ones and usage do, and
+    // `model` is the one the request bound, not the router's.
+    assert!(body.get(ROUTER_NOTE).is_none());
+    assert_eq!(body["id"], "c1");
+    assert_eq!(body["usage"]["total_tokens"], 4);
+    assert_eq!(body["model"], MODEL);
     assert_eq!(response.served_instance_id.as_deref(), Some(ADDRESS));
 
     let requests = fixture.broker.requests.lock().unwrap();
@@ -502,6 +523,12 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
         .collect();
     assert_eq!(events.len(), 4);
     assert!(events[0].contains(r#""content":"o""#) && !events[0].contains(E2EE));
+    assert!(events[..3]
+        .iter()
+        .all(|e| !e.contains(ROUTER_NOTE) && !e.contains("router-alias") && e.contains(MODEL)));
+    // The last frame held only unbound fields and an empty `choices`, so it
+    // is not emitted.
+    assert!(events[2].contains(r#""usage":{"total_tokens":5}"#));
     assert_eq!(events[3], "data: [DONE]\n\n");
     // Usage is requested before sealing, as 0G's client does, so it stays bound.
     let sent = fixture.broker.requests.lock().unwrap()[0].1.clone();
@@ -509,7 +536,7 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
 
     for (mode, delivered) in [
         (Mode::WrongSigner, 3),
-        (Mode::Truncated, 2),
+        (Mode::Truncated, 3),
         (Mode::Reordered, 0),
         (Mode::Tampered, 1),
     ] {
@@ -535,12 +562,62 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
 
-    let request = fixture.request(json!({"model": MODEL, "messages": [], "response_format": {}}));
-    let err = fixture
+    for (extra, message) in [
+        (json!({"user": "u-1"}), r#"request field "user""#),
+        (
+            json!({"thinking": {"type": "disabled"}}),
+            r#"request field "thinking""#,
+        ),
+        // The middleware's default dialect: the route lacks a reasoning_format.
+        (json!({"reasoning": {"effort": "high"}}), "reasoning_format"),
+    ] {
+        let mut body = json!({"model": MODEL, "messages": []});
+        body.as_object_mut().unwrap().extend(object(&extra));
+        let err = fixture
+            .backend
+            .forward_verified_prepared(fixture.request(body), &fixture.event)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, UpstreamError::InvalidRequest(m) if m.contains(message)),
+            "{extra}: {err}"
+        );
+    }
+    assert!(fixture.broker.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn output_schema_and_reasoning_controls_are_sealed() {
+    let fixture = Fixture::new(Mode::Ok).await;
+    let schema = json!({"type": "json_schema", "json_schema": {"name": "secret_schema"}});
+    // As the middleware writes them for a `reasoning_effort` route, plus a
+    // direct caller's chat template switch.
+    let request = fixture.request(json!({
+        "model": MODEL,
+        "stream": false,
+        "messages": [{"role": "user", "content": "secret prompt"}],
+        "response_format": schema,
+        "reasoning_effort": "high",
+        "chat_template_kwargs": {"enable_thinking": true},
+    }));
+    fixture
         .backend
         .forward_verified_prepared(request, &fixture.event)
         .await
-        .unwrap_err();
-    assert!(matches!(err, UpstreamError::InvalidRequest(_)));
-    assert!(fixture.broker.requests.lock().unwrap().is_empty());
+        .unwrap();
+    let sent = object(&fixture.broker.requests.lock().unwrap()[0].1);
+    assert!(!Value::Object(sent.clone())
+        .to_string()
+        .contains("secret_schema"));
+    for field in [
+        "response_format",
+        "reasoning_effort",
+        "chat_template_kwargs",
+    ] {
+        assert!(!sent.contains_key(field), "{field} is cleartext");
+    }
+    let (opened, _, _) = open_request(&fixture.broker.secret, &sent).unwrap();
+    assert_eq!(opened["response_format"], schema);
+    assert_eq!(opened["reasoning_effort"], "high");
+    assert_eq!(opened["chat_template_kwargs"]["enable_thinking"], true);
 }
