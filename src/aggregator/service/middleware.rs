@@ -56,8 +56,8 @@ fn abandoned_status(err: &UpstreamError) -> Option<u16> {
 }
 
 fn is_retryable_provider_status(status: u16) -> bool {
-    // 520-527 are Cloudflare's origin errors: the provider's node behind the
-    // proxy is down or unreachable, which says nothing about a sibling.
+    // 520-527: a reverse proxy in front of the provider could not get an
+    // answer from the node behind it, which says nothing about a sibling.
     matches!(
         status,
         401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504 | 520..=527
