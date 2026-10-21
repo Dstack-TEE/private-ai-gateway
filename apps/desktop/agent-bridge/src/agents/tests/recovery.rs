@@ -156,7 +156,7 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     let path = sandbox.home.join(".claude").join("settings.json");
     write(
         &path,
-        r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret"}}"#,
+        r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"}}"#,
     );
     let preview = sandbox
         .projector
@@ -178,6 +178,11 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     assert!(status.connected);
     let doc = doc(&sandbox, Agent::ClaudeCode);
     assert_eq!(doc.get_str(&["env", "ANTHROPIC_AUTH_TOKEN"]), None);
+    assert_eq!(
+        doc.get_str(&["env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"])
+            .as_deref(),
+        Some("1")
+    );
     assert_eq!(
         doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
         Some(ENDPOINT)
@@ -226,6 +231,10 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     assert!(text.contains("\"ANTHROPIC_AUTH_TOKEN\": \"sk-old-secret\""));
     assert!(!text.contains("apiKeyHelper"));
     let restored: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        restored["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        "0"
+    );
     assert!(restored.get("modelPicker").is_none());
     assert!(sandbox.secrets.is_empty(), "restore entry released");
     assert!(sandbox

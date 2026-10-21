@@ -96,6 +96,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             let mut fields = vec![
                 set(&["env", "ANTHROPIC_BASE_URL"], inputs.endpoint),
                 set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+                set(&["env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1"),
                 generated_catalog(
                     &["modelPicker"],
                     serde_json::json!({

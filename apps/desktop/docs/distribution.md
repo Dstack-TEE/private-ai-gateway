@@ -488,6 +488,34 @@ The private management socket uses the short `pap-ipc/api.sock` path at the
 root of the App Container so the Unix socket length limit is respected; it never
 uses `/private/tmp`.
 
+### Claude Code
+
+The connection sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the same
+settings-file `env` block as the gateway URL. This is Anthropic's
+[documented gateway setting](https://code.claude.com/docs/en/llm-gateway-connect#turn-off-traffic-outside-the-gateway-path):
+it suppresses nonessential background requests, including the fast-mode
+availability check, and disables auto-updates. Update Claude Code separately.
+The previous value is restored on disconnect, or the field is removed if it
+was absent. Gateway model discovery still refreshes in 2.1.257 and later;
+earlier versions keep the cached list with this setting.
+
+Use **Claude Code 2.1.299 or later**. Its
+[changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21299)
+fixes feature-flag, startup, fast-mode, profile, feedback and managed-settings
+requests carrying a gateway API key to Anthropic. PAP's `apiKeyHelper` token
+was affected: the official 2.1.283 binary resolves the helper's cached output
+through its shared API-key reader, which supplies `x-api-key` to the feature-flag
+client at the fixed `https://api.anthropic.com/` host. That code could send the
+local proxy token outside the gateway. This is a source finding, not evidence
+that any particular installation transmitted it. The exposed value would be a
+random, revocable local agent token; the upstream provider key stays in PAP's
+backend and is never supplied to Claude Code.
+
+The setting reduces background traffic; it does not replace the upstream fix.
+The WebFetch domain-safety preflight still calls Anthropic, as the gateway docs
+describe. Detection checks the configuration folder, not the installed version,
+so older clients are not blocked; the connect note recommends 2.1.299+.
+
 ### DeepSeek Harness
 
 DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is verified at 0.2.1-rc.2 by

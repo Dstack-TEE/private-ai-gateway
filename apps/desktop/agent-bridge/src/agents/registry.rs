@@ -100,10 +100,10 @@ impl AgentIntegration for Agent {
             }
             Agent::ClaudeCode => {
                 if cfg!(windows) {
-                    return "Claude Code 2.1.242+ uses a verified model picker and apiKeyHelper with a local token. Responses stream immediately; receipt audits run after delivery. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
+                    return "Claude Code uses a verified model picker and apiKeyHelper with a local token. Use 2.1.299+ for upstream fixes that keep gateway tokens out of Anthropic background requests. Nonessential traffic and auto-updates are disabled while connected. Responses stream immediately; receipt audits run after delivery. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
                 }
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
-                 and use a Messages-compatible model picker generated from the verified service (Claude Code 2.1.242+). Restart Claude Code after applying. Responses stream immediately; receipt audits run after delivery. Credentials set in this settings file are taken over and restored on \
+                 and use a Messages-compatible model picker generated from the verified service. Use Claude Code 2.1.299+ for upstream fixes that keep gateway tokens out of Anthropic background requests. Nonessential traffic and auto-updates are disabled while connected. Restart Claude Code after applying. Responses stream immediately; receipt audits run after delivery. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway. Anthropic does not officially support non-Claude models."
