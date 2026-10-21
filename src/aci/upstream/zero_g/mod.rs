@@ -32,11 +32,6 @@ pub(crate) const TRUST_MODE_HEADER: &str = "x-0g-provider-trust-mode";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const SIGNATURE_FETCH_TIMEOUT_SECONDS: u64 = 15;
 const MAX_SSE_BUFFER_BYTES: usize = 4 << 20;
-/// The router's unbound trace (billing amounts, provider address). Nothing may
-/// trust it (§8.2) and it is 0G's, not the caller's, so it is dropped from
-/// each frame after the frame opened; the §8 binding covers the frame as
-/// received.
-const ROUTER_TRACE: &str = "x_0g_trace";
 
 /// A verified provider, recorded by the verifier under
 /// `provider_claims.instances[<address>]`.
@@ -183,11 +178,12 @@ impl ZeroGProviderBackend {
 }
 
 /// OpenRouter's `reasoning` object, which the middleware's default dialect and
-/// direct callers send, becomes the `reasoning_effort` 0G providers honour,
-/// encoded as the middleware's `reasoning_effort` dialect does it, except that
-/// a bare `enabled: true` sends no effort: the provider reasons by default,
-/// while its `medium` barely reasons. The provider cannot drop reasoning from
-/// its response, so excluding it is refused.
+/// direct callers send, becomes the `reasoning_effort` 0G providers honour:
+/// a level is sent as itself and off as `none`, as the middleware's
+/// `reasoning_effort` dialect encodes them, and on without a level as the
+/// provider's default, which is no `reasoning_effort` (the provider reasons by
+/// default; its `medium` barely does). A token budget and excluding reasoning
+/// from the response have no 0G equivalent and are refused.
 fn translate_reasoning(request: Map<String, Value>) -> Result<Map<String, Value>, UpstreamError> {
     if !request.contains_key("reasoning") && !request.contains_key("include_reasoning") {
         return Ok(request);
@@ -203,13 +199,17 @@ fn translate_reasoning(request: Map<String, Value>) -> Result<Map<String, Value>
     let Value::Object(mut request) = params else {
         return Err(invalid("request body must be a JSON object"));
     };
-    let provider_default = ReasoningConfig {
-        enabled: Some(true),
-        ..Default::default()
-    };
-    if let Some(config) = config.filter(|config| *config != provider_default) {
-        let effort = reasoning::effort_parameter(&config).map_err(invalid)?;
-        request.insert("reasoning_effort".to_string(), effort.as_str().into());
+    match config {
+        None
+        | Some(ReasoningConfig {
+            effort: None,
+            max_tokens: None,
+            enabled: Some(true),
+        }) => {}
+        Some(config) => {
+            let effort = reasoning::effort_parameter(&config).map_err(invalid)?;
+            request.insert("reasoning_effort".to_string(), effort.as_str().into());
+        }
     }
     Ok(request)
 }
@@ -324,9 +324,8 @@ impl UpstreamBackend for ZeroGProviderBackend {
     ) -> Result<UpstreamResponse, UpstreamError> {
         let (response, mut opener, check) = self.send(req, event).await?;
         let frame = response.json().await.map_err(rejected)?;
-        let mut body = opener.open_frame(frame)?;
+        let body = opener.open_frame(frame)?;
         check.verify(&opener.signed_text(false)?).await?;
-        body.remove(ROUTER_TRACE);
         Ok(UpstreamResponse {
             status_code: 200,
             body: serde_json::to_vec(&body).map_err(rejected)?,
@@ -406,13 +405,10 @@ fn verified_event_stream(
                         break 'read;
                     }
                     let frame = serde_json::from_slice(&event).map_err(rejected)?;
-                    let mut opened = opener.open_frame(frame)?;
-                    // A frame that carried only the trace leaves the caller
-                    // nothing but an empty `choices`.
-                    if opened.remove(ROUTER_TRACE).is_some()
-                        && opened.len() == 1
-                        && opened["choices"].as_array().is_some_and(Vec::is_empty)
-                    {
+                    let opened = opener.open_frame(frame)?;
+                    // Opening drops the unbound fields; a frame left without
+                    // a value carries nothing for the caller.
+                    if opened.values().all(is_empty) {
                         continue;
                     }
                     let mut out = b"data: ".to_vec();
@@ -428,6 +424,15 @@ fn verified_event_stream(
         check.verify(&opener.signed_text(true)?).await?;
         yield Bytes::from_static(b"data: [DONE]\n\n");
     })
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

@@ -100,6 +100,7 @@ pub(crate) fn seal_chat_request(
         }
         options["include_usage"] = true.into();
     }
+    let model = request.get("model").cloned();
     let recipient = <Kem as hpke::Kem>::PublicKey::from_bytes(enc_pub)
         .map_err(|_| ProtocolError("invalid provider encryption key".into()))?;
     let mut rng = rand::rngs::OsRng;
@@ -133,7 +134,7 @@ pub(crate) fn seal_chat_request(
         .seal(&plaintext, &aad)
         .map_err(|e| ProtocolError(e.to_string()))?;
     envelope[E2EE]["ciphertext"] = URL_SAFE_NO_PAD.encode(&ciphertext).into();
-    let opener = ResponseOpener::new(response_secret, binding_hash(&aad, &ciphertext));
+    let opener = ResponseOpener::new(response_secret, binding_hash(&aad, &ciphertext), model);
     Ok((Value::Object(envelope), opener))
 }
 
@@ -153,24 +154,37 @@ pub(crate) struct ResponseOpener {
     secret: <Kem as hpke::Kem>::PrivateKey,
     context: Option<AeadCtxR<ChaCha20Poly1305, HkdfSha256, Kem>>,
     request_hash: [u8; 32],
+    /// The request's `model`, which this client binds (nothing is unbound).
+    model: Option<Value>,
     frame_hashes: Vec<[u8; 32]>,
     saw_final: bool,
 }
 
 impl ResponseOpener {
-    pub(super) fn new(secret: <Kem as hpke::Kem>::PrivateKey, request_hash: [u8; 32]) -> Self {
+    pub(super) fn new(
+        secret: <Kem as hpke::Kem>::PrivateKey,
+        request_hash: [u8; 32],
+        model: Option<Value>,
+    ) -> Self {
         Self {
             secret,
             context: None,
             request_hash,
+            model,
             frame_hashes: Vec::new(),
             saw_final: false,
         }
     }
 
-    /// Open the next frame into its cleartext fields merged with the decrypted
-    /// ones. Refuses unsealed, out-of-order, tampered or post-final frames and
-    /// the sealed/unbound sets the chat profile forbids (§12).
+    /// Open the next frame into its bound cleartext fields merged with the
+    /// decrypted ones. Refuses unsealed, out-of-order, tampered or post-final
+    /// frames and the sealed/unbound sets the chat profile forbids (§12).
+    ///
+    /// An unbound field is outside the AAD and the §8 binding, so an
+    /// intermediary can set it undetected (§5.2, §8.2: "a router-injected
+    /// `x_0g_trace` is unauthenticated by construction"); none is returned.
+    /// 0G unbinds `model` so the router can restore its alias (§5.2); its
+    /// place is taken by the model this request bound.
     pub fn open_frame(
         &mut self,
         mut frame: Map<String, Value>,
@@ -222,6 +236,13 @@ impl ResponseOpener {
             || sealed.keys().any(|key| frame.contains_key(key))
         {
             return fail("decrypted 0G response fields do not match sealed_fields");
+        }
+        for field in &unbound {
+            if frame.remove(field).is_some() && field == "model" {
+                if let Some(model) = &self.model {
+                    frame.insert(field.clone(), model.clone());
+                }
+            }
         }
         frame.extend(sealed);
         self.frame_hashes.push(binding_hash(&aad, &ciphertext));

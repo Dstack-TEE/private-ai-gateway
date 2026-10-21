@@ -23,6 +23,8 @@ use super::*;
 
 const MODEL: &str = "glm-5.3";
 const ADDRESS: &str = "0x7dcfe6aea70350c2090041524c9b4a9262dce87d";
+/// A field the broker declares unbound and the mock router injects.
+const ROUTER_NOTE: &str = "router_note";
 const INTEROP: &str = include_str!("../../../../tests/fixtures/0g-private-computer/interop.json");
 
 type Secret = <Kem as hpke::Kem>::PrivateKey;
@@ -118,7 +120,7 @@ impl ResponseSealer {
         sealed_fields: Value,
         is_final: bool,
     ) -> Value {
-        let mut meta = json!({"sealed_fields": sealed_fields, "unbound_fields": ["model", ROUTER_TRACE], "final": is_final});
+        let mut meta = json!({"sealed_fields": sealed_fields, "unbound_fields": ["model", ROUTER_NOTE], "final": is_final});
         if let Some(enc) = self.enc.take() {
             meta["v"] = 1.into();
             meta["enc"] = enc.into();
@@ -164,7 +166,11 @@ fn fixture_opener(f: &Value) -> ResponseOpener {
         &mut request_hash,
     )
     .unwrap();
-    ResponseOpener::new(secret, request_hash)
+    ResponseOpener::new(
+        secret,
+        request_hash,
+        Some(f["request_plain"]["model"].clone()),
+    )
 }
 
 fn fixture_signature(value: &Value) -> ChatSignature {
@@ -255,7 +261,7 @@ fn opener_refuses_duplicate_sealed_field_declarations() {
         json!(["choices", "choices"]),
         true,
     );
-    let mut opener = ResponseOpener::new(secret, [0; 32]);
+    let mut opener = ResponseOpener::new(secret, [0; 32], None);
     assert!(opener.open_frame(object(&frame)).is_err());
 }
 
@@ -390,7 +396,8 @@ fn completion(stream: bool) -> Vec<Map<String, Value>> {
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "o"}}]},
             {"id": "c1", "model": MODEL, "choices": [{"index": 0, "delta": {"content": "k"}, "finish_reason": "stop"}]},
             {"id": "c1", "model": MODEL, "usage": {"total_tokens": 5}, "choices": []},
-            // As live, the last frame carries nothing but the router trace.
+            // As live, the last frame carries only an empty `choices` and
+            // the router's unbound fields.
             {"choices": []},
         ])
     } else {
@@ -423,9 +430,12 @@ async fn chat(
         .enumerate()
         .map(|(i, f)| sealer.seal(f.clone(), i == last))
         .collect();
-    // The router adds its unbound trace to sealed frames in transit.
+    // In transit the router sets the frames' unbound fields as it likes.
     for frame in &mut frames {
-        frame[ROUTER_TRACE] = json!({"billing": {"total_cost": "42"}, "provider": ADDRESS});
+        frame[ROUTER_NOTE] = json!({"billing": {"total_cost": "42"}, "provider": ADDRESS});
+        if frame.get("model").is_some() {
+            frame["model"] = "router-alias".into();
+        }
     }
     *broker.signed_text.lock().unwrap() = sealer.signed_text(stream);
     match broker.mode {
@@ -468,10 +478,12 @@ async fn buffered_request_is_sealed_pinned_and_verified() {
     let response = fixture.buffered().await.unwrap();
     let body: Value = serde_json::from_slice(&response.body).unwrap();
     assert_eq!(body["choices"][0]["message"]["content"], "ok");
-    assert!(
-        body.get(ROUTER_TRACE).is_none(),
-        "the router trace is stripped"
-    );
+    // Unbound fields do not reach the caller; bound ones and usage do, and
+    // `model` is the one the request bound, not the router's.
+    assert!(body.get(ROUTER_NOTE).is_none());
+    assert_eq!(body["id"], "c1");
+    assert_eq!(body["usage"]["total_tokens"], 4);
+    assert_eq!(body["model"], MODEL);
     assert_eq!(response.served_instance_id.as_deref(), Some(ADDRESS));
 
     let requests = fixture.broker.requests.lock().unwrap();
@@ -511,7 +523,12 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
         .collect();
     assert_eq!(events.len(), 4);
     assert!(events[0].contains(r#""content":"o""#) && !events[0].contains(E2EE));
-    assert!(events.iter().all(|event| !event.contains(ROUTER_TRACE)));
+    assert!(events[..3]
+        .iter()
+        .all(|e| !e.contains(ROUTER_NOTE) && !e.contains("router-alias") && e.contains(MODEL)));
+    // The last frame held only unbound fields and an empty `choices`, so it
+    // is not emitted.
+    assert!(events[2].contains(r#""usage":{"total_tokens":5}"#));
     assert_eq!(events[3], "data: [DONE]\n\n");
     // Usage is requested before sealing, as 0G's client does, so it stays bound.
     let sent = fixture.broker.requests.lock().unwrap()[0].1.clone();

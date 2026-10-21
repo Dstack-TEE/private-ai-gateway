@@ -96,6 +96,10 @@ async fn completion_is_sealed_verified_and_signed() {
         .expect("buffered completion opens and its signature verifies");
     let body: Value = serde_json::from_slice(&buffered.body).unwrap();
     assert!(body["choices"].as_array().is_some_and(|c| !c.is_empty()));
+    // The router's unbound `x_0g_trace` never reaches the caller, and `model`
+    // is the one the request bound.
+    assert!(body.get("x_0g_trace").is_none());
+    assert_eq!(body["model"], model());
 
     // `response_format` and the translated `reasoning` travel sealed.
     let json_mode = backend
@@ -130,4 +134,5 @@ async fn completion_is_sealed_verified_and_signed() {
         .await;
     assert!(events.len() > 1);
     assert_eq!(events.last().map(String::as_str), Some("data: [DONE]\n\n"));
+    assert!(events.iter().all(|event| !event.contains("x_0g_trace")));
 }
