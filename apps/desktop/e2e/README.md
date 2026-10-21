@@ -9,7 +9,7 @@ runs it nightly and before a stable release
 `run.sh` verifies the package against the release's `SHA256SUMS` and starts a
 fresh `ubuntu:24.04` container. There it installs the package, Node.js and
 each agent with the agent's official installer as an unprivileged user. It
-checks that every agent reports its pinned version, and runs each agent once
+checks that every agent reports its resolved version, and runs each agent once
 so that it creates the configuration folder Private AI Proxy detects. Once no
 process of that user is left running, `agents.test.mjs` (`node:test`) starts
 protection with a RedPill profile and checks, for each agent:
@@ -49,7 +49,7 @@ The output ends with one row per agent and the result of each phase.
 
 ## Run locally
 
-Requirements: Docker, `sha256sum`, and the GitHub CLI for release downloads.
+Requirements: Node.js 22+, Docker, `sha256sum`, and the GitHub CLI for release downloads.
 Nothing is built: the container is removed afterwards, and only the
 `ubuntu:24.04` image stays.
 
@@ -77,20 +77,35 @@ takes about 10 minutes and sends about a dozen tiny prompts.
 
 ## Versions
 
-`versions.env` pins Node.js and every agent, one line each, so a bump is a
-one-line change. `OPENCODE_VERSION` pins OpenCode 1 and `OPENCODE_V2_VERSION`
-OpenCode 2. `npm_config_before` freezes the npm dependencies the
-installers resolve; move it forward with any bump. Codex must stay on the
-baseline the app supports (`agent-bridge/resources/codex/manifest.json`).
-Hermes is pinned to a release tag and installed with that tag's own
-`scripts/install.sh`, since the current installer expects the current source
-tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
+`versions.env` defaults Node.js, Bun and every agent to `latest`, one line
+each. Before starting the container, `run.sh` resolves each channel to an exact
+release from its installer's official source: npm's `dist-tags.latest`, Claude
+Code's native release channel, OpenCode 2's update API, GitHub's latest release
+for Bun and Hermes, and nodejs.org's release index for Node's 24.x line.
+`OPENCODE_VERSION` selects OpenCode 1 and `OPENCODE_V2_VERSION` OpenCode 2.
+Lookups retry network errors, HTTP 429 and 5xx up to three times, waiting
+one, two and four seconds; an exhausted lookup fails the run before installation.
+The versions under test appear at the start and in the final summary, including
+when installation fails. Installers still have to report those exact versions.
+The Codex catalog baseline (`agent-bridge/resources/codex/manifest.json`) is
+reviewed and refreshed separately; the test deliberately exercises the latest
+Codex against it.
+
+To reproduce a run, set exact versions in `versions.env` or override them in
+the environment, which takes precedence, for example
+`CODEX_VERSION=0.163.0 apps/desktop/e2e/run.sh --tag desktop-v0.6.1`.
+Hermes uses its release tag (for example `HERMES_VERSION=v0.22.2`) and that
+tag's own `scripts/install.sh`, since the current installer expects the current
+source tree. Its Python dependencies come from the tag's hash-verified
+`uv.lock`. npm transitive dependencies intentionally follow the current
+releases; there is no publish-date cutoff.
 Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
 `OPENCODE_DISABLE_AUTOUPDATE`), and so is DeepSeek Harness telemetry
 (`DSH_TELEMETRY_DISABLED`). DeepSeek Harness is installed from npm without its
 install scripts; its one-shot command is `dsh headless`. For dsh the reply step
 also checks the composed configuration with `--dump-config`: `acp` and the
-default model point at the Local API, DeepSeek web search is disabled, and the
+default model point at the Local API, the headless credential store is enabled,
+DeepSeek web search is disabled, and the
 shipped `acp` row still has only `provider` and `model`, the fields the
 connection replaces. It also replays the connected provider through a
 `--patch` overlay against a local recorder. That must receive no

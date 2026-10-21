@@ -295,6 +295,7 @@ pub(super) fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue>
 /// Write the owned fields, remembering what each held before. A field that
 /// still holds what an earlier connection wrote keeps that connection's
 /// `previous`, so reconnecting never records our own value as the original.
+/// Existing values are recorded even when they already match the projection.
 /// Previous values of sensitive fields are returned as pending secrets and
 /// referenced by entry name; they never appear in changes or the record.
 /// Exact fields, including every field in a keyed list item, only add keys or
@@ -357,10 +358,7 @@ pub(super) fn project(
         }
         let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
-            None => match current
-                .clone()
-                .filter(|held| Some(held) != field.value.as_ref())
-            {
+            None => match current.clone() {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
                     edit.pending_secrets.push(PendingSecret {
@@ -844,6 +842,9 @@ pub(super) fn restore(
             },
             None => (None, None),
         };
+        if current == restored {
+            continue;
+        }
         match &restored {
             Some(value) => doc.set_value(&path, value),
             None => doc.remove(&path),

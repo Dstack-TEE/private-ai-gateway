@@ -379,6 +379,7 @@ async function verifyDsh() {
   const headless = dshTree("--profile", "headless", "--dump-config");
   assert.deepEqual(headless("agent-default-model").config, connected);
   assert.equal(headless("web-search-deepseek").disabled, true, "DeepSeek web search is still enabled");
+  assert.equal(headless("credentials").disabled, false, "dsh's headless credential store is disabled");
   const provider = headless("llm-pi-ai").config.providers["private-ai-proxy"];
 
   const bodies = [];

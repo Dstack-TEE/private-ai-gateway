@@ -133,7 +133,8 @@ token revocation, then fail-closed behavior and restoration on stop
 with OpenCode 2. It runs nightly on the newest `desktop-v*`
 release and on demand for a given tag. Its `desktop-e2e` environment holds the
 `PAP_E2E_API_KEY` secret and allows only `main`, so the test never runs on
-pull requests. Agent versions are pinned in `e2e/versions.env`.
+pull requests. Agent versions default to `latest` in `e2e/versions.env`;
+the harness resolves and reports exact releases before installing them.
 
 ### Release GitHub App
 
@@ -487,10 +488,39 @@ The private management socket uses the short `pap-ipc/api.sock` path at the
 root of the App Container so the Unix socket length limit is respected; it never
 uses `/private/tmp`.
 
+### Claude Code
+
+The connection sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the same
+settings-file `env` block as the gateway URL. This is Anthropic's
+[documented gateway setting](https://code.claude.com/docs/en/llm-gateway-connect#turn-off-traffic-outside-the-gateway-path):
+it suppresses nonessential background requests, including the fast-mode
+availability check, and disables auto-updates. Update Claude Code separately.
+The previous value is restored on disconnect, or the field is removed if it
+was absent. Gateway model discovery still refreshes in 2.1.257 and later;
+earlier versions keep the cached list with this setting.
+
+Use **Claude Code 2.1.299 or later**. Its
+[changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21299)
+fixes feature-flag, startup, fast-mode, profile, feedback and managed-settings
+requests carrying a gateway API key to Anthropic. PAP's `apiKeyHelper` token
+was affected: the official 2.1.283 binary resolves the helper's cached output
+through its shared API-key reader, which supplies `x-api-key` to the feature-flag
+client at the fixed `https://api.anthropic.com/` host. That code could send the
+local proxy token outside the gateway. This is a source finding, not evidence
+that any particular installation transmitted it. The exposed value would be a
+random, revocable local agent token; the upstream provider key stays in PAP's
+backend and is never supplied to Claude Code.
+
+The setting reduces background traffic; it does not replace the upstream fix.
+The WebFetch domain-safety preflight still calls Anthropic, as the gateway docs
+describe. Detection checks the configuration folder, not the installed version,
+so older clients are not blocked; the connect note recommends 2.1.299+.
+
 ### DeepSeek Harness
 
-DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is supported at 0.1.7-rc.2, the
-version the live test installs; 0.2.0-rc.1 has the same configuration contract.
+DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is verified at 0.2.1-rc.2 by
+the live test, which resolves the latest release on every run. The projection
+also retains the configuration contract used by 0.1.7-rc.2 and 0.2.0-rc.1.
 dsh composes each profile from its bundle layers, then
 `$DSH_HOME/profiles/<name>/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`
 (`~/.dsh` by default), then any `--patch` overlays. Each layer is a list of items
@@ -499,16 +529,20 @@ row's whole config. Every profile, the dsh desktop app's included, reads the hom
 layer, and dsh never writes it, so a connection edits only that file. Profiles
 created later are covered too.
 
-The connection adds four keyed items there:
+The connection adds five keyed items there:
 - a `private-ai-proxy` provider in `llm-pi-ai` (Chat Completions, `[TEE]` model
   names, and the compatibility switches the Local API needs);
 - the default model in `agent-default-model`;
 - the same provider and model in `acp`, the acp profile's row, which picks its
-  own model instead of the default (the pinned acp-app bundle ships its config
+  own model instead of the default (the tested acp-app bundle ships its config
   as just `provider` and `model`, and the live test fails if that changes);
 - `disabled: true` on `web-search-deepseek`. That row would otherwise send
   search queries to DeepSeek with the user's own key. Search providers the
-  user installs (Exa, Perplexity) keep using their own keys.
+  user installs (Exa, Perplexity) keep using their own keys;
+- `disabled: false` on `credentials`. The 0.2.1-rc.2 headless bundle disables
+  the managed credential store by default. Re-enabling that service is the
+  [documented override](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/bundle/headless#credentials)
+  for reading saved keys, including the proxy's token.
 
 A layer that disables the `acp` row, or that inserts a row of
 `@deepseek-ai/dsh-web-search-deepseek` or `@deepseek-ai/dsh-acp` under another
@@ -523,6 +557,10 @@ The provider reads its token through `apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`,
 which the connection stores in dsh's `.credentials.yaml`:
 - The store is owner-only, reloads live and is never exported to the processes
   dsh starts.
+- In 0.2.1-rc.2, saved keys take precedence over the launch environment, then
+  the project's and Home's `.env` files. Earlier releases put the launch
+  environment first, so connecting still refuses a token reference exported
+  in the backend's environment.
 - Writes hold dsh's own `<file>.lock` writer lock. A lock whose holder has
   exited is taken over by dsh's own `takeOverExitedLock` rule, with the same
   process probe Node uses on Unix and Windows; a live holder is waited for,
@@ -564,7 +602,8 @@ Not protected, and named in the connect note:
 - the `sdk` and `sdk-minimal` profiles, for developers embedding dsh, which
   choose their provider in code;
 - runs started with `--patch` overlays;
-- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell;
+- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell on older dsh
+  releases that resolve the launch environment before saved credentials;
 - a `DSH_HOME` exported in the user's shell. The app reads `DSH_HOME` only from
   its own environment, and the MAS build never does.
 
