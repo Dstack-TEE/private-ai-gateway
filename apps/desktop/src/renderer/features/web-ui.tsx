@@ -50,7 +50,7 @@ export function WebUiDialog({ onClose, ...control }: DialogControl): React.JSX.E
   const { copy, isCopied, status: copyStatus } = useCopy(report);
   const copyPassword = () => {
     setError(undefined);
-    copy(PASSWORD_LABEL, password);
+    copy(PASSWORD_LABEL, password, true);
   };
   // Resolves whether a new password was generated.
   const generate = useMutation({

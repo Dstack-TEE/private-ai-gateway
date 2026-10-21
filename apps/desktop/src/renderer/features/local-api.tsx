@@ -127,7 +127,7 @@ export function LocalApiDialog({ onClose, ...control }: DialogControl): React.JS
   const saving = rotate.isPending || save.isPending;
   const copyKey = () => {
     setError(undefined);
-    if (clientKey) copy("Local API key", clientKey);
+    if (clientKey) copy("Local API key", clientKey, true);
   };
   return (
     <AppDialog {...control} title="Local API settings" className="sm:max-w-xl" dismissible={!saving} onClose={onClose}>

@@ -59,7 +59,7 @@ export function LocalApiExamplesDialog(control: DialogControl) {
         <Tabs value={language} className="min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
           <div className="flex items-center justify-between gap-2">
             <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
-            <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
+            <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code, true); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
           </div>
           <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
             <pre className="select-text p-4 text-xs leading-relaxed"><code>{tokens
