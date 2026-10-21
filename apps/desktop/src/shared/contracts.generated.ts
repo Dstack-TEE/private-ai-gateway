@@ -422,8 +422,9 @@ export const STATE_EVENT = "pap://state";
 export const CLIENT_KEY_CHANGED_EVENT = "pap://client-key-changed";
 export const AGENTS_CHANGED_EVENT = "pap://agents-changed";
 export const NAVIGATE_EVENT = "pap://navigate";
+export const CHECK_FOR_UPDATES_EVENT = "pap://check-for-updates";
 /** The payload each event carries. */
-export type UiEventPayloads = { "pap://appearance": Appearance, "pap://launch-preferences": LaunchPreferences, "pap://settings-reset": null, "pap://state": AppState, "pap://client-key-changed": boolean, "pap://agents-changed": null, "pap://navigate": null };
+export type UiEventPayloads = { "pap://appearance": Appearance, "pap://launch-preferences": LaunchPreferences, "pap://settings-reset": null, "pap://state": AppState, "pap://client-key-changed": boolean, "pap://agents-changed": null, "pap://navigate": null, "pap://check-for-updates": null };
 export type UiEvent = keyof UiEventPayloads;
 export const ABOUT_LINKS: Record<AboutLink, string> = {"documentation":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/quickstart.md","github":"https://github.com/Dstack-TEE/private-ai-gateway","aci":"https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/attested-confidential-inference.md"};
 export const AGENTS: ReadonlyArray<{ id: string, name: string, website: string }> = [{"id":"claude-code","name":"Claude Code","website":"https://code.claude.com"},{"id":"codex","name":"Codex","website":"https://developers.openai.com/codex/cli/"},{"id":"dsh","name":"DeepSeek Harness","website":"https://deepseek-harness.github.io/deepseek-harness/"},{"id":"hermes","name":"Hermes Agent","website":"https://hermes-agent.nousresearch.com"},{"id":"pi","name":"Pi","website":"https://pi.dev"},{"id":"oh-my-pi","name":"Oh My Pi","website":"https://omp.sh"},{"id":"opencode","name":"OpenCode","website":"https://opencode.ai"},{"id":"openclaw","name":"OpenClaw","website":"https://openclaw.ai"}];

@@ -932,6 +932,11 @@ mod typescript {
                 ui_api::NAVIGATE_EVENT,
                 <()>::name(&config),
             ),
+            (
+                "CHECK_FOR_UPDATES_EVENT",
+                ui_api::CHECK_FOR_UPDATES_EVENT,
+                <()>::name(&config),
+            ),
         ];
         for (name, value, _) in &events {
             output.push_str(&format!(

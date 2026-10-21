@@ -83,6 +83,11 @@ App Store build is sandboxed and cannot write the real home directory, so its
 settings stay in the `Config` subdirectory of its container's app directory.
 `pap settings show` prints the paths in use.
 
+Home lookup prefers `USERPROFILE` on Windows and `HOME` elsewhere, then the
+other variable. When neither is set, it uses the operating system's user
+profile or account database. Service logs stay in the app data directory's
+`logs` subdirectory.
+
 On Windows the settings directory is in the user profile, not in the roaming
 `%APPDATA%`: roaming profiles and folder redirection of AppData no longer carry
 the settings to other machines (sync the directory instead; see

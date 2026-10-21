@@ -33,12 +33,13 @@ mod privatemode;
 mod router;
 mod streaming_usage;
 mod tls;
+mod zero_g;
 
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
 pub use openai::OpenAICompatibleBackend;
-pub(crate) use privatemode::readiness_client;
+pub(crate) use privatemode::{forwarding_client, readiness_client};
 pub use privatemode::{
     PrivatemodeDeploymentConfigError, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
 };
@@ -46,6 +47,8 @@ pub use router::{ModelRoute, ModelRouterBackend};
 pub(crate) use streaming_usage::supports_streaming_usage;
 pub use streaming_usage::StreamingUsage;
 pub use tls::{observing_spki_client, SpkiObservations};
+pub(crate) use zero_g::{broker_api, VerifiedProvider, TRUST_MODE_HEADER};
+pub use zero_g::{ZeroGProviderBackend, ZERO_G_E2EE_ALGORITHM, ZERO_G_PROVIDER};
 
 use openai::request_model_id;
 
@@ -100,6 +103,10 @@ pub struct UpstreamStreamResponse {
 pub enum UpstreamError {
     #[error("upstream routing error: {0}")]
     Routing(String),
+    /// The caller's request cannot be forwarded as sent; nothing reached the
+    /// upstream. Reported to the client as a 400.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("upstream transport error: {0}")]
     Transport(String),
     /// A deadline the gateway's own HTTP client enforced (connect or read
@@ -162,6 +169,14 @@ pub trait UpstreamBackend: Send + Sync {
         req: PreparedUpstreamRequest,
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.forward(req.request).await
+    }
+
+    /// Whether `req` can be served only over a verified channel binding. Such
+    /// a request is held to the fail-closed verification gate even when the
+    /// caller did not ask for verification, so an unverified provider is
+    /// refused like any other verification failure.
+    fn requires_verified_binding(&self, _req: &PreparedUpstreamRequest) -> bool {
+        false
     }
 
     /// Forward a verified request. Backends that cannot enforce the

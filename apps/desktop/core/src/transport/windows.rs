@@ -23,7 +23,7 @@ use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_PIPE_BUSY, FALSE},
+    Foundation::{ERROR_INVALID_PARAMETER, ERROR_PIPE_BUSY, FALSE},
     Security::SECURITY_ATTRIBUTES,
     System::{
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
@@ -151,7 +151,14 @@ pub(super) fn endpoint_path(data_dir: &Path, file: &str) -> io::Result<PathBuf> 
 fn authenticate_process(process_id: u32) -> io::Result<()> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id) };
     if process.is_null() {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return Err(
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                io::Error::new(io::ErrorKind::ConnectionAborted, error)
+            } else {
+                error
+            },
+        );
     }
     // SAFETY: OpenProcess returned a unique owned kernel handle.
     let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
@@ -179,6 +186,16 @@ mod tests {
             r"\\.\pipe\pap-transport-test-{}-{sequence}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn an_exited_peer_is_a_benign_accept_error() {
+        // OpenProcess(0) deterministically returns ERROR_INVALID_PARAMETER,
+        // the same error reported when the pipe client has already exited.
+        assert_eq!(
+            authenticate_process(0).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
     }
 
     #[tokio::test]

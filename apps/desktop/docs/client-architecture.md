@@ -92,7 +92,9 @@ protection problems, is stored under that key.
   loaded and on each event, so a request made while the app starts is handled
   once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
-  answer is dropped, as with an alert. One app-level handler runs every native
+  answer is dropped, as with an alert. The macOS menu bar's Check for Updates…
+  also sends `pap://check-for-updates`, so the window checks again at once and
+  Settings shows the result. One app-level handler runs every native
   menu item, the tray's and the menu bar's. The window shows no success
   messages: the changed value, closed dialog or save panel is the feedback.
   Failures show inline in their dialog, form or settings row, and in an alert
@@ -100,6 +102,14 @@ protection problems, is stored under that key.
   Failed tray actions are only logged, like other tray apps; the tray and the
   window show the state that applies, and system notifications report
   background failures.
+- The window shows only the app's own pages (and the development server in a
+  development build); any other link or `window.open` opens in the default
+  browser. Copying the Local API key, from the tray or from a copy the
+  renderer marks secret (`copy_text` with `secret`), keeps it out of
+  clipboard history: Windows' history, cloud and monitoring exclusion
+  formats, macOS's `org.nspasteboard.ConcealedType`, and on Linux, which has
+  no standard, KDE's `x-kde-passwordManagerHint`, which other clipboard
+  managers may ignore.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.
@@ -163,7 +173,10 @@ protection problems, is stored under that key.
 - Shutdown enters draining before taking the exclusive operation gate, waits
   for existing mutations, restores managed agent configuration (an update
   restart keeps it for the updated backend to resume), stops listeners,
-  and awaits process exit. When a client requested it, failure to restore
+  and awaits process exit. Before sending shutdown, a client opens its process
+  observer (Linux pidfd, macOS kqueue registration or Windows process handle),
+  so a reused PID cannot redirect the wait. Linux kernels without usable
+  pidfds retain signal-zero polling. When a client requested it, failure to restore
   leaves management available for recovery instead of closing the inference
   listener halfway through shutdown; a signal or the owning app's exit stops
   regardless.
@@ -206,7 +219,14 @@ socket peers. Unix endpoints live in a validated private per-user directory,
 are `0600`, and check the peer UID in both directions (`SO_PEERCRED` or
 `getpeereid`). Endpoint paths are shortened for Unix socket limits. Only an
 instance-lock owner may reclaim a stale socket, and only the socket inode
-owned by a listener is removed when it closes.
+owned by a listener is removed when it closes. The listener checks its socket
+identity every second while accepting and rebinds the same endpoint if the
+socket or its runtime directory was removed. If logind removes all of
+`/run/user/$UID`, recovery resumes once logind recreates that directory; the
+backend cannot recreate it under the root-owned `/run/user`. It repairs an
+existing directory's permissions to `0700` only when the directory is real and owned by the user;
+connecting clients reject insecure directories without changing them. A runtime
+directory owned by another user is reported explicitly.
 
 The MAS service keeps its management socket in the short `pap-ipc` directory at
 the root of its own App Container. It does not fall back to `/private/tmp`, which

@@ -77,11 +77,22 @@ impl UpstreamBackend for StubUpstream {
         })
     }
 
+    /// Model `verified-only` stands for a provider that cannot be served
+    /// without a verified binding (0G Private Computer).
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        req.model_id == "verified-only"
+    }
+
     async fn forward_verified_prepared(
         &self,
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        if req.model_id == "invalid-for-route" {
+            return Err(UpstreamError::InvalidRequest(
+                "request field \"zz\" is not supported".to_string(),
+            ));
+        }
         self.forward(req.request).await
     }
 }
@@ -550,6 +561,45 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
         .as_str()
         .unwrap()
         .contains("https://img.example/x.jpg"));
+}
+
+async fn post_chat(h: &TestHarness, body: &str) -> (StatusCode, bool, serde_json::Value) {
+    let resp = build_router(h.service.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let has_receipt = resp.headers().contains_key("x-receipt-id");
+    let body = body_bytes(resp.into_body()).await;
+    (status, has_receipt, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+async fn chat_route_that_needs_verification_is_refused_when_unverified() {
+    // The caller did not ask for verification, but the route cannot be served
+    // unverified, so it gets the same receipt-backed refusal.
+    let h = make_harness();
+    let (status, has_receipt, json) =
+        post_chat(&h, r#"{"model":"verified-only","messages":[]}"#).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(has_receipt);
+    assert_eq!(json["error"]["type"], "upstream_verification_failed");
+    assert!(h.received.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn chat_request_the_route_cannot_carry_is_a_400() {
+    let h = make_harness();
+    let (status, _, json) = post_chat(&h, r#"{"model":"invalid-for-route","messages":[]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
 }
 
 #[tokio::test]

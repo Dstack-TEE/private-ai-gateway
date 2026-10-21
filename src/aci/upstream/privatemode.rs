@@ -260,7 +260,7 @@ impl PrivatemodeProxyDeployment {
 
 /// Streams may idle between tokens, so forwarding bounds reads, not the whole
 /// response.
-fn forwarding_client(
+pub(crate) fn forwarding_client(
     connect_timeout_seconds: u64,
     read_timeout_seconds: u64,
 ) -> Result<reqwest::Client, UpstreamError> {

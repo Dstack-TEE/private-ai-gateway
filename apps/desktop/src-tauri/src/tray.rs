@@ -14,7 +14,6 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, Wry,
 };
-use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use desktop_core::{
     agents::{Agent, AgentStatus},
@@ -26,7 +25,7 @@ use desktop_core::{
     ui_api::{LaunchPreference, LAUNCH_PREFERENCES_EVENT},
 };
 
-use crate::{notifications::show_failure, window};
+use crate::{clipboard, notifications::show_failure, window};
 
 pub(crate) const TRAY_ID: &str = "gateway";
 
@@ -48,7 +47,8 @@ struct Shown {
     profiles: Option<Vec<(String, String, CheckMenuItem<Wry>)>>,
     /// The backend instance and agents revision the agent items show.
     agents: Option<(Option<String>, u64)>,
-    /// Whether the icon shows protection, and whether it is the dark variant.
+    /// Whether the icon shows protection, and whether it is the dark variant
+    /// (Windows follows the taskbar theme).
     icon: (bool, bool),
 }
 
@@ -243,9 +243,10 @@ impl Task {
         match self {
             Self::CopyEndpoint => {
                 let endpoint = client.state()?.proxy_url;
-                copy(app, endpoint.ok_or("The Local API is unavailable")?)
+                let endpoint = endpoint.ok_or("The Local API is unavailable")?;
+                clipboard::write_text(app, endpoint, false)
             }
-            Self::CopyKey => copy(app, client.call(rpc::GetClientKey)?),
+            Self::CopyKey => clipboard::write_text(app, client.call(rpc::GetClientKey)?, true),
             Self::ActivateProfile(profile_id) => {
                 client.call(rpc::ActivateProfile { profile_id })?;
                 Ok(())
@@ -287,12 +288,6 @@ fn in_background(app: &AppHandle, task: Task) {
             &client.state().unwrap_or_else(|_| client.cached_state()),
         );
     });
-}
-
-fn copy(app: &AppHandle, text: String) -> Result<(), String> {
-    app.clipboard()
-        .write_text(text)
-        .map_err(|_| "The clipboard is unavailable".into())
 }
 
 /// Connects a disconnected agent, or disconnects a connected one. Codex's
@@ -516,8 +511,9 @@ fn tooltip(status: &str) -> String {
     format!("{PRODUCT_NAME} – {status}")
 }
 
-/// System theme observers call this independently of the application's theme.
-#[cfg(not(target_os = "macos"))]
+/// The taskbar theme observer calls this independently of the application's
+/// theme.
+#[cfg(target_os = "windows")]
 pub(crate) fn set_dark(app: &AppHandle, dark: bool) -> tauri::Result<()> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
@@ -546,8 +542,21 @@ fn show_icon(app: &AppHandle, shown: &mut (bool, bool), icon: (bool, bool)) -> t
     Ok(())
 }
 
-/// Black icons are the macOS template and the light-theme icons elsewhere.
+/// Black icons are the macOS template and the light-theme icons on Windows.
+/// StatusNotifier hosts neither report the panel's color nor recolor an icon
+/// given as an image, so the Linux icons are the white mark on a black disc,
+/// legible on any panel.
 fn icon_image((protected, dark): (bool, bool)) -> tauri::Result<Image<'static>> {
+    #[cfg(target_os = "linux")]
+    let bytes: &'static [u8] = {
+        let _ = dark;
+        if protected {
+            include_bytes!("../../assets/tray/protected-linux.png")
+        } else {
+            include_bytes!("../../assets/tray/unprotected-linux.png")
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     let bytes: &'static [u8] = match (protected, dark) {
         (true, false) => include_bytes!("../../assets/tray/protected.png"),
         (false, false) => include_bytes!("../../assets/tray/unprotected.png"),

@@ -1,6 +1,7 @@
 //! The main window: created hidden and shown once its page has loaded, hidden
 //! to the tray rather than closed (minimized while no tray can show the app),
-//! and shown at the page the tray or the menu bar asks for.
+//! and shown at the page the tray or the menu bar asks for. It shows only the
+//! app's own pages; links to any other open in the default browser.
 
 use std::{
     sync::{Mutex, MutexGuard, PoisonError},
@@ -10,8 +11,8 @@ use std::{
 use desktop_core::{config::Appearance, contracts::NavigationTarget, ui_api::NAVIGATE_EVENT};
 use tauri::{
     utils::config::WindowConfig,
-    webview::{PageLoadEvent, WebviewWindowBuilder},
-    AppHandle, Emitter, Manager, State, WindowEvent,
+    webview::{NewWindowResponse, PageLoadEvent, WebviewWindowBuilder},
+    AppHandle, Emitter, Manager, State, Url, WindowEvent,
 };
 
 pub(crate) const MAIN: &str = "main";
@@ -23,8 +24,29 @@ pub(crate) const MAIN: &str = "main";
 /// appearance on connecting.
 pub fn create(app: &tauri::App, appearance: Appearance) -> Result<(), Box<dyn std::error::Error>> {
     let config = main_config(app.handle()).ok_or("Main window configuration is missing")?;
+    let origin = AppOrigin {
+        https: config.use_https_scheme,
+        dev_url: app.config().build.dev_url.clone().filter(|_| cfg!(dev)),
+    };
+    let navigation = (app.handle().clone(), origin.clone());
+    let new_window = (app.handle().clone(), origin);
     let window = WebviewWindowBuilder::from_config(app, config)?
         .initialization_script(crate::distribution::initialization_script())
+        .on_navigation(move |url| {
+            let (app, origin) = &navigation;
+            let own = origin.contains(url);
+            if !own {
+                open_in_browser(app, url);
+            }
+            own
+        })
+        .on_new_window(move |url, _| {
+            let (app, origin) = &new_window;
+            if !origin.contains(&url) {
+                open_in_browser(app, &url);
+            }
+            NewWindowResponse::Deny
+        })
         .on_page_load(|window, payload| {
             if matches!(payload.event(), PageLoadEvent::Finished) {
                 // A request to show the window that came earlier shows it now.
@@ -117,6 +139,40 @@ pub fn launch_hidden(app: &AppHandle) {
             present(&app, Presentation::Minimized);
         }
     });
+}
+
+/// Where the app's own pages come from: Tauri's `tauri://localhost`, which
+/// Windows serves as `http://tauri.localhost` (`https` with
+/// `useHttpsScheme`), and the development server in a development build.
+#[derive(Clone)]
+struct AppOrigin {
+    https: bool,
+    dev_url: Option<Url>,
+}
+
+impl AppOrigin {
+    fn contains(&self, url: &Url) -> bool {
+        let (scheme, host) = if cfg!(windows) {
+            (if self.https { "https" } else { "http" }, "tauri.localhost")
+        } else {
+            ("tauri", "localhost")
+        };
+        (url.scheme() == scheme && url.host_str() == Some(host) && url.port().is_none())
+            || self
+                .dev_url
+                .as_ref()
+                .is_some_and(|dev| dev.origin() == url.origin())
+    }
+}
+
+/// Opens a web page that is not the app's in the default browser; other
+/// schemes are not opened.
+fn open_in_browser(app: &AppHandle, url: &Url) {
+    if matches!(url.scheme(), "http" | "https") {
+        crate::menu::open_link(app, url.as_str());
+    } else {
+        tracing::warn!("Blocked the window from opening a {} URL", url.scheme());
+    }
 }
 
 fn main_config(app: &AppHandle) -> Option<&WindowConfig> {
@@ -265,4 +321,44 @@ pub(crate) fn take_navigation(state: State<'_, Mutex<WindowState>>) -> Option<Na
         .unwrap_or_else(PoisonError::into_inner)
         .navigation
         .take()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_app_origin_stays_in_the_window() {
+        let origin = AppOrigin {
+            https: false,
+            dev_url: Some(Url::parse("http://127.0.0.1:1420").unwrap()),
+        };
+        let own = if cfg!(windows) {
+            "http://tauri.localhost/settings"
+        } else {
+            "tauri://localhost/settings"
+        };
+        for (url, contained) in [
+            (own, true),
+            ("http://127.0.0.1:1420/agents", true),
+            ("http://127.0.0.1:1421/", false),
+            ("https://127.0.0.1:1420/", false),
+            ("https://redpill.ai/", false),
+            ("http://tauri.localhost.example.com/", false),
+            ("https://tauri.localhost/", false),
+            ("http://localhost/", false),
+            ("file:///etc/passwd", false),
+        ] {
+            assert_eq!(
+                origin.contains(&Url::parse(url).unwrap()),
+                contained,
+                "{url}"
+            );
+        }
+        let release = AppOrigin {
+            dev_url: None,
+            ..origin
+        };
+        assert!(!release.contains(&Url::parse("http://127.0.0.1:1420/").unwrap()));
+    }
 }

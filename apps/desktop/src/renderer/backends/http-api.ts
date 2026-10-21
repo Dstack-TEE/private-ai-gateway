@@ -74,6 +74,7 @@ const platform: UiPlatform = {
   stopAllAndQuit: async () => undefined,
   // Only the desktop app has a tray and a menu bar.
   onNavigate: () => () => undefined,
+  onCheckForUpdates: () => () => undefined,
   closeWindow: undefined,
   quit: undefined,
   copyText: async (text) => {

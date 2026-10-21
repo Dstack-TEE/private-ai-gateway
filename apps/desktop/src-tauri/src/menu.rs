@@ -1,9 +1,12 @@
 //! The macOS menu bar, laid out like Tauri's default menu so every standard
-//! item keeps its system role and shortcut, with Settings… and a Help menu
-//! (documentation, then the source link). Other platforms are tray-only.
+//! item keeps its system role and shortcut, with Check for Updates… (in builds
+//! that update themselves), Settings… and a Help menu (documentation, then the
+//! source link). Other platforms are tray-only.
 
-use desktop_core::brand::AboutLink;
-use tauri::{menu::MenuEvent, AppHandle};
+use desktop_core::{
+    brand::AboutLink, contracts::NavigationTarget, ui_api::CHECK_FOR_UPDATES_EVENT,
+};
+use tauri::{menu::MenuEvent, AppHandle, Emitter};
 
 /// The menu bar, which `tauri::Builder::menu` sets on macOS.
 #[cfg(target_os = "macos")]
@@ -22,8 +25,12 @@ pub fn menu_bar(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
     // The accelerator sends the same navigate request as the renderer's
     // shortcut elsewhere; the window shows the page once a modal dialog closes.
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, Some("CmdOrCtrl+,"))?;
-    let application = SubmenuBuilder::new(app, PRODUCT_NAME)
-        .about_with_text(format!("About {PRODUCT_NAME}"), Some(about))
+    let mut application = SubmenuBuilder::new(app, PRODUCT_NAME)
+        .about_with_text(format!("About {PRODUCT_NAME}"), Some(about));
+    if crate::updates::configured(app) {
+        application = application.text("check-updates", "Check for Updates…");
+    }
+    let application = application
         .separator()
         .item(&settings)
         .separator()
@@ -68,15 +75,24 @@ pub fn menu_bar(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>>
 /// runs once; Settings… has the same id and action in both.
 pub fn handle_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
-        "documentation" => open_link(app, AboutLink::Documentation),
-        "github" => open_link(app, AboutLink::Github),
+        "documentation" => open_link(app, AboutLink::Documentation.url()),
+        "github" => open_link(app, AboutLink::Github.url()),
+        "check-updates" => check_for_updates(app),
         id => crate::tray::handle_menu_event(app, id),
     }
 }
 
-fn open_link(app: &AppHandle, link: AboutLink) {
+/// Shows Settings, where the update status is, and has the window check for
+/// updates now. A window that is not listening yet checks as it loads.
+fn check_for_updates(app: &AppHandle) {
+    crate::window::navigate(app, NavigationTarget::Settings);
+    let _ = app.emit(CHECK_FOR_UPDATES_EVENT, ());
+}
+
+/// Opens `url` in the default browser, reporting a failure in a notification.
+pub(crate) fn open_link(app: &AppHandle, url: &str) {
     use tauri_plugin_opener::OpenerExt;
-    if app.opener().open_url(link.url(), None::<&str>).is_err() {
+    if app.opener().open_url(url, None::<&str>).is_err() {
         crate::notifications::show_failure(
             app,
             "Could not open the link",

@@ -5059,9 +5059,9 @@ dependencies = [
 name = "private-ai-proxy-desktop"
 version = "0.6.0"
 dependencies = [
+ "arboard",
  "auto-launch",
  "block2",
- "futures-util",
  "libc",
  "objc2",
  "objc2-core-services",

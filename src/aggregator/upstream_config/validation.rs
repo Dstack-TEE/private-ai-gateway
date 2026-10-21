@@ -128,6 +128,16 @@ pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
         })
 }
 
+/// `tdx-boot-chain:sha256:<64 lowercase hex>`: SHA-256 over a dstack OS
+/// image's MRTD ‖ RTMR1 ‖ RTMR2, which a 0G provider's quote must match.
+fn valid_tdx_boot_chain_subject(value: &str) -> bool {
+    value
+        .strip_prefix("tdx-boot-chain:sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {
     UpstreamConfigSnapshot {
         config_path: path.display().to_string(),
@@ -318,6 +328,39 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} has Chutes E2EE fields but provider is not chutes",
+                upstream.name
+            )));
+        }
+        // The private trust tier and the TargetSeparated rule are code, not config.
+        if upstream.provider == UpstreamProvider::ZeroGPrivateComputer {
+            let rpc_is_https = upstream
+                .zg_chain_rpc_url
+                .as_deref()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .is_some_and(|url| url.scheme() == "https");
+            let contract_is_address = upstream.zg_serving_contract.as_deref().is_some_and(|v| {
+                v.len() == 42 && v.starts_with("0x") && hex::decode(&v[2..]).is_ok()
+            });
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if !valid_root_https_origin(&upstream.base_url)
+                || subjects.is_empty()
+                || !subjects.iter().all(|s| valid_tdx_boot_chain_subject(s))
+                || upstream
+                    .bearer_token
+                    .as_deref()
+                    .is_none_or(|token| token.trim().is_empty())
+                || upstream.path.is_some()
+                || !rpc_is_https
+                || !contract_is_address
+            {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider 0g-private-computer requires the 0G router as a root HTTPS base_url, bearer_token, an HTTPS zg_chain_rpc_url, zg_serving_contract (0x + 40 hex) and accepted_subjects pins (tdx-boot-chain:sha256:<64 lowercase hex>), and forbids path",
+                    upstream.name
+                )));
+            }
+        } else if upstream.zg_chain_rpc_url.is_some() || upstream.zg_serving_contract.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} has 0G fields but provider is not 0g-private-computer",
                 upstream.name
             )));
         }

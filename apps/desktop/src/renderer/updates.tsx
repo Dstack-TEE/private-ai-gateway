@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { queryOptions, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import type { UpdateChannel } from "../shared/contracts";
@@ -48,14 +48,18 @@ export function useUpdates() {
     await client.cancelQueries({ queryKey: updateQuery.queryKey });
     void refetch();
   };
+  // The menu bar's Check for Updates… checks now, joining a check under way:
+  // the shell runs one update operation at a time, so a second would fail.
+  useEffect(() => desktopApi.onCheckForUpdates(() => {
+    void client.refetchQueries({ queryKey: updateQuery.queryKey, exact: true }, { cancelRefetch: false });
+  }), [client]);
   const restart = useMutation({
     mutationKey: UPDATE_OPERATION,
     scope: UPDATE_SCOPE,
     mutationFn: async () => {
-      // The latest release, checked once: a failure ends the restart.
-      await client.cancelQueries({ queryKey: updateQuery.queryKey });
-      const latest = await desktopApi.prepareUpdate();
-      client.setQueryData(updateQuery.queryKey, latest);
+      // The latest release, checked once (or the check under way, for the same
+      // reason): a failure ends the restart.
+      const latest = await client.fetchQuery({ ...updateQuery, staleTime: 0 });
       if (!latest.version) return;
       if (!await confirm({ title: "Restart to update?", message: `Version ${latest.version} is ready. Protection will pause during the restart and resume only after fresh verification. In-flight requests may be interrupted.`, confirmLabel: "Restart to Update" })) return;
       try {

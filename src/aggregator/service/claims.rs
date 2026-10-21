@@ -21,7 +21,9 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
         Some("armet-ai") => &ArmetAiClaims,
-        Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
+        Some("near-ai") | Some("chutes") | Some("phala-direct") | Some("0g-private-computer") => {
+            &IntelTdxClaims
+        }
         _ => &GenericClaims,
     }
 }
@@ -43,14 +45,18 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
     claims
 }
 
-/// The Chutes instance id a binding attests, if this is a per-instance Chutes
-/// channel. Chutes seals one session per instance; every other provider has a
-/// single channel (None), so its claims/evidence apply to the event as a whole.
-pub(super) fn chutes_instance_id<'a>(
+/// The instance a binding attests (a Chutes instance id or a 0G provider
+/// address). Those providers seal one session per instance; every other
+/// provider has a single channel (None), so its claims/evidence apply to the
+/// event as a whole.
+pub(super) fn instance_id<'a>(
     event: &UpstreamVerifiedEvent,
     binding: &'a ChannelBinding,
 ) -> Option<&'a str> {
-    if event.provider_type.as_deref() != Some("chutes") {
+    if !matches!(
+        event.provider_type.as_deref(),
+        Some("chutes") | Some("0g-private-computer")
+    ) {
         return None;
     }
     match binding {
@@ -118,6 +124,13 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
         .and_then(|measurements| measurements.get(instance_id))
     {
         pc.insert("measurement".to_string(), measurement.clone());
+    }
+    // 0G records each provider's facts under `instances`.
+    if let Some(Value::Object(instance)) = map
+        .get("instances")
+        .and_then(|instances| instances.get(instance_id))
+    {
+        pc.extend(instance.clone());
     }
     // This instance's own GPU outcome (NOT the fleet aggregate), lifted to the
     // top of the slice so `gpu_attested` reflects this instance and the slice
@@ -807,8 +820,8 @@ mod claim_mapping_tests {
     }
 
     #[test]
-    fn chutes_instance_id_only_for_chutes_e2ee_bindings() {
-        use super::chutes_instance_id;
+    fn instance_id_only_for_per_instance_e2ee_bindings() {
+        use super::instance_id;
         let e2ee = ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),
             key_id: Some("inst-1".to_string()),
@@ -821,9 +834,15 @@ mod claim_mapping_tests {
         };
         let chutes = event(Some("chutes"), VerificationResult::Verified, None);
         let near = event(Some("near-ai"), VerificationResult::Verified, None);
-        assert_eq!(chutes_instance_id(&chutes, &e2ee), Some("inst-1"));
-        assert_eq!(chutes_instance_id(&chutes, &tls), None); // not an e2ee instance
-        assert_eq!(chutes_instance_id(&near, &e2ee), None); // not Chutes
+        let zero_g = event(
+            Some("0g-private-computer"),
+            VerificationResult::Verified,
+            None,
+        );
+        assert_eq!(instance_id(&chutes, &e2ee), Some("inst-1"));
+        assert_eq!(instance_id(&zero_g, &e2ee), Some("inst-1"));
+        assert_eq!(instance_id(&chutes, &tls), None); // not an e2ee instance
+        assert_eq!(instance_id(&near, &e2ee), None); // not per-instance
     }
 
     #[test]
@@ -881,5 +900,23 @@ mod claim_mapping_tests {
         let c2 = per_instance_session_claims(&ev, "inst-2");
         assert_eq!(c2.tcb_up_to_date.status, ClaimStatus::Refuted);
         assert_eq!(c2.gpu_attested.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn zero_g_instance_claims_are_that_providers_entry() {
+        use super::per_instance_session_claims;
+        let pc = json!({"trust_boundary": "0g", "instances": {
+            "0xa": {"signing_address": "0x5a", "tcb_status": "UpToDate"},
+            "0xb": {"signing_address": "0x5b", "tcb_status": "OutOfDate"},
+        }});
+        let ev = event(
+            Some("0g-private-computer"),
+            VerificationResult::Verified,
+            Some(pc),
+        );
+        let a = per_instance_session_claims(&ev, "0xa");
+        assert_eq!(a.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(a.extra.get("signing_address"), Some(&json!("0x5a")));
+        assert!(!a.extra.contains_key("instances"));
     }
 }
