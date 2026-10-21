@@ -3130,7 +3130,7 @@ impl UpstreamBackend for SequencedUpstream {
             // The recognized upstream capacity/no-targets signal, under a
             // status OUTSIDE the retryable whitelist — guards the shared
             // classification contract, not the whitelist path.
-            520 => br#"{"error":"exhausted all available targets"}"#.to_vec(),
+            501 => br#"{"error":"exhausted all available targets"}"#.to_vec(),
             _ => br#"{"error":{"message":"capacity"}}"#.to_vec(),
         };
         Ok(UpstreamResponse {
@@ -3412,9 +3412,9 @@ async fn capacity_retry_covers_the_recognized_5xx_capacity_signal() {
     // An upstream that reports "exhausted all available targets" under a 5xx
     // is surfaced to clients as 429 by error normalization — the retry (and
     // failover) must treat it as capacity too, even when the status sits
-    // outside the retryable whitelist (520 here), or a request could be told
+    // outside the retryable whitelist (501 here), or a request could be told
     // 429 without ever getting the second chance that 429s get.
-    let (service, forwarded, _) = build_sequenced_service(vec![520, 200]);
+    let (service, forwarded, _) = build_sequenced_service(vec![501, 200]);
     let result = service
         .forward_chat_completion_for_middleware(
             capacity_retry_request(None),
@@ -3428,7 +3428,7 @@ async fn capacity_retry_covers_the_recognized_5xx_capacity_signal() {
         MiddlewareForwardResult::Forwarded(forward) => {
             assert_eq!(
                 attempts(&forward.failed_attempts),
-                vec![("plain:gpt-test".to_string(), 520)]
+                vec![("plain:gpt-test".to_string(), 501)]
             );
         }
         _ => panic!("the capacity-signal 5xx must be replayed and commit the 200"),

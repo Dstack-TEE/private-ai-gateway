@@ -200,11 +200,11 @@ validation, and authentication statuses.
 
 The control plane returns ordered route candidates. Middleware mode tries the
 next candidate when the provider answers `401`, `402`, `403`, `404`, `429`,
-`500`, `502`, `503`, or `504`, or any `5xx` whose body carries the provider's
-out-of-capacity marker. A `404` means that provider does not serve the model,
-so another provider may. A `400`, a `422`, or a failed fetch of a
-caller-supplied image URL ends the request, because every candidate would
-receive the same input.
+`500`, `502`, `503`, `504`, or a Cloudflare origin error (`520`–`527`), or any
+`5xx` whose body carries the provider's out-of-capacity marker. A `404` means
+that provider does not serve the model, so another provider may. A `400`, a
+`422`, or a failed fetch of a caller-supplied image URL ends the request,
+because every candidate would receive the same input.
 
 When no candidate succeeds and some answered with `429` or the capacity marker,
 the gateway waits 2000 ms plus up to 2000 ms of random jitter and retries those
