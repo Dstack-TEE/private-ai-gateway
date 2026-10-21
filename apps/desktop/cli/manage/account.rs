@@ -1,5 +1,5 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, open_browser};
+use super::{args::AccountLoginOptions, graphical_session, open_browser};
 use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
@@ -76,7 +76,7 @@ pub(super) fn login(
     if let Some(code) = &login.user_code {
         eprintln!("Confirm device code: {code}");
     }
-    if !options.no_browser && open_browser(&login.url).is_err() {
+    if !options.no_browser && graphical_session() && open_browser(&login.url).is_err() {
         eprintln!("Browser did not open. Open the URL above manually.");
     }
     let deadline = Instant::now() + Duration::from_secs(options.timeout);

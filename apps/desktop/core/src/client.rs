@@ -57,7 +57,7 @@ const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// reports it instead of waiting.
 const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
-const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run private-ai-proxy service start to replace it.";
+const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run pap service start to replace it.";
 const OTHER_INSTALLATION: &str = "The running backend belongs to another installation. Update it through its owning package manager.";
 
 /// Why a management call failed.
@@ -237,10 +237,10 @@ impl Client {
                     let _ = child.wait();
                 }
                 return Err(match diagnostic {
-                    Some(diagnostic) => format!(
-                        "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
-                    ),
-                    None => "Backend readiness timed out. Run private-ai-proxy doctor.".into(),
+                    Some(diagnostic) => {
+                        format!("Backend readiness timed out: {diagnostic}. Run pap doctor.")
+                    }
+                    None => "Backend readiness timed out. Run pap doctor.".into(),
                 });
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -740,7 +740,7 @@ fn connection_error(error: io::Error) -> String {
     }
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-            "Backend is not running. Run private-ai-proxy service start.".into()
+            "Backend is not running. Run pap service start.".into()
         }
         io::ErrorKind::PermissionDenied => {
             "Management endpoint access denied. Use the same OS user as the backend.".into()
@@ -753,7 +753,7 @@ fn connection_error(error: io::Error) -> String {
             "Incompatible or invalid management protocol. Update the client and backend together."
                 .into()
         }
-        _ => "Management connection failed. Run private-ai-proxy doctor; do not automatically retry mutations."
+        _ => "Management connection failed. Run pap doctor; do not automatically retry mutations."
             .into(),
     }
 }

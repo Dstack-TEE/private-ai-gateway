@@ -13,6 +13,7 @@ pub use appraisal::{
     CustodyEvidence, FailureCause, Outcome, QuoteSource,
 };
 pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, VerifiedEventLog};
+pub(crate) use policy::parse_app_id_subject;
 pub use policy::{CustodyPolicy, CustodyPolicyError};
 pub use quote::{QuoteStepError, DEFAULT_PCCS_URL};
 

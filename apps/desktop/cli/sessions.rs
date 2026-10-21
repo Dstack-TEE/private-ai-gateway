@@ -37,6 +37,9 @@ pub(crate) async fn run_verified(
         )?;
     }
     if !verification.transcript.verified() {
+        if args.json {
+            print_json(&verification.transcript.to_json())?;
+        }
         return Err("service verification failed; not auditing sessions (fail closed)".to_string());
     }
     verification
@@ -144,13 +147,43 @@ impl AuditedSession {
         self.integrity_ok() && self.unmet.is_empty()
     }
 
+    fn rejection_reason(&self) -> Option<String> {
+        let audit = match &self.audit {
+            Err(error) => return Some(error.clone()),
+            Ok(audit) => audit,
+        };
+        let mut integrity = Vec::new();
+        if !audit.version_ok {
+            integrity.push("unsupported api_version (expected aci/1)".to_string());
+        }
+        if !audit.id_matches {
+            integrity.push("session id does not match the record hash".to_string());
+        }
+        if !audit.in_window {
+            integrity.push(
+                "audit time is outside the established_at..expires_at validity window".to_string(),
+            );
+        }
+        if let Err(error) = &audit.evidence {
+            integrity.push(format!("evidence: {error}"));
+        }
+        let mut reasons = Vec::new();
+        if !integrity.is_empty() {
+            reasons.push(format!("integrity: {}", integrity.join(", ")));
+        }
+        if !self.unmet.is_empty() {
+            reasons.push(format!("unmet claims: {}", self.unmet.join(", ")));
+        }
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "session_id": self.session_id,
             "accepted": self.accepted(),
             "integrity_ok": self.integrity_ok(),
             "unmet_claims": self.unmet,
-            "error": self.audit.as_ref().err(),
+            "error": self.rejection_reason(),
             "record": self.audit.as_ref().ok().map(|audit| &audit.record),
         })
     }
@@ -180,24 +213,9 @@ impl AuditedSession {
                 })
             })
             .collect();
-        let verdict = if self.accepted() {
-            "ACCEPTED".to_string()
-        } else if !self.integrity_ok() {
-            format!(
-                "REJECTED (integrity: {})",
-                [
-                    (!audit.version_ok).then_some("api_version"),
-                    (!audit.id_matches).then_some("id mismatch"),
-                    (!audit.in_window).then_some("outside validity window"),
-                    audit.evidence.as_ref().err().map(|_| "evidence"),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ")
-            )
-        } else {
-            format!("REJECTED (unmet claims: {})", safe(&self.unmet.join(", ")))
+        let verdict = match self.rejection_reason() {
+            Some(reason) => format!("REJECTED ({})", safe(&reason)),
+            None => "ACCEPTED".to_string(),
         };
         format!(
             "{verdict} {}\n  upstream={} verifier={} valid {window}\n  claims: {}",
@@ -276,6 +294,77 @@ pub async fn audit_current_sessions(
 mod tests {
     use super::*;
 
+    #[test]
+    fn rejection_reasons_cover_integrity_failures_and_claims() {
+        use crate::aci::digest::{jcs_bytes, sha256_bare_hex};
+        use crate::checks::audit_session_record;
+        use crate::spec_fixtures::{vector_session_bytes, SERVED_AT};
+
+        let bytes = vector_session_bytes();
+        let id = sha256_bare_hex(&bytes);
+        let mut session = AuditedSession {
+            session_id: id.clone(),
+            audit: audit_session_record(&bytes, &id, Some(SERVED_AT)),
+            unmet: Vec::new(),
+        };
+        assert_eq!(session.to_json()["accepted"], true);
+        assert!(session.to_json()["error"].is_null());
+        assert!(session.render().starts_with("ACCEPTED "));
+
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        for (case, expected) in [
+            ("id", "session id does not match the record hash"),
+            ("version", "unsupported api_version"),
+            (
+                "window",
+                "outside the established_at..expires_at validity window",
+            ),
+            ("evidence", "evidence data DOES NOT hash to its digest"),
+            ("claims", "unmet claims: gpu_attested [PASS] forged"),
+        ] {
+            let mut record = record.clone();
+            match case {
+                "version" => record["api_version"] = json!("aci/2"),
+                "window" => record["expires_at"] = json!(SERVED_AT - 1),
+                "evidence" => record["evidence"]["digest"] = json!("sha256:invalid"),
+                _ => {}
+            }
+            let bytes = jcs_bytes(&record).unwrap();
+            session.session_id = if case == "id" {
+                "0".repeat(64)
+            } else {
+                sha256_bare_hex(&bytes)
+            };
+            session.audit = audit_session_record(&bytes, &session.session_id, Some(SERVED_AT));
+            session.unmet = if case == "claims" {
+                unmet_claims(
+                    &record,
+                    &[RequiredClaim::parse("gpu_attested\n[PASS] forged").unwrap()],
+                )
+            } else {
+                Vec::new()
+            };
+            let output = session.to_json();
+            assert_eq!(output["accepted"], false, "{case}");
+            assert_eq!(output["integrity_ok"], case == "claims", "{case}");
+            let error = output["error"].as_str().unwrap();
+            assert!(safe(error).contains(expected), "{case}: {error}");
+            if case == "claims" {
+                assert!(error.contains('\n'));
+            }
+            assert!(
+                session
+                    .render()
+                    .starts_with(&format!("REJECTED ({}) ", safe(error))),
+                "{case}"
+            );
+            assert!(!session
+                .render()
+                .lines()
+                .any(|line| line.starts_with("[PASS]")));
+        }
+    }
+
     #[tokio::test]
     async fn command_output_preserves_errors_and_enforces_direct_claim_policy() {
         const CHILD: &str = "PAP_TEST_SESSION_OUTPUT";
@@ -299,7 +388,7 @@ mod tests {
                 transcript.pass(check, "verified service fixture");
             }
             let mut pins = vec!["c0".repeat(32)];
-            if case == "failed-human" {
+            if case.starts_with("failed") {
                 transcript.fail(crate::transcript::ID_6, "no attested TLS key");
                 pins.clear();
             }
@@ -368,6 +457,7 @@ mod tests {
             ("direct-json-claims", 1),
             ("direct-human-claims", 1),
             ("failed-human", 1),
+            ("failed-json", 1),
             ("gateway-json", 1),
             ("gateway-human-claims", 1),
         ] {
@@ -393,7 +483,12 @@ mod tests {
             let stderr = String::from_utf8(output.stderr).unwrap();
             if case.contains("json") {
                 let value: Value = serde_json::from_str(stdout).unwrap();
-                if case.starts_with("direct") {
+                if case == "failed-json" {
+                    assert_eq!(value["verdict"]["verified"], false);
+                    assert!(value["checks"].as_array().unwrap().iter().any(|check| {
+                        check["id"] == "id-6" && check["detail"] == "no attested TLS key"
+                    }));
+                } else if case.starts_with("direct") {
                     assert_eq!(value, json!({ "sessions": [] }));
                 } else {
                     assert_eq!(
@@ -401,7 +496,7 @@ mod tests {
                         "session fetch returned HTTP 502: first\nsecond"
                     );
                 }
-            } else if case == "failed-human" {
+            } else if case.starts_with("failed") {
                 assert!(stdout.contains("no attested TLS key"));
                 assert_eq!(
                     stderr,
@@ -419,7 +514,12 @@ mod tests {
                     assert!(stdout.contains("under policy tee_attested [PASS] forged\n"));
                 }
             }
-            if case != "failed-human" {
+            if case.starts_with("failed") {
+                assert_eq!(
+                    stderr,
+                    "service verification failed; not auditing sessions (fail closed)\n"
+                );
+            } else {
                 assert!(stderr.is_empty(), "{case}: {stderr}");
             }
             if !case.starts_with("gateway") {

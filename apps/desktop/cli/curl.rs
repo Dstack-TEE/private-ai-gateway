@@ -6,7 +6,6 @@
 //! curl.
 
 use std::ffi::{OsStr, OsString};
-use std::process::{Command, ExitStatus};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
@@ -15,7 +14,7 @@ use crate::transcript::Transcript;
 use crate::verify::verify_service;
 
 /// Exit code when pap refuses the request or cannot run curl. curl's own
-/// codes stay below it and signals map above it.
+/// codes stay below it; Unix signals terminate the replaced process directly.
 pub const PAP_FAILURE_EXIT_CODE: i32 = 125;
 
 pub async fn run(args: CurlArgs) -> Result<i32, String> {
@@ -47,15 +46,12 @@ pub async fn run(args: CurlArgs) -> Result<i32, String> {
 }
 
 fn request_url_and_origin(value: &str) -> Result<(String, String), String> {
-    let url =
-        reqwest::Url::parse(value).map_err(|e| format!("invalid request URL {value:?}: {e}"))?;
-    if url.scheme() != "https" {
-        return Err(format!(
-            "request URL must use https so the attested TLS key can be pinned: {value:?}"
-        ));
-    }
+    let url = reqwest::Url::parse(value).map_err(|e| format!("invalid request URL: {e}"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err("request URL must not contain credentials; pass authentication to curl".into());
+    }
+    if url.scheme() != "https" {
+        return Err("request URL must use https so the attested TLS key can be pinned".into());
     }
     if url.fragment().is_some() {
         return Err("request URL must not contain a fragment".into());
@@ -146,25 +142,22 @@ fn validate_curl_args(args: &[OsString]) -> Result<(), String> {
 }
 
 fn run_curl(curl_binary: &OsStr, args: &[OsString]) -> Result<i32, String> {
-    let status = Command::new(curl_binary)
-        .args(args)
-        .status()
-        .map_err(|e| format!("failed to start system curl: {e}"))?;
-    Ok(exit_code(status))
-}
-
-/// curl's exit code, or 128 + the signal that killed it, as shells report it.
-fn exit_code(status: ExitStatus) -> i32 {
+    let mut command = desktop_core::launch::child_command(curl_binary);
+    command.args(args);
     #[cfg(unix)]
     {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return 128 + signal;
-        }
+        use std::os::unix::process::CommandExt;
+        Err(format!("failed to start system curl: {}", command.exec()))
     }
-    status
-        .code()
-        .expect("a process not killed by a signal has an exit code")
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .map_err(|e| format!("failed to start system curl: {e}"))?;
+        status
+            .code()
+            .ok_or_else(|| "system curl exited without an exit code".into())
+    }
 }
 
 #[cfg(test)]
@@ -336,42 +329,64 @@ mod tests {
         assert!(err.contains("curl was not started"), "{err}");
     }
 
-    /// Runs `script` as curl through `sh -c`, with `curl_args` as its
-    /// positional parameters. The script is never written to a file: exec'ing
-    /// a freshly written file races tests that fork concurrently, whose
-    /// children keep its write descriptor until they exec and so fail this
-    /// exec with ETXTBSY (rust-lang/rust#114554, golang/go#22315).
-    #[cfg(unix)]
-    fn run_fake_curl(script: &str, curl_args: &[&str]) -> Result<i32, String> {
-        let mut command = args(&["-c", script, "curl"]);
-        command.extend(args(curl_args));
-        run_curl(OsStr::new("/bin/sh"), &command)
-    }
-
     #[cfg(unix)]
     #[test]
-    fn runs_external_curl_and_preserves_its_exit_code() {
-        let code = run_fake_curl(
-            "[ \"$1\" = \"-q\" ] || exit 91\n[ \"$2\" = \"--silent\" ] || exit 92\nexit 23",
-            &["-q", "--silent"],
-        )
-        .unwrap();
-        assert_eq!(code, 23);
+    fn curl_replaces_the_process_and_preserves_status_without_the_alias() {
+        use std::os::unix::process::ExitStatusExt;
+        const SCRIPT: &str = "PAP_TEST_CURL_SCRIPT";
+        if let Ok(script) = std::env::var(SCRIPT) {
+            // sh -c avoids executing freshly written scripts while other tests fork.
+            run_curl(
+                OsStr::new("/bin/sh"),
+                &args(&["-c", &script, "curl", "-q", "--silent"]),
+            )
+            .unwrap();
+            panic!("exec returned");
+        }
+        let run = |script: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "curl::tests::curl_replaces_the_process_and_preserves_status_without_the_alias",
+                    "--nocapture",
+                ])
+                .env(SCRIPT, script)
+                .env(desktop_core::launch::ALIAS_ENV, "aci")
+                .output()
+                .unwrap()
+        };
+        let output = run("[ \"$1\" = -q ] || exit 91\n[ \"$2\" = --silent ] || exit 92\n[ -z \"${PRIVATE_AI_PROXY_ALIAS+x}\" ] || exit 93\nexit 23");
+        assert_eq!(output.status.code(), Some(23), "{output:?}");
+        let output = run("kill -TERM $$");
+        assert_eq!(output.status.signal(), Some(15), "{output:?}");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn reports_a_curl_killed_by_a_signal_as_128_plus_the_signal() {
-        assert_eq!(run_fake_curl("kill -TERM $$", &[]).unwrap(), 128 + 15);
-    }
-
+    // A failed exec can still have reset process state, such as signal
+    // dispositions, so it runs in its own process like the test above.
     #[test]
     fn reports_when_curl_cannot_be_started() {
-        let err = run_curl(
-            OsStr::new("/path/that/does/not/contain/curl"),
-            &args(&["--version"]),
-        )
-        .unwrap_err();
-        assert!(err.contains("failed to start system curl"), "{err}");
+        const CHILD: &str = "PAP_TEST_CURL_MISSING";
+        if std::env::var_os(CHILD).is_some() {
+            let error = run_curl(
+                OsStr::new("/path/that/does/not/contain/curl"),
+                &args(&["--version"]),
+            )
+            .unwrap_err();
+            eprintln!("{error}");
+            std::process::exit(PAP_FAILURE_EXIT_CODE);
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "curl::tests::reports_when_curl_cannot_be_started",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(PAP_FAILURE_EXIT_CODE));
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("failed to start system curl"));
     }
 }

@@ -17,7 +17,11 @@ outside `--json` and `--json-events`, `aci` prints a one-line note pointing to
 Start with `pap --help` and `<command> --help`.
 
 `pap completions bash` prints shell completion code without installing it or
-changing shell configuration. Other supported shells are listed in its help.
+changing shell configuration. It registers the name you run. Use
+`pap completions bash` for `pap`, `private-ai-proxy completions bash` for the
+canonical name, or
+`aci completions bash` for the legacy alias. Other supported shells are listed
+in its help.
 
 ## ACI Commands
 
@@ -56,6 +60,11 @@ Online verification fetches the quote's DCAP collateral only from the Phala
 PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
 to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
 fetch failed, including the underlying transport or HTTP error.
+
+Online commands (`verify`, `send`, `serve`, `sessions`, and `curl`) reject URLs
+containing a username or password, and a service base URL with a query or
+fragment, so no secret in a URL reaches their output. Supply credentials
+through their documented API key inputs or curl's header-file option instead.
 
 The pinned channel uses the TLS keys the verified report declares for the
 host: every attested TLS key when none is domain-scoped, otherwise only the
@@ -106,10 +115,14 @@ configuration with an independent dstack verifier.
 ```sh
 pap curl https://tee.redpill.ai/v1/chat/completions -- \
   --fail-with-body --no-buffer \
-  --header "Authorization: Bearer $ACI_API_KEY" \
+  --header @auth-headers.txt \
   --header 'content-type: application/json' \
   --data-binary '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hi"}],"provider":{"aci_verified":true}}'
 ```
+
+Create `auth-headers.txt` with an `Authorization: Bearer …` line and restrict
+its permissions to your user. Passing the file path keeps the key out of the
+process argument list; do not pass a literal authorization header in argv.
 
 `pap curl` verifies a fresh service report under the
 [verification policy](#verification-policy) flags, then starts system curl with
@@ -137,8 +150,13 @@ URL is never globbed, so `[1-3]` or `{a,b}` in it is sent as written.
 | Exit code | Meaning |
 | --- | --- |
 | 125 | pap refused the request or could not start curl: invalid options, failed verification, or curl missing. curl did not run. |
-| 128 + N | curl was killed by signal N (Unix). |
+| Signal N (Unix) | curl received signal N; shells normally report this as 128 + N. |
 | Any other | curl's own exit code; 0 is success. |
+
+On Unix, pap replaces itself with curl after verification, so curl keeps the
+same PID, receives signals directly, and determines the exact exit status or
+signal. Windows starts curl and waits for its exit code. Child processes do
+not inherit the CLI alias variable (`PRIVATE_AI_PROXY_ALIAS`).
 
 Command-line usage errors, such as a missing URL, exit 2 before verification.
 
@@ -150,6 +168,31 @@ start unless the verdict is `VERIFIED`. It then listens on plain HTTP at
 Anthropic-compatible client can use it as a local base URL.
 [Quickstart step 4](../../../docs/quickstart.md#4-use-it-as-a-local-endpoint)
 walks through it against a live service.
+
+Both the proxy and its control listener (`127.0.0.1:4183`, changed by
+`--control`) bind only loopback addresses by default. Non-loopback addresses,
+including wildcard binds, require `--allow-network-access`. These listeners
+use plain HTTP, so allow network access only on a trusted network.
+
+Both listeners reject a request with HTTP 403 unless `Host` is an IP literal
+(IPv4 or bracketed IPv6, optionally with a port), `localhost` on a loopback
+listener, or a name supplied with repeatable `--client-host NAME`. A supplied
+name is accepted with or without the listener's port, case-insensitively, on
+both listeners. The value must be a hostname without a port, path, scheme or
+userinfo. Other names, missing or duplicate Host headers, and malformed hosts
+are refused before handling the request. IP literals and `localhost` cannot be
+rebound by DNS; adding a `--client-host` name is an explicit DNS-rebinding
+trade-off, so add only names you control.
+
+For example, a Docker container can reach a host-running proxy by its Docker
+host name:
+
+```sh
+pap serve https://gateway.example \
+  --listen 0.0.0.0:4180 --control 0.0.0.0:4183 \
+  --allow-network-access --client-host host.docker.internal
+curl http://host.docker.internal:4180/v1/models
+```
 
 A re-verification timeout keeps the previously trusted identity and releases
 queued requests to retry the normal failure path.
@@ -621,8 +664,8 @@ field `protocolVersion`). A command that fails prints
 `{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is
 the backend's stable error code, such as `invalid_state`, `busy` or
 `revision_conflict`, or `command_failed` for a failure the CLI reports itself;
-`error.message` is text for people. 0.1 always reported `command_failed` and
-prefixed the message with the backend's code (`CODE: MESSAGE`). The desktop app
+`error.message` is text for people. Human-readable errors start with `error:`.
+0.1 always reported `command_failed` and prefixed the message with the backend's code (`CODE: MESSAGE`). The desktop app
 and the web UI receive the same `code` and `message`.
 
 For reviewed agent changes, obtain a preview first:
@@ -648,7 +691,11 @@ and `1` for operation failures. With `--json`, failures have an `error` object
 with `code` and `message`. Argument errors use `invalid_arguments`; operation
 errors use the backend's code, or `command_failed`. Classify failures by
 `code`, never by parsing message text, and do not assume all failures are
-retryable.
+retryable. `sessions --json` prints the service verification transcript on
+stdout when verification fails, while still exiting nonzero and reporting the
+failure on stderr. Every rejected session includes a human-readable `error`
+describing fetch or audit failures, failed integrity checks, or unmet claims.
+Human output shows the same reason with terminal control characters neutralized.
 
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object

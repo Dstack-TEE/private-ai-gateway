@@ -1,7 +1,7 @@
 //! Unified Private AI Proxy CLI, including the ACI protocol commands.
 mod manage;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use desktop_core::client::CallError;
 use private_ai_proxy::{args::Command as Aci, audit, curl, safe, send, serve, sessions, verify};
 use std::{ffi::OsStr, io::IsTerminal, path::Path};
@@ -25,11 +25,12 @@ struct Cli {
 
 /// Options every command accepts.
 #[derive(Args)]
+#[command(next_help_heading = "Global Options")]
 struct Global {
-    /// Emit compact JSON instead of human-readable output.
+    /// Emit JSON instead of human-readable output.
     #[arg(long, global = true)]
     json: bool,
-    /// Never prompt. Mutations require --yes; credential inputs use stdin flags.
+    /// Never prompt; commands that need input fail unless --yes or a stdin flag supplies it.
     #[arg(long, visible_alias = "no-interactive", global = true)]
     non_interactive: bool,
     /// Approve a command's documented mutation without prompting.
@@ -61,7 +62,12 @@ async fn main() {
         global,
         command,
         require_production_os,
-    } = Cli::try_parse().unwrap_or_else(|error| {
+    } = Cli::try_parse().and_then(|cli| {
+        if let Command::Manage(action) = &cli.command {
+            manage::validate_arguments(action)?;
+        }
+        Ok(cli)
+    }).unwrap_or_else(|error| {
         // Parsing failed, so `--json` is known only from the raw arguments.
         if machine_output(&["--json"]) && error.use_stderr() {
             eprintln!("{}", serde_json::json!({"error":{"code":"invalid_arguments","message":error.to_string()}}));
@@ -103,7 +109,7 @@ async fn main() {
         if json {
             eprintln!("{}", json_error(error));
         } else {
-            eprintln!("private-ai-proxy: {}", safe(&error.to_string()));
+            eprintln!("error: {}", safe(&error.to_string()));
         }
         failure_code
     });
@@ -141,11 +147,30 @@ fn legacy_alias_hint() {
     }
 }
 
+/// Custom usage and completion scripts use the invoked alias.
+fn invocation_command() -> (clap::Command, &'static str) {
+    let argv0 = std::env::args_os().next();
+    let alias = std::env::var_os(desktop_core::launch::ALIAS_ENV);
+    let name = invocation_name(argv0.as_deref(), alias.as_deref());
+    (Cli::command().bin_name(name), name)
+}
+
+fn invocation_name(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> &'static str {
+    let stem = argv0.and_then(|name| Path::new(name).file_stem());
+    for name in [alias, stem].into_iter().flatten() {
+        for known in ["pap", "aci", "private-ai-proxy"] {
+            if name == OsStr::new(known) {
+                return known;
+            }
+        }
+    }
+    "private-ai-proxy"
+}
+
 /// Symlinks and the npm launcher name the alias in `argv[0]`; Windows `.cmd`
 /// shims, which cannot, name it in [`desktop_core::launch::ALIAS_ENV`].
 fn invoked_as_aci(argv0: Option<&OsStr>, alias: Option<&OsStr>) -> bool {
-    alias == Some(OsStr::new("aci"))
-        || argv0.is_some_and(|name| Path::new(name).file_stem() == Some(OsStr::new("aci")))
+    invocation_name(argv0, alias) == "aci"
 }
 
 #[cfg(test)]

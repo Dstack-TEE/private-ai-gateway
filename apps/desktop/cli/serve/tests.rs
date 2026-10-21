@@ -2146,3 +2146,125 @@ fn upstream_urls_keep_the_base_path_and_the_request_target() {
     );
     assert!(join_url("not a url", &Uri::from_static("/v1/models")).is_err());
 }
+
+#[tokio::test]
+async fn standalone_listeners_require_network_access_opt_in() {
+    for address in ["127.0.0.1:0", "[::1]:0", "localhost:0"] {
+        assert!(
+            listener_addresses(address, false).await.is_ok(),
+            "{address}"
+        );
+    }
+    for address in ["0.0.0.0:0", "[::]:0", "192.0.2.1:4180"] {
+        assert!(listener_addresses(address, false)
+            .await
+            .unwrap_err()
+            .contains("--allow-network-access"));
+        assert!(listener_addresses(address, true).await.is_ok(), "{address}");
+    }
+}
+
+#[test]
+fn host_guard_refuses_missing_duplicate_and_malformed_hosts() {
+    let mut headers = HeaderMap::new();
+    assert!(!valid_host(&headers, true, &[]));
+    for host in [
+        "localhost:",
+        "localhost:invalid",
+        "127.0.0.1:65536",
+        "user@127.0.0.1",
+        "[::1]:invalid",
+        "::1",
+        "localhost.attacker.example",
+    ] {
+        headers.insert("host", host.parse().unwrap());
+        assert!(!valid_host(&headers, true, &[]), "{host}");
+    }
+    headers.insert("host", "localhost".parse().unwrap());
+    headers.append("host", "127.0.0.1".parse().unwrap());
+    assert!(!valid_host(&headers, true, &[]));
+}
+
+#[tokio::test]
+async fn both_standalone_listeners_refuse_rebindable_hosts_before_handling_requests() {
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/receipts",
+        get({
+            let forwarded = forwarded.clone();
+            move || {
+                forwarded.fetch_add(1, Ordering::SeqCst);
+                async { "forwarded" }
+            }
+        }),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(spawn_server(upstream).await, tx);
+    let client = reqwest::Client::new();
+    for loopback in [true, false] {
+        for (router, proxy) in [
+            (build_proxy_router(state.clone()), true),
+            (build_control_router(state.clone()), false),
+        ] {
+            let client_hosts = vec!["docker.internal".to_string()];
+            let listener = spawn_server(with_host_guard(router, loopback, &client_hosts)).await;
+            for (host, accepted) in [
+                ("127.0.0.1", true),
+                ("127.0.0.1:4180", true),
+                ("[::1]", true),
+                ("[::1]:4180", true),
+                ("192.0.2.1:4180", true),
+                ("LOCALHOST:4180", loopback),
+                ("docker.internal", true),
+                ("DOCKER.INTERNAL:4180", true),
+                ("attacker.example:4180", false),
+                ("localhost.attacker.example", false),
+            ] {
+                let before = forwarded.load(Ordering::SeqCst);
+                let response = client
+                    .get(format!("{listener}/receipts"))
+                    .header("host", host)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if accepted {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::FORBIDDEN
+                    },
+                    "{host} loopback={loopback} proxy={proxy}"
+                );
+                assert_eq!(
+                    forwarded.load(Ordering::SeqCst),
+                    before + usize::from(accepted && proxy)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_upstream_requests_never_put_query_credentials_in_events() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let response = proxy_request(
+        state,
+        Method::GET,
+        "/v1/models?api_key=never-log-this".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::new(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let outcome = outcomes.recv().await.unwrap();
+    assert!(outcome.detail.contains("upstream connection failed"));
+    let event = request_outcome_event(outcome).to_string();
+    assert!(!event.contains("never-log-this"), "{event}");
+    assert!(!event.contains("api_key"), "{event}");
+}

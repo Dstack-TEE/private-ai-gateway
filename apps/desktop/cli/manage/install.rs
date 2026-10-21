@@ -203,7 +203,10 @@ mod platform {
 
     pub fn status() -> Result<CommandRegistration, String> {
         let executable = current_executable()?;
-        let directory = managed_system_directory(&executable).unwrap_or(default_directory()?);
+        let directory = match managed_system_directory(&executable) {
+            Some(directory) => directory,
+            None => default_directory()?,
+        };
         inspect(&executable, &directory, env::var_os("PATH").as_deref())
     }
 

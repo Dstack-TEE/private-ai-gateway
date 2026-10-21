@@ -96,7 +96,7 @@ impl CustodyPolicy {
     }
 }
 
-fn parse_app_id_subject(subject: &str) -> Result<Vec<u8>, CustodyPolicyError> {
+pub(crate) fn parse_app_id_subject(subject: &str) -> Result<Vec<u8>, CustodyPolicyError> {
     subject
         .strip_prefix(APP_ID_SUBJECT_PREFIX)
         .filter(|hex| !hex.is_empty())
