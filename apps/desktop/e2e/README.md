@@ -102,7 +102,8 @@ Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
 (`DSH_TELEMETRY_DISABLED`). DeepSeek Harness is installed from npm without its
 install scripts; its one-shot command is `dsh headless`. For dsh the reply step
 also checks the composed configuration with `--dump-config`: `acp` and the
-default model point at the Local API, DeepSeek web search is disabled, and the
+default model point at the Local API, the headless credential store is enabled,
+DeepSeek web search is disabled, and the
 shipped `acp` row still has only `provider` and `model`, the fields the
 connection replaces. It also replays the connected provider through a
 `--patch` overlay against a local recorder. That must receive no

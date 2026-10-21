@@ -490,8 +490,9 @@ uses `/private/tmp`.
 
 ### DeepSeek Harness
 
-DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is supported at 0.1.7-rc.2, the
-version the live test installs; 0.2.0-rc.1 has the same configuration contract.
+DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`) is verified at 0.2.1-rc.2 by
+the live test, which resolves the latest release on every run. The projection
+also retains the configuration contract used by 0.1.7-rc.2 and 0.2.0-rc.1.
 dsh composes each profile from its bundle layers, then
 `$DSH_HOME/profiles/<name>/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`
 (`~/.dsh` by default), then any `--patch` overlays. Each layer is a list of items
@@ -500,16 +501,20 @@ row's whole config. Every profile, the dsh desktop app's included, reads the hom
 layer, and dsh never writes it, so a connection edits only that file. Profiles
 created later are covered too.
 
-The connection adds four keyed items there:
+The connection adds five keyed items there:
 - a `private-ai-proxy` provider in `llm-pi-ai` (Chat Completions, `[TEE]` model
   names, and the compatibility switches the Local API needs);
 - the default model in `agent-default-model`;
 - the same provider and model in `acp`, the acp profile's row, which picks its
-  own model instead of the default (the pinned acp-app bundle ships its config
+  own model instead of the default (the tested acp-app bundle ships its config
   as just `provider` and `model`, and the live test fails if that changes);
 - `disabled: true` on `web-search-deepseek`. That row would otherwise send
   search queries to DeepSeek with the user's own key. Search providers the
-  user installs (Exa, Perplexity) keep using their own keys.
+  user installs (Exa, Perplexity) keep using their own keys;
+- `disabled: false` on `credentials`. The 0.2.1-rc.2 headless bundle disables
+  the managed credential store by default. Re-enabling that service is the
+  [documented override](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/bundle/headless#credentials)
+  for reading saved keys, including the proxy's token.
 
 A layer that disables the `acp` row, or that inserts a row of
 `@deepseek-ai/dsh-web-search-deepseek` or `@deepseek-ai/dsh-acp` under another
@@ -524,6 +529,10 @@ The provider reads its token through `apiKeyEnv: PRIVATE_AI_PROXY_DSH_TOKEN`,
 which the connection stores in dsh's `.credentials.yaml`:
 - The store is owner-only, reloads live and is never exported to the processes
   dsh starts.
+- In 0.2.1-rc.2, saved keys take precedence over the launch environment, then
+  the project's and Home's `.env` files. Earlier releases put the launch
+  environment first, so connecting still refuses a token reference exported
+  in the backend's environment.
 - Writes hold dsh's own `<file>.lock` writer lock. A lock whose holder has
   exited is taken over by dsh's own `takeOverExitedLock` rule, with the same
   process probe Node uses on Unix and Windows; a live holder is waited for,
@@ -565,7 +574,8 @@ Not protected, and named in the connect note:
 - the `sdk` and `sdk-minimal` profiles, for developers embedding dsh, which
   choose their provider in code;
 - runs started with `--patch` overlays;
-- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell;
+- a `PRIVATE_AI_PROXY_DSH_TOKEN` exported in the user's shell on older dsh
+  releases that resolve the launch environment before saved credentials;
 - a `DSH_HOME` exported in the user's shell. The app reads `DSH_HOME` only from
   its own environment, and the MAS build never does.
 
