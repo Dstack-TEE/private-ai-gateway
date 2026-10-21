@@ -83,6 +83,8 @@ release from its installer's official source: npm's `dist-tags.latest`, Claude
 Code's native release channel, OpenCode 2's update API, GitHub's latest release
 for Bun and Hermes, and nodejs.org's release index for Node's 24.x line.
 `OPENCODE_VERSION` selects OpenCode 1 and `OPENCODE_V2_VERSION` OpenCode 2.
+Lookups retry network errors, HTTP 429 and 5xx up to three times, waiting
+one, two and four seconds; an exhausted lookup fails the run before installation.
 The versions under test appear at the start and in the final summary, including
 when installation fails. Installers still have to report those exact versions.
 The Codex catalog baseline (`agent-bridge/resources/codex/manifest.json`) is

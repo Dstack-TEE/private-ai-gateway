@@ -1,6 +1,7 @@
 // Resolve the installers' release channels once, on the host, so every
 // installed version can be checked and the same inputs reported on failure.
 import { readFile } from "node:fs/promises";
+import { setTimeout } from "node:timers/promises";
 import { parseEnv } from "node:util";
 
 const npmPackages = {
@@ -13,9 +14,22 @@ const npmPackages = {
 };
 
 async function request(url, options) {
-  const response = await fetch(url, { ...options, signal: AbortSignal.timeout(30_000) });
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  return response;
+  for (let attempt = 0; ; attempt++) {
+    let response;
+    try {
+      response = await fetch(url, { ...options, signal: AbortSignal.timeout(30_000) });
+    } catch (error) {
+      if (attempt === 3) throw new Error(`${url}: ${error.message}`, { cause: error });
+    }
+    if (response) {
+      if (response.ok) return response;
+      await response.body?.cancel();
+      if (attempt === 3 || (response.status !== 429 && response.status < 500)) {
+        throw new Error(`${url}: HTTP ${response.status}`);
+      }
+    }
+    await setTimeout(1_000 * 2 ** attempt);
+  }
 }
 
 async function latest(name) {
