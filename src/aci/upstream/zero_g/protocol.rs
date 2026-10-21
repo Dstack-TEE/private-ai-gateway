@@ -21,8 +21,17 @@ pub(super) const SEAL_INFO: &[u8] = b"0g-pc/v1/seal";
 pub(super) const RESP_INFO: &[u8] = b"0g-pc/v1/resp";
 pub(super) const E2EE: &str = "_e2ee";
 
-/// The chat profile's default sealed set (§5.1).
-const SEALED_FIELDS: &[&str] = &["messages", "tools", "tool_choice"];
+/// The chat profile's default sealed set, plus the output schema and the
+/// reasoning controls, which §5.1 lets a client seal too. The broker merges
+/// them back into the request it serves.
+const SEALED_FIELDS: &[&str] = &[
+    "messages",
+    "tools",
+    "tool_choice",
+    "response_format",
+    "reasoning_effort",
+    "chat_template_kwargs",
+];
 /// Fields sent in the clear but bound in the AAD. Anything else is refused
 /// rather than sent in the clear (§5.1 would leave it cleartext).
 const CLEARTEXT_FIELDS: &[&str] = &[
@@ -45,7 +54,6 @@ const CLEARTEXT_FIELDS: &[&str] = &[
     "top_logprobs",
     "logit_bias",
     "parallel_tool_calls",
-    "reasoning_effort",
 ];
 
 #[derive(Debug, thiserror::Error)]

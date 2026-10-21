@@ -535,12 +535,61 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
 
-    let request = fixture.request(json!({"model": MODEL, "messages": [], "response_format": {}}));
-    let err = fixture
-        .backend
-        .forward_verified_prepared(request, &fixture.event)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, UpstreamError::InvalidRequest(_)));
+    for extra in [
+        json!({"user": "u-1"}),
+        json!({"reasoning": {"max_tokens": 1024}}),
+        json!({"reasoning": {"effort": "high", "exclude": true}}),
+        json!({"include_reasoning": false}),
+    ] {
+        let mut body = json!({"model": MODEL, "messages": []});
+        body.as_object_mut().unwrap().extend(object(&extra));
+        let err = fixture
+            .backend
+            .forward_verified_prepared(fixture.request(body), &fixture.event)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{extra}");
+    }
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn output_schema_and_reasoning_are_sealed_and_reasoning_is_translated() {
+    let schema = json!({"type": "json_schema", "json_schema": {"name": "secret_schema"}});
+    for (reasoning, effort) in [
+        (json!({"effort": "high"}), "high"),
+        (json!({"enabled": true}), "medium"),
+        (json!({"enabled": false}), "none"),
+    ] {
+        let fixture = Fixture::new(Mode::Ok).await;
+        let request = fixture.request(json!({
+            "model": MODEL,
+            "stream": false,
+            "messages": [{"role": "user", "content": "secret prompt"}],
+            "response_format": schema,
+            "reasoning": reasoning,
+            "chat_template_kwargs": {"enable_thinking": true},
+        }));
+        fixture
+            .backend
+            .forward_verified_prepared(request, &fixture.event)
+            .await
+            .unwrap();
+        let sent = object(&fixture.broker.requests.lock().unwrap()[0].1);
+        assert!(!Value::Object(sent.clone())
+            .to_string()
+            .contains("secret_schema"));
+        for field in [
+            "response_format",
+            "reasoning_effort",
+            "chat_template_kwargs",
+        ] {
+            assert!(!sent.contains_key(field), "{field} is cleartext");
+        }
+        let (opened, _, _) = open_request(&fixture.broker.secret, &sent).unwrap();
+        assert_eq!(opened["response_format"], schema);
+        assert_eq!(opened["reasoning_effort"], effort, "{reasoning}");
+        assert_eq!(opened["chat_template_kwargs"]["enable_thinking"], true);
+        assert!(!opened.contains_key("reasoning"));
+    }
 }

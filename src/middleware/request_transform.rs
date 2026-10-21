@@ -21,7 +21,7 @@ use crate::aggregator::service::{
     SYSTEMONE_PATH,
 };
 
-use super::reasoning::validate_effective;
+use super::reasoning::{effort_parameter, validate_effective};
 use super::types::{
     Engine, ProviderFormat, ReasoningConfig, ReasoningEffort, ReasoningFormat, RouteCandidate,
 };
@@ -421,14 +421,8 @@ fn candidate_params(
             object.insert("reasoning".to_string(), reasoning_object(&effective));
         }
         (ProviderFormat::Openai, ReasoningFormat::ReasoningEffort) => {
-            if effective.max_tokens.is_some() {
-                return invalid_reasoning(candidate, "cannot represent max_tokens");
-            }
-            let effort = effective.effort.unwrap_or_else(|| match effective.enabled {
-                Some(true) => ReasoningEffort::Medium,
-                Some(false) => ReasoningEffort::None,
-                None => unreachable!("validated reasoning has an effort, budget, or enabled flag"),
-            });
+            let effort = effort_parameter(&effective)
+                .or_else(|message| invalid_reasoning(candidate, message))?;
             object.insert(
                 "reasoning_effort".to_string(),
                 Value::String(effort.as_str().to_string()),

@@ -1,6 +1,6 @@
-//! Live 0G Private Computer test: private-tier verification, then one buffered
-//! and one streamed completion, each released only after the provider's
-//! signature verifies. `PRIVATE_AI_GATEWAY_0G_MODEL` overrides the model, as
+//! Live 0G Private Computer test: private-tier verification, then a buffered,
+//! a streamed and a sealed-JSON-mode completion, each released only after the
+//! provider's signature verifies. `PRIVATE_AI_GATEWAY_0G_MODEL` overrides the model, as
 //! the provider's on-chain id (default `glm-5.3`; e.g. `0GM-1.0-35B-A3B`).
 //!
 //! `PRIVATE_AI_GATEWAY_0G_API_KEY_FILE=/path/to/key cargo test --test 0g_private_computer_live -- --ignored --nocapture`
@@ -28,12 +28,15 @@ fn model() -> String {
 }
 
 fn prepared(stream: bool) -> PreparedUpstreamRequest {
-    let body = serde_json::json!({
+    prepared_body(serde_json::json!({
         "model": model(),
         "stream": stream,
         "messages": [{"role": "user", "content": "Reply with the word ok."}],
         "max_completion_tokens": 256,
-    });
+    }))
+}
+
+fn prepared_body(body: Value) -> PreparedUpstreamRequest {
     PreparedUpstreamRequest {
         request: UpstreamRequest {
             body: serde_json::to_vec(&body).unwrap(),
@@ -93,6 +96,27 @@ async fn completion_is_sealed_verified_and_signed() {
         .expect("buffered completion opens and its signature verifies");
     let body: Value = serde_json::from_slice(&buffered.body).unwrap();
     assert!(body["choices"].as_array().is_some_and(|c| !c.is_empty()));
+
+    // `response_format` and the translated `reasoning` travel sealed.
+    let json_mode = backend
+        .forward_verified_prepared(
+            prepared_body(serde_json::json!({
+                "model": model(),
+                "messages": [{"role": "user", "content": "Give the capital of France as JSON with the key capital."}],
+                "response_format": {"type": "json_object"},
+                "reasoning": {"effort": "low"},
+                "max_completion_tokens": 1024,
+            })),
+            &event,
+        )
+        .await
+        .expect("sealed JSON-mode completion opens and its signature verifies");
+    let body: Value = serde_json::from_slice(&json_mode.body).unwrap();
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
+    assert!(
+        serde_json::from_str::<Value>(content).is_ok_and(|v| v.is_object()),
+        "{content}"
+    );
 
     let events: Vec<String> = backend
         .forward_stream_verified_prepared(prepared(true), &event)
