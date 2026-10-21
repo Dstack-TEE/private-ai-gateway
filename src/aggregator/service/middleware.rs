@@ -56,7 +56,12 @@ fn abandoned_status(err: &UpstreamError) -> Option<u16> {
 }
 
 fn is_retryable_provider_status(status: u16) -> bool {
-    matches!(status, 401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504)
+    // 520-527: a reverse proxy in front of the provider could not get an
+    // answer from the node behind it, which says nothing about a sibling.
+    matches!(
+        status,
+        401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504 | 520..=527
+    )
 }
 
 // Whether to abandon this candidate and try the next. The status must be a
@@ -87,7 +92,7 @@ fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> 
     // The capacity signal must be failover-able regardless of the literal
     // status: error normalization surfaces the recognized capacity body under
     // ANY 5xx as a client 429, so a status outside the retryable whitelist
-    // (e.g. 520) carrying that body would otherwise be told "capacity" while
+    // (e.g. 501) carrying that body would otherwise be told "capacity" while
     // having been denied both the failover and the capacity retry that
     // capacity outcomes get.
     (is_retryable_provider_status(status) || is_upstream_capacity_signal(status, upstream_body))
@@ -945,14 +950,16 @@ mod tests {
         // Transient provider trouble (429/5xx), auth/account failures (401
         // invalid key, 402 out of credit, 403 no access), and 404 (this provider
         // dropped the model; a sibling's catalog may still have it) fail over.
-        for status in [401, 402, 403, 404, 429, 500, 502, 503, 504] {
+        for status in [
+            401, 402, 403, 404, 429, 500, 502, 503, 504, 520, 522, 524, 527,
+        ] {
             assert!(
                 is_retryable_provider_status(status),
                 "{status} should retry"
             );
         }
         // Request-level errors would fail identically on every candidate.
-        for status in [400, 422] {
+        for status in [400, 422, 501, 528] {
             assert!(
                 !is_retryable_provider_status(status),
                 "{status} should not retry"
