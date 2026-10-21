@@ -551,7 +551,7 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
 }
 
 #[tokio::test]
-async fn refuses_before_sending_without_a_binding() {
+async fn refuses_before_sending_without_a_binding_or_with_an_e2ee_field() {
     let fixture = Fixture::new(Mode::Ok).await;
     let mut unbound = fixture.event.clone();
     unbound.channel_bindings.clear();
@@ -561,6 +561,14 @@ async fn refuses_before_sending_without_a_binding() {
         .await
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
+
+    let body = json!({"model": MODEL, "messages": [], E2EE: {"v": 1}});
+    let err = fixture
+        .backend
+        .forward_verified_prepared(fixture.request(body), &fixture.event)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{err}");
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
 }
 
