@@ -208,9 +208,10 @@ receive the same input.
 
 When no candidate succeeds and some answered with `429` or the capacity marker,
 the gateway waits 2000 ms plus up to 2000 ms of random jitter and retries those
-candidates once. It skips this retry after ten seconds of forwarding. The
-receipt records the route that served the response. Usage reports carry each
-attempt to the control plane.
+candidates once. When a rejection carried a longer `Retry-After` (in seconds),
+the gateway waits that long instead, up to ten seconds. It skips this retry
+after ten seconds of forwarding. The receipt records the route that served the
+response. Usage reports carry each attempt to the control plane.
 
 ## Error handling
 
