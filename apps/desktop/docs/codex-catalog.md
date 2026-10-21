@@ -2,7 +2,8 @@
 
 Private AI Proxy supports the **Codex 0.157.1 baseline only**. Other client
 versions may reject its schema; PAP does not detect versions or provide legacy
-compatibility.
+compatibility. The live E2E resolves the latest Codex release independently of
+this reviewed catalog baseline, so a new upstream schema can fail the test.
 
 Codex reads the catalog when its app server starts. The CLI reuses a background
 app server that keeps its startup provider and catalog, and restarts it only when

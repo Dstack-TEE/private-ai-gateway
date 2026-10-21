@@ -133,7 +133,8 @@ token revocation, then fail-closed behavior and restoration on stop
 with OpenCode 2. It runs nightly on the newest `desktop-v*`
 release and on demand for a given tag. Its `desktop-e2e` environment holds the
 `PAP_E2E_API_KEY` secret and allows only `main`, so the test never runs on
-pull requests. Agent versions are pinned in `e2e/versions.env`.
+pull requests. Agent versions default to `latest` in `e2e/versions.env`;
+the harness resolves and reports exact releases before installing them.
 
 ### Release GitHub App
 

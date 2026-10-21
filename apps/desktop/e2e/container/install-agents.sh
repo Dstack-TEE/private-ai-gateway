@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs as the test user: installs each agent under test (PAP_E2E_AGENTS, or
-# every agent when empty) with its official installer at the version pinned in
-# versions.env, then runs it once. Its first run creates the configuration
+# every agent when empty) with its official installer at the version resolved
+# by run.sh, then runs it once. Its first run creates the configuration
 # folder that Private AI Proxy detects the agent by.
 set -euo pipefail
 export PATH="$AGENT_PATH:$PATH"
