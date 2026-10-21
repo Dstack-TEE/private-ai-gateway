@@ -827,14 +827,17 @@ async fn non_2xx_upstream_response_is_still_bound_to_a_receipt() {
 
     let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response.body, upstream_body);
+    // The client gets the gateway's envelope, not the provider's wording, and
+    // the receipt binds exactly that body.
+    assert_eq!(json_body(&response)["error"]["type"], "rate_limit_error");
+    assert_ne!(response.body, upstream_body);
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 
     let receipt_id = header_str(&response.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     assert_eq!(
         event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
-        sha256_hex(upstream_body)
+        sha256_hex(&response.body)
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 }
