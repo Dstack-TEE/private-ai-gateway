@@ -209,6 +209,7 @@ pub async fn check(
             installation,
             release_root(configured)?.as_str(),
             &version.to_string(),
+            std::env::consts::ARCH,
         )?,
         None => (Vec::new(), None),
     };
@@ -266,6 +267,7 @@ fn upgrade_steps(
     installation: Installation,
     root: &str,
     version: &str,
+    architecture: &str,
 ) -> Result<(Vec<String>, Option<String>), String> {
     let platform = if cfg!(windows) {
         "windows"
@@ -274,10 +276,10 @@ fn upgrade_steps(
     } else {
         "linux"
     };
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "x64"
+    let arch = match architecture {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        _ => return Ok((Vec::new(), None)),
     };
     // Mirrors artifactName() in scripts/release-artifacts.mjs.
     let name = |cli: bool, suffix: &str| {
@@ -469,7 +471,7 @@ mod tests {
         let root = root.as_str();
         assert_eq!(root, "https://example.test/o/r/releases/download/");
         let upgrade_steps = |installation, root, version| {
-            super::upgrade_steps(installation, root, version).unwrap()
+            super::upgrade_steps(installation, root, version, std::env::consts::ARCH).unwrap()
         };
         let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
@@ -499,6 +501,27 @@ mod tests {
                 upgrade_steps(Installation::Portable, root, "0.1.8").1.as_deref(),
                 Some("https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.tar.gz")
             );
+        }
+    }
+
+    #[test]
+    fn unsupported_architectures_have_no_download_or_asset_commands() {
+        for arch in ["arm", "i686", "riscv64"] {
+            for installation in [
+                Installation::Portable,
+                Installation::Deb,
+                Installation::DesktopPacman,
+            ] {
+                assert_eq!(
+                    super::upgrade_steps(installation, FEED, "0.1.8", arch).unwrap(),
+                    (Vec::new(), None)
+                );
+            }
+        }
+        for (arch, asset_arch) in [("aarch64", "arm64"), ("x86_64", "x64")] {
+            let (_, url) =
+                super::upgrade_steps(Installation::Portable, FEED, "0.1.8", arch).unwrap();
+            assert!(url.unwrap().contains(&format!("-{asset_arch}.")));
         }
     }
 }
