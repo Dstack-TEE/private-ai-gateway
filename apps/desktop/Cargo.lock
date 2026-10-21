@@ -4916,7 +4916,7 @@ dependencies = [
 
 [[package]]
 name = "private-ai-proxy"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 dependencies = [
  "aci-protocol",
  "aci-verify",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "private-ai-proxy-agent-bridge"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -4995,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "private-ai-proxy-core"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 dependencies = [
  "axum",
  "backon",
@@ -5031,7 +5031,7 @@ dependencies = [
 
 [[package]]
 name = "private-ai-proxy-desktop"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 dependencies = [
  "arboard",
  "auto-launch",
@@ -5066,7 +5066,7 @@ dependencies = [
 
 [[package]]
 name = "private-ai-proxy-runtime"
-version = "0.6.1-beta.1"
+version = "0.6.1"
 dependencies = [
  "aci-protocol",
  "argon2",
