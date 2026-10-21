@@ -12,7 +12,7 @@ export interface UiTransport {
 
 /** What the shell or the browser does itself, without a UI method. */
 export type UiPlatform = Pick<DesktopApi, "showEditMenu" | "getAppVersion" | "setUpdateChannel" | "prepareUpdate" | "restartToUpdate"
-  | "getCliRegistration" | "setCliRegistration" | "stopAllAndQuit" | "onNavigate" | "closeWindow" | "quit" | "copyText"
+  | "getCliRegistration" | "setCliRegistration" | "stopAllAndQuit" | "onNavigate" | "onCheckForUpdates" | "closeWindow" | "quit" | "copyText"
   | "selectProfileBackup" | "saveProfileExport" | "saveDiagnosticsExport" | "requestNotificationPermission"
   | "openNotificationSettings" | "openAboutLink" | "openWebUi" | "openAgentWebsite" | "openApiKeyPage" | "openOrganization" | "openTopUp"> & {
   /** Shows the page an account sign-in continues on. */

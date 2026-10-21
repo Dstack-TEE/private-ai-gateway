@@ -6,11 +6,12 @@ mod commands;
 mod app_data;
 mod autostart;
 mod cli_registration;
+mod clipboard;
 mod distribution;
 mod menu;
 mod notifications;
 mod tray;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 mod tray_theme;
 mod ui_api;
 mod updates;
@@ -100,22 +101,46 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
         .run(|_app, event| match event {
-            #[cfg(feature = "mac-app-store")]
             tauri::RunEvent::Exit => {
-                if let Some(client) = _app.try_state::<Arc<Client>>() {
-                    if client.is_running().unwrap_or(false) {
-                        if let Err(error) = client.shutdown() {
-                            tracing::warn!(
-                                "Cannot stop the App Store backend during exit: {error}"
-                            );
-                        }
-                    }
-                }
+                clipboard::release();
+                #[cfg(feature = "mac-app-store")]
+                stop_app_store_backend(_app);
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => window::show(_app),
             _ => {}
         });
+}
+
+/// How long quitting the App Store build waits for its backend to stop, so
+/// the client's much longer request and exit timeouts never hold the main
+/// thread. A backend that has the request stops on its own.
+#[cfg(feature = "mac-app-store")]
+const APP_STORE_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stops the App Store build's backend as the app quits, off the main thread,
+/// waiting for it at most `APP_STORE_EXIT_WAIT`.
+#[cfg(feature = "mac-app-store")]
+fn stop_app_store_backend(app: &AppHandle) {
+    let Some(client) = app.try_state::<Arc<Client>>() else {
+        return;
+    };
+    let client = client.inner().clone();
+    let (stopped, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if client.is_running().unwrap_or(false) {
+            let _ = stopped.send(client.shutdown());
+        } else {
+            let _ = stopped.send(Ok(()));
+        }
+    });
+    match result.recv_timeout(APP_STORE_EXIT_WAIT) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!("Cannot stop the App Store backend during exit: {error}");
+        }
+        Err(_) => tracing::warn!("The App Store backend did not stop before exit"),
+    }
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -146,7 +171,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     };
     app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    autostart::setup(app.handle())?;
+    if let Err(error) = autostart::setup(app.handle()) {
+        tracing::warn!("Open at Login is unavailable: {error}");
+    }
     if updates::configured(app.handle()) {
         app.handle()
             .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -164,7 +191,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = tray::setup(app.handle()) {
         tracing::warn!("The system tray is unavailable: {error}");
     } else {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        #[cfg(target_os = "windows")]
         if let Err(error) = tray_theme::setup(app.handle()) {
             tracing::warn!("Cannot observe system tray appearance: {error}");
         }
@@ -179,7 +206,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn configure_account_return(app: &tauri::App) {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    // Installers register the scheme; a development build registers itself.
+    #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "windows")))]
     if let Err(error) = app.deep_link().register_all() {
         tracing::warn!("Cannot register app return link: {error}");
     }

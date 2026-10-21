@@ -92,7 +92,9 @@ protection problems, is stored under that key.
   loaded and on each event, so a request made while the app starts is handled
   once, with the real profiles. One requested while a dialog is
   open shows once it closes, and one requested while a confirmation asks for an
-  answer is dropped, as with an alert. One app-level handler runs every native
+  answer is dropped, as with an alert. The macOS menu bar's Check for Updates…
+  also sends `pap://check-for-updates`, so the window checks again at once and
+  Settings shows the result. One app-level handler runs every native
   menu item, the tray's and the menu bar's. The window shows no success
   messages: the changed value, closed dialog or save panel is the feedback.
   Failures show inline in their dialog, form or settings row, and in an alert
@@ -100,6 +102,14 @@ protection problems, is stored under that key.
   Failed tray actions are only logged, like other tray apps; the tray and the
   window show the state that applies, and system notifications report
   background failures.
+- The window shows only the app's own pages (and the development server in a
+  development build); any other link or `window.open` opens in the default
+  browser. Copying the Local API key, from the tray or from a copy the
+  renderer marks secret (`copy_text` with `secret`), keeps it out of
+  clipboard history: Windows' history, cloud and monitoring exclusion
+  formats, macOS's `org.nspasteboard.ConcealedType`, and on Linux, which has
+  no standard, KDE's `x-kde-passwordManagerHint`, which other clipboard
+  managers may ignore.
 - Runtime `controller.rs` owns shared state and launch; its private modules group
   lifecycle, profiles, account login, credentials, agents and local endpoints.
   The same locks and transaction guards span these implementation modules.

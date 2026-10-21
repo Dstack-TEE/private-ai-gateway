@@ -209,8 +209,11 @@ Product identity is committed where each consumer reads it:
   maintainer address.
 - Images: `src-tauri/icons/` (from `tauri icon`, plus the Icon Composer project
   `AppIcon.icon` that `npm run build` compiles on macOS), the tray icons
-  `assets/tray/{protected,unprotected}{,-dark}.png` (the black ones are the
-  macOS menu bar template), `src/renderer/brand/app-icon-{light,dark}.png`,
+  `assets/tray/{protected,unprotected}{,-dark,-linux}.png` (the black ones are
+  the macOS menu bar template; the Linux ones are the `-dark` mark on a black
+  disc, since Linux panels do not report their color, with the unprotected
+  mark lightened to #8A8A8A for 3:1 contrast on dark panels),
+  `src/renderer/brand/app-icon-{light,dark}.png`,
   and the installer images
   `src-tauri/installer/brand-header.bmp` (150×57), `brand-sidebar.bmp`
   (164×314, the NSIS sizes) and `brand-dmg-background.png` (660×440, matching
