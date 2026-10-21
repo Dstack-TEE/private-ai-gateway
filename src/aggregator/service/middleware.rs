@@ -75,6 +75,8 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // re-tries exactly the candidates that answered 429 — once. A request that
 // already spent long in the chain is returned rather than delayed further.
 // The jittered delay de-synchronizes requests bounced by the same capacity dip.
+// An upstream that says how long to wait (`Retry-After`) is waited on instead
+// when that is longer, up to the walk's budget.
 //
 // x-user-tier does not gate this. Preemptible callers were once excluded on
 // the reasoning that they handle capacity signals themselves; they do, by
@@ -82,6 +84,17 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // under pressure, not retries.
 const CAPACITY_RETRY_DELAY_MS: u64 = 2_000;
 const CAPACITY_RETRY_MAX_ELAPSED: Duration = Duration::from_secs(10);
+
+/// A capacity rejection's `Retry-After`, in its delay-seconds form, capped at
+/// the walk's budget. An HTTP-date or unparsable value counts as absent.
+fn retry_after(headers: &HashMap<String, String>) -> Duration {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::ZERO, |secs| {
+            Duration::from_secs(secs).min(CAPACITY_RETRY_MAX_ELAPSED)
+        })
+}
 
 /// Whether this request may still take the delayed capacity-retry pass.
 fn capacity_retry_eligible(done: bool, started: Instant) -> bool {
@@ -370,9 +383,12 @@ impl AciService {
         // index, not route id: route ids may repeat in a caller-supplied chain,
         // and reconstructing the set from ids would replay a hard-failed twin.
         let mut capacity_indices: Vec<usize> = Vec::new();
+        // The longest `Retry-After` among this pass's capacity rejections.
+        let mut capacity_wait: Duration;
 
         loop {
             capacity_indices.clear();
+            capacity_wait = Duration::ZERO;
             let last_index = current.len() - 1;
             for (index, candidate) in current.iter().enumerate() {
                 let route_id = candidate.route_id.clone();
@@ -561,6 +577,7 @@ impl AciService {
                         {
                             if is_capacity {
                                 capacity_indices.push(index);
+                                capacity_wait = capacity_wait.max(retry_after(&upstream_headers));
                             }
                             retained = Some(RetainedResponse::Streaming {
                                 error: StreamingUpstreamError {
@@ -714,6 +731,7 @@ impl AciService {
                 {
                     if is_capacity {
                         capacity_indices.push(index);
+                        capacity_wait = capacity_wait.max(retry_after(&upstream_response.headers));
                     }
                     retained = Some(RetainedResponse::Buffered {
                         inputs: Box::new(BufferedCommit {
@@ -761,9 +779,9 @@ impl AciService {
                 // here must not be pinned on whichever candidate happened to
                 // answer last.
                 receipt_journal.clear_in_flight();
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    CAPACITY_RETRY_DELAY_MS + jitter,
-                ))
+                tokio::time::sleep(
+                    Duration::from_millis(CAPACITY_RETRY_DELAY_MS + jitter).max(capacity_wait),
+                )
                 .await;
                 current = capacity_indices
                     .iter()
@@ -943,7 +961,22 @@ impl AciService {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_provider_status;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use super::{is_retryable_provider_status, retry_after};
+
+    #[test]
+    fn retry_after_reads_delay_seconds_capped_at_the_budget() {
+        let headers = |value: &str| HashMap::from([("retry-after".to_string(), value.to_string())]);
+        assert_eq!(retry_after(&headers("5")), Duration::from_secs(5));
+        assert_eq!(retry_after(&headers("60")), Duration::from_secs(10));
+        assert_eq!(
+            retry_after(&headers("Wed, 21 Oct 2026 07:28:00 GMT")),
+            Duration::ZERO
+        );
+        assert_eq!(retry_after(&HashMap::new()), Duration::ZERO);
+    }
 
     #[test]
     fn retryable_covers_transient_and_account_specific_statuses() {
