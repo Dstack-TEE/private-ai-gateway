@@ -20,7 +20,9 @@ use super::{
     ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
-use crate::aci::upstream::{UpstreamError, UpstreamRequest, UpstreamResponse};
+use crate::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::sse_framing::SseFramingObserver;
@@ -46,11 +48,15 @@ use std::time::{Duration, Instant};
 /// Status recorded for a candidate that produced no HTTP response: 504 when the
 /// gateway's own connect/read deadline expired, 502 for every other failure, and
 /// none for a request the route cannot carry — the caller's fault, which must
-/// not count against the provider.
-fn abandoned_status(err: &UpstreamError) -> Option<u16> {
+/// not count against the provider. That skip leaves no attempt behind, so it
+/// is logged; the adapters' messages name a field or path, never content.
+fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> Option<u16> {
     match err {
         UpstreamError::Timeout(_) => Some(504),
-        UpstreamError::InvalidRequest(_) => None,
+        UpstreamError::InvalidRequest(reason) => {
+            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, reason = %reason, "candidate skipped before sending: the route cannot carry this request");
+            None
+        }
         _ => Some(502),
     }
 }
@@ -532,7 +538,7 @@ impl AciService {
                             // reverify outranks them at 3). The recorded status
                             // still tells them apart: a deadline the gateway's
                             // client enforced is 504, everything else 502.
-                            let status = abandoned_status(&err);
+                            let status = abandoned_status(&err, &prepared);
                             upgrade_err(&mut aggregated_err, 2, err.into());
                             Err(status)
                         }
@@ -691,7 +697,7 @@ impl AciService {
                         // reverify outranks them at 3). The recorded status
                         // still tells them apart: a deadline the gateway's
                         // client enforced is 504, everything else 502.
-                        let status = abandoned_status(&err);
+                        let status = abandoned_status(&err, &prepared);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         Err(status)
                     }

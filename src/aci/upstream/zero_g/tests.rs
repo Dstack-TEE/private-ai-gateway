@@ -551,7 +551,7 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
 }
 
 #[tokio::test]
-async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
+async fn refuses_before_sending_without_a_binding() {
     let fixture = Fixture::new(Mode::Ok).await;
     let mut unbound = fixture.event.clone();
     unbound.channel_bindings.clear();
@@ -561,63 +561,47 @@ async fn refuses_before_sending_without_a_binding_or_with_unknown_fields() {
         .await
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
-
-    for (extra, message) in [
-        (json!({"user": "u-1"}), r#"request field "user""#),
-        (
-            json!({"thinking": {"type": "disabled"}}),
-            r#"request field "thinking""#,
-        ),
-        // The middleware's default dialect: the route lacks a reasoning_format.
-        (json!({"reasoning": {"effort": "high"}}), "reasoning_format"),
-    ] {
-        let mut body = json!({"model": MODEL, "messages": []});
-        body.as_object_mut().unwrap().extend(object(&extra));
-        let err = fixture
-            .backend
-            .forward_verified_prepared(fixture.request(body), &fixture.event)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&err, UpstreamError::InvalidRequest(m) if m.contains(message)),
-            "{extra}: {err}"
-        );
-    }
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn output_schema_and_reasoning_controls_are_sealed() {
+async fn fields_outside_the_cleartext_set_are_sealed() {
     let fixture = Fixture::new(Mode::Ok).await;
     let schema = json!({"type": "json_schema", "json_schema": {"name": "secret_schema"}});
-    // As the middleware writes them for a `reasoning_effort` route, plus a
-    // direct caller's chat template switch.
-    let request = fixture.request(json!({
-        "model": MODEL,
-        "stream": false,
+    // The middleware's reasoning controls for a `reasoning_effort` route, a
+    // direct caller's chat template switch, and fields OpenAI SDKs and agents
+    // send that the transport has no rule for.
+    let sealed = json!({
         "messages": [{"role": "user", "content": "secret prompt"}],
         "response_format": schema,
         "reasoning_effort": "high",
         "chat_template_kwargs": {"enable_thinking": true},
-    }));
+        "user": "secret-user",
+        "store": false,
+        "metadata": {"session": "secret-session"},
+        "prompt_cache_key": "secret-cache-key",
+    });
+    let mut body = object(&sealed);
+    body.extend(object(
+        &json!({"model": MODEL, "stream": false, "temperature": 0.5}),
+    ));
     fixture
         .backend
-        .forward_verified_prepared(request, &fixture.event)
+        .forward_verified_prepared(fixture.request(Value::Object(body)), &fixture.event)
         .await
         .unwrap();
     let sent = object(&fixture.broker.requests.lock().unwrap()[0].1);
-    assert!(!Value::Object(sent.clone())
-        .to_string()
-        .contains("secret_schema"));
-    for field in [
-        "response_format",
-        "reasoning_effort",
-        "chat_template_kwargs",
-    ] {
-        assert!(!sent.contains_key(field), "{field} is cleartext");
-    }
+    let mut cleartext: Vec<_> = sent.keys().map(String::as_str).collect();
+    cleartext.sort_unstable();
+    assert_eq!(cleartext, [E2EE, "model", "stream", "temperature"]);
+    assert!(!Value::Object(sent.clone()).to_string().contains("secret"));
     let (opened, _, _) = open_request(&fixture.broker.secret, &sent).unwrap();
-    assert_eq!(opened["response_format"], schema);
-    assert_eq!(opened["reasoning_effort"], "high");
-    assert_eq!(opened["chat_template_kwargs"]["enable_thinking"], true);
+    for (field, value) in object(&sealed) {
+        assert_eq!(opened[&field], value, "{field}");
+    }
+
+    // Cleartext fields are bound: rewriting one fails the enclave's `Open`.
+    let mut rewritten = sent;
+    rewritten["temperature"] = 1.into();
+    assert!(open_request(&fixture.broker.secret, &rewritten).is_none());
 }
