@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.1...desktop-v0.6.2) (2026-10-21)
+
+
+### Bug Fixes
+
+* **desktop:** connect DeepSeek Harness 0.2.1, whose headless bundle disables the credentials service ([#478](https://github.com/Dstack-TEE/private-ai-gateway/issues/478)) ([2154f50](https://github.com/Dstack-TEE/private-ai-gateway/commit/2154f50cbbfefc44f2415a52389e3a20bf901054))
+* **desktop:** keep Claude Code before 2.1.299 from sending the local agent token with feature-flag requests to api.anthropic.com ([#478](https://github.com/Dstack-TEE/private-ai-gateway/issues/478)) ([2154f50](https://github.com/Dstack-TEE/private-ai-gateway/commit/2154f50cbbfefc44f2415a52389e3a20bf901054))
+* **desktop:** restore a setting the user already had when an agent disconnects ([#478](https://github.com/Dstack-TEE/private-ai-gateway/issues/478)) ([2154f50](https://github.com/Dstack-TEE/private-ai-gateway/commit/2154f50cbbfefc44f2415a52389e3a20bf901054))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.6.2 ([#479](https://github.com/Dstack-TEE/private-ai-gateway/issues/479)) ([0dfd36e](https://github.com/Dstack-TEE/private-ai-gateway/commit/0dfd36e8e407380f16b67849d9475e33ca64788d))
+
 ## [0.6.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.0...desktop-v0.6.1) (2026-10-21)
 
 
