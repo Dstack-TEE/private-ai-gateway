@@ -101,14 +101,14 @@ async fn completion_is_sealed_verified_and_signed() {
     assert!(body.get("x_0g_trace").is_none());
     assert_eq!(body["model"], model());
 
-    // `response_format` and the translated `reasoning` travel sealed.
+    // `response_format` and `reasoning_effort` travel sealed.
     let json_mode = backend
         .forward_verified_prepared(
             prepared_body(serde_json::json!({
                 "model": model(),
                 "messages": [{"role": "user", "content": "Give the capital of France as JSON with the key capital."}],
                 "response_format": {"type": "json_object"},
-                "reasoning": {"effort": "low"},
+                "reasoning_effort": "low",
                 "max_completion_tokens": 1024,
             })),
             &event,

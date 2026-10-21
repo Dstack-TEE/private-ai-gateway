@@ -99,20 +99,6 @@ pub fn validate_effective(config: &ReasoningConfig) -> Result<(), String> {
     validate(config)
 }
 
-/// The `reasoning_effort` dialect's value: the explicit effort, else `medium`
-/// for enabled and `none` for disabled. A token budget has no effort.
-pub fn effort_parameter(config: &ReasoningConfig) -> Result<ReasoningEffort, &'static str> {
-    if config.max_tokens.is_some() {
-        return Err("cannot represent max_tokens");
-    }
-    match (config.effort, config.enabled) {
-        (Some(effort), _) => Ok(effort),
-        (None, Some(true)) => Ok(ReasoningEffort::Medium),
-        (None, Some(false)) => Ok(ReasoningEffort::None),
-        (None, None) => Err("reasoning configuration is empty"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

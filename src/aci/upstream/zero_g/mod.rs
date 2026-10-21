@@ -21,8 +21,6 @@ use super::{
     UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
-use crate::middleware::reasoning;
-use crate::middleware::types::ReasoningConfig;
 
 pub const ZERO_G_PROVIDER: &str = "0g-private-computer";
 pub const ZERO_G_E2EE_ALGORITHM: &str = "0g-pc-v1-hpke-x25519-hkdf-sha256-chacha20poly1305";
@@ -131,7 +129,6 @@ impl ZeroGProviderBackend {
             ))
         })?;
         let api = broker_api(&provider.endpoint).map_err(UpstreamError::Transport)?;
-        let request = translate_reasoning(request)?;
         let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)?;
 
         // No caller or route headers are forwarded, so no X-0G-* control can
@@ -175,43 +172,6 @@ impl ZeroGProviderBackend {
         };
         Ok((response, opener, check))
     }
-}
-
-/// OpenRouter's `reasoning` object, which the middleware's default dialect and
-/// direct callers send, becomes the `reasoning_effort` 0G providers honour:
-/// a level is sent as itself and off as `none`, as the middleware's
-/// `reasoning_effort` dialect encodes them, and on without a level as the
-/// provider's default, which is no `reasoning_effort` (the provider reasons by
-/// default; its `medium` barely does). A token budget and excluding reasoning
-/// from the response have no 0G equivalent and are refused.
-fn translate_reasoning(request: Map<String, Value>) -> Result<Map<String, Value>, UpstreamError> {
-    if !request.contains_key("reasoning") && !request.contains_key("include_reasoning") {
-        return Ok(request);
-    }
-    let (params, config, exclude) = reasoning::normalize_chat_request(&Value::Object(request))
-        .map_err(UpstreamError::InvalidRequest)?;
-    let invalid = |message: &str| {
-        UpstreamError::InvalidRequest(format!("0G Private Computer reasoning: {message}"))
-    };
-    if exclude {
-        return Err(invalid("cannot exclude reasoning from the response"));
-    }
-    let Value::Object(mut request) = params else {
-        return Err(invalid("request body must be a JSON object"));
-    };
-    match config {
-        None
-        | Some(ReasoningConfig {
-            effort: None,
-            max_tokens: None,
-            enabled: Some(true),
-        }) => {}
-        Some(config) => {
-            let effort = reasoning::effort_parameter(&config).map_err(invalid)?;
-            request.insert("reasoning_effort".to_string(), effort.as_str().into());
-        }
-    }
-    Ok(request)
 }
 
 /// The first provider, in preview order, whose recorded key hashes to a

@@ -80,8 +80,15 @@ pub(crate) fn seal_chat_request(
     if let Some(field) = request.keys().find(|key| {
         !SEALED_FIELDS.contains(&key.as_str()) && !CLEARTEXT_FIELDS.contains(&key.as_str())
     }) {
+        // The middleware writes reasoning in the route's `reasoning_format`;
+        // the nested object is its default dialect, which 0G does not take.
+        let hint = if field == "reasoning" {
+            "; the route's reasoning_format must be reasoning_effort"
+        } else {
+            ""
+        };
         return Err(UpstreamError::InvalidRequest(format!(
-            "request field {field:?} is not supported by the 0G E2EE transport"
+            "request field {field:?} is not supported by the 0G E2EE transport{hint}"
         )));
     }
     if !request.contains_key("messages") {

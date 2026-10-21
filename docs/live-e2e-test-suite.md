@@ -136,7 +136,7 @@ It verifies the private-tier candidates for `glm-5.3`, or for the model in
 `PRIVATE_AI_GATEWAY_0G_MODEL`, given as the provider's on-chain model id such as
 `0GM-1.0-35B-A3B` (route preview, on-chain
 record, DCAP quote, boot chain, signer), then sends a buffered completion, a
-streamed completion, and a buffered JSON-mode completion with `reasoning`
+streamed completion, and a buffered JSON-mode completion with `reasoning_effort`
 (both sealed). Each must open and its provider signature must verify; the
 stream must end in `[DONE]`, and the JSON-mode content must parse as a JSON
 object. `PRIVATE_AI_GATEWAY_0G_CHAIN_RPC_URL`
