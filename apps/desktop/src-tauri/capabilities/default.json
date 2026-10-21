@@ -10,6 +10,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+    },
     "allow-show-edit-menu",
     "allow-get-appearance",
     "allow-get-state",

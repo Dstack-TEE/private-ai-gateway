@@ -2,7 +2,7 @@
 //! the `pap` command. On macOS a launch registers it once a backend answers,
 //! unless the user turned that off.
 
-use std::{sync::Arc, time::Duration};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use desktop_core::{
     client::{CallError, Client},
@@ -10,7 +10,6 @@ use desktop_core::{
     protocol::{rpc, Preference},
 };
 use tauri::{AppHandle, Manager};
-use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 use crate::{distribution, run_blocking};
 
@@ -32,39 +31,39 @@ struct CliStartupState {
     last_error: Option<String>,
 }
 
-async fn run(app: &AppHandle, arguments: &[&str]) -> Result<CommandRegistration, String> {
-    let (mut events, child) = app
-        .shell()
-        .sidecar("private-ai-proxy")
-        .map_err(|_| "The bundled pap command is unavailable in this installation")?
+/// Runs the bundled `pap`. Tauri bundles it next to the app's executable
+/// (`Contents/MacOS` in a macOS bundle), where its shell plugin finds sidecars.
+async fn run(arguments: &[&str]) -> Result<CommandRegistration, String> {
+    let directory = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(ToOwned::to_owned))
+        .ok_or("The bundled pap command is unavailable in this installation")?;
+    let mut command = tokio::process::Command::new(
+        directory.join(format!("private-ai-proxy{}", std::env::consts::EXE_SUFFIX)),
+    );
+    command
         .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // CREATE_NO_WINDOW: the console-subsystem `pap` opens no console window.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let child = command
         .spawn()
         .map_err(|_| "The pap command could not complete")?;
-    let finished = async {
-        let (mut stdout, mut code) = (Vec::new(), None);
-        while let Some(event) = events.recv().await {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    stdout.extend(line);
-                    stdout.push(b'\n');
-                }
-                CommandEvent::Terminated(payload) => code = payload.code,
-                _ => {}
-            }
-        }
-        (stdout, code)
-    };
-    let Ok((stdout, code)) = tokio::time::timeout(TIMEOUT, finished).await else {
-        let _ = child.kill();
+    let Ok(output) = tokio::time::timeout(TIMEOUT, child.wait_with_output()).await else {
         return Err("The pap command did not finish in time".to_string());
     };
-    if code != Some(0) {
+    let output = output.map_err(|_| "The pap command could not complete")?;
+    if !output.status.success() {
         return Err("The pap command could not update command-line access".to_string());
     }
-    if stdout.len() > 64 * 1024 {
+    if output.stdout.len() > 64 * 1024 {
         return Err("The pap command returned an invalid response".to_string());
     }
-    serde_json::from_slice(&stdout)
+    serde_json::from_slice(&output.stdout)
         .map_err(|_| "The pap command returned an invalid response".to_string())
 }
 
@@ -98,7 +97,7 @@ pub(crate) fn register_on_startup(app: &AppHandle) {
         state.attempted = enabled.is_ok();
         let result = match enabled {
             Ok(true) => match stable_location() {
-                Ok(()) => run(&app, &INSTALL).await.map(|_| ()),
+                Ok(()) => run(&INSTALL).await.map(|_| ()),
                 Err(error) => Err(error),
             },
             other => other.map(|_| ()),
@@ -145,7 +144,7 @@ pub(crate) async fn get_cli_registration(app: AppHandle) -> Result<CliRegistrati
     require_registration()?;
     let startup = app.state::<CliStartup>().inner().clone();
     let state = startup.0.lock().await;
-    let registration = run(&app, &["cli", "status", "--json"]).await?;
+    let registration = run(&["cli", "status", "--json"]).await?;
     Ok(CliRegistration {
         registration,
         startup_error: state.last_error.clone(),
@@ -165,12 +164,12 @@ pub(crate) async fn set_cli_registration(
     let mut state = startup.0.lock().await;
     let client = app.state::<Arc<Client>>().inner().clone();
     let registration = if installed {
-        let registration = run(&app, &INSTALL).await?;
+        let registration = run(&INSTALL).await?;
         set_automatic(client, true).await?;
         registration
     } else {
         set_automatic(client, false).await?;
-        run(&app, &["cli", "uninstall", "--json", "--yes"]).await?
+        run(&["cli", "uninstall", "--json", "--yes"]).await?
     };
     state.last_error = None;
     Ok(CliRegistration {
