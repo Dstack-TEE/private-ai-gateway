@@ -57,7 +57,15 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
             tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, reason = %reason, "candidate skipped before sending: the route cannot carry this request");
             None
         }
-        _ => Some(502),
+        // A withheld non-2xx is forwarded as a response before it gets here;
+        // one that did not is still the upstream's answer.
+        UpstreamError::Upstream { status } if !(200..300).contains(status) => Some(*status),
+        // A withheld 2xx (no verifiable body) is no answer; the rest never
+        // got one.
+        UpstreamError::Upstream { .. }
+        | UpstreamError::Routing(_)
+        | UpstreamError::Transport(_)
+        | UpstreamError::ChannelBindingMismatch(_) => Some(502),
     }
 }
 
