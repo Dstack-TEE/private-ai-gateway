@@ -8,7 +8,10 @@ use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
     VerificationResult,
 };
-use crate::aci::upstream::{PreparedUpstreamRequest, UpstreamError, UpstreamRequest};
+use crate::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
+};
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
@@ -42,6 +45,34 @@ pub(super) enum ReverifyOutcome<R> {
     /// error. Both map to the caller's failure path; the helper has already
     /// applied any mismatch invalidation.
     Failed(UpstreamError),
+}
+
+/// A response with an upstream's status and no body: what an adapter that
+/// withholds unverified bodies answered ([`UpstreamError::Upstream`]).
+pub(super) trait WithheldResponse {
+    fn withheld(status_code: u16) -> Self;
+}
+
+impl WithheldResponse for UpstreamResponse {
+    fn withheld(status_code: u16) -> Self {
+        Self {
+            status_code,
+            body: Vec::new(),
+            headers: Default::default(),
+            served_instance_id: None,
+        }
+    }
+}
+
+impl WithheldResponse for UpstreamStreamResponse {
+    fn withheld(status_code: u16) -> Self {
+        Self {
+            status_code,
+            headers: Default::default(),
+            body: Box::pin(futures_util::stream::empty()),
+            served_instance_id: None,
+        }
+    }
 }
 
 /// A session sealed for one verified channel binding (one per Chutes instance).
@@ -209,28 +240,30 @@ impl AciService {
             response_model.as_deref(),
         );
 
-        // A client image-URL fetch failure the upstream reports as a 5xx is the
-        // caller's bad input: remap it to a surface-correct 400. This is decided on
-        // the cleartext body here — before E2EE encryption and before the receipt is
-        // built — so the receipt attests exactly the body/status the client receives.
+        // An upstream error reaches the client as the middleware and the
+        // streaming path give it: the gateway's own envelope at a mapped status,
+        // so the provider's wording and its auth statuses (which would read as
+        // the caller's) never pass through, and a client image-URL fetch failure
+        // becomes a 400. This is decided on the cleartext body here — before E2EE
+        // encryption and before the receipt is built — so the receipt attests
+        // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
-        let (client_status, client_body) = match crate::middleware::errors::image_input_error_parts(
-            crate::middleware::errors::surface_for_path(endpoint_path),
-            received_body,
-            upstream_response.status_code,
-            &upstream_response.body,
-            None,
-        ) {
-            Some((status, body)) => {
-                // The remapped body is a JSON envelope; don't let the client inherit
-                // a non-JSON upstream content-type (some backends 5xx with text/*).
-                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
-                (status, body)
-            }
-            None => (
+        let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
+            (
                 upstream_response.status_code,
                 upstream_response.body.clone(),
-            ),
+            )
+        } else {
+            // The envelope is JSON; don't let the client inherit a non-JSON
+            // upstream content-type (some backends 5xx with text/*).
+            upstream_headers.insert("content-type".to_string(), "application/json".to_string());
+            crate::middleware::errors::normalize_upstream_error_parts(
+                crate::middleware::errors::surface_for_path(endpoint_path),
+                upstream_response.status_code,
+                &upstream_response.body,
+                received_body,
+                None,
+            )
         };
 
         let e2ee = req.e2ee.as_ref();
@@ -576,6 +609,7 @@ impl AciService {
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
     where
+        R: WithheldResponse,
         Fwd: FnMut(PreparedUpstreamRequest, UpstreamVerifiedEvent) -> Fut,
         Fut: std::future::Future<Output = Result<R, UpstreamError>>,
     {
@@ -586,6 +620,14 @@ impl AciService {
             // and `prepared` was already cloned per attempt before this refactor.
             match forward(prepared.clone(), recorded_event.clone()).await {
                 Ok(response) => return ReverifyOutcome::Forwarded(response),
+                // The upstream refused; only its body was withheld. As that
+                // status with an empty body, every caller classifies it like
+                // any other upstream error: the attempt's status, failover, the
+                // capacity retry and the client's status. A 2xx without a
+                // verifiable body is no answer, so it stays a failure.
+                Err(UpstreamError::Upstream { status }) if !(200..300).contains(&status) => {
+                    return ReverifyOutcome::Forwarded(R::withheld(status))
+                }
                 Err(UpstreamError::ChannelBindingMismatch(_))
                     if !caller_supplied_event
                         && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>

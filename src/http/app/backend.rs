@@ -118,9 +118,8 @@ async fn forward_to_backend_inner(
                 // directly. This used to relay the upstream's status, headers and
                 // error body verbatim, which handed the client the provider's own
                 // error vocabulary; `normalize_upstream_error` scrubs it and subsumes
-                // the image-URL remap this arm used to do on its own. (The buffered
-                // branch below still returns the upstream error body as-is on this
-                // no-middleware path — see the note there.)
+                // the image-URL remap this arm used to do on its own. The service
+                // applies the same normalization to a buffered error.
                 normalize_upstream_error(
                     surface_for_path(input.endpoint_path),
                     forward.upstream_status,
@@ -171,12 +170,9 @@ async fn forward_to_backend_inner(
         .await;
     match result {
         Ok(forward) => {
-            // The service already remapped a client image-URL fetch failure to a
-            // surface-correct 400 (with a matching receipt + E2EE wire body), so the
-            // buffered response is returned uniformly here. A non-image upstream
-            // error body is returned as-is: on this no-middleware path the receipt is
-            // built over that body, so scrubbing it would have to move into the
-            // service (before the receipt), which is out of scope here.
+            // The service already normalized an upstream error into the gateway's
+            // envelope (with a matching receipt + E2EE wire body), so the buffered
+            // response is returned uniformly here.
             let resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
                 "application/json",

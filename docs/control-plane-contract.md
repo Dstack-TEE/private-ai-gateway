@@ -133,6 +133,13 @@ which the gateway encodes in the declared dialect. An explicit `reasoning` or
 translated, because that would require the gateway to invent an effort level.
 Without a declared `reasoningFormat`, the gateway does not interpret the switch.
 
+A reasoning budget (`reasoning.max_tokens`) goes unchanged only in the
+`reasoning` format. The `reasoning_effort` and `thinking_type` formats write it
+as an effort: up to 1024 tokens is `low`, up to 8192 is `medium`, and anything
+above is `high`, the same buckets used for Anthropic `thinking.budget_tokens`.
+The `chat_template_*` formats cannot carry a budget, so the candidate is
+skipped.
+
 ### System message hoisting
 
 Some chat templates, including Qwen's, reject a `system` message anywhere but

@@ -21,39 +21,27 @@ pub(super) const SEAL_INFO: &[u8] = b"0g-pc/v1/seal";
 pub(super) const RESP_INFO: &[u8] = b"0g-pc/v1/resp";
 pub(super) const E2EE: &str = "_e2ee";
 
-/// The chat profile's default sealed set, plus the output schema and the
-/// reasoning controls, which §5.1 lets a client seal too. The broker merges
-/// them back into the request it serves.
-const SEALED_FIELDS: &[&str] = &[
-    "messages",
-    "tools",
-    "tool_choice",
-    "response_format",
-    "reasoning_effort",
-    "chat_template_kwargs",
-];
-/// Fields sent in the clear but bound in the AAD. Anything else is refused
-/// rather than sent in the clear (§5.1 would leave it cleartext).
+/// Fields sent in the clear but bound in the AAD: those 0G's router reads
+/// before the broker opens the request. Every other field is sealed: §5.1 lets
+/// a client seal fields beyond the chat profile's default set, and the broker
+/// merges them back into the request it serves. The provider is pinned, so the
+/// router routes on nothing else.
 const CLEARTEXT_FIELDS: &[&str] = &[
+    // The router routes and attributes on it (§1, §5.3.2).
     "model",
+    // The router serves a stream by the cleartext `stream` (§12: a sealed
+    // `stream: true` reaches the upstream while the router sees a buffered
+    // request).
     "stream",
+    // The router forces `include_usage` to bill a stream unless the client set
+    // it; sealed, its rewrite would collide with the sealed name (§5.1, design
+    // `request-envelope-and-integrity.md` §7).
     "stream_options",
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
+    // 0G's design lists the output limit as read for routing and billing
+    // (`request-envelope-and-integrity.md` §1). The router's source is not
+    // public, so both spellings stay readable.
     "max_tokens",
     "max_completion_tokens",
-    "stop",
-    "n",
-    "presence_penalty",
-    "frequency_penalty",
-    "repetition_penalty",
-    "seed",
-    "logprobs",
-    "top_logprobs",
-    "logit_bias",
-    "parallel_tool_calls",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -77,19 +65,10 @@ pub(crate) fn seal_chat_request(
     enc_pub: &[u8; 32],
     signer: &str,
 ) -> Result<(Value, ResponseOpener), UpstreamError> {
-    if let Some(field) = request.keys().find(|key| {
-        !SEALED_FIELDS.contains(&key.as_str()) && !CLEARTEXT_FIELDS.contains(&key.as_str())
-    }) {
-        // The middleware writes reasoning in the route's `reasoning_format`;
-        // the nested object is its default dialect, which 0G does not take.
-        let hint = if field == "reasoning" {
-            "; the route's reasoning_format must be reasoning_effort"
-        } else {
-            ""
-        };
-        return Err(UpstreamError::InvalidRequest(format!(
-            "request field {field:?} is not supported by the 0G E2EE transport{hint}"
-        )));
+    if request.contains_key(E2EE) {
+        return Err(UpstreamError::InvalidRequest(
+            "request field \"_e2ee\" is reserved by the 0G E2EE transport".to_string(),
+        ));
     }
     if !request.contains_key("messages") {
         return Err(UpstreamError::InvalidRequest(
@@ -122,7 +101,7 @@ pub(crate) fn seal_chat_request(
 
     let (sealed, mut envelope): (Map<_, _>, Map<_, _>) = request
         .into_iter()
-        .partition(|(key, _)| SEALED_FIELDS.contains(&key.as_str()));
+        .partition(|(key, _)| !CLEARTEXT_FIELDS.contains(&key.as_str()));
     envelope.insert(
         E2EE.into(),
         serde_json::json!({

@@ -254,12 +254,11 @@ fn native_passthrough(params: &Value) -> Result<Value, TransformError> {
 /// `/v1/responses` in `supportedEndpoints` gets that original shaped for the
 /// Responses endpoint; every other candidate gets `params`, the chat body.
 ///
-/// A candidate that cannot shape THIS request is skipped (logged at debug,
-/// never surfaced to the client), and the remaining candidates keep the
-/// request alive: with capability filtering upstream, one mis-described
-/// backend must cost an attempt, not the whole request. Only when every
-/// candidate fails does the first error surface — that is a request nothing
-/// could serve.
+/// A candidate that cannot shape THIS request is skipped (never surfaced to
+/// the client), and the remaining candidates keep the request alive: with
+/// capability filtering upstream, one mis-described backend must cost an
+/// attempt, not the whole request. Only when every candidate fails does the
+/// first error surface — that is a request nothing could serve.
 pub fn build_candidates(
     params: &Value,
     endpoint: Endpoint,
@@ -268,7 +267,7 @@ pub fn build_candidates(
     responses: Option<ResponsesCandidateInput<'_>>,
 ) -> Result<Vec<(String, Value, Endpoint)>, TransformError> {
     let mut shaped = Vec::new();
-    let mut first_error: Option<TransformError> = None;
+    let mut skipped = Vec::new();
     // Converted once; every Chat candidate of a Messages request shares it.
     let messages_chat = (endpoint == Endpoint::Messages
         && candidates
@@ -294,20 +293,39 @@ pub fn build_candidates(
             Ok((upstream_endpoint, body)) => {
                 shaped.push((candidate.route_id.clone(), body, upstream_endpoint))
             }
-            Err(err) => {
-                tracing::debug!(
-                    route_id = %candidate.route_id,
-                    error = %err,
-                    "candidate cannot shape this request; skipping"
-                );
-                first_error.get_or_insert(err);
-            }
+            Err(err) => skipped.push((&candidate.route_id, err)),
         }
     }
-    match (shaped.is_empty(), first_error) {
-        (true, Some(err)) => Err(err),
-        _ => Ok(shaped),
+    if shaped.is_empty() {
+        // Nothing serves the request, so the first error becomes its 400.
+        for (route_id, err) in &skipped {
+            tracing::debug!(%route_id, error = %err, "candidate cannot shape this request");
+        }
+        return skipped
+            .into_iter()
+            .next()
+            .map_or(Ok(shaped), |(_, err)| Err(err));
     }
+    // Another candidate shaped the same request, so each skip depends on this
+    // route (its endpoints, format or reasoning dialect) and would otherwise
+    // lose it traffic silently. Route-attributed and endpoint errors are fixed
+    // text; a conversion error may quote the caller's values, so it is not
+    // logged.
+    for (route_id, err) in &skipped {
+        let reason =
+            if err.route_id().is_some() || matches!(err, TransformError::Unsupported { .. }) {
+                err.to_string()
+            } else {
+                "the request cannot be converted for this route".to_string()
+            };
+        tracing::warn!(
+            %route_id,
+            endpoint = endpoint.path(),
+            %reason,
+            "candidate cannot shape this request; skipping"
+        );
+    }
+    Ok(shaped)
 }
 
 /// The Chat bridge a request may take to a Chat-only candidate.
@@ -421,10 +439,7 @@ fn candidate_params(
             object.insert("reasoning".to_string(), reasoning_object(&effective));
         }
         (ProviderFormat::Openai, ReasoningFormat::ReasoningEffort) => {
-            if effective.max_tokens.is_some() {
-                return invalid_reasoning(candidate, "cannot represent max_tokens");
-            }
-            let effort = effective.effort.unwrap_or_else(|| match effective.enabled {
+            let effort = requested_effort(&effective).unwrap_or_else(|| match effective.enabled {
                 Some(true) => ReasoningEffort::Medium,
                 Some(false) => ReasoningEffort::None,
                 None => unreachable!("validated reasoning has an effort, budget, or enabled flag"),
@@ -441,9 +456,6 @@ fn candidate_params(
             set_chat_template_reasoning(object, &effective, candidate, "enable_thinking")?;
         }
         (ProviderFormat::Openai, ReasoningFormat::ThinkingType) => {
-            if effective.max_tokens.is_some() {
-                return invalid_reasoning(candidate, "cannot represent max_tokens");
-            }
             let Some(enabled) = reasoning_enabled(&effective) else {
                 return invalid_reasoning(candidate, "reasoning configuration is empty");
             };
@@ -452,7 +464,7 @@ fn candidate_params(
                 json!({ "type": if enabled { "enabled" } else { "disabled" } }),
             );
             // The level only means something next to an enabled switch.
-            if let Some(effort) = effective.effort.filter(|_| enabled) {
+            if let Some(effort) = requested_effort(&effective).filter(|_| enabled) {
                 object.insert(
                     "reasoning_effort".to_string(),
                     Value::String(effort.as_str().to_string()),
@@ -698,6 +710,22 @@ fn reasoning_enabled(reasoning: &ReasoningConfig) -> Option<bool> {
                 .map(|effort| effort != ReasoningEffort::None)
         })
         .or(reasoning.max_tokens.map(|_| true))
+}
+
+/// A reasoning budget as the effort level of a dialect that carries only an
+/// effort, bucketed as claude-code-router and new-api bucket it (≤1024 low,
+/// ≤8192 medium, above that high).
+fn budget_effort(budget: u64) -> ReasoningEffort {
+    match budget {
+        ..=1024 => ReasoningEffort::Low,
+        1025..=8192 => ReasoningEffort::Medium,
+        _ => ReasoningEffort::High,
+    }
+}
+
+/// The stated effort, else the budget's. Validation keeps them exclusive.
+fn requested_effort(reasoning: &ReasoningConfig) -> Option<ReasoningEffort> {
+    reasoning.effort.or(reasoning.max_tokens.map(budget_effort))
 }
 
 fn set_chat_template_reasoning(
@@ -1300,9 +1328,8 @@ pub fn messages_to_chat_params(params: &Value) -> Result<Value, TransformError> 
 /// gets thinking blocks; `omitted` and `updates` hide the reasoning text.
 ///
 /// `output_config.effort` states the level directly. Otherwise a thinking
-/// budget is bucketed as claude-code-router and new-api bucket it (≤1024 low,
-/// ≤8192 medium, above that high): most Chat reasoning dialects carry only an
-/// effort. Adaptive thinking means Anthropic's default, high; enabled
+/// budget is bucketed by [`budget_effort`]: most Chat reasoning dialects carry
+/// only an effort. Adaptive thinking means Anthropic's default, high; enabled
 /// thinking without a budget reads the same way, as CC-Switch reads it. A
 /// shape this gateway cannot read asks for nothing it could honour.
 pub fn messages_reasoning(params: &Value) -> (Option<ReasoningConfig>, bool) {
@@ -1338,11 +1365,7 @@ pub fn messages_reasoning(params: &Value) -> (Option<ReasoningConfig>, bool) {
             false,
         ),
         Some("enabled" | "adaptive") => {
-            let effort = effort.unwrap_or(match budget {
-                Some(..=1024) => ReasoningEffort::Low,
-                Some(1025..=8192) => ReasoningEffort::Medium,
-                _ => ReasoningEffort::High,
-            });
+            let effort = effort.unwrap_or(budget.map_or(ReasoningEffort::High, budget_effort));
             (Some(effort_config(effort)), visible)
         }
         _ => (effort.map(effort_config), false),
@@ -4214,7 +4237,7 @@ mod tests {
 
     /// DeepSeek's dialect: `thinking.type` is the switch, `reasoning_effort`
     /// the level. The switch is always written; the level only next to an
-    /// enabled switch; a budget cannot be expressed at all.
+    /// enabled switch; a budget is written as its effort.
     #[test]
     fn thinking_type_reasoning_format_writes_switch_and_level() {
         let candidate: RouteCandidate = serde_json::from_value(json!({
@@ -4259,6 +4282,11 @@ mod tests {
                 "enabled",
                 None,
             ),
+            (
+                with("reasoning", json!({ "max_tokens": 512 })),
+                "enabled",
+                Some("low"),
+            ),
             // A caller's chat-template switch is read as intent on a route
             // that declares a dialect, and lands in this dialect.
             (
@@ -4279,9 +4307,6 @@ mod tests {
             );
             assert!(body.get("reasoning").is_none(), "{request}");
         }
-
-        // A budget has no encoding on this wire.
-        assert!(shape(with("reasoning", json!({ "max_tokens": 512 }))).is_err());
 
         // With nothing to say the switch stays absent, and a caller-supplied
         // `thinking` does not stand in for it: on the OpenAI wire the gateway
@@ -4333,7 +4358,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_candidate_without_dialect_preserves_reasoning_budget() {
+    fn reasoning_budget_is_kept_or_read_as_effort() {
         let request = json!({
             "model": "m",
             "messages": [{ "role": "user", "content": "hi" }],
@@ -4360,21 +4385,68 @@ mod tests {
         assert_eq!(bodies[0].1["reasoning"]["enabled"], true);
         assert!(bodies[0].1.get("reasoning_effort").is_none());
 
-        let effort_candidate: RouteCandidate = serde_json::from_value(json!({
-            "routeId": "self-hosted:m",
-            "format": "openai",
-            "engine": "sglang"
-        }))
-        .unwrap();
-        let error = build_candidates(
+        // An effort-only route reads the budget as an effort, where it used
+        // to be skipped. A route with only an on/off switch still cannot carry
+        // a budget and is skipped while the others serve.
+        let route = |id: &str, dialect: &str| -> RouteCandidate {
+            serde_json::from_value(json!({
+                "routeId": id,
+                "format": "openai",
+                "reasoningFormat": dialect,
+            }))
+            .unwrap()
+        };
+        let bodies = build_candidates(
             &params,
             Endpoint::ChatComplete,
-            &[effort_candidate],
+            &[
+                route("switch:m", "chat_template_enable_thinking"),
+                route("effort:m", "reasoning_effort"),
+            ],
             requested.as_ref(),
             None,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("cannot represent max_tokens"));
+        .unwrap();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0].0, "effort:m");
+        assert_eq!(bodies[0].1["reasoning_effort"], "low");
+        assert!(bodies[0].1.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_budget_buckets_at_their_boundaries() {
+        for dialect in ["reasoning_effort", "thinking_type"] {
+            let candidate: RouteCandidate = serde_json::from_value(json!({
+                "routeId": "vendor:m",
+                "format": "openai",
+                "reasoningFormat": dialect,
+            }))
+            .unwrap();
+            for (budget, effort) in [
+                (1024, "low"),
+                (1025, "medium"),
+                (8192, "medium"),
+                (8193, "high"),
+            ] {
+                let requested = ReasoningConfig {
+                    max_tokens: Some(budget),
+                    enabled: Some(true),
+                    ..Default::default()
+                };
+                let bodies = build_candidates(
+                    &json!({ "model": "m", "messages": [] }),
+                    Endpoint::ChatComplete,
+                    std::slice::from_ref(&candidate),
+                    Some(&requested),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    bodies[0].1["reasoning_effort"], effort,
+                    "{dialect} {budget}"
+                );
+            }
+        }
     }
 
     #[test]

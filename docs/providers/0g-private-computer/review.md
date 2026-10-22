@@ -68,9 +68,10 @@ Acceptance runs of the native adapter at #464 head `e25c1b99`, 2026-10-20:
   `0GM-1.0-35B-A3B` passed with live DCAP and signature verification. Only
   `TargetSeparated: false` providers were selected.
 - Throwaway dstack CVM: the same through the deployed gateway. Client-supplied
-  `X-0G-*` headers had no effect; an unsupported request field returned 400; an
-  unconfigured model returned 404. Each session carried the
-  `e2ee_public_key_sha256` binding of the selected provider.
+  `X-0G-*` headers had no effect; an unsupported request field returned 400
+  (such fields are now sealed); an unconfigured model returned 404. Each
+  session carried the `e2ee_public_key_sha256` binding of the selected
+  provider.
 - Private AI Proxy: `audit` of five response receipts had no failed check
   (receipt signature, request and response hashes, cited 0G session and
   binding). Online `verify` of the gateway passed id-1 to id-5 with the Phala KMS

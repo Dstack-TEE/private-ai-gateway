@@ -24,6 +24,7 @@ use private_ai_gateway::aci::receipt::{
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
@@ -93,7 +94,28 @@ impl UpstreamBackend for StubUpstream {
                 "request field \"zz\" is not supported".to_string(),
             ));
         }
+        withheld(&req)?;
         self.forward(req.request).await
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        withheld(&req)?;
+        self.forward_stream_prepared(req).await
+    }
+}
+
+/// Model `withheld-<status>` answers as an adapter that withholds an
+/// unverified body (0G) does: the status alone.
+fn withheld(req: &PreparedUpstreamRequest) -> Result<(), UpstreamError> {
+    match req.model_id.strip_prefix("withheld-") {
+        Some(status) => Err(UpstreamError::Upstream {
+            status: status.parse().unwrap(),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -600,6 +622,33 @@ async fn chat_request_the_route_cannot_carry_is_a_400() {
     let (status, _, json) = post_chat(&h, r#"{"model":"invalid-for-route","messages":[]}"#).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+/// A withheld upstream status reaches a direct caller, buffered or streamed,
+/// as the gateway normalizes that status: the provider's auth and billing
+/// refusals are not the caller's, a 2xx without a verifiable body is no
+/// success, and a 429 stays a 429.
+#[tokio::test]
+async fn chat_withheld_upstream_status_is_normalized() {
+    let h = make_harness();
+    for stream in [false, true] {
+        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 500), (429, 429)] {
+            let body =
+                format!(r#"{{"model":"withheld-{upstream}","messages":[],"stream":{stream}}}"#);
+            let (status, _, json) = post_chat(&h, &body).await;
+            assert_eq!(
+                status.as_u16(),
+                client,
+                "stream={stream} {upstream}: {json}"
+            );
+            assert!(
+                json["error"]["type"].is_string(),
+                "stream={stream} {upstream}: {json}"
+            );
+        }
+    }
+    let (_, _, json) = post_chat(&h, r#"{"model":"withheld-429","messages":[]}"#).await;
+    assert_eq!(json["error"]["type"], "rate_limit_error");
 }
 
 #[tokio::test]

@@ -1572,7 +1572,28 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         ServiceError::InvalidNonce(_)
         | ServiceError::DownstreamTlsDomainMissing
         | ServiceError::DownstreamTlsDomainUnknown(_) => 400,
-        _ => 502,
+        // A withheld non-2xx is forwarded as a response before it gets here;
+        // one that did not maps as that upstream status does.
+        ServiceError::Upstream(UpstreamError::Upstream { status })
+            if !(200..300).contains(status) =>
+        {
+            errors::map_upstream_status(*status)
+        }
+        // A withheld 2xx (no verifiable body) is no answer; the rest are
+        // transport and gateway faults.
+        ServiceError::Upstream(
+            UpstreamError::Upstream { .. }
+            | UpstreamError::Transport(_)
+            | UpstreamError::ChannelBindingMismatch(_),
+        )
+        | ServiceError::TestKeysInProduction
+        | ServiceError::InvalidSourceProvenance
+        | ServiceError::Keyset(_)
+        | ServiceError::Key(_)
+        | ServiceError::Receipt(_)
+        | ServiceError::SessionStore(_)
+        | ServiceError::Metrics(_)
+        | ServiceError::NoReceiptKey => 502,
     }
 }
 
