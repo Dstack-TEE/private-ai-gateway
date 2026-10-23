@@ -15,6 +15,9 @@ import { promisify } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, parseDocument } from "yaml";
 
+import { classifyReplyFailure } from "./reply-failure.mjs";
+import { runReply } from "./reply-process.mjs";
+
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
 const REPLY = "PAP-OK";
@@ -212,7 +215,7 @@ async function step(row, name, check) {
     row[name] = "ok";
     return value;
   } catch (error) {
-    row[name] = "FAIL";
+    row[name] = error.upstream ? "UPSTREAM" : "FAIL";
     throw error;
   }
 }
@@ -311,18 +314,17 @@ function localApi(token, pathname, body) {
 // but not a different reply.
 const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'“”‘’.,;:!?]+$/g, "");
 
-function assertReply(agent) {
+async function assertReply(agent) {
   const [command, ...args] = agent.prompt;
   const since = nowSeconds();
-  const { error, status, signal, stdout, stderr } = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
-  if (!error && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
+  const result = await runReply(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  const { error, degenerate, stdout, stderr } = result;
+  if (!error && !degenerate && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
 
-  let reason = `exited ${status ?? signal} without replying ${REPLY}`;
-  if (error?.code === "ETIMEDOUT") reason = `timed out after ${REPLY_TIMEOUT / 1000} s`;
-  else if (error) reason = `did not finish: ${error.message}`;
+  let record;
   let usage = "none since the prompt";
   try {
-    const [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
+    [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
     if (record) {
       const { method, path: requestPath, status: httpStatus, verified, leftDevice, detail } = record;
       usage = `${method} ${requestPath}: HTTP ${httpStatus}, verified ${verified}, left device ${leftDevice}: ${detail}`;
@@ -330,6 +332,7 @@ function assertReply(agent) {
   } catch (usageError) {
     usage = `unreadable: ${usageError.message}`;
   }
+  const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, timeout: REPLY_TIMEOUT });
   const report = [
     `${agent.id} ${reason}`,
     `--- stdout (last 40 lines)`,
@@ -339,7 +342,7 @@ function assertReply(agent) {
     `--- latest usage record`,
     usage,
   ];
-  assert.fail(redact(report.join("\n")));
+  throw Object.assign(new assert.AssertionError({ message: redact(report.join("\n")) }), { upstream });
 }
 
 // Receipt audits finish after delivery, so wait for every record to settle.
@@ -452,7 +455,7 @@ for (const agent of AGENTS) {
 
     const since = nowSeconds();
     await step(row, "reply", async () => {
-      assertReply(agent);
+      await assertReply(agent);
       await agent.verify?.();
     });
     await step(row, "usage", async () => {
@@ -535,7 +538,7 @@ test("recovers when the network returns", async () => {
       async () => protection() === "protected" && (await Promise.all(agents.map(accepted))).every(Boolean),
       180_000,
     );
-    assertReply(agents[0]);
+    await assertReply(agents[0]);
   });
 });
 
