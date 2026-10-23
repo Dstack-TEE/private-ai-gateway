@@ -18,7 +18,7 @@ test("normal replies, prompt echoes, whitespace and long varied output have no r
   }
 });
 
-const failure = { model: "test/model", timeout: 240_000, status: null, signal: "SIGKILL" };
+const failure = { model: "test/model", reply: "PAP-OK", timeout: 240_000, status: null, signal: "SIGKILL" };
 
 test("base64 values, separators and progress bars are informational and never trigger UPSTREAM", () => {
   for (const [text, character, length] of [

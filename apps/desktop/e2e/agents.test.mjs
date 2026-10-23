@@ -349,7 +349,7 @@ function assertReply(agent) {
   } catch (usageError) {
     usage = `unreadable: ${usageError.message}`;
   }
-  const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, timeout: REPLY_TIMEOUT });
+  const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, reply: REPLY, timeout: REPLY_TIMEOUT });
   const repetition = repeatedOutput(`${stdout ?? ""}\n${stderr ?? ""}`);
   const report = [
     `${agent.id} ${reason}`,
