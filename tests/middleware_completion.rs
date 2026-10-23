@@ -327,6 +327,24 @@ impl UpstreamVerifier for SessionVerifier {
     }
 }
 
+struct ResponseFailVerifier;
+
+#[async_trait]
+impl UpstreamVerifier for ResponseFailVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        SessionVerifier.verify(request).await
+    }
+
+    async fn verify_response(
+        &self,
+        _request: UpstreamVerificationRequest,
+        _event: UpstreamVerifiedEvent,
+        _headers: &HashMap<String, String>,
+    ) -> Result<Option<UpstreamVerifiedEvent>, String> {
+        Err("synthetic response evidence failure".to_string())
+    }
+}
+
 fn build_service_failing_verify() -> Arc<AciService> {
     let forwarded = Arc::new(Mutex::new(Vec::new()));
     Arc::new(
@@ -2881,10 +2899,89 @@ async fn aci_constraint_fails_closed_when_attestation_fails() {
         .expect("refusal receipts record upstream.verified");
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], true);
+    assert_eq!(
+        receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["request.received", "upstream.verified", "response.returned"]
+    );
     assert!(
         forwarded.lock().unwrap().is_empty(),
         "an unattested TEE route must not receive the prompt"
     );
+}
+
+#[tokio::test]
+async fn aci_constraint_response_refusal_records_forwarding_before_failed_verification() {
+    for streaming in [false, true] {
+        let control_url = spawn_control(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{ "routeId": "tee-a:gpt-test", "format": "openai" }]
+            }),
+        )
+        .await;
+        let mw = middleware(control_url);
+        let forwarded = Arc::new(Mutex::new(Vec::new()));
+        let service = Arc::new(
+            AciService::new_with_upstream_verifier(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(TeeAwareUpstream {
+                    forwarded: forwarded.clone(),
+                    status: 200,
+                }),
+                Arc::new(ResponseFailVerifier),
+                Arc::new(InMemoryReceiptStore::default()),
+                AciServiceConfig::for_test(),
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let mut input = chat_input();
+        input.aci_required = true;
+        input.stream = streaming;
+        input.params["stream"] = json!(streaming);
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let received_hash = private_ai_gateway::aci::digest::sha256_hex(&input.received_body);
+        let response = mw.handle_completion(&service, input).await;
+        assert_eq!(response.status().as_u16(), 503);
+        let receipt_id = response.headers()["x-receipt-id"].to_str().unwrap();
+        let receipt = service.get_receipt_by_receipt_id(receipt_id).unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["type"], "upstream_verification_failed");
+        assert_eq!(*forwarded.lock().unwrap(), ["tee-a:gpt-test"]);
+        let document = receipt.document_json().unwrap();
+        let events = document["event_log"].as_array().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "request.received",
+                "request.forwarded",
+                "upstream.verified",
+                "response.returned"
+            ]
+        );
+        assert_eq!(events[0]["body_hash"], received_hash);
+        assert!(events[1]["body_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(events[2]["result"], "failed");
+        assert!(events[2].get("session_id").is_none());
+        assert_eq!(
+            events[3]["body_hash"],
+            private_ai_gateway::aci::digest::sha256_hex(&body)
+        );
+    }
 }
 
 #[tokio::test]

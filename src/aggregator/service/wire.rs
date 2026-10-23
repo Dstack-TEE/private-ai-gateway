@@ -425,6 +425,17 @@ pub struct UpstreamVerificationRequest {
 pub trait UpstreamVerifier: Send + Sync {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent;
 
+    /// Bind the recorded event to the response before releasing a body or
+    /// sealing its session. Providers with response-specific evidence override this.
+    async fn verify_response(
+        &self,
+        _request: UpstreamVerificationRequest,
+        _event: UpstreamVerifiedEvent,
+        _headers: &std::collections::HashMap<String, String>,
+    ) -> Result<Option<UpstreamVerifiedEvent>, String> {
+        Ok(None)
+    }
+
     /// The verification `verify(request)` would serve from cache right now, without verifying; None when `verify` would verify afresh.
     fn cached(&self, _request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
         None

@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult,
+    VerificationResult, EVENT_REQUEST_FORWARDED,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -51,9 +51,19 @@ pub(super) enum ReverifyOutcome<R> {
 /// withholds unverified bodies answered ([`UpstreamError::Upstream`]).
 pub(super) trait WithheldResponse {
     fn withheld(status_code: u16) -> Self;
+    fn headers(&self) -> &std::collections::HashMap<String, String>;
+    fn status_code(&self) -> u16;
 }
 
 impl WithheldResponse for UpstreamResponse {
+    fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
+    fn headers(&self) -> &std::collections::HashMap<String, String> {
+        &self.headers
+    }
+
     fn withheld(status_code: u16) -> Self {
         Self {
             status_code,
@@ -65,6 +75,14 @@ impl WithheldResponse for UpstreamResponse {
 }
 
 impl WithheldResponse for UpstreamStreamResponse {
+    fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
+    fn headers(&self) -> &std::collections::HashMap<String, String> {
+        &self.headers
+    }
+
     fn withheld(status_code: u16) -> Self {
         Self {
             status_code,
@@ -619,7 +637,65 @@ impl AciService {
             // owns its inputs. Bounded to CHANNEL_BINDING_REVERIFY_ATTEMPTS + 1,
             // and `prepared` was already cloned per attempt before this refactor.
             match forward(prepared.clone(), recorded_event.clone()).await {
-                Ok(response) => return ReverifyOutcome::Forwarded(response),
+                Ok(response) => {
+                    let evidence_required = recorded_event
+                        .provider_claims
+                        .as_ref()
+                        .is_some_and(|claims| claims["active_secret_evidence"] == true);
+                    if evidence_required && !(200..300).contains(&response.status_code()) {
+                        // Error responses must not cite a previous secret's session.
+                        recorded_event.result = VerificationResult::Failed;
+                        recorded_event.reason = Some(
+                            "active-secret evidence is not checked for a non-success response"
+                                .to_string(),
+                        );
+                        recorded_event.evidence = None;
+                        return ReverifyOutcome::Forwarded(response);
+                    }
+                    let result = match &self.upstream_verifier {
+                        Some(verifier) => {
+                            let request =
+                                self.upstream_verification_request(prepared, verification_required);
+                            verifier
+                                .verify_response(
+                                    request,
+                                    recorded_event.clone(),
+                                    response.headers(),
+                                )
+                                .await
+                        }
+                        None => Ok(None),
+                    };
+                    let result = match result {
+                        Ok(Some(event)) => {
+                            *recorded_event = event;
+                            self.apply_aci_session_constraint(
+                                recorded_event,
+                                aci_session_ids,
+                                &prepared.model_id,
+                            )
+                        }
+                        Ok(None) if evidence_required => {
+                            Err(UpstreamVerificationError::NoVerifierResult.into())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(reason) => {
+                            Err(UpstreamVerificationError::VerifierFailed(reason).into())
+                        }
+                    };
+                    if let Err(err) = result {
+                        return ReverifyOutcome::RefreshFailed(match err {
+                            ServiceError::UpstreamVerification(source) => {
+                                ServiceError::UpstreamVerificationAfterForwarding {
+                                    source,
+                                    forwarded_body_hash: digest::sha256_hex(&prepared.request.body),
+                                }
+                            }
+                            other => other,
+                        });
+                    }
+                    return ReverifyOutcome::Forwarded(response);
+                }
                 // The upstream refused; only its body was withheld. As that
                 // status with an empty body, every caller classifies it like
                 // any other upstream error: the attempt's status, failover, the
@@ -721,6 +797,13 @@ impl AciService {
             return Ok(Vec::new());
         }
 
+        if event.provider_claims.as_ref().is_some_and(|claims| {
+            claims["active_secret_evidence"] == true
+                && claims["manifest_bound_to_active_secret"] != true
+        }) {
+            return Ok(Vec::new());
+        }
+
         let now = self.clock.now_secs();
         // Retention window (`receipt_ttl_seconds`), so a relying party verifying a
         // citing receipt can resolve its `session_id`. The session is sealed
@@ -767,12 +850,35 @@ impl AciService {
     /// Finalize a fail-closed refusal into a receipt (§7.5): the exact request
     /// bytes the workload received, a failed `upstream.verified` event naming
     /// the requested model and the reason, and the exact error bytes served.
-    /// No prompt was forwarded, so there is no `request.forwarded` event.
+    /// No successful response is released. Pre-forward refusals contain no
+    /// `request.forwarded` event.
     pub fn issue_upstream_refusal_receipt(
         &self,
         endpoint_path: &str,
         model: Option<String>,
         received_body: &[u8],
+        reason: &str,
+        wire_error_body: &[u8],
+        requester: Option<ReceiptOwner>,
+    ) -> Result<SignedReceipt, ServiceError> {
+        self.issue_upstream_refusal_receipt_with_forwarded_hash(
+            endpoint_path,
+            model,
+            received_body,
+            None,
+            reason,
+            wire_error_body,
+            requester,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_upstream_refusal_receipt_with_forwarded_hash(
+        &self,
+        endpoint_path: &str,
+        model: Option<String>,
+        received_body: &[u8],
+        forwarded_body_hash: Option<&str>,
         reason: &str,
         wire_error_body: &[u8],
         requester: Option<ReceiptOwner>,
@@ -787,6 +893,9 @@ impl AciService {
             self.clock.now_secs(),
         );
         builder.add_request_received(received_body)?;
+        if let Some(hash) = forwarded_body_hash {
+            builder.append_hash(EVENT_REQUEST_FORWARDED, hash.to_string())?;
+        }
         // A refusal only happens when verification was required (§7.5).
         builder.add_upstream_verified_failed(
             model.as_deref().unwrap_or_default(),

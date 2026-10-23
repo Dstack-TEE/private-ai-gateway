@@ -151,6 +151,24 @@ pub(super) struct DynamicUpstreamVerifier {
 
 #[async_trait]
 impl UpstreamVerifier for DynamicUpstreamVerifier {
+    async fn verify_response(
+        &self,
+        request: UpstreamVerificationRequest,
+        event: UpstreamVerifiedEvent,
+        headers: &HashMap<String, String>,
+    ) -> Result<Option<UpstreamVerifiedEvent>, String> {
+        let verifier = self
+            .state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .clone();
+        match verifier {
+            Some(verifier) => verifier.verify_response(request, event, headers).await,
+            None => Ok(None),
+        }
+    }
+
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let verifier = self
             .state

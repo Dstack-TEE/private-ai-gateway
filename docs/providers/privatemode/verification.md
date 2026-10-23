@@ -70,6 +70,41 @@ A native gateway implementation of Privatemode's protocol would remove the
 sidecar and allow route-supplied endpoints and keys like the other providers;
 this is not planned.
 
+## Optional active-secret evidence
+
+`privatemode_proxy.active_secret_evidence` defaults to `false`, preserving the
+manifest observation below. Enable it only with a pinned proxy implementing the
+[active-secret extension](../../../spec/privatemode-active-secret-evidence.md);
+the fork requires `--expose-secret-evidence` (default `false`), and the reference
+v1.59 image lacks this API. Without the proxy flag, the enabled gateway refuses
+every 2xx for missing `Privatemode-Secret-ID`. See the
+[test deployment setup](../../../deploy/privatemode.md#enable-active-secret-evidence-for-a-test-deployment)
+for the writable workspace requirements.
+
+For every 2xx response, the gateway fetches evidence for `Privatemode-Secret-ID`
+from the measured origin and binds the receipt's session before releasing
+provider bytes. It checks the version 1 shape, encodings, sizes, timestamps,
+manifest digest, and matching header/URL/bundle/public-key IDs. Redirects and
+ambient proxies are rejected; fetches are bounded by ten seconds and 8 MiB,
+with at most eight cached IDs. See the extension for exact limits and refusal
+semantics. Evidence failures intentionally refuse even unconstrained requests;
+non-2xx responses retain normal error/retry/failover handling.
+
+Sessions carry `manifest_bound_to_active_secret: true`, `active_manifest_sha256`,
+`secret_id`, and the full bundle. Discovery lists no bound session before a valid
+response, then returns the most recently observed secret under the readiness
+lease; the next request may use another secret. Session pins are rechecked after
+response binding. GPU, OS, TCB, software, and model claims remain unknown.
+
+The gateway trusts the measured proxy's cryptographic checks. The bound claims
+identify which manifest its Coordinator attested for that secret; trusting the
+manifest requires comparison against Privatemode's published CDN/release
+manifest or a reviewed allowlist. The extension's
+[verification procedure](../../../spec/privatemode-active-secret-evidence.md#sessions-and-verification)
+uses `verify-evidence --accept-manifest-sha256 <hex>`; without an allowlist, PASS
+proves only internal consistency. That verifier fetches AMD/Intel collateral
+online and is not air-gapped.
+
 ## What the manifest observation proves
 
 Privatemode v1.59 writes every fetched manifest to
@@ -107,8 +142,9 @@ For route verification, the gateway:
 1. Sends `GET /readyz`, the proxy's readiness endpoint, to the pinned internal
    proxy origin, and rejects redirects, ambient HTTP proxies, and non-success
    status.
-2. Reads and validates the latest manifest-history entry, falling back to the
-   previous one while the proxy is still writing the newest file. The
+2. With active-secret evidence disabled, reads and validates the latest
+   manifest-history entry, falling back to the previous one while the proxy
+   is still writing the newest file. The
    observation is the session's evidence bundle, which every sealed session
    must carry.
 3. Emits the measured proxy binding and the explicitly unbound manifest
@@ -195,7 +231,7 @@ The session's `endpoint` is the measured internal origin. Its verifier ID is
 
 The session asserts `tee_attested` as `VerifierDerived`: the measured proxy must
 establish a Contrast-attested E2EE secret before it starts serving. These claims
-remain `Unknown` until the proxy exposes a request-bound active manifest:
+remain `Unknown` in both modes; manifest review policy is not implemented:
 
 - `gpu_attested`
 - `tcb_up_to_date`
@@ -203,9 +239,9 @@ remain `Unknown` until the proxy exposes a request-bound active manifest:
 - `serving_software_known_good`
 - `model_weights_provenance`
 
-The full observed manifest is retained as session evidence with
-`bound_to_active_secret: false`. The observation metadata is also in
-`claims.extra`; the receipt contains only the session id and verification
+With active-secret evidence disabled, the full observed manifest is retained as
+session evidence with `bound_to_active_secret: false`. The observation metadata
+is also in `claims.extra`; the receipt contains only the session id and verification
 outcome.
 
 ## Failure behavior
@@ -217,7 +253,8 @@ The route fails closed when:
 - the proxy image digest is malformed;
 - mutable configuration supplies a Bearer token or path;
 - the readiness probe fails;
-- the manifest log is malformed or its latest file is missing or unreadable;
+- with active-secret evidence disabled, the manifest log is malformed or its
+  latest file is missing or unreadable;
 - forwarding targets a handler outside the encrypted allowlist; or
 - the verified proxy-image binding differs from the active deployment.
 
@@ -239,7 +276,9 @@ claims outside the gateway.
 
 Run the hermetic adapter tests: the credential and binding refusals, redirect
 refusal, readiness deadline, verification cache, manifest observation, receipt
-binding, and capacity retry:
+binding, and capacity retry. Active-secret tests add exact-ID binding, rotation,
+pinned sessions, missing/unknown/malformed evidence, bounded cache/body reads,
+and buffered/streaming refusals:
 
 ```sh
 cargo test --test provider_e2e privatemode

@@ -365,13 +365,21 @@ routes at another proxy or change the measured pins.
 | `credential_path` | Absolute path to the Compose secret mounted into both gateway and proxy. The gateway checks it at startup and never forwards it. |
 | `credential_sha256` | SHA-256 of that credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch fails startup. |
 | `proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, as `sha256:<64-hex>`. |
+| `active_secret_evidence` | Boolean, default `false`. `true` requires the response-ID evidence API and binds each receipt session to that secret. `null`, strings, and numbers are rejected. Static only; changing it requires a measured redeployment. |
 
 For `privatemode`, dstack Compose owns the proxy process, image pin, shared
 manifest-history volume, restart policy, and private network. Mutable routes
 must match the static origin and cannot set `bearer_token` or `path`; all share
-the measured Compose credential. The gateway validates the credential digest, requires the proxy's
-`/readyz` readiness probe to succeed, reports the latest fetched manifest as explicitly
-unbound metadata, and forwards only to the encrypted v1.59 handlers. Separate
+the measured Compose credential. The gateway validates the credential digest,
+requires the proxy's `/readyz` readiness probe to succeed and forwards only to
+encrypted handlers.
+
+With `active_secret_evidence` omitted or `false`, the latest fetched manifest
+is explicitly unbound metadata. With `true`, every 2xx response requires matching
+secret evidence, intentionally even without `aci_verified`; non-2xx handling is
+unchanged. `manifest_log_path` remains required but is not read in enabled mode.
+See the [active-secret extension](../spec/privatemode-active-secret-evidence.md)
+for the API, bounds, claims, discovery, and trust requirements. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 
