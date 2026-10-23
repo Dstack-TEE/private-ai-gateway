@@ -106,7 +106,7 @@ pub(super) fn validate(body: &[u8], secret_id: &str, requested_id: &str) -> Resu
     )?;
     bytes(
         &evidence.coordinator_attestation.document,
-        1024 * 1024,
+        MAX_BODY_BYTES / 4 * 3,
         "coordinator_attestation.document",
     )?;
     bytes(

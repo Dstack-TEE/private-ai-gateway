@@ -73,7 +73,7 @@ times, and size violations. Header, URL, bundle ID, and
 | --- | --- |
 | Whole JSON body | 8 MiB (wire bytes) |
 | Manifest | 4 MiB |
-| Attestation document | 1 MiB |
+| Attestation document | Bounded by the whole JSON body, including base64 encoding |
 | Secret Service certificate | 64 KiB |
 | Mesh CA PEM | 64 KiB, 16 certificates |
 | Request public key, encapsulated key | 4 KiB each |

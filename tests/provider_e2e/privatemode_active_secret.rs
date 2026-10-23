@@ -261,6 +261,35 @@ async fn privatemode_active_secret_binds_rotating_responses_and_discovers_sessio
 }
 
 #[tokio::test]
+async fn privatemode_active_secret_accepts_large_attestation_documents_within_body_limit() {
+    for streaming in [false, true] {
+        for size in [5 * 1024 * 1024 / 2, 6 * 1024 * 1024] {
+            let f = Fixture::new(true).await;
+            let document = BASE64.encode(vec![b'p'; size]);
+            f.state().bundles.get_mut(&url_secret(0)).unwrap()["coordinator_attestation"]
+                ["document"] = json!(document);
+            let (status, receipt, _) = f.send(request(streaming)).await;
+            if size == 6 * 1024 * 1024 {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            } else {
+                assert_eq!(status, StatusCode::OK);
+                let session = f.session(&receipt);
+                let data = session["evidence"]["data"].as_str().unwrap();
+                let raw = BASE64
+                    .decode(data.strip_prefix("data:application/json;base64,").unwrap())
+                    .unwrap();
+                assert_eq!(session["evidence"]["digest"], sha256_hex(&raw));
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&raw).unwrap()["coordinator_attestation"]
+                        ["document"],
+                    document
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn privatemode_active_secret_default_off_preserves_wire_and_claims() {
     let f = Fixture::new(false).await;
     f.state().header = Some(String::new());
