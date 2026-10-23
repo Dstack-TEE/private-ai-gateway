@@ -111,7 +111,7 @@ impl OsKeychain {
     /// [`STORE_TIMEOUT`]. An operation still waiting after that (a prompt
     /// nobody answers) is abandoned and the store counts as unavailable. The
     /// Secret Service backend also needs the plain thread: it uses zbus's
-    /// blocking API, which creates a Tokio runtime internally.
+    /// blocking API, which must not run on an async worker thread.
     fn run<T: Send + 'static>(
         operation: impl FnOnce() -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
