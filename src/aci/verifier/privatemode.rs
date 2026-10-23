@@ -126,11 +126,16 @@ impl PrivatemodeProviderVerifier {
 
     async fn secret_evidence(&self, secret_id: &str) -> Result<Value, String> {
         let id = evidence::url_id(secret_id)?;
-        // Serialize misses and bound retained memory to eight immutable bundles.
-        let mut cache = self.evidence_cache.lock().await;
-        if let Some((_, bundle)) = cache.iter().find(|(key, _)| key == secret_id) {
+        if let Some((_, bundle)) = self
+            .evidence_cache
+            .lock()
+            .await
+            .iter()
+            .find(|(key, _)| key == secret_id)
+        {
             return Ok(bundle.clone());
         }
+        // Fetch outside the cache lock so one slow ID cannot block other IDs.
         let mut response = self
             .client
             .get(format!(
@@ -175,6 +180,11 @@ impl PrivatemodeProviderVerifier {
             body.extend_from_slice(&chunk);
         }
         let bundle = evidence::validate(&body, secret_id, &id)?;
+        let mut cache = self.evidence_cache.lock().await;
+        // Concurrent misses may have fetched the same immutable bundle.
+        if let Some((_, cached)) = cache.iter().find(|(key, _)| key == secret_id) {
+            return Ok(cached.clone());
+        }
         if cache.len() == 8 {
             cache.pop_front();
         }

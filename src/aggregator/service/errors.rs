@@ -17,6 +17,11 @@ pub enum ServiceError {
     InvalidSourceProvenance,
     #[error("upstream verification failed: {0}")]
     UpstreamVerification(#[from] UpstreamVerificationError),
+    #[error("upstream verification failed: {source}")]
+    UpstreamVerificationAfterForwarding {
+        source: UpstreamVerificationError,
+        forwarded_body_hash: String,
+    },
     #[error("failed to seal workload keyset: {0}")]
     Keyset(String),
     #[error("invalid attestation nonce: {0}")]
@@ -41,6 +46,31 @@ pub enum ServiceError {
     DownstreamTlsDomainUnknown(String),
 }
 
+impl ServiceError {
+    pub(crate) fn upstream_verification_failure(
+        &self,
+    ) -> Option<(&UpstreamVerificationError, Option<&str>)> {
+        match self {
+            Self::UpstreamVerification(error) => Some((error, None)),
+            Self::UpstreamVerificationAfterForwarding {
+                source,
+                forwarded_body_hash,
+            } => Some((source, Some(forwarded_body_hash))),
+            _ => None,
+        }
+    }
+
+    pub(super) fn after_forwarding(self, body: &[u8]) -> Self {
+        match self {
+            Self::UpstreamVerification(source) => Self::UpstreamVerificationAfterForwarding {
+                source,
+                forwarded_body_hash: crate::aci::digest::sha256_hex(body),
+            },
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum UpstreamVerificationError {
     #[error("upstream verification required but no verifier result supplied")]
@@ -54,7 +84,8 @@ pub enum UpstreamVerificationError {
     #[error("no attested upstream available for model {0}")]
     NoEligibleAttestedRoute(String),
     /// The request pins one or more attested session ids, but none matches the
-    /// route's current verified channel bindings. No prompt was forwarded.
+    /// route's current verified channel bindings, including a response binding
+    /// that rotated after the prompt was forwarded.
     #[error("none of the requested attested sessions is available for model {0}; pinned sessions may have been superseded by re-verification, so re-list /v1/aci/sessions and retry")]
     NoEligibleAttestedSession(String),
 }

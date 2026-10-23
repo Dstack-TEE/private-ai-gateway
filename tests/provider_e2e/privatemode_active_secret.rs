@@ -1,5 +1,6 @@
 use super::*;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 struct EvidenceState {
@@ -7,12 +8,18 @@ struct EvidenceState {
     selected: Arc<AtomicUsize>,
     fetched: Arc<Mutex<Vec<String>>>,
     calls: Arc<AtomicUsize>,
+    forwarded: Arc<Mutex<Vec<Vec<u8>>>>,
+    chat_statuses: Arc<Mutex<VecDeque<StatusCode>>>,
+    readiness_status: StatusCode,
+    retry_after: Option<String>,
     missing_header: bool,
     header_value: Option<String>,
     evidence_status: StatusCode,
     evidence_location: String,
     oversized: bool,
     stall: bool,
+    stalled_id: Option<String>,
+    evidence_started: Arc<tokio::sync::Notify>,
 }
 
 impl Default for EvidenceState {
@@ -25,12 +32,18 @@ impl Default for EvidenceState {
             selected: Arc::new(AtomicUsize::new(0)),
             fetched: Arc::new(Mutex::new(Vec::new())),
             calls: Arc::new(AtomicUsize::new(0)),
+            forwarded: Arc::new(Mutex::new(Vec::new())),
+            chat_statuses: Arc::new(Mutex::new(VecDeque::new())),
+            readiness_status: StatusCode::OK,
+            retry_after: None,
             missing_header: false,
             header_value: None,
             evidence_status: StatusCode::OK,
             evidence_location: String::new(),
             oversized: false,
             stall: false,
+            stalled_id: None,
+            evidence_started: Arc::new(tokio::sync::Notify::new()),
         }
     }
 }
@@ -67,11 +80,24 @@ fn bundle(index: usize) -> Value {
 
 async fn chat(State(state): State<EvidenceState>, body: Bytes) -> axum::response::Response {
     state.calls.fetch_add(1, Ordering::SeqCst);
+    state.forwarded.lock().unwrap().push(body.to_vec());
+    let status = state
+        .chat_statuses
+        .lock()
+        .unwrap()
+        .pop_front()
+        .unwrap_or(StatusCode::OK);
     let index = state.selected.load(Ordering::SeqCst);
     // The proxy rotates after selecting the attempt's secret, before evidence is fetched.
     state.selected.store(1, Ordering::SeqCst);
     let streaming = serde_json::from_slice::<Value>(&body).unwrap()["stream"] == true;
-    let mut response = if streaming {
+    let mut response = if !status.is_success() {
+        (
+            [("content-type", "application/json")],
+            r#"{"error":{"message":"synthetic upstream error"}}"#,
+        )
+            .into_response()
+    } else if streaming {
         (
             [("content-type", "text/event-stream")],
             format!(
@@ -83,7 +109,13 @@ async fn chat(State(state): State<EvidenceState>, body: Bytes) -> axum::response
     } else {
         ([("content-type", "application/json")], CHAT_RESPONSE).into_response()
     };
-    if !state.missing_header {
+    *response.status_mut() = status;
+    if let Some(retry_after) = state.retry_after {
+        response
+            .headers_mut()
+            .insert("retry-after", retry_after.parse().unwrap());
+    }
+    if !state.missing_header && status.is_success() {
         response.headers_mut().insert(
             "privatemode-secret-id",
             state
@@ -101,7 +133,8 @@ async fn evidence(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     state.fetched.lock().unwrap().push(id.clone());
-    if state.stall {
+    state.evidence_started.notify_one();
+    if state.stall || state.stalled_id.as_deref() == Some(id.as_str()) {
         return (
             [("content-type", "application/json")],
             Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>()),
@@ -139,7 +172,10 @@ async fn setup(
 ) -> (PrivatemodeTestDeployment, Arc<AciService>, Router) {
     let origin = serve_router(
         Router::new()
-            .route("/readyz", get(|| async { StatusCode::OK }))
+            .route(
+                "/readyz",
+                get(|State(state): State<EvidenceState>| async move { state.readiness_status }),
+            )
             .route("/v1/chat/completions", post(chat))
             .route("/privatemode/v1/secret-evidence/:id", get(evidence))
             .with_state(state),
@@ -278,7 +314,7 @@ async fn privatemode_active_secret_failures_withhold_buffered_and_streaming_bodi
                 "oversized" => state.oversized = true,
                 _ => unreachable!(),
             }
-            let (_fixture, service, app) = setup(state, true).await;
+            let (_fixture, service, app) = setup(state.clone(), true).await;
             let (status, headers, body) =
                 call(app, "POST", "/v1/chat/completions", request(streaming)).await;
             assert_eq!(
@@ -298,6 +334,30 @@ async fn privatemode_active_secret_failures_withhold_buffered_and_streaming_bodi
             assert_eq!(event["result"], "failed");
             assert_eq!(event["required"], true);
             assert!(event.get("session_id").is_none());
+            let document = receipt.document_json().unwrap();
+            let types: Vec<_> = document["event_log"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                types,
+                [
+                    "request.received",
+                    "request.forwarded",
+                    "upstream.verified",
+                    "response.returned"
+                ]
+            );
+            assert_eq!(
+                receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+                sha256_hex(&state.forwarded.lock().unwrap()[0])
+            );
+            assert_eq!(
+                receipt_event(&receipt, "response.returned")["body_hash"],
+                sha256_hex(&body)
+            );
         }
     }
 }
@@ -474,6 +534,52 @@ async fn privatemode_active_secret_evidence_cache_evicts_after_eight_ids() {
 }
 
 #[tokio::test]
+async fn privatemode_active_secret_slow_evidence_does_not_block_other_ids() {
+    let state = EvidenceState {
+        stalled_id: Some(url_secret(0)),
+        ..EvidenceState::default()
+    };
+    let (fixture, _, _) = setup(state.clone(), true).await;
+    let verifier = Arc::new(fixture.verifier(10, 300));
+    let req = fixture.verification_request("provider-model");
+    let event = verifier.verify(req.clone()).await;
+    let stalled = tokio::spawn({
+        let verifier = verifier.clone();
+        let req = req.clone();
+        let event = event.clone();
+        async move {
+            let headers =
+                std::collections::HashMap::from([("privatemode-secret-id".to_string(), secret(0))]);
+            verifier.verify_response(req, event, &headers).await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), state.evidence_started.notified())
+        .await
+        .expect("first evidence fetch must start");
+    let headers =
+        std::collections::HashMap::from([("privatemode-secret-id".to_string(), secret(1))]);
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        verifier.verify_response(req, event, &headers),
+    )
+    .await;
+    let still_pending = !stalled.is_finished();
+    stalled.abort();
+    assert!(stalled.await.unwrap_err().is_cancelled());
+    assert!(
+        still_pending,
+        "the other secret completed while the first stalled"
+    );
+    assert!(result
+        .expect("a slow ID must not hold the cache lock")
+        .is_ok());
+    assert_eq!(
+        *state.fetched.lock().unwrap(),
+        [url_secret(0), url_secret(1)]
+    );
+}
+
+#[tokio::test]
 async fn privatemode_active_secret_middleware_commits_only_response_bound_receipts() {
     for streaming in [false, true] {
         for missing_header in [false, true] {
@@ -528,9 +634,7 @@ async fn privatemode_active_secret_middleware_commits_only_response_bound_receip
                     assert!(missing_header);
                     assert!(matches!(
                         failure.error,
-                        private_ai_gateway::aggregator::service::ServiceError::UpstreamVerification(
-                            _
-                        )
+                        private_ai_gateway::aggregator::service::ServiceError::UpstreamVerificationAfterForwarding { .. }
                     ));
                     assert!(journal.take().is_none());
                     continue;
@@ -561,6 +665,210 @@ async fn privatemode_active_secret_middleware_commits_only_response_bound_receip
                 session.document().claims.extra["manifest_bound_to_active_secret"],
                 true
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn privatemode_active_secret_non_success_responses_preserve_status_and_retry_after() {
+    for streaming in [false, true] {
+        for upstream_status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let mut outcomes = Vec::new();
+            for enabled in [false, true] {
+                let state = EvidenceState {
+                    chat_statuses: Arc::new(Mutex::new(VecDeque::from([upstream_status]))),
+                    retry_after: Some("5".to_string()),
+                    ..EvidenceState::default()
+                };
+                let (_fixture, service, app) = setup(state.clone(), enabled).await;
+                if streaming {
+                    let (status, _, body) =
+                        call(app, "POST", "/v1/chat/completions", request(true)).await;
+                    outcomes.push((status.as_u16(), body));
+                } else {
+                    let result = service
+                        .forward_chat_completion(&request(false), None, true, None)
+                        .await
+                        .unwrap();
+                    assert_eq!(result.upstream_headers["retry-after"], "5");
+                    if enabled {
+                        let event = receipt_event(&result.receipt, EVENT_UPSTREAM_VERIFIED);
+                        assert_eq!(event["result"], "failed");
+                        assert!(event.get("session_id").is_none());
+                    }
+                    outcomes.push((result.upstream_status, result.upstream_body));
+                }
+                assert!(state.fetched.lock().unwrap().is_empty());
+                assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+            assert_eq!(outcomes[0].0, upstream_status.as_u16());
+        }
+    }
+}
+
+#[tokio::test]
+async fn privatemode_active_secret_all_success_statuses_still_require_evidence() {
+    for streaming in [false, true] {
+        for upstream_status in [StatusCode::OK, StatusCode::CREATED, StatusCode::NO_CONTENT] {
+            let state = EvidenceState {
+                missing_header: true,
+                chat_statuses: Arc::new(Mutex::new(VecDeque::from([upstream_status]))),
+                ..EvidenceState::default()
+            };
+            let (_fixture, service, app) = setup(state.clone(), true).await;
+            let (status, headers, _) =
+                call(app, "POST", "/v1/chat/completions", request(streaming)).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            let receipt = service
+                .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+                .unwrap();
+            assert_eq!(
+                receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+                sha256_hex(&state.forwarded.lock().unwrap()[0])
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn privatemode_active_secret_preforward_refusal_omits_forwarded_event() {
+    for streaming in [false, true] {
+        let state = EvidenceState {
+            readiness_status: StatusCode::SERVICE_UNAVAILABLE,
+            ..EvidenceState::default()
+        };
+        let (_fixture, service, app) = setup(state.clone(), true).await;
+        let (status, headers, _) =
+            call(app, "POST", "/v1/chat/completions", request(streaming)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        let document = receipt.document_json().unwrap();
+        let types: Vec<_> = document["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            ["request.received", "upstream.verified", "response.returned"]
+        );
+        assert!(state.forwarded.lock().unwrap().is_empty());
+        assert!(state.fetched.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn privatemode_active_secret_evidence_failures_also_refuse_unconstrained_requests() {
+    for streaming in [false, true] {
+        let state = EvidenceState {
+            missing_header: true,
+            ..EvidenceState::default()
+        };
+        let (_fixture, service, app) = setup(state.clone(), true).await;
+        let mut body: Value = serde_json::from_slice(&request(streaming)).unwrap();
+        body.as_object_mut().unwrap().remove("provider");
+        let (status, headers, _) = call(
+            app,
+            "POST",
+            "/v1/chat/completions",
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
+            sha256_hex(&state.forwarded.lock().unwrap()[0])
+        );
+        assert_eq!(
+            receipt_event(&receipt, EVENT_UPSTREAM_VERIFIED)["result"],
+            "failed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn privatemode_active_secret_non_success_responses_keep_middleware_retry_and_failover() {
+    for streaming in [false, true] {
+        for first_status in [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let state = EvidenceState {
+                chat_statuses: Arc::new(Mutex::new(VecDeque::from([first_status, StatusCode::OK]))),
+                retry_after: Some("5".to_string()),
+                ..EvidenceState::default()
+            };
+            let (_fixture, service, _) = setup(state.clone(), true).await;
+            let body = request(streaming);
+            let candidate = || ForwardCandidate {
+                route_id: "privatemode-provider:public-model".to_string(),
+                body: body.clone(),
+                path: "/v1/chat/completions",
+            };
+            let candidates = if first_status == StatusCode::TOO_MANY_REQUESTS {
+                vec![candidate()]
+            } else {
+                vec![candidate(), candidate()]
+            };
+            let journal = MiddlewareReceiptJournal::default();
+            let started = tokio::time::Instant::now();
+            let result = service
+                .forward_chat_completion_for_middleware(
+                    ChatCompletionRequest {
+                        context: GatewayRequestContext {
+                            user_model: Some("public-model".to_string()),
+                            ..Default::default()
+                        },
+                        endpoint_path: "/v1/chat/completions",
+                        received_body: &body,
+                        forwarded_body: None,
+                        aci_required: true,
+                        aci_session_ids: Vec::new(),
+                        upstream_verification_event: None,
+                        requester: None,
+                        e2ee: None,
+                    },
+                    candidates,
+                    streaming,
+                    journal.clone(),
+                )
+                .await
+                .unwrap();
+            let (session_id, failed_attempts) = match result {
+                MiddlewareForwardResult::Forwarded(forward) => {
+                    (forward.session_id, forward.failed_attempts)
+                }
+                MiddlewareForwardResult::Stream(mut forward) => {
+                    while let Some(chunk) = forward.body.next().await {
+                        chunk.unwrap();
+                    }
+                    (forward.session_id, forward.failed_attempts)
+                }
+                _ => panic!("the ordinary capacity retry or failover must serve the next response"),
+            };
+            if first_status == StatusCode::TOO_MANY_REQUESTS {
+                assert!(
+                    started.elapsed() >= Duration::from_secs(5),
+                    "capacity retry honors Retry-After"
+                );
+            }
+            assert_eq!(failed_attempts.len(), 1);
+            assert_eq!(failed_attempts[0].status, first_status.as_u16());
+            assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(*state.fetched.lock().unwrap(), [url_secret(1)]);
+            let session = service.get_attested_session(&session_id.unwrap()).unwrap();
+            assert_eq!(session.document().claims.extra["secret_id"], secret(1));
         }
     }
 }

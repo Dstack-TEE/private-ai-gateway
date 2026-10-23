@@ -254,6 +254,15 @@ impl ReceiptBuilder {
         self.append_body_hash(EVENT_REQUEST_FORWARDED, body)
     }
 
+    /// Record a previously observed forward without retaining its request body
+    /// in the post-forward verification error.
+    pub(crate) fn add_request_forwarded_hash(
+        &mut self,
+        body_hash: &str,
+    ) -> Result<(), ReceiptError> {
+        self.append_hash(EVENT_REQUEST_FORWARDED, body_hash.to_string())
+    }
+
     pub fn add_middleware_forwarded(&mut self, body: &[u8]) -> Result<String, ReceiptError> {
         self.append_body_hash(EVENT_MIDDLEWARE_FORWARDED, body)
     }

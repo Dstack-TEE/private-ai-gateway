@@ -132,7 +132,11 @@ disabled. Replace those assertions with the bound claims above for this mode;
 retain the deployment binding, keyset, receipt, and session checks. Streaming
 acceptance must also cite the secret whose header produced that response.
 The gateway validates shape and consistency and trusts the measured proxy;
-the fork verifier supplies the independent Contrast/TEE checks.
+the fork verifier supplies the independent Contrast/TEE checks. Compare the
+manifest hash against Privatemode's published CDN or release manifest, or a
+reviewed allowlist. Without `--accept-manifest-sha256`, a PASS proves only
+internal consistency of the supplied bundle. The verifier fetches AMD/Intel
+collateral online, so this recorded-evidence check is not air-gapped.
 
 ## Verify the deployment
 

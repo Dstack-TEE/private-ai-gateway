@@ -52,9 +52,14 @@ pub(super) enum ReverifyOutcome<R> {
 pub(super) trait WithheldResponse {
     fn withheld(status_code: u16) -> Self;
     fn headers(&self) -> &std::collections::HashMap<String, String>;
+    fn status_code(&self) -> u16;
 }
 
 impl WithheldResponse for UpstreamResponse {
+    fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
     fn headers(&self) -> &std::collections::HashMap<String, String> {
         &self.headers
     }
@@ -70,6 +75,10 @@ impl WithheldResponse for UpstreamResponse {
 }
 
 impl WithheldResponse for UpstreamStreamResponse {
+    fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
     fn headers(&self) -> &std::collections::HashMap<String, String> {
         &self.headers
     }
@@ -633,6 +642,17 @@ impl AciService {
                         .provider_claims
                         .as_ref()
                         .is_some_and(|claims| claims["active_secret_evidence"] == true);
+                    if evidence_required && !(200..300).contains(&response.status_code()) {
+                        // Preserve normal error/failover handling without citing a
+                        // previous response's secret for this unbound response.
+                        recorded_event.result = VerificationResult::Failed;
+                        recorded_event.reason = Some(
+                            "active-secret evidence is not checked for a non-success response"
+                                .to_string(),
+                        );
+                        recorded_event.evidence = None;
+                        return ReverifyOutcome::Forwarded(response);
+                    }
                     let mut response_bound = false;
                     if let Some(verifier) = &self.upstream_verifier {
                         let request =
@@ -650,7 +670,9 @@ impl AciService {
                                     aci_session_ids,
                                     &prepared.model_id,
                                 ) {
-                                    return ReverifyOutcome::RefreshFailed(err);
+                                    return ReverifyOutcome::RefreshFailed(
+                                        err.after_forwarding(&prepared.request.body),
+                                    );
                                 }
                             }
                             Ok(None) => {}
@@ -658,15 +680,19 @@ impl AciService {
                                 return ReverifyOutcome::RefreshFailed(
                                     ServiceError::UpstreamVerification(
                                         UpstreamVerificationError::VerifierFailed(reason),
-                                    ),
+                                    )
+                                    .after_forwarding(&prepared.request.body),
                                 )
                             }
                         }
                     }
                     if evidence_required && !response_bound {
-                        return ReverifyOutcome::RefreshFailed(ServiceError::UpstreamVerification(
-                            UpstreamVerificationError::NoVerifierResult,
-                        ));
+                        return ReverifyOutcome::RefreshFailed(
+                            ServiceError::UpstreamVerification(
+                                UpstreamVerificationError::NoVerifierResult,
+                            )
+                            .after_forwarding(&prepared.request.body),
+                        );
                     }
                     return ReverifyOutcome::Forwarded(response);
                 }
@@ -824,13 +850,37 @@ impl AciService {
     /// Finalize a fail-closed refusal into a receipt (§7.5): the exact request
     /// bytes the workload received, a failed `upstream.verified` event naming
     /// the requested model and the reason, and the exact error bytes served.
-    /// No successful response is released. A response-evidence refusal can
-    /// happen after upstream IO; this receipt has no `request.forwarded` event.
+    /// No successful response is released. Pre-forward refusals contain no
+    /// `request.forwarded` event.
     pub fn issue_upstream_refusal_receipt(
         &self,
         endpoint_path: &str,
         model: Option<String>,
         received_body: &[u8],
+        reason: &str,
+        wire_error_body: &[u8],
+        requester: Option<ReceiptOwner>,
+    ) -> Result<SignedReceipt, ServiceError> {
+        self.issue_upstream_refusal_receipt_with_forwarded_hash(
+            endpoint_path,
+            model,
+            received_body,
+            None,
+            reason,
+            wire_error_body,
+            requester,
+        )
+    }
+
+    /// The same refusal, with a forwarding observation when verification failed
+    /// only after the request had already reached the upstream.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_upstream_refusal_receipt_with_forwarded_hash(
+        &self,
+        endpoint_path: &str,
+        model: Option<String>,
+        received_body: &[u8],
+        forwarded_body_hash: Option<&str>,
         reason: &str,
         wire_error_body: &[u8],
         requester: Option<ReceiptOwner>,
@@ -845,6 +895,9 @@ impl AciService {
             self.clock.now_secs(),
         );
         builder.add_request_received(received_body)?;
+        if let Some(hash) = forwarded_body_hash {
+            builder.add_request_forwarded_hash(hash)?;
+        }
         // A refusal only happens when verification was required (§7.5).
         builder.add_upstream_verified_failed(
             model.as_deref().unwrap_or_default(),

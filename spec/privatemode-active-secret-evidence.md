@@ -61,9 +61,9 @@ With the switch enabled, the gateway MUST:
 1. Verify deployment readiness and enforce the existing proxy-image binding
    before forwarding. A readiness response alone MUST NOT publish an active
    secret session. Manifest logs are not required in this mode.
-2. Read the response header, validate its canonical encoding and length, and
-   fetch evidence for exactly that ID from the fixed proxy origin. Reject
-   redirects and ambient HTTP proxies.
+2. For every 2xx response, read the response header, validate its canonical
+   encoding and length, and fetch evidence for exactly that ID from the fixed
+   proxy origin. Reject redirects and ambient HTTP proxies.
 3. Reject missing or unknown fields, versions other than integer `1`, invalid
    encodings, non-object manifests, invalid PEM framing, invalid or unordered
    timestamps, and size-limit violations. Require the response ID, bundle ID,
@@ -79,12 +79,24 @@ With the switch enabled, the gateway MUST:
    Session-allowlist mismatches use the existing `412 session_not_accepted`.
    Other evidence failures use `503 upstream_verification_failed`. No provider
    body bytes are released. Verification can fail after the request reached
-   the proxy; a refusal receipt does not imply that no upstream IO occurred.
+   the proxy. Such refusals record `request.forwarded` with the exact forwarded
+   body hash before the failed `upstream.verified` event. Pre-forward refusals
+   retain their existing event sequence without `request.forwarded`.
+
+With the switch enabled, evidence failures intentionally refuse requests even
+when the client did not require `aci_verified`. This stricter fail-closed
+behavior applies to all 2xx responses. Non-2xx responses bypass response binding
+and retain the ordinary upstream-status, error-normalization, capacity-retry,
+`Retry-After`, and failover handling. Their receipts do not cite an active-secret
+session because no successful response was bound.
 
 The evidence fetch has a total timeout of the smaller of ten seconds and the
-route's `verifier_request_timeout_seconds`, including cache-lock waits and body reads. The gateway
-accepts at most 8 MiB of JSON, with decoded field limits of 4 MiB for the
-manifest, 1 MiB for the attestation document, 64 KiB for the Secret Service
+route's `verifier_request_timeout_seconds`, including cache-lock waits and body
+reads. Network fetches do not hold the cache mutex, so a slow ID does not block
+other cache lookups or fetches. Concurrent misses for one ID may fetch twice;
+the cache retains a single immutable bundle for that ID. The gateway accepts at
+most 8 MiB of JSON, with decoded field limits of 4 MiB for the manifest, 1 MiB
+for the attestation document, 64 KiB for the Secret Service
 certificate, 4 KiB each for the request public key and encapsulated key, and
 1 KiB each for the nonce and signature. The PEM string is limited to 64 KiB
 and 16 certificates. Fields must be nonempty; the secret ID is exactly 32
@@ -119,6 +131,13 @@ TCB, OS, serving-software, and model-weight claims remain `unknown`. The
 gateway trusts the measured proxy's attestation checks and does not verify
 Contrast or TEE evidence itself, or decide whether a manifest is acceptable.
 
+`manifest_bound_to_active_secret: true` together with `active_manifest_sha256`
+identifies which manifest the proxy's Coordinator attested for that secret.
+Trust in that manifest requires comparing `active_manifest_sha256` against a
+trusted manifest: Privatemode's published CDN or release manifest, or the
+relying party's reviewed allowlist. These claims alone do not approve the
+manifest's contents.
+
 The receipt's existing `upstream.verified.session_id` cites this immutable
 session. The secret ID and evidence digest participate in the session material,
 so another secret cannot reuse the session. The header itself adds no receipt
@@ -143,6 +162,11 @@ manifest and attested Mesh CA, the Secret Service certificate chain and
 signature over `SHA256(request_public_key || encapsulated_key)`, and the secret
 ID. Success exits zero and prints the verified manifest SHA-256. Gateway shape
 checks alone are not independent cryptographic verification.
+
+Use `--accept-manifest-sha256 <hex>` to enforce the trusted manifest comparison.
+Without an allowlist, a PASS proves only internal consistency of the supplied
+bundle. The verifier fetches AMD/Intel collateral online, so verification of a
+recorded bundle is not air-gapped.
 
 The hermetic fixtures in
 [`tests/provider_e2e/privatemode_active_secret.rs`](../tests/provider_e2e/privatemode_active_secret.rs)

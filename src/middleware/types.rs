@@ -389,6 +389,9 @@ impl From<&ServiceError> for ErrorClass {
                 UpstreamVerificationError::NoVerifierResult
                 | UpstreamVerificationError::VerifierFailed(_),
             ) => Self::UpstreamVerificationFailed,
+            ServiceError::UpstreamVerificationAfterForwarding { .. } => {
+                Self::UpstreamVerificationFailed
+            }
             ServiceError::Upstream(upstream) => upstream.into(),
             ServiceError::E2ee(_) => Self::E2eeFailed,
             ServiceError::Receipt(_) | ServiceError::NoReceiptKey => Self::ReceiptFailed,

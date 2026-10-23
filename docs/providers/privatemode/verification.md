@@ -93,21 +93,42 @@ The gateway rejects missing headers, unknown/evicted IDs, non-200 evidence
 responses, invalid content types, malformed JSON, unsupported versions,
 unknown fields, invalid sizes/encodings/PEM/timestamps, a manifest digest
 mismatch, or disagreement between the header, URL, bundle ID, and public-key
-hash. Provider body bytes stay withheld until these checks pass. For
+hash. For every 2xx response, provider body bytes stay withheld until these
+checks pass.
+Evidence failures also refuse requests without an `aci_verified` constraint;
+this stricter fail-closed policy is intentional. Non-2xx responses bypass these
+checks and keep their existing status, capacity/`Retry-After`, error-normalization,
+and failover handling. They do not cite a response-bound secret session. For
 `aci_verified` requests, streaming responses also remain uncommitted until
 verification completes. Failures use the existing signed verification refusal
 (`503`); a pinned session that changes during the request produces the existing
-`412`. The prompt can already have reached the measured proxy when a response
-check fails.
+`412`. If the prompt already reached the measured proxy when a response check
+fails, its refusal receipt records `request.forwarded` with the exact forwarded
+body hash before the failed verification event. Pre-forward refusals keep their
+existing event sequence.
 
 Successful receipt sessions replace observation metadata with
 `manifest_bound_to_active_secret: true`, `active_manifest_sha256`, `secret_id`,
 and `active_secret_evidence: true`. Session evidence carries the exact full
 bundle as a digest and JSON data URI, so the proxy fork's `verify-evidence`
-can independently check the Contrast nonce/report, manifest, Mesh CA,
-Secret Service certificate/signature, and secret ID offline. Rust validates
+can independently check the recorded Contrast nonce/report, manifest, Mesh CA,
+Secret Service certificate/signature, and secret ID. Rust validates
 shape and digest consistency and trusts the measured proxy's cryptographic
 checks; it does not reimplement Contrast verification.
+
+`manifest_bound_to_active_secret: true` and `active_manifest_sha256` identify
+which manifest the proxy's Coordinator attested for that secret. To trust the
+manifest, compare the hash against Privatemode's published CDN or release
+manifest, or the relying party's reviewed allowlist. Verify the recorded bundle
+with the fork's verifier, repeating the allowlist flag as needed:
+
+```sh
+verify-evidence --evidence evidence.json --accept-manifest-sha256 <hex>
+```
+
+Without an allowlist, a PASS proves only internal consistency of the supplied
+bundle. The verifier fetches AMD/Intel collateral online; this verification is
+not air-gapped.
 
 There is no bound session to list before the first successful inference.
 Afterward, discovery returns the most recently observed secret under the
