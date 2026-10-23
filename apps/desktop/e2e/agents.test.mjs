@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, parseDocument } from "yaml";
 
+import { classifyReplyFailure, latestReplyUsage, repeatedOutput } from "./reply-failure.mjs";
+
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
 const REPLY = "PAP-OK";
@@ -212,7 +214,7 @@ async function step(row, name, check) {
     row[name] = "ok";
     return value;
   } catch (error) {
-    row[name] = "FAIL";
+    row[name] = error.upstream ? "UPSTREAM" : "FAIL";
     throw error;
   }
 }
@@ -311,18 +313,35 @@ function localApi(token, pathname, body) {
 // but not a different reply.
 const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'“”‘’.,;:!?]+$/g, "");
 
+function agentUsage(agent) {
+  const records = [];
+  let cursor;
+  do {
+    const page = papJson("usage", "list", "--agent", agent.id, "--limit", "100", ...(cursor ? ["--cursor", cursor] : []));
+    records.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return records;
+}
+
 function assertReply(agent) {
   const [command, ...args] = agent.prompt;
-  const since = nowSeconds();
-  const { error, status, signal, stdout, stderr } = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  let previousIds;
+  let snapshotError;
+  try {
+    previousIds = new Set(agentUsage(agent).map(({ id }) => id));
+  } catch (error) {
+    snapshotError = error;
+  }
+  const result = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  const { error, stdout, stderr } = result;
   if (!error && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
 
-  let reason = `exited ${status ?? signal} without replying ${REPLY}`;
-  if (error?.code === "ETIMEDOUT") reason = `timed out after ${REPLY_TIMEOUT / 1000} s`;
-  else if (error) reason = `did not finish: ${error.message}`;
+  let record;
   let usage = "none since the prompt";
   try {
-    const [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
+    if (snapshotError) throw snapshotError;
+    record = latestReplyUsage(agentUsage(agent), previousIds);
     if (record) {
       const { method, path: requestPath, status: httpStatus, verified, leftDevice, detail } = record;
       usage = `${method} ${requestPath}: HTTP ${httpStatus}, verified ${verified}, left device ${leftDevice}: ${detail}`;
@@ -330,8 +349,11 @@ function assertReply(agent) {
   } catch (usageError) {
     usage = `unreadable: ${usageError.message}`;
   }
+  const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, reply: REPLY, timeout: REPLY_TIMEOUT });
+  const repetition = repeatedOutput(`${stdout ?? ""}\n${stderr ?? ""}`);
   const report = [
     `${agent.id} ${reason}`,
+    ...(repetition ? [`output contains ${repetition.length.toLocaleString("en-US")} consecutive ${JSON.stringify(repetition.character)} characters`] : []),
     `--- stdout (last 40 lines)`,
     tail(stdout),
     `--- stderr (last 40 lines)`,
@@ -339,7 +361,7 @@ function assertReply(agent) {
     `--- latest usage record`,
     usage,
   ];
-  assert.fail(redact(report.join("\n")));
+  throw Object.assign(new assert.AssertionError({ message: redact(report.join("\n")) }), { upstream });
 }
 
 // Receipt audits finish after delivery, so wait for every record to settle.
