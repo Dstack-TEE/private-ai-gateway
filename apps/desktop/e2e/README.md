@@ -42,16 +42,23 @@ and revoke every token, and `pap service stop` must leave them restored.
 
 When an agent's one-shot command times out or does not reply `PAP-OK`, the
 failure shows why: the last 40 lines of its stdout and stderr and its latest
-usage record since the prompt (HTTP status, verification and detail), with the
+new usage record for that reply (HTTP status, verification and detail), with the
 API key, agent tokens and anything shaped like a credential masked.
 
-During the reply, 500 consecutive identical non-whitespace characters on
-either output stream stop the command's process group immediately and report
-the model, agent, repeated character and run length as an upstream model
-failure. The 240-second reply timeout also reports an unfinished upstream
-response when the latest usage record is HTTP 200 with verification still
-pending (`null`). Other timeouts keep their usual message. Neither case is
-retried; upstream failures appear as `UPSTREAM` in the summary's reply column.
+The reply keeps its normal 240-second timeout. A timeout reports an unfinished
+upstream response, including the model and agent, only when the latest new
+usage record reached the service (`leftDevice: true`), returned HTTP 200 and
+still has verification pending (`null`). Before
+starting the reply, the test snapshots that agent's usage record IDs; older
+records are excluded even if they share the reply's timestamp. If that snapshot
+cannot be read, the failure keeps the usual timeout message and reports usage
+as unreadable. Upstream failures appear as `UPSTREAM` in the summary's reply
+column. No replies are retried.
+
+On failure, a run of at least 500 identical non-whitespace characters in either
+output stream adds an informational line with the character and full run
+length. Output content never stops the command or classifies an upstream
+failure: long base64 values, separators and progress bars can be legitimate.
 
 The output ends with one row per agent and the result of each phase.
 

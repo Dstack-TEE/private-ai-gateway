@@ -15,8 +15,7 @@ import { promisify } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, parseDocument } from "yaml";
 
-import { classifyReplyFailure } from "./reply-failure.mjs";
-import { runReply } from "./reply-process.mjs";
+import { classifyReplyFailure, latestReplyUsage, repeatedOutput } from "./reply-failure.mjs";
 
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
@@ -314,17 +313,35 @@ function localApi(token, pathname, body) {
 // but not a different reply.
 const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'“”‘’.,;:!?]+$/g, "");
 
-async function assertReply(agent) {
+function agentUsage(agent) {
+  const records = [];
+  let cursor;
+  do {
+    const page = papJson("usage", "list", "--agent", agent.id, "--limit", "100", ...(cursor ? ["--cursor", cursor] : []));
+    records.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return records;
+}
+
+function assertReply(agent) {
   const [command, ...args] = agent.prompt;
-  const since = nowSeconds();
-  const result = await runReply(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
-  const { error, degenerate, stdout, stderr } = result;
-  if (!error && !degenerate && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
+  let previousIds;
+  let snapshotError;
+  try {
+    previousIds = new Set(agentUsage(agent).map(({ id }) => id));
+  } catch (error) {
+    snapshotError = error;
+  }
+  const result = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  const { error, stdout, stderr } = result;
+  if (!error && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
 
   let record;
   let usage = "none since the prompt";
   try {
-    [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
+    if (snapshotError) throw snapshotError;
+    record = latestReplyUsage(agentUsage(agent), previousIds);
     if (record) {
       const { method, path: requestPath, status: httpStatus, verified, leftDevice, detail } = record;
       usage = `${method} ${requestPath}: HTTP ${httpStatus}, verified ${verified}, left device ${leftDevice}: ${detail}`;
@@ -333,8 +350,10 @@ async function assertReply(agent) {
     usage = `unreadable: ${usageError.message}`;
   }
   const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, timeout: REPLY_TIMEOUT });
+  const repetition = repeatedOutput(`${stdout ?? ""}\n${stderr ?? ""}`);
   const report = [
     `${agent.id} ${reason}`,
+    ...(repetition ? [`output contains ${repetition.length.toLocaleString("en-US")} consecutive ${JSON.stringify(repetition.character)} characters`] : []),
     `--- stdout (last 40 lines)`,
     tail(stdout),
     `--- stderr (last 40 lines)`,
@@ -455,7 +474,7 @@ for (const agent of AGENTS) {
 
     const since = nowSeconds();
     await step(row, "reply", async () => {
-      await assertReply(agent);
+      assertReply(agent);
       await agent.verify?.();
     });
     await step(row, "usage", async () => {
@@ -538,7 +557,7 @@ test("recovers when the network returns", async () => {
       async () => protection() === "protected" && (await Promise.all(agents.map(accepted))).every(Boolean),
       180_000,
     );
-    await assertReply(agents[0]);
+    assertReply(agents[0]);
   });
 });
 
