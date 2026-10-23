@@ -1,9 +1,13 @@
 //! Verifier for the official Privatemode proxy co-deployed with the gateway.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::Value;
+
+mod evidence;
 use tokio::time::Instant;
 
 use super::CachedProviderEvent;
@@ -14,15 +18,18 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 /// Verifier for the exact official Privatemode proxy deployment measured with
 /// the gateway. The proxy completes its initial Contrast verification and
 /// secret exchange before serving, so its readiness probe corroborates startup
-/// and liveness. Dynamic manifest history is reported as an observation only:
-/// v1.59 does not bind a logged manifest to the secret used for a request.
+/// and liveness. By default, dynamic manifest history is an observation only.
+/// An opt-in proxy extension binds each response to per-secret evidence.
 #[derive(Debug, Clone)]
 pub struct PrivatemodeProviderVerifier {
     deployment: Arc<PrivatemodeProxyDeployment>,
     client: reqwest::Client,
+    evidence_timeout: Duration,
     cache_ttl_seconds: u64,
     cache: Arc<RwLock<Option<CachedProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
+    evidence_cache: Arc<tokio::sync::Mutex<VecDeque<(String, Value)>>>,
+    last_bound: Arc<RwLock<Option<UpstreamVerifiedEvent>>>,
 }
 
 impl PrivatemodeProviderVerifier {
@@ -36,9 +43,12 @@ impl PrivatemodeProviderVerifier {
         Ok(Self {
             deployment,
             client,
+            evidence_timeout: Duration::from_secs(request_timeout_seconds.min(10)),
             cache_ttl_seconds,
             cache: Arc::new(RwLock::new(None)),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
+            evidence_cache: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
+            last_bound: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -56,6 +66,29 @@ impl PrivatemodeProviderVerifier {
             required: request.required,
             ..Default::default()
         };
+        if self.deployment.active_secret_evidence() {
+            if let Err(err) = self.probe().await {
+                event.reason = Some(err.to_string());
+                return event;
+            }
+            if let Some(bound) = self
+                .last_bound
+                .read()
+                .expect("Privatemode bound event poisoned")
+                .as_ref()
+            {
+                event.evidence = bound.evidence.clone();
+                event.provider_claims = bound.provider_claims.clone();
+            } else {
+                event.provider_claims = Some(serde_json::json!({
+                    "active_secret_evidence": true,
+                    "manifest_bound_to_active_secret": false,
+                }));
+            }
+            event.result = VerificationResult::Verified;
+            event.channel_bindings = vec![self.deployment.channel_binding()];
+            return event;
+        }
         // The observed manifest is the session's evidence bundle, which every
         // sealed session must carry (§8.2). It is not bound to the active
         // secret, so it supports no manifest-specific claims.
@@ -89,6 +122,64 @@ impl PrivatemodeProviderVerifier {
             "manifest_bound_to_active_secret": false,
         }));
         event
+    }
+
+    async fn secret_evidence(&self, secret_id: &str) -> Result<Value, String> {
+        let id = evidence::url_id(secret_id)?;
+        // Serialize misses and bound retained memory to eight immutable bundles.
+        let mut cache = self.evidence_cache.lock().await;
+        if let Some((_, bundle)) = cache.iter().find(|(key, _)| key == secret_id) {
+            return Ok(bundle.clone());
+        }
+        let mut response = self
+            .client
+            .get(format!(
+                "{}/privatemode/v1/secret-evidence/{id}",
+                self.deployment.base_url()
+            ))
+            .timeout(self.evidence_timeout)
+            .send()
+            .await
+            .map_err(|_| "Privatemode active-secret evidence fetch failed".to_string())?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "Privatemode active-secret evidence returned {}",
+                response.status()
+            ));
+        }
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .map(str::trim)
+            != Some("application/json")
+        {
+            return Err("Privatemode active-secret evidence must be application/json".to_string());
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > evidence::MAX_BODY_BYTES as u64)
+        {
+            return Err("Privatemode active-secret evidence exceeds size limit".to_string());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "Privatemode active-secret evidence read failed".to_string())?
+        {
+            if chunk.len() > evidence::MAX_BODY_BYTES.saturating_sub(body.len()) {
+                return Err("Privatemode active-secret evidence exceeds size limit".to_string());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let bundle = evidence::validate(&body, secret_id, &id)?;
+        if cache.len() == 8 {
+            cache.pop_front();
+        }
+        cache.push_back((secret_id.to_string(), bundle.clone()));
+        Ok(bundle)
     }
 
     /// The proxy's `/readyz` answers only after it starts listening, which it
@@ -145,6 +236,48 @@ impl PrivatemodeProviderVerifier {
 
 #[async_trait]
 impl UpstreamVerifier for PrivatemodeProviderVerifier {
+    async fn verify_response(
+        &self,
+        _request: UpstreamVerificationRequest,
+        mut event: UpstreamVerifiedEvent,
+        headers: &HashMap<String, String>,
+    ) -> Result<Option<UpstreamVerifiedEvent>, String> {
+        if !self.deployment.active_secret_evidence() {
+            return Ok(None);
+        }
+        let secret_id = headers
+            .get("privatemode-secret-id")
+            .ok_or("Privatemode response is missing Privatemode-Secret-ID")?;
+        let bundle = tokio::time::timeout(self.evidence_timeout, self.secret_evidence(secret_id))
+            .await
+            .map_err(|_| "Privatemode active-secret evidence deadline exceeded".to_string())??;
+        event.provider_claims = Some(serde_json::json!({
+            "trust_boundary": "attested-compose-privatemode-proxy",
+            "attestation_scope": "contrast-attested-e2ee-secret",
+            "request_encryption": "privatemode-oae",
+            "success_response_authentication": "privatemode-oae",
+            "inference_secret_policy": "latest-per-attempt-fail-closed",
+            "active_secret_evidence": true,
+            "manifest_bound_to_active_secret": true,
+            "active_manifest_sha256": bundle["manifest_sha256"],
+            "secret_id": secret_id,
+        }));
+        event.evidence = Some(bundle);
+        *self
+            .last_bound
+            .write()
+            .expect("Privatemode bound event poisoned") = Some(event.clone());
+        if let Some(cached) = self
+            .cache
+            .write()
+            .expect("Privatemode verifier cache poisoned")
+            .as_mut()
+        {
+            cached.event = event.clone();
+        }
+        Ok(Some(event))
+    }
+
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         if let Some(event) = self.cached(&request) {
             return event;

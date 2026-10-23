@@ -144,6 +144,8 @@ struct PrivatemodeProxyConfig {
     credential_path: String,
     credential_sha256: String,
     proxy_image_digest: String,
+    #[serde(default)]
+    active_secret_evidence: bool,
 }
 
 impl Default for GatewayConfigFile {
@@ -497,7 +499,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &config.credential_sha256,
                 &config.proxy_image_digest,
             )
-            .map(Arc::new)
+            .map(|deployment| {
+                Arc::new(deployment.with_active_secret_evidence(config.active_secret_evidence))
+            })
             .map_err(|err| invalid_input(err.to_string()))
         })
         .transpose()?;
@@ -984,6 +988,34 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             proxy.proxy_image_digest,
             format!("sha256:{}", "22".repeat(32))
         );
+    }
+
+    #[test]
+    fn privatemode_active_secret_evidence_is_a_default_off_static_boolean() {
+        let base = serde_json::json!({
+            "base_url": "http://privatemode-proxy:8080",
+            "manifest_log_path": "/run/privatemode-manifests/log.txt",
+            "credential_path": "/run/secrets/privatemode-api-key",
+            "credential_sha256": "33".repeat(32),
+            "proxy_image_digest": format!("sha256:{}", "22".repeat(32)),
+        });
+        let parsed: super::PrivatemodeProxyConfig = serde_json::from_value(base.clone()).unwrap();
+        assert!(!parsed.active_secret_evidence);
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(false),
+            serde_json::json!(null),
+            serde_json::json!("true"),
+        ] {
+            let mut config = base.clone();
+            config["active_secret_evidence"] = value.clone();
+            let parsed = serde_json::from_value::<super::PrivatemodeProxyConfig>(config);
+            if let Some(enabled) = value.as_bool() {
+                assert_eq!(parsed.unwrap().active_secret_evidence, enabled);
+            } else {
+                assert!(parsed.is_err());
+            }
+        }
     }
 
     #[test]

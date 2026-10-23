@@ -15,6 +15,8 @@ use std::sync::{
 use std::time::Duration;
 
 mod common;
+#[path = "provider_e2e/privatemode_active_secret.rs"]
+mod privatemode_active_secret;
 
 use axum::{
     body::{to_bytes, Body, Bytes},

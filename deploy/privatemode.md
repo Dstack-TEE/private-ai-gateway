@@ -76,6 +76,64 @@ salt lifetime, shard affinity, and the change from per-request isolation.
 After deployment, the gateway listens on port `8086` and serves inference like
 any other deployment. The admin API uses the admin token.
 
+## Enable active-secret evidence for a test deployment
+
+The reference renderer and official v1.59 proxy image retain their current
+behavior. To test the optional extension, use a reviewed fork image implementing
+[the version 1 API](../spec/privatemode-active-secret-evidence.md), pin its OCI
+digest in the measured Compose and `privatemode_proxy.proxy_image_digest`, and
+add this member to the measured gateway config's existing proxy object:
+
+```json
+{
+  "privatemode_proxy": {
+    "active_secret_evidence": true
+  }
+}
+```
+
+This is a config fragment; retain the object's required origin, manifest-log
+path, credential path/digest, and image digest. Keep the proxy listener private.
+The switch is static and defaults to `false`; mutable route replacement cannot
+enable it. The existing manifest log is not read when the switch is enabled.
+Use a throwaway CVM and test account for acceptance; the fork image and gateway
+branch require independent review and live verification before rollout.
+
+After the ordinary `pap verify` and receipt/session `pap audit` below, require
+`claims.extra.manifest_bound_to_active_secret == true`, then decode and check
+the evidence bundle offline:
+
+```bash
+jq -e '.claims.extra.manifest_bound_to_active_secret == true' "$artifact_dir/session.json"
+python3 - "$artifact_dir/session.json" "$artifact_dir/secret-evidence.json" <<'PYTHON'
+import base64
+import hashlib
+import json
+import pathlib
+import sys
+
+session = json.loads(pathlib.Path(sys.argv[1]).read_text())
+evidence = session["evidence"]
+prefix = "data:application/json;base64,"
+assert evidence["data"].startswith(prefix)
+raw = base64.b64decode(evidence["data"][len(prefix):], validate=True)
+assert evidence["digest"] == "sha256:" + hashlib.sha256(raw).hexdigest()
+bundle = json.loads(raw)
+assert bundle["secret_id"] == session["claims"]["extra"]["secret_id"]
+assert bundle["manifest_sha256"] == session["claims"]["extra"]["active_manifest_sha256"]
+pathlib.Path(sys.argv[2]).write_bytes(raw)
+PYTHON
+verify-evidence --evidence "$artifact_dir/secret-evidence.json" \
+  --accept-manifest-sha256 <reviewed-manifest-sha256>
+```
+
+The default-mode manifest-observation assertions below apply with the switch
+disabled. Replace those assertions with the bound claims above for this mode;
+retain the deployment binding, keyset, receipt, and session checks. Streaming
+acceptance must also cite the secret whose header produced that response.
+The gateway validates shape and consistency and trusts the measured proxy;
+the fork verifier supplies the independent Contrast/TEE checks.
+
 ## Verify the deployment
 
 

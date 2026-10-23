@@ -1,5 +1,13 @@
 # Privatemode provider review
 
+> **Status (2026-10-22 PDT):** optional measured
+> `privatemode_proxy.active_secret_evidence` support records the full version 1
+> per-secret bundle and binds the receipt's session to the response secret ID.
+> The default remains the existing unbound manifest observation. See the
+> [current verification contract](verification.md#optional-active-secret-evidence).
+> Hermetic tests cover both modes; the fork's independent verifier and a fresh
+> CVM end-to-end run remain separate acceptance gates before enabling this.
+
 Audit date: 2026-05-26 UTC. Provider behavior was rechecked against
 Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic

@@ -84,6 +84,7 @@ pub struct PrivatemodeProxyDeployment {
     manifest_log_path: PathBuf,
     credential_sha256: String,
     proxy_image_digest: String,
+    active_secret_evidence: bool,
 }
 
 #[derive(Debug)]
@@ -159,7 +160,18 @@ impl PrivatemodeProxyDeployment {
             manifest_log_path: manifest_log_path.to_path_buf(),
             credential_sha256,
             proxy_image_digest,
+            active_secret_evidence: false,
         })
+    }
+
+    /// Require per-response evidence from a proxy implementing the version 1 API.
+    pub fn with_active_secret_evidence(mut self, enabled: bool) -> Self {
+        self.active_secret_evidence = enabled;
+        self
+    }
+
+    pub(crate) fn active_secret_evidence(&self) -> bool {
+        self.active_secret_evidence
     }
 
     pub fn base_url(&self) -> &str {
@@ -333,6 +345,16 @@ impl PrivatemodeProviderBackend {
                 event.url_origin,
                 self.url_origin()
             )));
+        }
+        if self.deployment.active_secret_evidence()
+            && !event
+                .provider_claims
+                .as_ref()
+                .is_some_and(|claims| claims["active_secret_evidence"] == true)
+        {
+            return Err(binding_mismatch(
+                "Privatemode requires response-bound active-secret evidence",
+            ));
         }
         if event.channel_bindings != [self.deployment.channel_binding()] {
             return Err(binding_mismatch(
