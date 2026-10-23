@@ -1507,6 +1507,44 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     }
 }
 
+async fn forward_privatemode_candidates(
+    service: &AciService,
+    body: &[u8],
+    stream: bool,
+    count: usize,
+) -> (MiddlewareForwardResult, MiddlewareReceiptJournal) {
+    let journal = MiddlewareReceiptJournal::default();
+    let result = service
+        .forward_chat_completion_for_middleware(
+            ChatCompletionRequest {
+                context: GatewayRequestContext {
+                    user_model: Some("public-model".to_string()),
+                    ..Default::default()
+                },
+                endpoint_path: "/v1/chat/completions",
+                received_body: body,
+                forwarded_body: None,
+                aci_required: true,
+                aci_session_ids: Vec::new(),
+                upstream_verification_event: None,
+                requester: None,
+                e2ee: None,
+            },
+            (0..count)
+                .map(|_| ForwardCandidate {
+                    route_id: "privatemode-provider:public-model".to_string(),
+                    body: body.to_vec(),
+                    path: "/v1/chat/completions",
+                })
+                .collect(),
+            stream,
+            journal.clone(),
+        )
+        .await
+        .unwrap();
+    (result, journal)
+}
+
 #[tokio::test]
 async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
     for stream in [false, true] {
@@ -1531,33 +1569,8 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
             "stream": stream
         }))
         .unwrap();
-        let journal = MiddlewareReceiptJournal::default();
-        let result = service
-            .forward_chat_completion_for_middleware(
-                ChatCompletionRequest {
-                    context: GatewayRequestContext {
-                        user_model: Some("public-model".to_string()),
-                        ..GatewayRequestContext::default()
-                    },
-                    endpoint_path: "/v1/chat/completions",
-                    received_body: &request_body,
-                    forwarded_body: None,
-                    aci_required: true,
-                    aci_session_ids: Vec::new(),
-                    upstream_verification_event: None,
-                    requester: None,
-                    e2ee: None,
-                },
-                vec![ForwardCandidate {
-                    route_id: "privatemode-provider:public-model".to_string(),
-                    body: request_body.clone(),
-                    path: "/v1/chat/completions",
-                }],
-                stream,
-                journal.clone(),
-            )
-            .await
-            .unwrap();
+        let (result, journal) =
+            forward_privatemode_candidates(&service, &request_body, stream, 1).await;
 
         let (status, route, failed_attempts, session_id) = match result {
             MiddlewareForwardResult::Forwarded(forward) => {

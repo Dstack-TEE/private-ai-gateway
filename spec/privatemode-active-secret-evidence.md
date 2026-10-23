@@ -3,27 +3,22 @@
 > **Status:** draft provider extension to `aci/1`
 > **Binding:** [`proxy_image_sha256`](proxy-image-binding.md)
 
-This extension records the Contrast manifest associated with the inference
-secret used for a particular response. It adds provider fields in
-`claims.extra` and a session evidence format; it does not change the core
-session, receipt, or channel-binding schema.
+This extension binds a response's inference secret to its Contrast manifest
+through provider claims and session evidence. Core ACI schemas are unchanged.
 
 ## Proxy contract
 
-The measured proxy MUST set `Privatemode-Secret-ID` before the body of every
-proxied inference response, including streaming responses. Its value is the
-standard padded base64 encoding of `SHA256(request_public_key)` for the attempt
-that produced that response.
+The measured proxy MUST set `Privatemode-Secret-ID` before every proxied
+inference response body, including streaming. It contains standard padded
+base64 of `SHA256(request_public_key)` for the attempt producing that response.
 
-The gateway obtains the bundle with
-`GET /privatemode/v1/secret-evidence/{id}` at the measured proxy origin. The URL
-ID is the unpadded base64url encoding of those same 32 bytes. The endpoint
-returns `200 application/json`, `404` for unknown or evicted IDs, or `400` for a
-malformed ID. It MUST return the requested secret's evidence even when the
-proxy rotates its current secret during the request. The gateway never uses a
-`current` endpoint to select receipt evidence.
+`GET /privatemode/v1/secret-evidence/{id}` at the measured proxy origin uses
+unpadded base64url of the same 32 bytes. It returns `200 application/json`,
+`404` for unknown/evicted IDs, or `400` for malformed IDs. Evidence MUST remain
+associated with the requested secret across rotation; the gateway never selects
+evidence through a `current` endpoint.
 
-The version 1 JSON shape is:
+Version 1 JSON (all byte fields standard padded base64; times RFC 3339 UTC):
 
 ```json
 {
@@ -46,67 +41,55 @@ The version 1 JSON shape is:
 }
 ```
 
-All byte fields use standard base64 with padding. Timestamps are RFC 3339 UTC.
-The bundle MUST NOT contain the inference secret, API key, or prompt data.
+Bundles MUST NOT contain the inference secret, API key, or prompt data.
 
 ## Gateway requirements
 
-`privatemode_proxy.active_secret_evidence` is a static, measured boolean,
-`false` by default. Omission or `false` preserves the existing manifest
-observation, session claims, forwarding behavior, and wire format. Enabling it
-requires a proxy image that implements this contract.
+`privatemode_proxy.active_secret_evidence` is static, measured, and defaults to
+`false`. Omission or `false` preserves existing behavior, claims, and wire output.
+Enabling it requires a proxy implementing this contract.
 
-With the switch enabled, the gateway MUST:
+The gateway MUST enforce readiness and the existing proxy-image binding before
+forwarding. Enabled mode does not read manifest logs. For every 2xx response it
+MUST validate the header and obtain matching evidence before releasing provider
+bytes; `aci_verified` streaming responses MUST also remain uncommitted. Client
+session constraints apply before forwarding and again after response binding.
+Non-2xx responses bypass binding, retain normal status/error, capacity,
+`Retry-After`, and failover handling, and cite no active-secret session.
 
-1. Verify deployment readiness and enforce the existing proxy-image binding
-   before forwarding. A readiness response alone MUST NOT publish an active
-   secret session. Manifest logs are not required in this mode.
-2. For every 2xx response, read the response header, validate its canonical
-   encoding and length, and fetch evidence for exactly that ID from the fixed
-   proxy origin. Reject redirects and ambient HTTP proxies.
-3. Reject missing or unknown fields, versions other than integer `1`, invalid
-   encodings, non-object manifests, invalid PEM framing, invalid or unordered
-   timestamps, and size-limit violations. Require the response ID, bundle ID,
-   URL ID, and `SHA256(request_public_key)` to agree, and check the digest of
-   the decoded manifest.
-4. Bind the per-request recorded event to this bundle before releasing a
-   provider body. For `aci_verified` requests, this MUST precede committing a
-   streaming response. Recheck any client session
-   allowlist against that event. A rotated secret can produce a new session;
-   it cannot reuse the previous secret's session in the receipt.
-5. Fail closed with the existing verification refusal and signed refusal
-   receipt on missing headers or missing, invalid, or mismatched evidence.
-   Session-allowlist mismatches use the existing `412 session_not_accepted`.
-   Other evidence failures use `503 upstream_verification_failed`. No provider
-   body bytes are released. Verification can fail after the request reached
-   the proxy. Such refusals record `request.forwarded` with the exact forwarded
-   body hash before the failed `upstream.verified` event. Pre-forward refusals
-   retain their existing event sequence without `request.forwarded`.
+Evidence fetches use only the measured proxy origin, reject redirects and
+ambient proxies, and have a total deadline of
+`min(10, verifier_request_timeout_seconds)` seconds, including cache waits and
+body reads. The cache retains at most eight immutable bundles; failures are not
+cached. Fetches do not hold its mutex; concurrent misses may fetch the same ID.
 
-With the switch enabled, evidence failures intentionally refuse requests even
-when the client did not require `aci_verified`. This stricter fail-closed
-behavior applies to all 2xx responses. Non-2xx responses bypass response binding
-and retain the ordinary upstream-status, error-normalization, capacity-retry,
-`Retry-After`, and failover handling. Their receipts do not cite an active-secret
-session because no successful response was bound.
+Validation rejects missing/unknown fields, versions other than integer `1`,
+noncanonical encodings, non-object manifests, invalid PEM/timestamps, unordered
+times, and size violations. Header, URL, bundle ID, and
+`SHA256(request_public_key)` MUST agree; the decoded manifest MUST match its
+64-character lowercase hexadecimal digest. All fields are nonempty. Limits:
 
-The evidence fetch has a total timeout of the smaller of ten seconds and the
-route's `verifier_request_timeout_seconds`, including cache-lock waits and body
-reads. Network fetches do not hold the cache mutex, so a slow ID does not block
-other cache lookups or fetches. Concurrent misses for one ID may fetch twice;
-the cache retains a single immutable bundle for that ID. The gateway accepts at
-most 8 MiB of JSON, with decoded field limits of 4 MiB for the manifest, 1 MiB
-for the attestation document, 64 KiB for the Secret Service
-certificate, 4 KiB each for the request public key and encapsulated key, and
-1 KiB each for the nonce and signature. The PEM string is limited to 64 KiB
-and 16 certificates. Fields must be nonempty; the secret ID is exactly 32
-bytes and the manifest digest is exactly 64 lowercase hexadecimal characters.
-The immutable evidence cache retains at most eight IDs per verifier. Failed
-fetches and invalid bundles are not cached.
+| Field | Maximum decoded size |
+| --- | --- |
+| Whole JSON body | 8 MiB (wire bytes) |
+| Manifest | 4 MiB |
+| Attestation document | 1 MiB |
+| Secret Service certificate | 64 KiB |
+| Mesh CA PEM | 64 KiB, 16 certificates |
+| Request public key, encapsulated key | 4 KiB each |
+| Nonce, signature | 1 KiB each |
+| Secret ID | Exactly 32 bytes |
 
-## Session and receipt
+Missing, invalid, or mismatched evidence MUST produce the existing signed
+`503 upstream_verification_failed` refusal, intentionally even without an
+`aci_verified` constraint. Session-pin mismatches use `412 session_not_accepted`.
+No provider bytes are released. When the prompt already reached the proxy, the
+refusal records `request.forwarded` with its exact body hash before failed
+`upstream.verified`. Pre-forward refusals retain their existing event sequence.
 
-A successfully bound session includes:
+## Sessions and verification
+
+Successful sessions include:
 
 ```json
 {
@@ -125,52 +108,33 @@ A successfully bound session includes:
 }
 ```
 
-The existing trust-boundary, request-encryption, response-authentication,
-attestation-scope, and inference-secret-policy claims are preserved. Typed GPU,
-TCB, OS, serving-software, and model-weight claims remain `unknown`. The
-gateway trusts the measured proxy's attestation checks and does not verify
-Contrast or TEE evidence itself, or decide whether a manifest is acceptable.
+The receipt's `upstream.verified.session_id` cites this immutable session;
+secret ID and evidence digest participate in its identity. No bound session is
+listed before a valid response. Discovery then offers the most recently
+observed secret under the readiness lease, without promising the next request
+will use it. Existing trust/encryption claims are preserved; GPU, TCB, OS,
+serving-software, and model-weight claims remain `unknown`.
 
-`manifest_bound_to_active_secret: true` together with `active_manifest_sha256`
-identifies which manifest the proxy's Coordinator attested for that secret.
-Trust in that manifest requires comparing `active_manifest_sha256` against a
-trusted manifest: Privatemode's published CDN or release manifest, or the
-relying party's reviewed allowlist. These claims alone do not approve the
-manifest's contents.
-
-The receipt's existing `upstream.verified.session_id` cites this immutable
-session. The secret ID and evidence digest participate in the session material,
-so another secret cannot reuse the session. The header itself adds no receipt
-field. The gateway only lists bound sessions after it has observed a valid
-response; the most recently observed session is a discovery hint, not a promise
-that a subsequent request will use the same secret. Client session constraints
-are checked before forwarding and again before releasing the response.
-
-## Offline verification
-
-Decode the session's `evidence.data` and verify its digest, then run the proxy
-fork's independent verifier:
+The gateway checks shape and consistency and trusts the measured proxy's
+cryptographic checks. Decode `evidence.data`, verify its digest, then use the
+[proxy fork's verifier](https://github.com/redpill-ai/privatemode-public/pull/1):
 
 ```sh
-verify-evidence --evidence evidence.json \
-  --accept-manifest-sha256 <reviewed-manifest-sha256>
+verify-evidence --evidence evidence.json --accept-manifest-sha256 <hex>
 ```
 
-Repeated `--accept-manifest-sha256` flags allow several reviewed manifests. The
-verifier checks Contrast attestation with the recorded nonce, the single
-manifest and attested Mesh CA, the Secret Service certificate chain and
-signature over `SHA256(request_public_key || encapsulated_key)`, and the secret
-ID. Success exits zero and prints the verified manifest SHA-256. Gateway shape
-checks alone are not independent cryptographic verification.
+It checks Contrast attestation/nonce, the single manifest and Mesh CA, the
+Secret Service certificate chain/signature over
+`SHA256(request_public_key || encapsulated_key)`, and secret ID. Success exits
+zero and prints the verified manifest hash. It fetches AMD/Intel collateral
+online; recorded-evidence verification is not air-gapped.
 
-Use `--accept-manifest-sha256 <hex>` to enforce the trusted manifest comparison.
-Without an allowlist, a PASS proves only internal consistency of the supplied
-bundle. The verifier fetches AMD/Intel collateral online, so verification of a
-recorded bundle is not air-gapped.
+`manifest_bound_to_active_secret: true` and `active_manifest_sha256` identify
+which manifest the proxy's Coordinator attested for that secret. Trust requires
+comparing that hash with Privatemode's published CDN/release manifest or the
+relying party's reviewed allowlist. Repeat `--accept-manifest-sha256` for multiple
+trusted hashes. Without an allowlist, PASS proves only internal consistency.
 
-The hermetic fixtures in
-[`tests/provider_e2e/privatemode_active_secret.rs`](../tests/provider_e2e/privatemode_active_secret.rs)
-cover accepted and rejected bundles, rotation, session constraints, cache
-retention, redirects, size limits, and streaming deadlines. They deliberately
-use synthetic attestation bytes: the proxy verifier and live CVM acceptance
-are separate checks.
+[Hermetic tests](../tests/provider_e2e/privatemode_active_secret.rs) use synthetic
+attestation bytes; independent cryptographic verification and live CVM
+acceptance remain separate checks.

@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult,
+    VerificationResult, EVENT_REQUEST_FORWARDED,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -643,8 +643,7 @@ impl AciService {
                         .as_ref()
                         .is_some_and(|claims| claims["active_secret_evidence"] == true);
                     if evidence_required && !(200..300).contains(&response.status_code()) {
-                        // Preserve normal error/failover handling without citing a
-                        // previous response's secret for this unbound response.
+                        // Error responses must not cite a previous secret's session.
                         recorded_event.result = VerificationResult::Failed;
                         recorded_event.reason = Some(
                             "active-secret evidence is not checked for a non-success response"
@@ -653,46 +652,47 @@ impl AciService {
                         recorded_event.evidence = None;
                         return ReverifyOutcome::Forwarded(response);
                     }
-                    let mut response_bound = false;
-                    if let Some(verifier) = &self.upstream_verifier {
-                        let request =
-                            self.upstream_verification_request(prepared, verification_required);
-                        match verifier
-                            .verify_response(request, recorded_event.clone(), response.headers())
-                            .await
-                        {
-                            Ok(Some(event)) => {
-                                response_bound = true;
-                                *recorded_event = event;
-                                // The response may select a different secret than preflight.
-                                if let Err(err) = self.apply_aci_session_constraint(
-                                    recorded_event,
-                                    aci_session_ids,
-                                    &prepared.model_id,
-                                ) {
-                                    return ReverifyOutcome::RefreshFailed(
-                                        err.after_forwarding(&prepared.request.body),
-                                    );
+                    let result = match &self.upstream_verifier {
+                        Some(verifier) => {
+                            let request =
+                                self.upstream_verification_request(prepared, verification_required);
+                            verifier
+                                .verify_response(
+                                    request,
+                                    recorded_event.clone(),
+                                    response.headers(),
+                                )
+                                .await
+                        }
+                        None => Ok(None),
+                    };
+                    let result = match result {
+                        Ok(Some(event)) => {
+                            *recorded_event = event;
+                            self.apply_aci_session_constraint(
+                                recorded_event,
+                                aci_session_ids,
+                                &prepared.model_id,
+                            )
+                        }
+                        Ok(None) if evidence_required => {
+                            Err(UpstreamVerificationError::NoVerifierResult.into())
+                        }
+                        Ok(None) => Ok(()),
+                        Err(reason) => {
+                            Err(UpstreamVerificationError::VerifierFailed(reason).into())
+                        }
+                    };
+                    if let Err(err) = result {
+                        return ReverifyOutcome::RefreshFailed(match err {
+                            ServiceError::UpstreamVerification(source) => {
+                                ServiceError::UpstreamVerificationAfterForwarding {
+                                    source,
+                                    forwarded_body_hash: digest::sha256_hex(&prepared.request.body),
                                 }
                             }
-                            Ok(None) => {}
-                            Err(reason) => {
-                                return ReverifyOutcome::RefreshFailed(
-                                    ServiceError::UpstreamVerification(
-                                        UpstreamVerificationError::VerifierFailed(reason),
-                                    )
-                                    .after_forwarding(&prepared.request.body),
-                                )
-                            }
-                        }
-                    }
-                    if evidence_required && !response_bound {
-                        return ReverifyOutcome::RefreshFailed(
-                            ServiceError::UpstreamVerification(
-                                UpstreamVerificationError::NoVerifierResult,
-                            )
-                            .after_forwarding(&prepared.request.body),
-                        );
+                            other => other,
+                        });
                     }
                     return ReverifyOutcome::Forwarded(response);
                 }
@@ -872,8 +872,6 @@ impl AciService {
         )
     }
 
-    /// The same refusal, with a forwarding observation when verification failed
-    /// only after the request had already reached the upstream.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue_upstream_refusal_receipt_with_forwarded_hash(
         &self,
@@ -896,7 +894,7 @@ impl AciService {
         );
         builder.add_request_received(received_body)?;
         if let Some(hash) = forwarded_body_hash {
-            builder.add_request_forwarded_hash(hash)?;
+            builder.append_hash(EVENT_REQUEST_FORWARDED, hash.to_string())?;
         }
         // A refusal only happens when verification was required (§7.5).
         builder.add_upstream_verified_failed(

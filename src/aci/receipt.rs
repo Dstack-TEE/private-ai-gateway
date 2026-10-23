@@ -240,7 +240,11 @@ impl ReceiptBuilder {
         Ok(hash)
     }
 
-    fn append_hash(&mut self, event_type: &str, body_hash: String) -> Result<(), ReceiptError> {
+    pub(crate) fn append_hash(
+        &mut self,
+        event_type: &str,
+        body_hash: String,
+    ) -> Result<(), ReceiptError> {
         let mut fields = Map::new();
         fields.insert("body_hash".to_string(), Value::String(body_hash));
         self.append(event_type, fields)
@@ -252,15 +256,6 @@ impl ReceiptBuilder {
 
     pub fn add_request_forwarded(&mut self, body: &[u8]) -> Result<String, ReceiptError> {
         self.append_body_hash(EVENT_REQUEST_FORWARDED, body)
-    }
-
-    /// Record a previously observed forward without retaining its request body
-    /// in the post-forward verification error.
-    pub(crate) fn add_request_forwarded_hash(
-        &mut self,
-        body_hash: &str,
-    ) -> Result<(), ReceiptError> {
-        self.append_hash(EVENT_REQUEST_FORWARDED, body_hash.to_string())
     }
 
     pub fn add_middleware_forwarded(&mut self, body: &[u8]) -> Result<String, ReceiptError> {

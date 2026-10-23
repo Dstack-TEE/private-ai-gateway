@@ -373,17 +373,13 @@ must match the static origin and cannot set `bearer_token` or `path`; all share
 the measured Compose credential. The gateway validates the credential digest,
 requires the proxy's `/readyz` readiness probe to succeed and forwards only to
 encrypted handlers.
-With `active_secret_evidence` omitted or `false`, it reports the latest fetched
-manifest as explicitly unbound metadata. With `true`, it fetches the full
-version 1 evidence bundle for each response's `Privatemode-Secret-ID`, caches
-at most eight IDs, and withholds successful bodies when evidence cannot be bound.
-This intentionally refuses 2xx responses with missing or invalid evidence even
-when the client did not require `aci_verified`. Non-2xx responses keep ordinary
-upstream-status, error normalization, capacity/`Retry-After`, and failover handling
-without fetching response evidence.
-`manifest_log_path` remains a required absolute path but is not read in enabled
-mode. See the [active-secret extension](../spec/privatemode-active-secret-evidence.md)
-for encoding, size limits, deadlines, claims, and refusal statuses. Separate
+
+With `active_secret_evidence` omitted or `false`, the latest fetched manifest
+is explicitly unbound metadata. With `true`, every 2xx response requires matching
+secret evidence, intentionally even without `aci_verified`; non-2xx handling is
+unchanged. `manifest_log_path` remains required but is not read in enabled mode.
+See the [active-secret extension](../spec/privatemode-active-secret-evidence.md)
+for the API, bounds, claims, discovery, and trust requirements. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 

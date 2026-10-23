@@ -59,16 +59,6 @@ impl ServiceError {
             _ => None,
         }
     }
-
-    pub(super) fn after_forwarding(self, body: &[u8]) -> Self {
-        match self {
-            Self::UpstreamVerification(source) => Self::UpstreamVerificationAfterForwarding {
-                source,
-                forwarded_body_hash: crate::aci::digest::sha256_hex(body),
-            },
-            other => other,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error, Clone)]

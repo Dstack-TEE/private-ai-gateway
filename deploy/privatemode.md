@@ -127,16 +127,13 @@ verify-evidence --evidence "$artifact_dir/secret-evidence.json" \
   --accept-manifest-sha256 <reviewed-manifest-sha256>
 ```
 
-The default-mode manifest-observation assertions below apply with the switch
-disabled. Replace those assertions with the bound claims above for this mode;
-retain the deployment binding, keyset, receipt, and session checks. Streaming
-acceptance must also cite the secret whose header produced that response.
-The gateway validates shape and consistency and trusts the measured proxy;
-the fork verifier supplies the independent Contrast/TEE checks. Compare the
-manifest hash against Privatemode's published CDN or release manifest, or a
-reviewed allowlist. Without `--accept-manifest-sha256`, a PASS proves only
-internal consistency of the supplied bundle. The verifier fetches AMD/Intel
-collateral online, so this recorded-evidence check is not air-gapped.
+Replace the default-mode manifest-observation assertions below with these bound
+claims; retain deployment, keyset, receipt, and session checks. Streaming must
+cite its response's secret. Use a trusted CDN/release manifest or reviewed
+allowlist: without `--accept-manifest-sha256`, PASS proves only internal
+consistency. The verifier fetches AMD/Intel collateral online. See the
+[extension](../spec/privatemode-active-secret-evidence.md#sessions-and-verification)
+for the trust boundary and discovery semantics.
 
 ## Verify the deployment
 

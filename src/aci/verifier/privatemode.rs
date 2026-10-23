@@ -28,7 +28,7 @@ pub struct PrivatemodeProviderVerifier {
     cache_ttl_seconds: u64,
     cache: Arc<RwLock<Option<CachedProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
-    evidence_cache: Arc<tokio::sync::Mutex<VecDeque<(String, Value)>>>,
+    evidence_cache: Arc<tokio::sync::Mutex<VecDeque<Value>>>,
     last_bound: Arc<RwLock<Option<UpstreamVerifiedEvent>>>,
 }
 
@@ -66,11 +66,11 @@ impl PrivatemodeProviderVerifier {
             required: request.required,
             ..Default::default()
         };
+        if let Err(err) = self.probe().await {
+            event.reason = Some(err.to_string());
+            return event;
+        }
         if self.deployment.active_secret_evidence() {
-            if let Err(err) = self.probe().await {
-                event.reason = Some(err.to_string());
-                return event;
-            }
             if let Some(bound) = self
                 .last_bound
                 .read()
@@ -85,53 +85,41 @@ impl PrivatemodeProviderVerifier {
                     "manifest_bound_to_active_secret": false,
                 }));
             }
-            event.result = VerificationResult::Verified;
-            event.channel_bindings = vec![self.deployment.channel_binding()];
-            return event;
+        } else {
+            let manifest = match self.deployment.latest_observed_manifest() {
+                Ok(manifest) => manifest,
+                Err(err) => {
+                    event.reason = Some(err.to_string());
+                    return event;
+                }
+            };
+            event.evidence = Some(manifest.evidence());
+            event.provider_claims = Some(serde_json::json!({
+                "trust_boundary": "attested-compose-privatemode-proxy",
+                "attestation_scope": "contrast-attested-e2ee-secret",
+                "request_encryption": "privatemode-oae",
+                "success_response_authentication": "privatemode-oae",
+                "inference_secret_policy": "latest-per-attempt-fail-closed",
+                "manifest_mode": "dynamic",
+                "observed_manifest_sha256": manifest.sha256,
+                "manifest_observed_at": manifest.observed_at,
+                "manifest_observation": "latest-proxy-fetch-log",
+                "manifest_bound_to_active_secret": false,
+            }));
         }
-        // The observed manifest is the session's evidence bundle, which every
-        // sealed session must carry (§8.2). It is not bound to the active
-        // secret, so it supports no manifest-specific claims.
-        let observed = match self.probe().await {
-            Ok(()) => self
-                .deployment
-                .latest_observed_manifest()
-                .map_err(|err| err.to_string()),
-            Err(err) => Err(err.to_string()),
-        };
-        let manifest = match observed {
-            Ok(manifest) => manifest,
-            Err(reason) => {
-                event.reason = Some(reason);
-                return event;
-            }
-        };
         event.result = VerificationResult::Verified;
-        event.evidence = Some(manifest.evidence());
         event.channel_bindings = vec![self.deployment.channel_binding()];
-        event.provider_claims = Some(serde_json::json!({
-            "trust_boundary": "attested-compose-privatemode-proxy",
-            "attestation_scope": "contrast-attested-e2ee-secret",
-            "request_encryption": "privatemode-oae",
-            "success_response_authentication": "privatemode-oae",
-            "inference_secret_policy": "latest-per-attempt-fail-closed",
-            "manifest_mode": "dynamic",
-            "observed_manifest_sha256": manifest.sha256,
-            "manifest_observed_at": manifest.observed_at,
-            "manifest_observation": "latest-proxy-fetch-log",
-            "manifest_bound_to_active_secret": false,
-        }));
         event
     }
 
     async fn secret_evidence(&self, secret_id: &str) -> Result<Value, String> {
         let id = evidence::url_id(secret_id)?;
-        if let Some((_, bundle)) = self
+        if let Some(bundle) = self
             .evidence_cache
             .lock()
             .await
             .iter()
-            .find(|(key, _)| key == secret_id)
+            .find(|bundle| bundle["secret_id"] == secret_id)
         {
             return Ok(bundle.clone());
         }
@@ -182,13 +170,13 @@ impl PrivatemodeProviderVerifier {
         let bundle = evidence::validate(&body, secret_id, &id)?;
         let mut cache = self.evidence_cache.lock().await;
         // Concurrent misses may have fetched the same immutable bundle.
-        if let Some((_, cached)) = cache.iter().find(|(key, _)| key == secret_id) {
+        if let Some(cached) = cache.iter().find(|bundle| bundle["secret_id"] == secret_id) {
             return Ok(cached.clone());
         }
         if cache.len() == 8 {
             cache.pop_front();
         }
-        cache.push_back((secret_id.to_string(), bundle.clone()));
+        cache.push_back(bundle.clone());
         Ok(bundle)
     }
 

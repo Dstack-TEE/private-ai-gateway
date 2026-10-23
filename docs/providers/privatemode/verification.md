@@ -72,70 +72,34 @@ this is not planned.
 
 ## Optional active-secret evidence
 
-The static measured switch `privatemode_proxy.active_secret_evidence` defaults
-to `false` (omission preserves the behavior described below). Enable it only
-with a pinned proxy image implementing the
-[version 1 active-secret evidence contract](../../../spec/privatemode-active-secret-evidence.md).
-The official v1.59 image in the reference Compose does not expose that API.
+`privatemode_proxy.active_secret_evidence` defaults to `false`, preserving the
+manifest observation below. Enable it only with a pinned proxy implementing the
+[active-secret extension](../../../spec/privatemode-active-secret-evidence.md);
+the reference v1.59 image lacks this API.
 
-In enabled mode, readiness establishes the deployment gate without reading
-manifest logs. After inference headers arrive, the gateway reads
-`Privatemode-Secret-ID` and fetches
-`GET /privatemode/v1/secret-evidence/{id}` from the measured proxy origin;
-`{id}` is the unpadded base64url form of the header's 32-byte standard-base64
-ID. It never fetches `current` to choose evidence. Redirects and ambient HTTP
-proxies are refused. Fetches have a total deadline of at most ten seconds and
-an 8 MiB body limit, including chunked responses. The extension specifies
-smaller field limits and shape checks. Valid immutable bundles are cached by
-ID, with at most eight retained; there is no negative caching.
+For every 2xx response, the gateway fetches evidence for `Privatemode-Secret-ID`
+from the measured origin and binds the receipt's session before releasing
+provider bytes. It checks the version 1 shape, encodings, sizes, timestamps,
+manifest digest, and matching header/URL/bundle/public-key IDs. Redirects and
+ambient proxies are rejected; fetches are bounded by ten seconds and 8 MiB,
+with at most eight cached IDs. See the extension for exact limits and refusal
+semantics. Evidence failures intentionally refuse even unconstrained requests;
+non-2xx responses retain normal error/retry/failover handling.
 
-The gateway rejects missing headers, unknown/evicted IDs, non-200 evidence
-responses, invalid content types, malformed JSON, unsupported versions,
-unknown fields, invalid sizes/encodings/PEM/timestamps, a manifest digest
-mismatch, or disagreement between the header, URL, bundle ID, and public-key
-hash. For every 2xx response, provider body bytes stay withheld until these
-checks pass.
-Evidence failures also refuse requests without an `aci_verified` constraint;
-this stricter fail-closed policy is intentional. Non-2xx responses bypass these
-checks and keep their existing status, capacity/`Retry-After`, error-normalization,
-and failover handling. They do not cite a response-bound secret session. For
-`aci_verified` requests, streaming responses also remain uncommitted until
-verification completes. Failures use the existing signed verification refusal
-(`503`); a pinned session that changes during the request produces the existing
-`412`. If the prompt already reached the measured proxy when a response check
-fails, its refusal receipt records `request.forwarded` with the exact forwarded
-body hash before the failed verification event. Pre-forward refusals keep their
-existing event sequence.
+Sessions carry `manifest_bound_to_active_secret: true`, `active_manifest_sha256`,
+`secret_id`, and the full bundle. Discovery lists no bound session before a valid
+response, then returns the most recently observed secret under the readiness
+lease; the next request may use another secret. Session pins are rechecked after
+response binding. GPU, OS, TCB, software, and model claims remain unknown.
 
-Successful receipt sessions replace observation metadata with
-`manifest_bound_to_active_secret: true`, `active_manifest_sha256`, `secret_id`,
-and `active_secret_evidence: true`. Session evidence carries the exact full
-bundle as a digest and JSON data URI, so the proxy fork's `verify-evidence`
-can independently check the recorded Contrast nonce/report, manifest, Mesh CA,
-Secret Service certificate/signature, and secret ID. Rust validates
-shape and digest consistency and trusts the measured proxy's cryptographic
-checks; it does not reimplement Contrast verification.
-
-`manifest_bound_to_active_secret: true` and `active_manifest_sha256` identify
-which manifest the proxy's Coordinator attested for that secret. To trust the
-manifest, compare the hash against Privatemode's published CDN or release
-manifest, or the relying party's reviewed allowlist. Verify the recorded bundle
-with the fork's verifier, repeating the allowlist flag as needed:
-
-```sh
-verify-evidence --evidence evidence.json --accept-manifest-sha256 <hex>
-```
-
-Without an allowlist, a PASS proves only internal consistency of the supplied
-bundle. The verifier fetches AMD/Intel collateral online; this verification is
-not air-gapped.
-
-There is no bound session to list before the first successful inference.
-Afterward, discovery returns the most recently observed secret under the
-readiness lease. A receipt always uses its own response's bundle, including
-when the secret rotates mid-flight; session constraints are rechecked before
-body release. Manifest-specific GPU, OS, TCB, serving-software and model claims
-remain unknown because manifest approval policy is outside this extension.
+The gateway trusts the measured proxy's cryptographic checks. The bound claims
+identify which manifest its Coordinator attested for that secret; trusting the
+manifest requires comparison against Privatemode's published CDN/release
+manifest or a reviewed allowlist. The extension's
+[verification procedure](../../../spec/privatemode-active-secret-evidence.md#sessions-and-verification)
+uses `verify-evidence --accept-manifest-sha256 <hex>`; without an allowlist, PASS
+proves only internal consistency. That verifier fetches AMD/Intel collateral
+online and is not air-gapped.
 
 ## What the manifest observation proves
 
@@ -272,8 +236,8 @@ remain `Unknown` in both modes; manifest review policy is not implemented:
 - `model_weights_provenance`
 
 With active-secret evidence disabled, the full observed manifest is retained as
-session evidence with `bound_to_active_secret: false`. The observation metadata is also in
-`claims.extra`; the receipt contains only the session id and verification
+session evidence with `bound_to_active_secret: false`. The observation metadata
+is also in `claims.extra`; the receipt contains only the session id and verification
 outcome.
 
 ## Failure behavior

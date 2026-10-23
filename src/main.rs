@@ -988,30 +988,26 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             proxy.proxy_image_digest,
             format!("sha256:{}", "22".repeat(32))
         );
-    }
-
-    #[test]
-    fn privatemode_active_secret_evidence_is_a_default_off_static_boolean() {
-        let base = serde_json::json!({
-            "base_url": "http://privatemode-proxy:8080",
-            "manifest_log_path": "/run/privatemode-manifests/log.txt",
-            "credential_path": "/run/secrets/privatemode-api-key",
-            "credential_sha256": "33".repeat(32),
-            "proxy_image_digest": format!("sha256:{}", "22".repeat(32)),
-        });
-        let parsed: super::PrivatemodeProxyConfig = serde_json::from_value(base.clone()).unwrap();
-        assert!(!parsed.active_secret_evidence);
+        assert!(!proxy.active_secret_evidence);
+        let mut policy: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
         for value in [
             serde_json::json!(true),
             serde_json::json!(false),
             serde_json::json!(null),
             serde_json::json!("true"),
         ] {
-            let mut config = base.clone();
-            config["active_secret_evidence"] = value.clone();
-            let parsed = serde_json::from_value::<super::PrivatemodeProxyConfig>(config);
+            policy["privatemode_proxy"]["active_secret_evidence"] = value.clone();
+            let parsed = serde_json::from_value::<super::GatewayConfigFile>(policy.clone());
             if let Some(enabled) = value.as_bool() {
-                assert_eq!(parsed.unwrap().active_secret_evidence, enabled);
+                assert_eq!(
+                    parsed
+                        .unwrap()
+                        .privatemode_proxy
+                        .unwrap()
+                        .active_secret_evidence,
+                    enabled
+                );
             } else {
                 assert!(parsed.is_err());
             }

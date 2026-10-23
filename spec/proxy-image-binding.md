@@ -62,10 +62,9 @@ evidence the proxy fetched is observational unless the proxy binds it to the
 secret used for the cited request; a session MAY report it in
 `claims.extra`, labelled as unbound.
 
-The optional [Privatemode active-secret evidence extension](privatemode-active-secret-evidence.md)
-records a per-response manifest and full offline-verifiable bundle without
-changing this binding's shape. Enabling it does not approve the manifest or
-upgrade GPU, OS, software, or model claims.
+The optional [Privatemode active-secret extension](privatemode-active-secret-evidence.md)
+adds per-response manifest evidence without changing this binding or approving
+manifest-specific claims.
 
 ## 5. Verifying a session
 
