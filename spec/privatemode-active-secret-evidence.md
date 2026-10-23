@@ -8,6 +8,9 @@ through provider claims and session evidence. Core ACI schemas are unchanged.
 
 ## Proxy contract
 
+The fork exposes this header and API only with `--expose-secret-evidence`
+(default `false`, preserving upstream v1.60.0 behavior).
+
 The measured proxy MUST set `Privatemode-Secret-ID` before every proxied
 inference response body, including streaming. It contains standard padded
 base64 of `SHA256(request_public_key)` for the attempt producing that response.
@@ -47,7 +50,9 @@ Bundles MUST NOT contain the inference secret, API key, or prompt data.
 
 `privatemode_proxy.active_secret_evidence` is static, measured, and defaults to
 `false`. Omission or `false` preserves existing behavior, claims, and wire output.
-Enabling it requires a proxy implementing this contract.
+Enabling it requires a proxy implementing this contract with
+`--expose-secret-evidence`. If the proxy flag is off, every 2xx response fails
+closed for missing `Privatemode-Secret-ID`.
 
 The gateway MUST enforce readiness and the existing proxy-image binding before
 forwarding. Enabled mode does not read manifest logs. For every 2xx response it

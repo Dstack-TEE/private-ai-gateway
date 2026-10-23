@@ -82,7 +82,9 @@ The reference renderer and official v1.59 proxy image retain their current
 behavior. To test the optional extension, use a reviewed fork image implementing
 [the version 1 API](../spec/privatemode-active-secret-evidence.md), pin its OCI
 digest in the measured Compose and `privatemode_proxy.proxy_image_digest`, and
-add this member to the measured gateway config's existing proxy object:
+add `--expose-secret-evidence` to the proxy command. The flag defaults to `false`;
+without it, the fork preserves upstream v1.60.0 behavior. Add this member to the
+measured gateway config's existing proxy object:
 
 ```json
 {
@@ -96,6 +98,14 @@ This is a config fragment; retain the object's required origin, manifest-log
 path, credential path/digest, and image digest. Keep the proxy listener private.
 The switch is static and defaults to `false`; mutable route replacement cannot
 enable it. The existing manifest log is not read when the switch is enabled.
+With the gateway switch on but the proxy flag off, every 2xx response is refused
+for missing `Privatemode-Secret-ID` (fail closed).
+
+Give the fork proxy's non-root user a writable workspace: set its tmpfs entry to
+`/var/lib/privatemode:mode=0700,uid=65532,gid=65532`. Remove the proxy's
+`privatemode-manifests:/var/lib/privatemode/manifests` mount; the root-owned
+manifest-history volume must not be mounted into the fork proxy.
+
 Use a throwaway CVM and test account for acceptance; the fork image and gateway
 branch require independent review and live verification before rollout.
 

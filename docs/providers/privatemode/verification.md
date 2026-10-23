@@ -75,7 +75,11 @@ this is not planned.
 `privatemode_proxy.active_secret_evidence` defaults to `false`, preserving the
 manifest observation below. Enable it only with a pinned proxy implementing the
 [active-secret extension](../../../spec/privatemode-active-secret-evidence.md);
-the reference v1.59 image lacks this API.
+the fork requires `--expose-secret-evidence` (default `false`), and the reference
+v1.59 image lacks this API. Without the proxy flag, the enabled gateway refuses
+every 2xx for missing `Privatemode-Secret-ID`. See the
+[test deployment setup](../../../deploy/privatemode.md#enable-active-secret-evidence-for-a-test-deployment)
+for the writable workspace requirements.
 
 For every 2xx response, the gateway fetches evidence for `Privatemode-Secret-ID`
 from the measured origin and binds the receipt's session before releasing
