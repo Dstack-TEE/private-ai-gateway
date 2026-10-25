@@ -138,7 +138,7 @@ const openai = new OpenAI({
 });
 
 const response = await openai.chat.completions.create({
-  model: 'z-ai/glm-5.2',
+  model: 'z-ai/glm-5.3',
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
