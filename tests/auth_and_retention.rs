@@ -45,6 +45,7 @@ impl UpstreamBackend for StubUpstream {
             model_id: "aci-model".to_string(),
             route_id: req.target_route_id.clone(),
             is_tee: Some(true),
+            public_errors: Default::default(),
             request: req,
         })
     }

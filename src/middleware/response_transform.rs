@@ -623,6 +623,141 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
     }
 }
 
+/// Apply the selected upstream's opt-in policy before the normal surface
+/// canonicalization discards granular error codes.
+pub(crate) fn canonicalize_with_policy(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+    policy: crate::error_payload::PublicErrorPolicy,
+) {
+    if policy == crate::error_payload::PublicErrorPolicy::Opaque {
+        opaque_public_errors(body, endpoint);
+    }
+    canonicalize(body, endpoint, request_id);
+}
+
+/// Normalize error fields without changing a successful direct response's
+/// content or metadata. Full surface canonicalization remains the middleware's.
+pub(crate) fn opaque_public_errors(body: &mut Value, endpoint: Endpoint) {
+    if matches!(
+        endpoint,
+        Endpoint::ChatComplete | Endpoint::Complete | Endpoint::Embed
+    ) && matches!(
+        body.get("type").and_then(Value::as_str),
+        Some("error" | "response.error")
+    ) {
+        let error = body
+            .get("error")
+            .filter(|error| !error.is_null())
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut error = body.clone();
+                if let Some(object) = error.as_object_mut() {
+                    object.remove("type");
+                }
+                error
+            });
+        *body = json!({"error": error});
+    }
+    make_errors_opaque(body);
+    if matches!(
+        body.get("type").and_then(Value::as_str),
+        Some("error" | "response.error")
+    ) {
+        canonicalize(body, endpoint, None);
+        return;
+    }
+    if endpoint == Endpoint::CreateModelResponse {
+        sanitize_responses_error_field(body.get_mut("error"));
+        if let Some(response) = body.get_mut("response") {
+            sanitize_responses_error_field(response.get_mut("error"));
+        }
+    } else {
+        sanitize_error(body.get_mut("error"));
+        for choice in body
+            .get_mut("choices")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            sanitize_error(choice.get_mut("error"));
+        }
+    }
+}
+
+fn make_errors_opaque(body: &mut Value) {
+    fn opaque(error: &mut Value) {
+        if let Some(object) = error.as_object_mut() {
+            let kind = effective_error_kind(object);
+            let status = if is_relayable_error(object) {
+                kind.filter(|kind| !kind.is_null())
+                    .map_or(502, |kind| kind_http_status(Some(kind)))
+            } else {
+                suppressed_status_for(object, object.get("type"))
+            };
+            if !is_relayable_error(object) {
+                *error = chat_gateway_error(status);
+                return;
+            }
+            let message = crate::error_payload::opaque_error_message(
+                status,
+                kind.and_then(Value::as_str)
+                    .filter(|kind| RELAYABLE_ERROR_KINDS.contains(kind)),
+                object.get("param").and_then(Value::as_str),
+            );
+            let param = object
+                .get("param")
+                .and_then(Value::as_str)
+                .and_then(crate::error_payload::public_error_param)
+                .map(str::to_string);
+            let error_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|kind| RELAYABLE_ERROR_KINDS.contains(kind))
+                .unwrap_or_else(|| super::errors::error_type(Surface::Openai, status))
+                .to_string();
+            retain_allowed(object, &["message", "type", "code", "param"]);
+            object.insert("type".into(), json!(error_type));
+            object.insert("message".into(), json!(message));
+            object.insert("param".into(), json!(param));
+        } else if !error.is_null() {
+            *error = chat_gateway_error(502);
+        }
+    }
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(error) = object.get_mut("error").filter(|error| !error.is_null()) {
+        opaque(error);
+    } else if matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("error" | "response.error")
+    ) {
+        // A flat event's `type` is the event name, not the error kind.
+        let mut error = Value::Object(object.clone());
+        if let Some(fields) = error.as_object_mut() {
+            fields.remove("type");
+        }
+        opaque(&mut error);
+        object.insert("message".into(), error["message"].clone());
+        object.insert("param".into(), error["param"].clone());
+    }
+    if let Some(response) = object.get_mut("response") {
+        make_errors_opaque(response);
+    }
+    for choice in object
+        .get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(error) = choice.get_mut("error") {
+            opaque(error);
+        }
+    }
+}
+
 fn canonicalize_systemone(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -2993,5 +3128,114 @@ mod tests {
             canonical["usage"]["completion_tokens_details"]["accepted_prediction_tokens"],
             4
         );
+    }
+}
+
+#[cfg(test)]
+mod opaque_error_tests {
+    use super::*;
+    use crate::error_payload::PublicErrorPolicy;
+
+    #[test]
+    fn opaque_errors_drop_prose_and_parameters_on_every_surface() {
+        for endpoint in [
+            Endpoint::ChatComplete,
+            Endpoint::Complete,
+            Endpoint::Messages,
+            Endpoint::CreateModelResponse,
+            Endpoint::SystemOne,
+            Endpoint::Embed,
+        ] {
+            for kind in [
+                "invalid_request_error",
+                "context_length_exceeded",
+                "supplier-marker-a",
+            ] {
+                let error = json!({
+                    "type": "invalid_request_error", "code": kind,
+                    "message": "supplier-marker-a failed at upstream-a.example.internal",
+                    "param": "supplier-marker-a", "raw": "supplier-marker-a"
+                });
+                let mut body = if endpoint == Endpoint::CreateModelResponse {
+                    json!({"type": "error", "error": error, "sequence_number": 7})
+                } else if endpoint == Endpoint::Messages {
+                    json!({"type": "error", "error": error})
+                } else {
+                    json!({"error": error})
+                };
+                canonicalize_with_policy(&mut body, endpoint, None, PublicErrorPolicy::Opaque);
+                let wire = body.to_string();
+                for marker in ["supplier-marker-a", "upstream-a.example.internal"] {
+                    assert!(!wire.contains(marker), "{endpoint:?}: {wire}");
+                }
+                assert!(wire.contains("error"), "{wire}");
+                if endpoint == Endpoint::CreateModelResponse {
+                    assert_eq!(body["sequence_number"], 7);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_flat_events_with_null_errors_cannot_bypass_normalization() {
+        for error in [Value::Null, json!({"type": "invalid_request_error"})] {
+            let mut body = json!({
+                "type": "error", "error": error, "code": "invalid_image",
+                "message": "supplier-marker-a", "param": "supplier-marker-a", "sequence_number": 3
+            });
+            canonicalize_with_policy(
+                &mut body,
+                Endpoint::CreateModelResponse,
+                None,
+                PublicErrorPolicy::Opaque,
+            );
+            assert!(!body.to_string().contains("supplier-marker-a"), "{body}");
+            assert_eq!(body["sequence_number"], 3);
+        }
+    }
+
+    #[test]
+    fn opaque_errors_keep_known_validation_detail_and_request_field_paths() {
+        let mut body = json!({"error": {
+            "code": "context_length_exceeded", "message": "supplier-marker-a",
+            "param": "messages[0].content"
+        }});
+        canonicalize_with_policy(
+            &mut body,
+            Endpoint::ChatComplete,
+            None,
+            PublicErrorPolicy::Opaque,
+        );
+        assert_eq!(
+            body["error"]["message"],
+            "The request exceeds the model's context window (parameter: messages[0].content)"
+        );
+        assert_eq!(body["error"]["param"], "messages[0].content");
+        assert_eq!(body["error"]["code"], 400);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+    }
+
+    #[test]
+    fn opaque_errors_preserve_account_and_retry_classification() {
+        for (kind, message, status) in [
+            (
+                "invalid_request_error",
+                "Your credit balance is too low to access the API.",
+                502,
+            ),
+            ("rate_limit_error", "supplier-marker-a is busy", 429),
+            ("overloaded_error", "supplier-marker-a is busy", 503),
+            ("timeout_error", "supplier-marker-a timed out", 504),
+        ] {
+            let mut body = json!({"error": {"type": kind, "message": message}});
+            canonicalize_with_policy(
+                &mut body,
+                Endpoint::ChatComplete,
+                None,
+                PublicErrorPolicy::Opaque,
+            );
+            assert_eq!(body["error"]["code"], status, "{body}");
+            assert_eq!(body["error"]["message"], upstream_message(status), "{body}");
+        }
     }
 }

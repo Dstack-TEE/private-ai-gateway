@@ -209,6 +209,7 @@ impl UpstreamBackend for RecordingUpstream {
             model_id,
             route_id: None,
             is_tee: self.is_tee,
+            public_errors: Default::default(),
         })
     }
 

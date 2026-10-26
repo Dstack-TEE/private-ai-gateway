@@ -566,10 +566,11 @@ pub async fn run(
                 // to the gateway's documented output schema, so the client sees one
                 // shape and no upstream-specific field — including any we have never
                 // seen — can leak.
-                response_transform::canonicalize(
+                response_transform::canonicalize_with_policy(
                     &mut transformed,
                     client_endpoint,
                     Some(request_id.as_str()),
+                    forward.public_errors,
                 );
                 // A valid Responses envelope can carry a failed operation over
                 // HTTP 200. Record its outcome after conversion and scrubbing,
@@ -593,12 +594,13 @@ pub async fn run(
                     serde_json::to_vec(&transformed).unwrap_or_default(),
                 )
             } else {
-                let (mapped, body) = errors::normalize_upstream_error_parts(
+                let (mapped, body) = errors::normalize_upstream_error_parts_with_policy(
                     surface,
                     upstream_status,
                     &forward.upstream_body,
                     received_body.as_slice(),
                     Some(&request_id),
+                    forward.public_errors,
                 );
                 let class = errors::classify_upstream(
                     received_body.as_slice(),
@@ -709,6 +711,7 @@ pub async fn run(
                 forward.body,
                 &forward.selected_route,
                 forward.selected_path,
+                forward.public_errors,
                 report,
                 &pipeline_inputs,
             );
@@ -802,12 +805,13 @@ pub async fn run(
             // Streaming non-2xx: no receipt (no completed stream to bind), but the
             // attempt did reach an upstream, so it reports the serving route and
             // every failed-over candidate exactly like the Stream arm.
-            let (status, body) = errors::normalize_upstream_error_parts(
+            let (status, body) = errors::normalize_upstream_error_parts_with_policy(
                 surface,
                 forward.error.upstream_status,
                 &forward.error.upstream_body,
                 received_body.as_slice(),
                 Some(&request_id),
+                forward.error.public_errors,
             );
             let class = errors::classify_upstream(
                 received_body.as_slice(),
@@ -944,12 +948,13 @@ impl Meter {
         let is_streaming = meter.is_streaming;
         match result {
             Ok(MiddlewareForwardResult::UpstreamError(forward)) => {
-                let (status, _) = errors::normalize_upstream_error_parts(
+                let (status, _) = errors::normalize_upstream_error_parts_with_policy(
                     surface,
                     forward.error.upstream_status,
                     &forward.error.upstream_body,
                     received_body,
                     Some(request_id),
+                    forward.error.public_errors,
                 );
                 let class = errors::classify_upstream(
                     received_body,
@@ -971,6 +976,7 @@ impl Meter {
                 status
             }
             Ok(MiddlewareForwardResult::AllFailed(forward)) => {
+                tracing::warn!(error = %forward.error, request_id, "forwarding request failed");
                 let status = forward_error_status(&forward.error);
                 meter.failed_attempts(&forward.failed_attempts, is_streaming);
                 if status >= 500 {
@@ -988,6 +994,7 @@ impl Meter {
                 status
             }
             Err(err) => {
+                tracing::warn!(error = %err, request_id, "forwarding request failed");
                 let status = forward_error_status(&err);
                 if status >= 500 {
                     meter.gateway_failure(
@@ -1080,6 +1087,7 @@ fn build_early_streaming_response(
                     f.body,
                     &selected_route,
                     f.selected_path,
+                    f.public_errors,
                     report,
                     &inputs,
                 );
@@ -1227,6 +1235,7 @@ pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
     selected_route_id: &str,
     selected_path: &'static str,
+    public_errors: crate::error_payload::PublicErrorPolicy,
     report: StreamReport,
     inputs: &StreamPipelineInputs,
 ) -> ServiceResponseStream {
@@ -1285,6 +1294,14 @@ pub(super) fn build_metered_pipeline(
     // Unconditional, unlike the two above: same-format streaming skips every
     // other transform, and that is exactly the path that used to hand the
     // provider's bytes to the client verbatim.
+    let surfaced = if public_errors == crate::error_payload::PublicErrorPolicy::Opaque {
+        Box::pin(SseTransformStream::new(
+            surfaced,
+            StreamTransform::OpaqueErrors(inputs.endpoint),
+        )) as ServiceResponseStream
+    } else {
+        surfaced
+    };
     let sanitized: ServiceResponseStream = Box::pin(SseTransformStream::new(
         surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
@@ -1608,6 +1625,7 @@ fn service_error_response(
     let surface = outcome.surface;
     let request_id = outcome.request_id;
     let status = forward_error_status(&err);
+    tracing::warn!(error = %err, request_id, "forwarding request failed");
     let e2ee = match &err {
         ServiceError::E2ee(_) => None,
         _ => e2ee,
@@ -1620,7 +1638,8 @@ fn service_error_response(
             _ => "upstream_verification_failed",
         };
         let reason = uv.to_string();
-        let body = errors::envelope_bytes(surface, error_type, &reason, Some(request_id));
+        let body =
+            errors::envelope_bytes(surface, error_type, uv.public_message(), Some(request_id));
         return match outcome.service.issue_upstream_refusal_receipt(
             outcome.endpoint_path,
             (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
@@ -1636,20 +1655,28 @@ fn service_error_response(
             // The receipt is part of the refusal contract (§5.2); a refusal
             // that cannot be committed is a server error, not a bare 503.
             Err(receipt_err) => {
+                tracing::error!(error = %receipt_err, request_id, "refusal receipt could not be issued");
                 let body = errors::envelope_bytes(
                     surface,
                     errors::error_type(surface, 500),
-                    &format!("refusal receipt could not be issued: {receipt_err}"),
+                    "Refusal receipt could not be issued",
                     Some(request_id),
                 );
                 finalize_generated(500, body, &[], e2ee, outcome)
             }
         };
     }
+    let message = match &err {
+        ServiceError::E2ee(_)
+        | ServiceError::InvalidNonce(_)
+        | ServiceError::DownstreamTlsDomainMissing
+        | ServiceError::DownstreamTlsDomainUnknown(_) => err.to_string(),
+        _ => errors::upstream_message(status).to_string(),
+    };
     let body = errors::envelope_bytes(
         surface,
         errors::error_type(surface, status),
-        &err.to_string(),
+        &message,
         Some(request_id),
     );
     finalize_generated(status, body, &[], e2ee, outcome)

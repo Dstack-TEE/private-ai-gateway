@@ -26,6 +26,7 @@ pub struct ModelRoute {
     pub path: Option<String>,
     /// Usage flags requested from this configured upstream deployment.
     pub streaming_usage: Option<StreamingUsage>,
+    pub public_errors: crate::error_payload::PublicErrorPolicy,
     /// Whether this route's provider is an attested (TEE) provider. `None`
     /// means unclassified and therefore ineligible for requests constrained by
     /// `provider.aci_verified`. See [`PreparedUpstreamRequest::is_tee`].
@@ -64,6 +65,7 @@ impl ModelRoute {
             route_id,
             path: None,
             streaming_usage: None,
+            public_errors: Default::default(),
             is_tee: None,
         })
     }
@@ -82,6 +84,11 @@ impl ModelRoute {
 
     pub fn with_streaming_usage(mut self, policy: Option<StreamingUsage>) -> Self {
         self.streaming_usage = policy;
+        self
+    }
+
+    pub fn with_public_errors(mut self, policy: crate::error_payload::PublicErrorPolicy) -> Self {
+        self.public_errors = policy;
         self
     }
 
@@ -213,6 +220,7 @@ impl UpstreamBackend for ModelRouterBackend {
             model_id: route.upstream_model_id.clone(),
             route_id: Some(route.route_id.clone()),
             is_tee: route.is_tee,
+            public_errors: route.public_errors,
         })
     }
 

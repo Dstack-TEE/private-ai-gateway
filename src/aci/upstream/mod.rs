@@ -26,6 +26,7 @@ use bytes::Bytes;
 use futures_util::{stream, Stream};
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
+pub use crate::error_payload::PublicErrorPolicy;
 
 mod chutes;
 mod openai;
@@ -76,6 +77,8 @@ pub struct PreparedUpstreamRequest {
     /// pinned ACI session. Unconstrained requests may use any classification;
     /// their receipts still record the verification outcome.
     pub is_tee: Option<bool>,
+    /// Error presentation captured from the selected route.
+    pub public_errors: PublicErrorPolicy,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +161,7 @@ pub trait UpstreamBackend: Send + Sync {
             model_id,
             route_id: None,
             is_tee: None,
+            public_errors: Default::default(),
         })
     }
 

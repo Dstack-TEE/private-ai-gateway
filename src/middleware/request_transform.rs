@@ -42,6 +42,19 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
+    pub(crate) fn from_path(path: &str) -> Option<Self> {
+        [
+            Self::ChatComplete,
+            Self::Complete,
+            Self::Embed,
+            Self::Messages,
+            Self::CreateModelResponse,
+            Self::SystemOne,
+        ]
+        .into_iter()
+        .find(|endpoint| endpoint.path() == path)
+    }
+
     /// The path this endpoint is served on downstream and forwarded to upstream.
     pub fn path(self) -> &'static str {
         match self {

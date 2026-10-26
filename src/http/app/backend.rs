@@ -120,13 +120,16 @@ async fn forward_to_backend_inner(
                 // error vocabulary; `normalize_upstream_error` scrubs it and subsumes
                 // the image-URL remap this arm used to do on its own. The service
                 // applies the same normalization to a buffered error.
-                normalize_upstream_error(
-                    surface_for_path(input.endpoint_path),
-                    forward.upstream_status,
-                    &forward.upstream_body,
-                    &input.received_body,
-                    None,
-                )
+                let (status, body) =
+                    crate::middleware::errors::normalize_upstream_error_parts_with_policy(
+                        surface_for_path(input.endpoint_path),
+                        forward.upstream_status,
+                        &forward.upstream_body,
+                        &input.received_body,
+                        None,
+                        forward.public_errors,
+                    );
+                crate::middleware::errors::parts_response(status, body)
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
             Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -232,7 +235,8 @@ fn refusal_response(
         ),
     };
     let reason = uv.to_string();
-    let body = refusal_error_body(error_type, reason.clone());
+    tracing::warn!(error = %uv, "upstream verification refused the request");
+    let body = refusal_error_body(error_type, uv.public_message().to_string());
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CONTENT_TYPE,
@@ -453,6 +457,15 @@ pub(super) fn upstream_direct_response(
     upstream: crate::aci::upstream::UpstreamResponse,
     default_content_type: &'static str,
 ) -> Response {
+    if !(200..300).contains(&upstream.status_code) {
+        return normalize_upstream_error(
+            crate::middleware::errors::Surface::Openai,
+            upstream.status_code,
+            &[],
+            &[],
+            None,
+        );
+    }
     let mut headers = upstream_direct_response_headers();
     if !headers.contains_key(axum::http::header::CONTENT_TYPE) {
         headers.insert(
@@ -466,15 +479,67 @@ pub(super) fn upstream_direct_response(
 
 pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
     tracing::warn!(error = %err, "upstream proxy request failed");
-    error_response(StatusCode::BAD_GATEWAY, "upstream_error", err.to_string())
+    error_response(
+        StatusCode::BAD_GATEWAY,
+        "upstream_error",
+        crate::middleware::errors::upstream_message(502),
+    )
 }
 
 fn invalid_request_response(message: String) -> Response {
-    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
+    tracing::warn!(error = %message, "upstream request could not be prepared");
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "invalid_request_error",
+        crate::middleware::errors::upstream_message(400),
+    )
 }
 
 pub(super) fn routing_error_response(message: String) -> Response {
     // §10: malformed/unroutable requests use the OpenAI-inherited types; the
     // middleware path serves the same miss as a 404 `not_found_error`.
-    error_response(StatusCode::NOT_FOUND, "not_found_error", message)
+    tracing::warn!(error = %message, "upstream routing failed");
+    error_response(
+        StatusCode::NOT_FOUND,
+        "not_found_error",
+        crate::middleware::errors::upstream_message(404),
+    )
+}
+
+#[cfg(test)]
+mod public_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn direct_infrastructure_errors_use_fixed_public_messages() {
+        let diagnostic = "supplier-marker-a at upstream-a.example.internal on private-route-a";
+        let responses = [
+            upstream_proxy_error_response(UpstreamError::Transport(diagnostic.to_string())),
+            routing_error_response(diagnostic.to_string()),
+            internal_error_response(ServiceError::SessionStore(diagnostic.to_string())),
+            upstream_direct_response(
+                crate::aci::upstream::UpstreamResponse {
+                    status_code: 400,
+                    body: diagnostic.as_bytes().to_vec(),
+                    ..Default::default()
+                },
+                "application/json",
+            ),
+        ];
+        for response in responses {
+            assert!(response.status().is_client_error() || response.status().is_server_error());
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(body["error"]["type"].is_string());
+            for marker in [
+                "supplier-marker-a",
+                "upstream-a.example.internal",
+                "private-route-a",
+            ] {
+                assert!(!body.to_string().contains(marker), "{body}");
+            }
+        }
+    }
 }

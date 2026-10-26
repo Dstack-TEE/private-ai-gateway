@@ -55,6 +55,7 @@ pub enum StreamTransform {
     OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>, UpstreamUsage),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
+    OpaqueErrors(Endpoint),
     /// Applied to every stream, including same-format passthrough, which is the
     /// one path that previously relayed provider bytes verbatim. Carries the
     /// endpoint so each chunk is canonicalized to that surface's output schema.
@@ -67,7 +68,7 @@ impl StreamTransform {
             StreamTransform::OpenaiToAnthropicMessages(_) => "openai",
             StreamTransform::OpenaiChatToResponses(..) => "openai",
             StreamTransform::ExcludeReasoning => "openai",
-            StreamTransform::SanitizeResponse(_, _) => "openai",
+            StreamTransform::OpaqueErrors(_) | StreamTransform::SanitizeResponse(_, _) => "openai",
             _ => "anthropic",
         }
     }
@@ -86,6 +87,65 @@ impl StreamTransform {
         state: &mut StreamState,
     ) -> Result<Option<String>, ()> {
         match self {
+            StreamTransform::OpaqueErrors(endpoint) => {
+                let parsed = parse_event(event);
+                let payload = parsed.data.as_deref().unwrap_or("").trim();
+                if payload.is_empty() {
+                    return Ok(None);
+                }
+                if payload == "[DONE]" {
+                    return Ok(Some("data: [DONE]\n\n".to_string()));
+                }
+                let mut body: Value = serde_json::from_str(payload).map_err(|_| ())?;
+                if !body.is_object() {
+                    return Err(());
+                }
+                if matches!(parsed.name.as_deref(), Some("error" | "response.error")) {
+                    body["type"] = json!("error");
+                }
+                let has_error = body.get("error").is_some_and(|error| !error.is_null())
+                    || matches!(
+                        body.get("type").and_then(Value::as_str),
+                        Some("error" | "response.error")
+                    )
+                    || body
+                        .get("response")
+                        .and_then(|response| response.get("error"))
+                        .is_some_and(|error| !error.is_null())
+                    || body
+                        .get("choices")
+                        .and_then(Value::as_array)
+                        .is_some_and(|choices| {
+                            choices.iter().any(|choice| {
+                                choice.get("error").is_some_and(|error| !error.is_null())
+                            })
+                        });
+                response_transform::opaque_public_errors(&mut body, *endpoint);
+                if has_error {
+                    // Error framing is ours too: upstream comments, ids and
+                    // event names can carry the same diagnostics as the body.
+                    let name = match endpoint {
+                        Endpoint::Messages => "event: error\n",
+                        Endpoint::CreateModelResponse => {
+                            match body.get("type").and_then(Value::as_str) {
+                                Some("response.failed") => "event: response.failed\n",
+                                Some("response.completed") => "event: response.completed\n",
+                                Some("response.incomplete") => "event: response.incomplete\n",
+                                _ => "event: error\n",
+                            }
+                        }
+                        _ => "",
+                    };
+                    return Ok(Some(format!("{name}data: {}\n\n", json_str(&body))));
+                }
+                // Upstream comments can identify infrastructure even on success
+                // events. Gateway keepalives are injected downstream.
+                let event: String = event
+                    .split_inclusive('\n')
+                    .filter(|line| !line.starts_with(':'))
+                    .collect();
+                return Ok(Some(framed_event(&event)));
+            }
             StreamTransform::ExcludeReasoning => {
                 return Ok(Some(edit_event_body(
                     event,
@@ -124,7 +184,9 @@ impl StreamTransform {
                 })
                 .event(&event, fallback_id),
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
-            StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
+            StreamTransform::ExcludeReasoning
+            | StreamTransform::OpaqueErrors(_)
+            | StreamTransform::SanitizeResponse(_, _) => {
                 unreachable!("handled above")
             }
         }
@@ -2868,6 +2930,65 @@ mod tests {
                 output.starts_with(event.split('\n').next().unwrap()),
                 "{output}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod opaque_stream_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_error_events_rebuild_framing_as_well_as_prose() {
+        for endpoint in [
+            Endpoint::ChatComplete,
+            Endpoint::Messages,
+            Endpoint::CreateModelResponse,
+        ] {
+            for payload in [
+                r#"{"error":{"type":"invalid_request_error","message":"supplier-marker-a"}}"#,
+                r#"{"message":"supplier-marker-a","code":400}"#,
+            ] {
+                let event = format!("event: error\nid: upstream-a.example.internal\n: supplier-marker-a\ndata: {payload}\n");
+                let output = StreamTransform::OpaqueErrors(endpoint)
+                    .apply(&event, "req-1", &mut StreamState::default())
+                    .unwrap()
+                    .unwrap();
+                assert!(!output.contains("supplier-marker-a"), "{output}");
+                assert!(!output.contains("upstream-a.example.internal"), "{output}");
+                assert!(output.contains("error"), "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_response_failures_preserve_the_lifecycle_event() {
+        let event = concat!(
+            "event: response.failed\nid: supplier-marker-a\ndata: ",
+            r#"{"type":"response.failed","sequence_number":7,"response":{"status":"failed","error":{"code":"invalid_image","message":"supplier-marker-a"}}}"#,
+            "\n"
+        );
+        let output = StreamTransform::OpaqueErrors(Endpoint::CreateModelResponse)
+            .apply(event, "req-1", &mut StreamState::default())
+            .unwrap()
+            .unwrap();
+        assert!(output.starts_with("event: response.failed\n"), "{output}");
+        assert!(output.contains(r#""type":"response.failed""#), "{output}");
+        assert!(output.contains(r#""sequence_number":7"#), "{output}");
+        assert!(!output.contains("supplier-marker-a"), "{output}");
+    }
+
+    #[test]
+    fn opaque_streams_fail_closed_on_unparseable_error_payloads() {
+        for payload in [
+            "supplier-marker-a",
+            r#""supplier-marker-a""#,
+            "{broken supplier-marker-a",
+        ] {
+            let event = format!("event: error\ndata: {payload}\n");
+            assert!(StreamTransform::OpaqueErrors(Endpoint::ChatComplete)
+                .apply(&event, "req-1", &mut StreamState::default())
+                .is_err());
         }
     }
 }

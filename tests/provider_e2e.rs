@@ -760,6 +760,7 @@ fn privatemode_upstream_config(base_url: String, verifier_cache_seconds: u64) ->
         base_url,
         path: None,
         streaming_usage: None,
+        public_errors: None,
         models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -973,6 +974,7 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
             base_url,
             path: None,
             streaming_usage: Some(StreamingUsage::Continuous),
+            public_errors: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("scoped-credential".to_string()),
             basic_auth: true,
@@ -1022,6 +1024,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             base_url: base_url.clone(),
             path: None,
             streaming_usage: Some(StreamingUsage::Continuous),
+            public_errors: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: Some("provider-secret".to_string()),
             basic_auth: false,
@@ -1630,6 +1633,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
             base_url: base_url.clone(),
             path: None,
             streaming_usage: Some(StreamingUsage::Continuous),
+            public_errors: None,
             models: BTreeMap::from([
                 ("public-model".to_string(), "provider-model".to_string()),
                 (
@@ -1726,6 +1730,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             base_url: base_url.clone(),
             path: None,
             streaming_usage: Some(StreamingUsage::Continuous),
+            public_errors: None,
             models: BTreeMap::from([("public-model".to_string(), "provider-model".to_string())]),
             bearer_token: None,
             basic_auth: false,
@@ -1815,10 +1820,7 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("TLS channel binding requires an https upstream"));
+    assert_eq!(error["error"]["message"], "An internal error occurred");
     assert!(provider_calls.lock().unwrap().is_empty());
 }
 
@@ -1920,10 +1922,10 @@ async fn chutes_provider_requires_exact_catalog_match() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["error"]["type"], "not_found_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("exact chute_id match"));
+    assert_eq!(
+        error["error"]["message"],
+        "The requested model or resource was not found"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
     assert!(instance_requests.lock().unwrap().is_empty());
 }
@@ -2361,9 +2363,6 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("matching the verified binding"));
+    assert_eq!(error["error"]["message"], "An internal error occurred");
     assert!(provider_calls.lock().unwrap().is_empty());
 }

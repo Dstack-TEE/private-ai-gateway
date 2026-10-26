@@ -482,7 +482,7 @@ impl MiddlewareResponseFinalizingStream {
 }
 
 pub(super) struct ReceiptFinalizingStream {
-    inner: UpstreamBodyStream,
+    inner: ServiceResponseStream,
     builder: Option<ReceiptBuilder>,
     shared: FinalizerShared,
 }
@@ -503,13 +503,7 @@ impl FinalizingStream for ReceiptFinalizingStream {
     }
 
     fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, ServiceError>>> {
-        // The upstream body stream yields `UpstreamError`; lift it to `ServiceError`.
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(chunk))),
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(ServiceError::Upstream(err)))),
-        }
+        self.inner.as_mut().poll_next(cx)
     }
 
     fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
@@ -539,7 +533,7 @@ impl ReceiptFinalizingStream {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         service: &AciService,
-        inner: UpstreamBodyStream,
+        inner: ServiceResponseStream,
         builder: ReceiptBuilder,
         requester: Option<ReceiptOwner>,
         endpoint_path: String,

@@ -228,6 +228,19 @@ The gateway rewrites the request's top-level `model` to the provider model ID
 before provider verification and forwarding. The receipt commits to both the
 client-observed body and the provider-facing body.
 
+Infrastructure errors (transport, routing, internal failures, and verification
+refusals) always use fixed public messages. Set `"public_errors": "opaque"`
+on an upstream entry to apply the same protection to upstream-authored error
+messages. The setting travels through the existing upstream JSON array:
+`PUT /v1/admin/upstreams`, the seed/active file, or each entry in the
+`upstreams` array of the schema-version-1 `upstream_pull` response. It applies
+to direct and middleware requests and follows the selected route after failover.
+Signed attestation and refusal receipts retain their existing evidence,
+including upstream identity and refusal reasons; this policy controls the
+public inference error envelopes. In opaque mode, malformed stream events and
+a declared non-SSE response to a streaming request fail with a generic error;
+upstream error-event framing is rebuilt to remove diagnostic comments and IDs.
+
 ### Provider values
 
 | Value | Classification | Transport and verifier |
@@ -259,6 +272,7 @@ request time.
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
 | `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
+| `public_errors` | `"relay"` or `"opaque"` | `"relay"` | Error-message policy for this upstream. `opaque` replaces upstream error prose with fixed messages on buffered and streamed responses; only known validation codes and standard request-parameter paths contribute actionable detail. Omission preserves existing validation-message relay. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
 | `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |

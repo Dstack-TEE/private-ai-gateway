@@ -180,6 +180,7 @@ impl RetainedResponse {
 /// buffered upstream response into a committed result.
 pub(super) struct BufferedCommit {
     pub response: UpstreamResponse,
+    pub public_errors: crate::error_payload::PublicErrorPolicy,
     /// Resolved where the response arrived, alongside its one metrics count.
     pub response_model: Option<String>,
     pub recorded_event: UpstreamVerifiedEvent,
@@ -261,6 +262,7 @@ impl AciService {
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let BufferedCommit {
             response,
+            public_errors,
             response_model,
             recorded_event,
             route_id,
@@ -296,6 +298,7 @@ impl AciService {
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
+                public_errors,
                 receipt_id: receipt_id.clone(),
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
@@ -562,6 +565,25 @@ impl AciService {
                     };
 
                     let status = upstream_response.status_code;
+                    if status == 200
+                        && prepared.public_errors == crate::error_payload::PublicErrorPolicy::Opaque
+                        && upstream_response
+                            .headers
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                            .is_some_and(|(_, value)| !is_sse_content_type(Some(value)))
+                    {
+                        upgrade_err(
+                            &mut aggregated_err,
+                            2,
+                            UpstreamError::Transport(
+                                "upstream response was not an event stream".to_string(),
+                            )
+                            .into(),
+                        );
+                        abandon(&mut failed_attempts, 502);
+                        continue;
+                    }
                     if status != 200 {
                         self.metrics.record_upstream_response(
                             endpoint_path,
@@ -595,6 +617,7 @@ impl AciService {
                             }
                             retained = Some(RetainedResponse::Streaming {
                                 error: StreamingUpstreamError {
+                                    public_errors: prepared.public_errors,
                                     upstream_status: status,
                                     upstream_headers,
                                     upstream_body,
@@ -610,6 +633,7 @@ impl AciService {
                         return Ok(MiddlewareForwardResult::UpstreamError(Box::new(
                             MiddlewareUpstreamError {
                                 error: StreamingUpstreamError {
+                                    public_errors: prepared.public_errors,
                                     upstream_status: status,
                                     upstream_headers,
                                     upstream_body,
@@ -658,6 +682,7 @@ impl AciService {
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
+                            public_errors: prepared.public_errors,
                             receipt_id: receipt_id.clone(),
                             upstream_status: status,
                             upstream_headers,
@@ -750,6 +775,7 @@ impl AciService {
                     retained = Some(RetainedResponse::Buffered {
                         inputs: Box::new(BufferedCommit {
                             response: upstream_response,
+                            public_errors: prepared.public_errors,
                             response_model,
                             recorded_event,
                             route_id: route_id.clone(),
@@ -767,6 +793,7 @@ impl AciService {
                 return self.commit_buffered_response(
                     BufferedCommit {
                         response: upstream_response,
+                        public_errors: prepared.public_errors,
                         response_model,
                         recorded_event,
                         route_id,

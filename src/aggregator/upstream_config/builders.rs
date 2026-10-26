@@ -63,6 +63,7 @@ fn build_model_router(
                     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
                     .with_path(cfg.path.clone())
                     .with_streaming_usage(cfg.streaming_usage)
+                    .with_public_errors(cfg.public_errors.unwrap_or_default())
                     .with_is_tee(Some(provider_is_tee(cfg.provider))),
                 )
                 .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;

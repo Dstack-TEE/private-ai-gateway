@@ -170,6 +170,6 @@ pub(super) fn internal_error_response(err: ServiceError) -> Response {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal_error",
-        err.to_string(),
+        "An internal error occurred",
     )
 }

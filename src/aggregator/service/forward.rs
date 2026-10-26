@@ -251,18 +251,36 @@ impl AciService {
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
             (
                 upstream_response.status_code,
-                upstream_response.body.clone(),
+                if prepared.public_errors == crate::error_payload::PublicErrorPolicy::Opaque {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&upstream_response.body).map_err(|_| {
+                            UpstreamError::Transport("invalid upstream JSON response".to_string())
+                        })?;
+                    crate::middleware::response_transform::opaque_public_errors(
+                        &mut value,
+                        crate::middleware::request_transform::Endpoint::from_path(endpoint_path)
+                            .unwrap_or(
+                                crate::middleware::request_transform::Endpoint::ChatComplete,
+                            ),
+                    );
+                    serde_json::to_vec(&value).map_err(|_| {
+                        UpstreamError::Transport("invalid upstream JSON response".to_string())
+                    })?
+                } else {
+                    upstream_response.body.clone()
+                },
             )
         } else {
             // The envelope is JSON; don't let the client inherit a non-JSON
             // upstream content-type (some backends 5xx with text/*).
             upstream_headers.insert("content-type".to_string(), "application/json".to_string());
-            crate::middleware::errors::normalize_upstream_error_parts(
+            crate::middleware::errors::normalize_upstream_error_parts_with_policy(
                 crate::middleware::errors::surface_for_path(endpoint_path),
                 upstream_response.status_code,
                 &upstream_response.body,
                 received_body,
                 None,
+                prepared.public_errors,
             )
         };
 
@@ -430,6 +448,7 @@ impl AciService {
             let upstream_body = collect_upstream_body(upstream_response.body).await?;
             return Ok(StreamingForwardResult::UpstreamError(
                 StreamingUpstreamError {
+                    public_errors: prepared.public_errors,
                     upstream_status,
                     upstream_headers,
                     upstream_body,
@@ -478,6 +497,12 @@ impl AciService {
         // non-SSE body (an upstream that answered `application/json`) cannot be
         // encrypted, and must not be returned in the clear or signed as if it
         // were — the middleware path rejects the same combination.
+        if prepared.public_errors == crate::error_payload::PublicErrorPolicy::Opaque && !is_sse {
+            return Err(UpstreamError::Transport(
+                "upstream response was not an event stream".to_string(),
+            )
+            .into());
+        }
         if req.e2ee.is_some() && !is_sse {
             return Err(ServiceError::E2ee(E2eeError::EncryptionFailed));
         }
@@ -491,9 +516,30 @@ impl AciService {
             .clone()
             .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
 
+        use futures_util::StreamExt;
+        let body: super::ServiceResponseStream = Box::pin(
+            upstream_response
+                .body
+                .map(|chunk| chunk.map_err(ServiceError::Upstream)),
+        );
+        let body = if prepared.public_errors == crate::error_payload::PublicErrorPolicy::Opaque {
+            Box::pin(
+                crate::middleware::stream_transform::SseTransformStream::new(
+                    body,
+                    crate::middleware::stream_transform::StreamTransform::OpaqueErrors(
+                        crate::middleware::request_transform::Endpoint::from_path(endpoint_path)
+                            .unwrap_or(
+                                crate::middleware::request_transform::Endpoint::ChatComplete,
+                            ),
+                    ),
+                ),
+            ) as super::ServiceResponseStream
+        } else {
+            body
+        };
         let body = ReceiptFinalizingStream::new(
             self,
-            upstream_response.body,
+            body,
             builder,
             req.requester,
             endpoint_path.to_string(),

@@ -119,6 +119,7 @@ pub struct MiddlewareAllFailed {
 }
 
 pub struct MiddlewareForwarded {
+    pub public_errors: crate::error_payload::PublicErrorPolicy,
     pub receipt_id: String,
     pub receipt: MiddlewareReceiptDraft,
     pub upstream_status: u16,
@@ -138,6 +139,7 @@ pub struct MiddlewareForwarded {
 }
 
 pub struct MiddlewareStreamingForwarded {
+    pub public_errors: crate::error_payload::PublicErrorPolicy,
     pub receipt_id: String,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
@@ -313,6 +315,7 @@ pub struct StreamingForwardStream {
 }
 
 pub struct StreamingUpstreamError {
+    pub public_errors: crate::error_payload::PublicErrorPolicy,
     pub upstream_status: u16,
     pub upstream_headers: std::collections::HashMap<String, String>,
     pub upstream_body: Vec<u8>,

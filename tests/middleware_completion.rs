@@ -187,6 +187,7 @@ impl UpstreamBackend for TeeAwareUpstream {
             url_origin: self.url_origin().map(str::to_string),
             model_id: "gpt-test".to_string(),
             is_tee: Some(route_id.starts_with("tee-")),
+            public_errors: Default::default(),
             route_id: Some(route_id),
             request: req,
         })
@@ -2911,7 +2912,7 @@ async fn aci_constraint_with_no_attested_route_is_a_diagnosable_503() {
     assert_eq!(status, 503);
     let message = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("no attested upstream available for model gpt-test"),
+        message == "No attested upstream is available for the requested model",
         "unexpected message: {message}"
     );
     assert!(
@@ -3107,6 +3108,7 @@ impl UpstreamBackend for SequencedUpstream {
             url_origin: self.url_origin().map(str::to_string),
             model_id: "gpt-test".to_string(),
             is_tee: Some(false),
+            public_errors: Default::default(),
             route_id: Some(route_id),
             request: req,
         })
@@ -3762,6 +3764,7 @@ impl UpstreamBackend for HangingUpstream {
             url_origin: self.url_origin().map(str::to_string),
             model_id: "gpt-test".to_string(),
             is_tee: Some(true),
+            public_errors: Default::default(),
             route_id: req.target_route_id.clone(),
             request: req,
         })
@@ -4636,4 +4639,363 @@ async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() 
             .count(),
         1
     );
+}
+
+fn service_with_public_errors(base_url: &str, opaque: bool) -> Arc<AciService> {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
+    let mut upstream = json!({
+        "name": "upstream-a", "base_url": base_url,
+        "models": { "gpt-test": "model-a" }
+    });
+    if opaque {
+        upstream["public_errors"] = json!("opaque");
+    }
+    std::fs::write(&path, serde_json::to_vec(&json!([upstream])).unwrap()).unwrap();
+    let manager = UpstreamConfigManager::load(&path, runtime_options()).unwrap();
+    let snapshot = serde_json::to_value(manager.snapshot()).unwrap();
+    assert_eq!(
+        snapshot["upstreams"][0]["public_errors"],
+        if opaque { json!("opaque") } else { Value::Null }
+    );
+    Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            manager.backend(),
+            manager.verifier(),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    )
+}
+
+async fn direct_error_request(service: Arc<AciService>, stream: bool) -> axum::response::Response {
+    use tower::ServiceExt;
+    private_ai_gateway::http::build_router(service)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"model": "gpt-test", "messages": [], "stream": stream}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn upstream_public_error_policy_applies_to_http_and_sse() {
+    use axum::response::IntoResponse;
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true, "candidates": [{"routeId": "upstream-a:gpt-test", "format": "openai"}]
+        }),
+    )
+    .await;
+    let message = "supplier-marker-a rejected temperature";
+    for opaque in [false, true] {
+        for stream in [false, true] {
+            for in_band in [false, true] {
+                let error = json!({"type": "invalid_request_error", "code": "invalid_value", "message": message, "param": "temperature"});
+                let body = if in_band && stream {
+                    format!("data: {}\n\ndata: [DONE]\n\n", json!({"error": error}))
+                } else {
+                    json!({"error": error}).to_string()
+                };
+                let app = Router::new().route(
+                    "/v1/chat/completions",
+                    post(move || {
+                        let body = body.clone();
+                        async move {
+                            (
+                                if in_band {
+                                    axum::http::StatusCode::OK
+                                } else {
+                                    axum::http::StatusCode::BAD_REQUEST
+                                },
+                                [
+                                    (
+                                        "content-type",
+                                        if in_band && stream {
+                                            "text/event-stream"
+                                        } else {
+                                            "application/json"
+                                        },
+                                    ),
+                                    ("x-upstream-name", "supplier-marker-a"),
+                                ],
+                                body,
+                            )
+                                .into_response()
+                        }
+                    }),
+                );
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base_url = format!("http://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let service = service_with_public_errors(&base_url, opaque);
+                for direct in [false, true] {
+                    let response = if direct {
+                        direct_error_request(service.clone(), stream).await
+                    } else {
+                        let mut input = chat_input();
+                        input.stream = stream;
+                        middleware(control_url.clone())
+                            .handle_completion(&service, input)
+                            .await
+                    };
+                    assert_eq!(response.status().as_u16(), if in_band { 200 } else { 400 });
+                    let (headers, body) = raw_body(response).await;
+                    assert!(!headers.contains_key("x-upstream-name"));
+                    assert_eq!(body.contains("supplier-marker-a"), !opaque, "opaque={opaque}, stream={stream}, in_band={in_band}, direct={direct}: {body}");
+                    if opaque {
+                        assert!(body.contains("parameter: temperature"), "{body}");
+                        assert!(body.contains("invalid_request_error"), "{body}");
+                    } else {
+                        assert!(body.contains(message), "{body}");
+                    }
+                }
+                server.abort();
+                let _ = server.await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn upstream_sse_comments_are_only_removed_in_opaque_mode() {
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true, "candidates": [{"routeId": "upstream-a:gpt-test", "format": "openai"}]
+        }),
+    )
+    .await;
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            (
+                [("content-type", "text/event-stream")],
+                concat!(
+                    ": upstream-marker-a PROCESSING\n\n",
+                    ": upstream-marker-a before data\n",
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer: retained\"}}]}\n",
+                    ": upstream-marker-a after data\n\n",
+                    "data: [DONE]\n\n"
+                ),
+            )
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for opaque in [false, true] {
+        let service = service_with_public_errors(&base_url, opaque);
+        for direct in [false, true] {
+            let response = if direct {
+                direct_error_request(service.clone(), true).await
+            } else {
+                let mut input = chat_input();
+                input.stream = true;
+                middleware(control_url.clone())
+                    .handle_completion(&service, input)
+                    .await
+            };
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let (_, body) = raw_body(response).await;
+            for comment in ["PROCESSING", "before data", "after data"] {
+                assert_eq!(
+                    body.contains(&format!(": upstream-marker-a {comment}\n")),
+                    !opaque,
+                    "opaque={opaque}, direct={direct}: {body}"
+                );
+            }
+            assert!(!opaque || !body.contains("upstream-marker-a"), "{body}");
+            assert!(body.contains("answer: retained"), "{body}");
+            assert!(body.contains("data: [DONE]\n\n"), "{body}");
+        }
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+struct HostnameFailureUpstream {
+    client: reqwest::Client,
+    url: String,
+    delay: Duration,
+}
+
+#[async_trait]
+impl UpstreamBackend for HostnameFailureUpstream {
+    fn name(&self) -> &str {
+        "supplier-marker-a"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some(&self.url)
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.forward_stream_prepared(req).await
+    }
+    async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        tokio::time::sleep(self.delay).await;
+        let err = self.client.post(&self.url).send().await.unwrap_err();
+        assert!(err.to_string().contains("upstream-a.example.internal"));
+        Err(UpstreamError::Transport(err.to_string()))
+    }
+}
+
+#[tokio::test]
+async fn transport_hostnames_stay_out_of_http_and_sse_errors() {
+    let logs = captured_logs();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        }
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve("upstream-a.example.internal", address)
+        .build()
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(HostnameFailureUpstream {
+        client,
+        url: format!(
+            "http://upstream-a.example.internal:{}/v1/chat/completions",
+            address.port()
+        ),
+        delay: Duration::from_millis(100),
+    }));
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true, "candidates": [{"routeId": "private-route-a", "format": "openai"}]
+        }),
+    )
+    .await;
+    for stream in [false, true] {
+        for direct in [false, true] {
+            let response = if direct {
+                direct_error_request(service.clone(), stream).await
+            } else {
+                let mut input = chat_input();
+                input.stream = stream;
+                middleware(control_url.clone())
+                    .handle_completion(&service, input)
+                    .await
+            };
+            assert!(response.status().is_server_error());
+            let (headers, body) = raw_body(response).await;
+            let public = format!("{headers:?}{body}");
+            for marker in [
+                "upstream-a.example.internal",
+                "supplier-marker-a",
+                "private-route-a",
+            ] {
+                assert!(!public.contains(marker), "{public}");
+            }
+        }
+    }
+    let mut input = chat_input();
+    input.stream = true;
+    let response = middleware_with_keepalive(control_url, 10)
+        .handle_completion(&service, input)
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let (_, body) = raw_body(response).await;
+    assert!(body.starts_with(": PROCESSING"), "{body}");
+    assert!(body.contains("\"code\":502"), "{body}");
+    assert!(!body.contains("upstream-a.example.internal"), "{body}");
+    assert!(
+        logs.text().contains("upstream-a.example.internal"),
+        "the diagnostic stays internal"
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn opaque_policy_rejects_a_non_sse_success_on_a_stream_request() {
+    use axum::response::IntoResponse;
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            Json(
+                json!({"error": {"type": "invalid_request_error", "message": "supplier-marker-a"}}),
+            )
+            .into_response()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let service = service_with_public_errors(&base_url, true);
+    let control_url = spawn_control(
+        200,
+        json!({
+            "allow": true, "candidates": [{"routeId": "upstream-a:gpt-test", "format": "openai"}]
+        }),
+    )
+    .await;
+    for direct in [false, true] {
+        let response = if direct {
+            direct_error_request(service.clone(), true).await
+        } else {
+            let mut input = chat_input();
+            input.stream = true;
+            middleware(control_url.clone())
+                .handle_completion(&service, input)
+                .await
+        };
+        assert!(response.status().is_server_error());
+        let (_, body) = raw_body(response).await;
+        assert!(!body.contains("supplier-marker-a"), "{body}");
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn exhausted_route_ids_stay_out_of_public_errors() {
+    let control_url = spawn_control(200, json!({
+        "allow": true, "candidates": [{"routeId": "missing-private-route-a", "format": "openai"}]
+    })).await;
+    let (service, _) = build_tee_aware_service();
+    for stream in [false, true] {
+        let mut input = chat_input();
+        input.stream = stream;
+        let (status, _, body) = response_parts(
+            middleware(control_url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["type"], "not_found_error");
+        assert_eq!(
+            body["error"]["message"],
+            "The requested model or resource was not found"
+        );
+        assert!(!body.to_string().contains("missing-private-route-a"));
+    }
 }

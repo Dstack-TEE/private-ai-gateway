@@ -22,6 +22,7 @@ fn test_upstream_config(
         base_url: format!("https://{name}.example"),
         path: None,
         streaming_usage: None,
+        public_errors: None,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,

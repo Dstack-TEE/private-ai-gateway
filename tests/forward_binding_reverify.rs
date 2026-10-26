@@ -171,6 +171,7 @@ impl UpstreamBackend for MismatchingBackend {
             route_id: None,
             // A TEE-attesting route, so an `aci_required` request selects it.
             is_tee: Some(true),
+            public_errors: Default::default(),
         })
     }
 

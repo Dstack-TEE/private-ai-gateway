@@ -59,6 +59,17 @@ pub enum UpstreamVerificationError {
     NoEligibleAttestedSession(String),
 }
 
+impl UpstreamVerificationError {
+    /// Public refusal detail; the diagnostic carried by the variant stays internal.
+    pub(crate) fn public_message(&self) -> &'static str {
+        match self {
+            Self::NoEligibleAttestedSession(_) => "None of the requested attested sessions is available; re-list /v1/aci/sessions and retry",
+            Self::NoEligibleAttestedRoute(_) => "No attested upstream is available for the requested model",
+            Self::NoVerifierResult | Self::VerifierFailed(_) => "Upstream verification failed",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum E2eeError {
     #[error("missing E2EE header")]

@@ -91,6 +91,7 @@ impl UpstreamBackend for StubUpstream {
             route_id: None,
             // A TEE-attesting route, so a constrained request can select it.
             is_tee: Some(true),
+            public_errors: Default::default(),
         })
     }
 

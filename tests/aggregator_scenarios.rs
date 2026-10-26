@@ -128,6 +128,7 @@ impl UpstreamBackend for MockUpstream {
             // A TEE-attesting route: only these are candidates for a
             // constrained request (§5.3).
             is_tee: Some(true),
+            public_errors: Default::default(),
         })
     }
 
@@ -642,10 +643,10 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "Upstream verification failed"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 
@@ -871,10 +872,10 @@ async fn aci_verified_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "Upstream verification failed"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 }

@@ -360,6 +360,7 @@ impl Fixture {
             model_id: MODEL.into(),
             route_id: None,
             is_tee: Some(true),
+            public_errors: Default::default(),
         }
     }
 

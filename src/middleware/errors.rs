@@ -624,6 +624,25 @@ pub fn normalize_upstream_error_parts(
     received_body: &[u8],
     request_id: Option<&str>,
 ) -> (u16, Vec<u8>) {
+    normalize_upstream_error_parts_with_policy(
+        surface,
+        upstream_status,
+        body,
+        received_body,
+        request_id,
+        crate::error_payload::PublicErrorPolicy::Relay,
+    )
+}
+
+/// Normalize errors using the policy captured from the selected upstream.
+pub fn normalize_upstream_error_parts_with_policy(
+    surface: Surface,
+    upstream_status: u16,
+    body: &[u8],
+    received_body: &[u8],
+    request_id: Option<&str>,
+    policy: crate::error_payload::PublicErrorPolicy,
+) -> (u16, Vec<u8>) {
     // A failed fetch of a client-supplied image URL is the caller's problem, not a
     // provider fault: surface it as a 400 with a message naming the URL.
     if let Some(parts) =
@@ -643,7 +662,21 @@ pub fn normalize_upstream_error_parts(
         return parts;
     }
     if is_actionable_client_error(upstream_status) {
-        if let Some(message) = client_safe_error_message(body) {
+        let message = if policy == crate::error_payload::PublicErrorPolicy::Opaque {
+            let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let error = value.get("error").unwrap_or(&value);
+            Some(crate::error_payload::opaque_error_message(
+                upstream_status,
+                error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .or_else(|| error.get("type").and_then(Value::as_str)),
+                error.get("param").and_then(Value::as_str),
+            ))
+        } else {
+            client_safe_error_message(body)
+        };
+        if let Some(message) = message {
             return (
                 upstream_status,
                 envelope_bytes(

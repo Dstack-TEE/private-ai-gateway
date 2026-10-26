@@ -48,6 +48,7 @@ fn prepared_body(body: Value) -> PreparedUpstreamRequest {
         model_id: model(),
         route_id: None,
         is_tee: Some(true),
+        public_errors: Default::default(),
     }
 }
 
