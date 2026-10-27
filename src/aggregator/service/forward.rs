@@ -296,7 +296,11 @@ impl AciService {
         };
         let selected = (*admission).select(upstream_response.served_instance_id.as_deref())?;
         let response_model =
-            accepted_response_model(upstream_response.status_code, &upstream_response.body);
+            accepted_response_model(upstream_response.status_code, &upstream_response.body)
+                .or_else(|| {
+                    (endpoint_path == super::IMAGES_GENERATIONS_PATH)
+                        .then(|| prepared.model_id.clone())
+                });
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -313,7 +317,38 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            (upstream_response.status_code, upstream_response.body)
+            if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+                let validated = serde_json::from_slice::<Value>(&upstream_response.body)
+                    .ok()
+                    .filter(|body| crate::middleware::images::validate_response(body).is_ok());
+                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
+                if let Some(mut body) = validated {
+                    crate::middleware::images::canonicalize(&mut body);
+                    (
+                        upstream_response.status_code,
+                        serde_json::to_vec(&body).map_err(|err| {
+                            ServiceError::Upstream(UpstreamError::Transport(format!(
+                                "failed to serialize image response: {err}"
+                            )))
+                        })?,
+                    )
+                } else {
+                    (
+                        502,
+                        crate::middleware::errors::envelope_bytes(
+                            crate::middleware::errors::Surface::Openai,
+                            crate::middleware::errors::error_type(
+                                crate::middleware::errors::Surface::Openai,
+                                502,
+                            ),
+                            "upstream returned a malformed success body",
+                            None,
+                        ),
+                    )
+                }
+            } else {
+                (upstream_response.status_code, upstream_response.body)
+            }
         } else {
             // The envelope is JSON; don't let the client inherit a non-JSON
             // upstream content-type (some backends 5xx with text/*).
@@ -327,7 +362,11 @@ impl AciService {
             )
         };
 
-        let chat_id = extract_chat_id(&client_body);
+        let chat_id = if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+            None
+        } else {
+            extract_chat_id(&client_body)
+        };
         let e2ee = req.e2ee.as_ref();
         let wire_response_body = match e2ee {
             Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,

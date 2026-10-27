@@ -2,11 +2,11 @@
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-10-20.
+Last reviewed: 2026-10-27.
 
 ## Implemented
 
-- OpenAI chat, completions, embeddings, Responses, and native System One endpoints, and Anthropic Messages.
+- OpenAI chat, completions, embeddings, Responses, buffered image generation, and native System One endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
 - Runtime upstream replacement: validated, redacted, atomically persisted, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
@@ -20,6 +20,12 @@ Last reviewed: 2026-10-20.
 
 Providers prove different claims; see [Provider verification](providers/README.md).
 
+Image generation (`/v1/images/generations`) is available in direct and middleware
+modes with inline base64 output, per-image pricing, and receipts. Middleware
+routes require explicit endpoint opt-in; merging support does not launch a
+model. Streaming, edits, image E2EE, and public-launch compliance controls remain
+outside this endpoint's current scope.
+
 ## Known limitations
 
 These are gaps in the implementation. What ACI does not cover by design is in
@@ -32,7 +38,7 @@ These are gaps in the implementation. What ACI does not cover by design is in
 - Router providers (NEAR AI, Tinfoil, SecretAI) are trusted for per-model TEE coverage, and the instance that served a request is not identified.
 - Clients check that a session's evidence matches its digest, but not what the evidence proves. See item 12 of the [conformance gap review](reviews/aci-spec-conformance-gaps.md).
 - A non-`UpToDate` TCB is recorded as a refuted claim, not a failure. Relying parties enforce their own TCB policy.
-- E2EE covers selected fields, not metadata. It is not available on `/v1/responses` or as an Anthropic Messages profile.
+- E2EE covers selected fields, not metadata. It is not available on `/v1/responses`, `/v1/images/generations`, or as an Anthropic Messages profile.
 - The Private AI Proxy Local API and `pap serve` are plain local HTTP endpoints, not TEE-backed services.
 - The example control plane covers only the request-decision contract. The deployment example leaves authentication, rate limiting, observability, secret delivery, and availability to the operator.
 

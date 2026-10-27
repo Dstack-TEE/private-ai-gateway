@@ -442,6 +442,8 @@ pub struct PostReport {
     pub request_model: String,
     /// Raw upstream usage before any cost injection, or `null`.
     pub usage: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<super::images::ImageUsage>,
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,

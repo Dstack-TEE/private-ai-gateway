@@ -47,5 +47,16 @@
     "chutes_chute_ids": {
       "Qwen/Qwen3-Embedding-8B-TEE": "21822836-bfa6-5426-b27e-dd5fdda1249e"
     }
+  },
+  {
+    "name": "near-ai-live-images",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-images",
+    "upstream_model": "black-forest-labs/FLUX.2-klein-4B",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": ["DSTACK_VERIFIER_URL"],
+    "capabilities": ["images"]
   }
 ]

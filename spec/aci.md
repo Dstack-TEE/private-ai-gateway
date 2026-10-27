@@ -467,6 +467,7 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
+| `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output) |
 | `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |

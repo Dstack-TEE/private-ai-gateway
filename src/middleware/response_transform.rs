@@ -620,6 +620,7 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => {}
         Endpoint::SystemOne => canonicalize_systemone(body),
+        Endpoint::ImagesGenerations => super::images::canonicalize(body),
     }
 }
 
