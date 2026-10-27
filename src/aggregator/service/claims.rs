@@ -636,6 +636,50 @@ mod claim_mapping_tests {
     }
 
     #[test]
+    fn tdx_profiles_require_string_formats_and_digest_the_supplied_report() {
+        let digest = |report: &Value| {
+            json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(report).unwrap()
+            ))
+        };
+        for provider in ["near-ai", "phala-direct", "chutes"] {
+            let verifier_id = if provider == "near-ai" {
+                "private-ai-verifier/near-ai-gateway/v1".to_string()
+            } else {
+                format!("private-ai-verifier/{provider}/v1")
+            };
+            for format in ["td10", "td15"] {
+                let mut claims = profiles()[provider].clone();
+                claims["tdx_report"]["report_format"] = json!(format);
+                if format == "td15" {
+                    claims["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
+                    claims["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
+                }
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // An externally tagged enum object must not be normalized to
+                // the string whose digest was supplied by the verifier.
+                claims["tdx_report"]["report_format"] = json!({(format): null});
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // A valid string report must hash its own supplied content,
+                // not another representation or another valid report.
+                claims["tdx_report"]["report_format"] = json!(format);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report"]["rt_mr0"] = json!("ff".repeat(48));
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+            }
+        }
+    }
+
+    #[test]
     fn chutes_slice_keeps_own_security_state_and_ignores_sibling_churn() {
         let own = profiles()["chutes"].clone();
         let mut full = json!({

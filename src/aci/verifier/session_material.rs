@@ -35,11 +35,21 @@ impl<const N: usize> Hex<N> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum TdxReportFormat {
     Td10,
     Td15,
+}
+
+impl<'de> Deserialize<'de> for TdxReportFormat {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "td10" => Ok(Self::Td10),
+            "td15" => Ok(Self::Td15),
+            _ => Err(serde::de::Error::custom("expected td10 or td15")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,9 +156,10 @@ impl TdxMaterial {
         })
     }
 
-    fn valid(&self) -> bool {
+    fn valid(&self, supplied_report: &Value) -> bool {
         self.tdx_report.valid()
-            && self.tdx_report.digest().as_ref() == Some(&self.tdx_report_sha256)
+            && digest::jcs_bytes(supplied_report)
+                .is_ok_and(|bytes| digest::sha256_hex(&bytes) == self.tdx_report_sha256)
     }
 }
 
@@ -159,7 +170,7 @@ fn object<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(d: D) -> Re
 }
 
 // Unlike Option<T>, this requires the field even when its value is null.
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum Nullable<T> {
     Value(T),
@@ -217,27 +228,32 @@ impl ReceiptCustody {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct NearAiMaterial {
     #[serde(flatten)]
     tdx: TdxMaterial,
     trust_boundary: String,
     signing_address: String,
-    compose_hash: Hex<32>,
-    gateway_tls_spki_sha256: Hex<32>,
+    #[serde(rename = "compose_hash")]
+    _compose_hash: Hex<32>,
+    #[serde(rename = "gateway_tls_spki_sha256")]
+    _gateway_tls_spki_sha256: Hex<32>,
     gateway_verified: bool,
-    tcb_status: Nullable<String>,
-    #[serde(deserialize_with = "object")]
-    gateway_gpu_check: GatewayGpuCheck,
+    #[serde(rename = "tcb_status")]
+    _tcb_status: Nullable<String>,
+    #[serde(rename = "gateway_gpu_check", deserialize_with = "object")]
+    _gateway_gpu_check: GatewayGpuCheck,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct GatewayGpuCheck {
-    present: bool,
-    accepted: bool,
+    #[serde(rename = "present")]
+    _present: bool,
+    #[serde(rename = "accepted")]
+    _accepted: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct PhalaDirectMaterial {
     #[serde(flatten)]
     tdx: TdxMaterial,
@@ -245,24 +261,34 @@ struct PhalaDirectMaterial {
     evidence_scope: String,
     canonical_model_id: String,
     signing_address: String,
-    compose_hash: Hex<32>,
+    #[serde(rename = "compose_hash")]
+    _compose_hash: Hex<32>,
     attestation_version: u64,
     tls_spki_from_report_data: bool,
     report_data_nonce_matched: bool,
     compose_hash_verified: bool,
     tdx_debug_mode: bool,
-    os_image_hash: Nullable<String>,
-    os_image_version: Nullable<String>,
-    gpu_arch: Nullable<String>,
-    tcb_status: Nullable<String>,
-    os_image_is_dev: Nullable<bool>,
-    production_os_image: Nullable<bool>,
-    gpu_evidence_nonce_matched: Nullable<bool>,
-    gpu_verified: bool,
-    gpu_evidence_present: bool,
+    #[serde(rename = "os_image_hash")]
+    _os_image_hash: Nullable<String>,
+    #[serde(rename = "os_image_version")]
+    _os_image_version: Nullable<String>,
+    #[serde(rename = "gpu_arch")]
+    _gpu_arch: Nullable<String>,
+    #[serde(rename = "tcb_status")]
+    _tcb_status: Nullable<String>,
+    #[serde(rename = "os_image_is_dev")]
+    _os_image_is_dev: Nullable<bool>,
+    #[serde(rename = "production_os_image")]
+    _production_os_image: Nullable<bool>,
+    #[serde(rename = "gpu_evidence_nonce_matched")]
+    _gpu_evidence_nonce_matched: Nullable<bool>,
+    #[serde(rename = "gpu_verified")]
+    _gpu_verified: bool,
+    #[serde(rename = "gpu_evidence_present")]
+    _gpu_evidence_present: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct ChutesMaterial {
     #[serde(flatten)]
     tdx: TdxMaterial,
@@ -272,15 +298,20 @@ struct ChutesMaterial {
     canonical_model_id: String,
     instance_id: String,
     measurement: String,
-    tcb_status: Nullable<String>,
+    #[serde(rename = "tcb_status")]
+    _tcb_status: Nullable<String>,
     advisory_ids: Vec<String>,
-    gpu_verified: bool,
-    gpu_evidence_present: bool,
-    gpu_arch: Nullable<String>,
-    gpu_evidence_nonce_matched: Nullable<bool>,
+    #[serde(rename = "gpu_verified")]
+    _gpu_verified: bool,
+    #[serde(rename = "gpu_evidence_present")]
+    _gpu_evidence_present: bool,
+    #[serde(rename = "gpu_arch")]
+    _gpu_arch: Nullable<String>,
+    #[serde(rename = "gpu_evidence_nonce_matched")]
+    _gpu_evidence_nonce_matched: Nullable<bool>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct PrivatemodeMaterial {
     trust_boundary: String,
     attestation_scope: String,
@@ -289,7 +320,8 @@ struct PrivatemodeMaterial {
     inference_secret_policy: String,
     manifest_mode: String,
     manifest_observation: String,
-    observed_manifest_sha256: Hex<32>,
+    #[serde(rename = "observed_manifest_sha256")]
+    _observed_manifest_sha256: Hex<32>,
     manifest_observed_at: String,
     manifest_bound_to_active_secret: bool,
 }
@@ -323,7 +355,7 @@ pub(crate) fn valid_profile(provider: &str, claims: &Value) -> bool {
     match provider {
         "aci-service" => parse(claims, |m: AciServiceMaterial| {
             let p = &m.published_source_provenance;
-            m.tdx.valid()
+            m.tdx.valid(&claims["tdx_report"])
                 && !m.tcb_status.is_empty()
                 && sorted_unique(&m.advisory_ids)
                 && lower_hex(&m.measured_app_id)
@@ -333,13 +365,13 @@ pub(crate) fn valid_profile(provider: &str, claims: &Value) -> bool {
                         && p.get("repo_commit").is_some_and(Value::is_string)))
         }),
         "near-ai" => parse(claims, |m: NearAiMaterial| {
-            m.tdx.valid()
+            m.tdx.valid(&claims["tdx_report"])
                 && !m.trust_boundary.is_empty()
                 && signing_address(&m.signing_address)
                 && m.gateway_verified
         }),
         "phala-direct" => parse(claims, |m: PhalaDirectMaterial| {
-            m.tdx.valid()
+            m.tdx.valid(&claims["tdx_report"])
                 && nonempty(&[&m.trust_boundary, &m.evidence_scope, &m.canonical_model_id])
                 && signing_address(&m.signing_address)
                 && m.attestation_version == 2
@@ -349,7 +381,7 @@ pub(crate) fn valid_profile(provider: &str, claims: &Value) -> bool {
                 && !m.tdx_debug_mode
         }),
         "chutes" => parse(claims, |m: ChutesMaterial| {
-            m.tdx.valid()
+            m.tdx.valid(&claims["tdx_report"])
                 && nonempty(&[
                     &m.trust_boundary,
                     &m.evidence_scope,

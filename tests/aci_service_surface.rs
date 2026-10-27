@@ -29,7 +29,8 @@ use private_ai_gateway::aci::e2ee::{
 };
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
+    VerificationResult, VerificationRound,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -3255,7 +3256,7 @@ async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
         .await;
     let original_bytes = full.body;
     // A reviewed profile ignores the round token as well as fresh evidence.
-    event.verification_round = Some(Default::default());
+    event.verification_round = Some(VerificationRound::fresh());
     // A new successful round with different evidence keeps the establishing bytes.
     event.evidence =
         Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"round two")).unwrap());
@@ -3387,14 +3388,14 @@ async fn incomplete_evidence_rounds_rotate_sessions_but_cache_hits_reuse() {
     let mut event = common::verified_event("admission-test", "model-a");
     event.provider_type = Some("tinfoil".into());
     event.verifier_id = "private-ai-verifier/tinfoil/v1".into();
-    event.verification_round = Some(Default::default());
+    event.verification_round = Some(VerificationRound::fresh());
     *h.verifier.0.lock().unwrap() = event.clone();
     let original = h.listed()[0].session_id().to_string();
     h.clock.set(101);
     assert_eq!(h.listed()[0].session_id(), original, "cached event");
 
     // The SDK summary can be identical while unreported platform state changes.
-    event.verification_round = Some(Default::default());
+    event.verification_round = Some(VerificationRound::fresh());
     *h.verifier.0.lock().unwrap() = event;
     let replacement = h.listed()[0].session_id().to_string();
     assert_ne!(replacement, original, "independent verification round");

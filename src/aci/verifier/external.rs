@@ -19,7 +19,9 @@ use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
 use super::CachedProviderEvent;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationResult, VerificationRound,
+};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
 use crate::aggregator::session::EvidenceRef;
@@ -451,7 +453,8 @@ impl ExternalProviderVerifier {
         }
         Ok(UpstreamVerifiedEvent {
             aci_identity: None,
-            verification_round: (!self.evidence_binds_platform_state()).then(Default::default),
+            verification_round: (!self.evidence_binds_platform_state())
+                .then(VerificationRound::fresh),
             upstream_name: request.upstream_name,
             provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,

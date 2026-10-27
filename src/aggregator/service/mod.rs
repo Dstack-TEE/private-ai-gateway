@@ -140,10 +140,7 @@ impl AciService {
                 .checked_add(config.attested_session_ttl_seconds)
                 .is_none()
         {
-            return Err(ServiceError::SessionStore(
-                "attested_session_ttl_seconds must be positive and its expiry representable as u64"
-                    .into(),
-            ));
+            return Err(ServiceError::InvalidAttestedSessionTtl);
         }
 
         let tls_public_keys = config

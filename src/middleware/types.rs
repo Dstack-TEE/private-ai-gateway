@@ -394,6 +394,7 @@ impl From<&ServiceError> for ErrorClass {
             ServiceError::Receipt(_) | ServiceError::NoReceiptKey => Self::ReceiptFailed,
             ServiceError::TestKeysInProduction
             | ServiceError::InvalidSourceProvenance
+            | ServiceError::InvalidAttestedSessionTtl
             | ServiceError::Keyset(_)
             | ServiceError::InvalidNonce(_)
             | ServiceError::Key(_)

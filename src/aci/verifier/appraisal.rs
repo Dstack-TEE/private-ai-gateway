@@ -16,6 +16,7 @@ use serde_json::Value;
 use super::dstack::verify_dstack_kms_receipt_custody;
 use super::quote::{parse_quote_evidence, verify_quote_to_root, QuoteStepError, VerifiedQuote};
 use super::report::{AciReportValidationError, ReportBinding};
+use super::session_material::{AciServiceMaterial, Hex, ReceiptCustody, TdxMaterial};
 use super::{dcap_report_data, verify_dstack_event_log, AciServiceVerifierPolicy};
 use crate::aci::receipt::ChannelBinding;
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
@@ -675,8 +676,6 @@ fn authenticated_session_material(
     {
         return None;
     }
-    use super::session_material::{AciServiceMaterial, Hex, ReceiptCustody, TdxMaterial};
-
     let quote = quote?;
     let provenance = provenance?;
     let custody = custody?;

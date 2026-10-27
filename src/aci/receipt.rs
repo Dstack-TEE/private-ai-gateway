@@ -54,8 +54,8 @@ pub enum ReceiptError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationRound([u8; 32]);
 
-impl Default for VerificationRound {
-    fn default() -> Self {
+impl VerificationRound {
+    pub fn fresh() -> Self {
         Self(rand::random())
     }
 }

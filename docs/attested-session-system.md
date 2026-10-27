@@ -147,8 +147,9 @@ cannot authorize a subset of that group.
 0G previously omitted the evidence digest from its fingerprint. It selects one
 replacement session when the digest is first included, then reuses it while the
 complete evidence remains identical. Tinfoil's incomplete SDK summary uses a
-gateway-local round token in its fingerprint; this replaces its earlier
-fingerprint once and prevents cross-round dedup even when summaries match.
+fresh gateway-local round token on every verifier run, selecting a new session
+for each fresh round even when summaries match; cache hits retain the token and
+session.
 Other unreviewed material keeps its evidence-digest fingerprint.
 
 JSONL fingerprints remain opaque. Existing records, IDs and pins are never
@@ -162,10 +163,9 @@ or seal a legacy session and requires the same explicit audit and repinning.
 
 Rust integrations initialize the optional `UpstreamVerifiedEvent::verification_round`
 field to `None` for complete evidence; an adapter whose evidence omits platform
-state creates a token on fresh verification and clones it on cache hits. Callers
-of the removed KMS root-only helper use
-`verify_dstack_kms_receipt_custody(...)?.root_public_key`. Invalid session TTLs
-are rejected at service construction through the existing `SessionStore` error.
+state creates a `VerificationRound::fresh()` token on fresh verification and
+clones it on cache hits. Callers of the removed KMS root-only helper use
+`verify_dstack_kms_receipt_custody(...)?.root_public_key`.
 
 ### Custom session stores
 

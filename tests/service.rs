@@ -1060,7 +1060,7 @@ fn constructor_rejects_zero_and_overflowing_session_ttl() {
         );
         assert!(matches!(
             result,
-            Err(ServiceError::SessionStore(message)) if message.contains("attested_session_ttl_seconds")
+            Err(ServiceError::InvalidAttestedSessionTtl)
         ));
     }
     assert_eq!(
