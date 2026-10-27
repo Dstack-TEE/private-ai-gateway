@@ -694,14 +694,6 @@ material, claims, evidence, and validity period. Receipts cite this snapshot
 by id. Only a verified TEE upstream yields a session; serving through an
 upstream with no TEE appears as unverified, with no session to cite (§7.5).
 
-Tinfoil sessions remain evidence-sensitive on TDX and SNP. Its SDK's verified
-document omits security-relevant platform attributes; evidence-independent
-reuse requires the SDK to expose the authenticated quote or document used by
-`SecureClient.verify()` for a complete reviewed projection. Each independent
-verification carries a fresh round identifier in evidence metadata. Repeated use
-of that cached event can reuse its session; independent rounds with equal SDK
-summaries cannot. The identifier does not establish platform-change detection.
-
 Sessions are per verified channel and validity period, rather than per
 request. A router serving several models through the same verified channel may
 share one session; the receipt records the model served.
