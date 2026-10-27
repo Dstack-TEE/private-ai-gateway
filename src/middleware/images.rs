@@ -205,6 +205,16 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         }
     }
     if object
+        .get("n")
+        .is_some_and(|value| value.as_i64() != Some(1))
+    {
+        return Err(RequestError {
+            code: "unsupported_value",
+            param: "n".into(),
+            message: "only n=1 is currently supported".into(),
+        });
+    }
+    if object
         .get("response_format")
         .is_some_and(|v| v.as_str() != Some("b64_json"))
     {
@@ -337,7 +347,7 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":10, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":1, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
@@ -347,15 +357,40 @@ mod tests {
     }
 
     #[test]
+    fn launch_accepts_only_one_image_and_preserves_type_and_range_errors() {
+        validate_request(&json!({"model":"image","prompt":"hello"})).unwrap();
+        validate_request(&json!({"model":"image","prompt":"hello","n":1})).unwrap();
+        for n in 2..=10 {
+            let error =
+                validate_request(&json!({"model":"image","prompt":"hello","n":n})).unwrap_err();
+            assert_eq!(error.code, "unsupported_value");
+            assert_eq!(error.param, "n");
+            assert_eq!(error.message, "only n=1 is currently supported");
+        }
+        for n in [
+            json!(-1),
+            json!(0),
+            json!(11),
+            json!(1.0),
+            json!(1.5),
+            json!("1"),
+            json!(true),
+            Value::Null,
+        ] {
+            let error =
+                validate_request(&json!({"model":"image","prompt":"hello","n":n})).unwrap_err();
+            assert_eq!(error.code, "invalid_parameter", "{n}");
+            assert_eq!(error.param, "n");
+            assert_eq!(error.message, "parameter must be an integer from 1 to 10");
+        }
+    }
+
+    #[test]
     fn rejects_invalid_parameters_without_clamping() {
         for patch in [
             json!({"response_format":"url"}),
             json!({"stream":false}),
             json!({"partial_images":1}),
-            json!({"n":0}),
-            json!({"n":11}),
-            json!({"n":1.5}),
-            json!({"n":"1"}),
             json!({"output_compression":101}),
             json!({"quality":2}),
             json!({"prompt":null}),

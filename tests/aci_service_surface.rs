@@ -3870,6 +3870,32 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
 }
 
 #[tokio::test]
+async fn images_reject_unsupported_counts_before_forwarding() {
+    let h = harness();
+    for (n, code) in [
+        (serde_json::json!(2), "unsupported_value"),
+        (serde_json::json!(10), "unsupported_value"),
+        (serde_json::json!(0), "invalid_parameter"),
+        (serde_json::json!(11), "invalid_parameter"),
+        (serde_json::json!(1.5), "invalid_parameter"),
+    ] {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"model":"aci-model","prompt":"hello","n":n}))
+                .unwrap();
+        let resp = h.requester.post("/v1/images/generations", &body, &[]).await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let error = &json_body(&resp)["error"];
+        assert_eq!(error["type"], "invalid_request_error");
+        assert_eq!(error["code"], code);
+        assert_eq!(error["param"], "n");
+        if code == "unsupported_value" {
+            assert_eq!(error["message"], "only n=1 is currently supported");
+        }
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
     let h = harness();
     for patch in [
