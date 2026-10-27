@@ -513,7 +513,6 @@ test("fails closed while the network is down", async (t) => {
     connected.set(agent.id, { original, files: readFiles(agent), token: readToken(agent) });
   }
   const clientToken = pap(["token", "show", "--yes"]).trim();
-  const down = nowSeconds();
 
   await setNetwork("down");
   pap(["profiles", "use", "redpill-alt", "--yes"]);
@@ -521,9 +520,10 @@ test("fails closed while the network is down", async (t) => {
     const current = protection();
     return !["protected", "verifying"].includes(current) && current;
   });
-  // Only requests made while protection is unverified count: records that
-  // exist now, and requests started before the network went down (such as an
-  // agent's background request still in flight), are excluded.
+  // Only requests recorded once verification has failed count. The switch
+  // starts a new verifier generation, and the backend discards events from the
+  // old one, so a request still in flight from before the outage is never
+  // recorded after this point.
   const before = new Set(usageRecords().map(({ id }) => id));
 
   await check(t, "outage phase", () => assert.ok(OUTAGE_PHASES.includes(phase), `phase ${phase}`));
@@ -545,7 +545,7 @@ test("fails closed while the network is down", async (t) => {
     assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" });
   });
   await check(t, "nothing forwarded", () => {
-    const forwarded = usageRecords().filter(({ id, at, leftDevice }) => leftDevice && !before.has(id) && at > down);
+    const forwarded = usageRecords().filter(({ id, leftDevice }) => leftDevice && !before.has(id));
     const describe = ({ agent, method, path: p, status, at, detail }) =>
       `${agent ?? "Local API client"} ${method} ${p}: HTTP ${status} at ${new Date(at * 1000).toISOString()}: ${detail}`;
     assert.equal(forwarded.length, 0, redact(`forwarded during the outage:\n${forwarded.map(describe).join("\n")}`));
