@@ -493,7 +493,7 @@ impl AciServiceUpstreamVerifier {
         self.finish_verification(started, &body, appraisal)
     }
 
-    pub(super) fn finish_verification(
+    fn finish_verification(
         &self,
         started: Instant,
         body: &[u8],
@@ -629,3 +629,6 @@ pub(super) fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> 
         dcap_qvl::quote::Report::SgxEnclave(_) => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

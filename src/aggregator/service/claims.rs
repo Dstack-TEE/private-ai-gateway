@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::verifier::{
-    AciServiceUpstreamVerifier, ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
-    PrivatemodeProviderVerifier,
+    AciServiceUpstreamVerifier, ChutesProviderVerifier, NearAiProviderVerifier,
+    PhalaDirectProviderVerifier, PrivatemodeProviderVerifier,
 };
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
 

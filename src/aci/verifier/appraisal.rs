@@ -699,4 +699,4 @@ fn authenticated_session_material(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
