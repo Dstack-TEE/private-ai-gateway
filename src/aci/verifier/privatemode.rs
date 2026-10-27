@@ -26,6 +26,8 @@ pub struct PrivatemodeProviderVerifier {
 }
 
 impl PrivatemodeProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "privatemode-proxy/co-deployed-contrast/v1";
+
     pub fn new(
         deployment: Arc<PrivatemodeProxyDeployment>,
         connect_timeout_seconds: u64,
@@ -51,7 +53,7 @@ impl PrivatemodeProviderVerifier {
             provider_type: Some("privatemode".to_string()),
             model_id: request.model_id,
             url_origin: Some(self.deployment.base_url().to_string()),
-            verifier_id: "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+            verifier_id: Self::VERIFIER_ID.to_string(),
             result: VerificationResult::Failed,
             required: request.required,
             ..Default::default()

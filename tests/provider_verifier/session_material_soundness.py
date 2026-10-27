@@ -214,10 +214,25 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertEqual(claims["instance_advisory_ids"], {"instance-a": ["SA-A", "SA-B"]})
         self.assertIn("gpu_evidence_nonce_matched", claims["instance_gpu"]["instance-a"])
 
+    def test_tinfoil_independent_rounds_have_distinct_evidence(self):
+        first = tinfoil_output()
+        second = tinfoil_output()
+        self.assertEqual(first["provider_claims"], second["provider_claims"])
+        self.assertNotEqual(first["evidence"]["digest"], second["evidence"]["digest"])
+        documents = [json.loads(base64.b64decode(event["evidence"]["data"].split(",", 1)[1]))
+                     for event in (first, second)]
+        rounds = [doc.pop("verification_id") for doc in documents]
+        self.assertNotEqual(rounds[0], rounds[1])
+        self.assertEqual(documents[0], documents[1])
+
     def test_tinfoil_document_material_and_evidence(self):
         doc = tinfoil_doc()
         base = tinfoil_output(doc)
         claims = base["provider_claims"]
+        self.assertNotIn("session_material_version", claims)
+        snp = copy.deepcopy(doc)
+        snp.enclave_measurement.measurement = Measurement(PredicateType.SEV_GUEST_V2, ["22" * 48])
+        self.assertNotIn("session_material_version", tinfoil_output(snp)["provider_claims"])
         self.assertEqual(claims["hpke_public_key"], "")
         evidence = json.loads(base64.b64decode(base["evidence"]["data"].split(",", 1)[1]))
         for key in ("code_measurement", "enclave_measurement", "hardware_measurement", "hpke_public_key"):

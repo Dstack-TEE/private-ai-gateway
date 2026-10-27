@@ -152,7 +152,6 @@
     },
     "hpke_public_key": "",
     "release_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "session_material_version": "tinfoil/1",
     "tls_spki_from_report_data": true,
     "trust_boundary": "router",
     "used_router": true,

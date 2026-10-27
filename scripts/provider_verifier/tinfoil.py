@@ -7,6 +7,7 @@ import base64
 import contextlib
 import gzip
 import sys
+import uuid
 from typing import Any
 
 from .common import emit, failed, json_evidence_bundle, provider_options, verifier_id_for
@@ -29,7 +30,7 @@ def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
     return report_data
 
 
-def tinfoil_session_material(doc: Any) -> dict[str, Any]:
+def tinfoil_document_material(doc: Any) -> dict[str, Any]:
     """Preserve the official verified document's measurements and register order."""
 
     def measurement(value):
@@ -94,8 +95,12 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         }
         for name, state in (doc.steps or {}).items()
     }
-    material = tinfoil_session_material(doc)
+    material = tinfoil_document_material(doc)
     evidence_doc = {
+        # The SDK summary omits the authenticated quote/platform attributes.
+        # Equal summaries cannot establish continuity across independent rounds;
+        # cached events retain this identifier and their session unchanged.
+        "verification_id": str(uuid.uuid4()),
         **material,
         "config_repo": doc.config_repo,
         "enclave_host": doc.enclave_host,
@@ -161,7 +166,6 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
             ],
             "provider_claims": {
                 **material,
-                **({"session_material_version": "tinfoil/1"} if material else {}),
                 # Router channel scope — model-independent. The served model is
                 # deliberately NOT folded in: it would split one verified channel
                 # into a session per model, and it is recorded on the receipt.

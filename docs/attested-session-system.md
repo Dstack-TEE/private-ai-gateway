@@ -79,10 +79,11 @@ Do not synthesize leases or mix acquisition and retention across stores.
 ## Reviewed material and snapshot evidence
 
 Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
-`phala-direct/1`, `chutes/1` (per instance), `tinfoil/1` and `privatemode/1`
+`phala-direct/1`, `chutes/1` (per instance) and `privatemode/1`
 claims require the matching provider type and built-in verifier ID. Missing,
 unknown, mismatched or incomplete material remains evidence-sensitive. ArmetAI,
-SecretAI (both TDX and SNP), 0G, generic external verifiers and legacy Chutes outputs
+SecretAI (both TDX and SNP), Tinfoil (TDX and SNP), 0G, generic external verifiers
+and legacy Chutes outputs
 remain evidence-sensitive; neither provider names nor markers alone opt in.
 Shape validation does not authenticate facts; the configured verifier owns that.
 
@@ -91,10 +92,21 @@ The private fingerprint for reviewed material is SHA-256 of JCS over
 verifier ID, identity, channel bindings and all recorded claims. TDX profiles
 preserve every supported TD10/TD15 security field except report data; non-freshness
 report-data inputs are retained as identity/bindings/claims. Rust checks the
-report format, hex field lengths and recomputed report digest. Tinfoil retains
-its official measured code, enclave, HPKE key and optional hardware material.
+report format, hex field lengths and recomputed report digest.
 Privatemode retains the observed manifest digest and `manifest_observed_at`;
 this observation is not bound to the active inference secret.
+
+Tinfoil preserves the SDK's code/enclave measurements, HPKE key and hardware
+summary in its evidence and claims, but these omit security-relevant platform
+attributes. Tinfoil TDX and SNP therefore remain evidence-sensitive. Reuse awaits
+the SDK exposing the authenticated quote or document behind
+`SecureClient.verify()`, followed by a complete reviewed projection. Each
+independent verification puts a fresh `verification_id` in evidence metadata;
+identical summaries therefore select different sessions across rounds. A cached
+event retains its identifier and session. The identifier separates rounds; it
+does not detect or expose hidden platform changes. Removing the incomplete
+`tinfoil/1` eligibility and adding round identifiers selects replacement sessions;
+fixed pins require explicit audit and acceptance under the migration rules below.
 
 Equal reviewed material reuses an unexpired document byte for byte, including
 its establishing evidence, without extending validity. Binding, identity,

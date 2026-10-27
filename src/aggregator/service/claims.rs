@@ -1,6 +1,10 @@
 use serde_json::Value;
 
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::verifier::{
+    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
+    PrivatemodeProviderVerifier,
+};
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
 
 /// Maps a verified `UpstreamVerifiedEvent` onto the typed claim vocabulary for
@@ -58,9 +62,10 @@ pub(crate) fn reviewed_session_material(
         return false;
     };
     let expected_id = match provider {
-        "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
-        "phala-direct" | "chutes" | "tinfoil" => format!("private-ai-verifier/{provider}/v1"),
-        "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+        "near-ai" => NearAiProviderVerifier::VERIFIER_ID,
+        "phala-direct" => PhalaDirectProviderVerifier::VERIFIER_ID,
+        "chutes" => ChutesProviderVerifier::VERIFIER_ID,
+        "privatemode" => PrivatemodeProviderVerifier::VERIFIER_ID,
         _ => return false,
     };
     if verifier_id != expected_id
@@ -154,38 +159,6 @@ pub(crate) fn reviewed_session_material(
                 && nullable_string("gpu_arch")
                 && nullable_bool("gpu_evidence_nonce_matched")
         }
-        "tinfoil" => {
-            strings(&[
-                "trust_boundary",
-                "evidence_scope",
-                "config_repo",
-                "release_digest",
-                "code_fingerprint",
-                "enclave_host",
-                "enclave_fingerprint",
-            ]) && claims["used_router"] == true
-                && claims["tls_spki_from_report_data"] == true
-                && claims["hpke_public_key"].is_string()
-                && valid_tinfoil_measurement(&claims["code_measurement"])
-                && valid_tinfoil_measurement(&claims["enclave_measurement"])
-                && claims["verification_steps"]
-                    .as_object()
-                    .is_some_and(|steps| {
-                        !steps.is_empty()
-                            && steps.values().all(|v| {
-                                matches!(
-                                    v.as_str(),
-                                    Some("pending" | "success" | "failed" | "skipped")
-                                )
-                            })
-                    })
-                && claims.get("hardware_measurement").is_some_and(|hardware| {
-                    hardware.is_null()
-                        || (hardware["id"].as_str().is_some_and(|s| !s.is_empty())
-                            && lower_hex(&hardware["mrtd"], 48)
-                            && lower_hex(&hardware["rtmr0"], 48))
-                })
-        }
         "privatemode" => {
             strings(&[
                 "trust_boundary",
@@ -256,19 +229,6 @@ fn valid_tdx_material(claims: &Value) -> bool {
         claims["tdx_report_sha256"].as_str()
             == Some(crate::aci::digest::sha256_hex(&bytes).as_str())
     })
-}
-
-fn valid_tinfoil_measurement(value: &Value) -> bool {
-    let count = match value["type"].as_str() {
-        Some("https://tinfoil.sh/predicate/sev-snp-guest/v2") => 1,
-        Some("https://tinfoil.sh/predicate/tdx-guest/v2") => 5,
-        Some("https://tinfoil.sh/predicate/snp-tdx-multiplatform/v1") => 3,
-        _ => return false,
-    };
-    value.as_object().is_some_and(|m| m.len() == 2)
-        && value["registers"].as_array().is_some_and(|registers| {
-            registers.len() == count && registers.iter().all(|r| lower_hex(r, 48))
-        })
 }
 
 /// The instance a binding attests (a Chutes instance id or a 0G provider
@@ -737,6 +697,14 @@ mod claim_mapping_tests {
     #[test]
     fn only_complete_matching_reviewed_profiles_are_eligible() {
         for (provider, claims) in profiles().as_object().unwrap() {
+            if provider == "tinfoil" {
+                assert!(!super::reviewed_session_material(
+                    Some(provider),
+                    "private-ai-verifier/tinfoil/v1",
+                    claims
+                ));
+                continue;
+            }
             let id = match provider.as_str() {
                 "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
                 "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),

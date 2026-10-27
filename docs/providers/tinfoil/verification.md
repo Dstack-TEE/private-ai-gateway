@@ -34,6 +34,19 @@ The hardware signature covers the whole report, including the TLS fingerprint in
 
 The gateway compares the binding with the live HTTPS certificate before forwarding. All models behind the same Tinfoil router share the verifier cache and session. The served model remains a receipt field.
 
+## Session reuse
+
+TDX and SNP sessions remain evidence-sensitive. The SDK's verified document
+preserves code/enclave measurements and hardware summaries but omits other
+security-relevant platform attributes. Evidence-independent reuse requires the
+SDK to expose the authenticated quote or document used by `SecureClient.verify()`
+so a complete projection can be reviewed. The gateway does not replace that SDK
+verification flow or accept the former `tinfoil/1` marker. Each independent
+verification emits a fresh `verification_id` in evidence metadata, so identical
+SDK summaries cannot reuse a session across rounds. A cached event retains its
+identifier and session. This separates rounds; it does not detect or expose
+platform changes hidden by the SDK summary.
+
 ## Session claims
 
 | Claim | Mapping |

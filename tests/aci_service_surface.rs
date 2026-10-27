@@ -3362,6 +3362,74 @@ async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
 }
 
 #[tokio::test]
+async fn tinfoil_tdx_and_snp_rounds_remain_evidence_sensitive() {
+    for (kind, registers) in [
+        ("tdx-guest", vec!["22".repeat(48); 5]),
+        ("sev-snp-guest", vec!["22".repeat(48)]),
+    ] {
+        let h = admission::Harness::new(vec![admission::Attempt::Response {
+            status: 200,
+            at: 101,
+        }]);
+        let mut event = common::verified_event("admission-test", "model-a");
+        event.provider_type = Some("tinfoil".to_string());
+        event.verifier_id = "private-ai-verifier/tinfoil/v1".to_string();
+        let mut claims = session_profile("tinfoil");
+        // A cached legacy marker must not opt this incomplete projection in.
+        claims["session_material_version"] = serde_json::json!("tinfoil/1");
+        for key in ["code_measurement", "enclave_measurement"] {
+            claims[key] = serde_json::json!({
+                "type": format!("https://tinfoil.sh/predicate/{kind}/v2"),
+                "registers": registers,
+            });
+        }
+        let mut summary = serde_json::json!({
+            "verification_id": "1c7abe93-6501-4db4-bfd0-2cf3e3c05f77",
+            "document": claims,
+        });
+        event.evidence = Some(
+            serde_json::to_value(EvidenceRef::from_bytes(
+                "application/json",
+                &serde_json::to_vec(&summary).unwrap(),
+            ))
+            .unwrap(),
+        );
+        event.provider_claims = Some(claims);
+        *h.verifier.0.lock().unwrap() = event.clone();
+        let original = h.listed()[0].session_id().to_string();
+        assert_eq!(h.listed()[0].session_id(), original);
+        // Two independent rounds can return identical SDK summaries. Only the
+        // explicit round identifier differs; a cached event keeps it unchanged.
+        summary["verification_id"] = serde_json::json!("8abed6c3-aace-4395-aea4-08c8e3f7bcc2");
+        event.evidence = Some(
+            serde_json::to_value(EvidenceRef::from_bytes(
+                "application/json",
+                &serde_json::to_vec(&summary).unwrap(),
+            ))
+            .unwrap(),
+        );
+        *h.verifier.0.lock().unwrap() = event;
+        let replacement = h.listed()[0].session_id().to_string();
+        assert_ne!(replacement, original, "{kind}: new evidence must rotate");
+        assert!(h
+            .service
+            .forward_chat_completion_request(admission::request(vec![original]))
+            .await
+            .is_err());
+        assert!(h.backend.events.lock().unwrap().is_empty());
+        let response = h
+            .service
+            .forward_chat_completion_request(admission::request(vec![replacement.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt_event(&response.receipt, "upstream.verified")["session_id"],
+            replacement
+        );
+    }
+}
+
+#[tokio::test]
 async fn privatemode_manifest_observation_time_is_material() {
     let h = admission::Harness::new(vec![]);
     let mut event = common::verified_event("admission-test", "model-a");

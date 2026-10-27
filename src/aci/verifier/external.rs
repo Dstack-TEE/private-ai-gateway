@@ -567,7 +567,7 @@ struct ExternalProviderVerifierOutput {
     #[serde(default)]
     channel_bindings: Vec<ExternalChannelBinding>,
     /// Optional session_material_version profiles: near-ai/1, phala-direct/1,
-    /// chutes/1 (per instance), tinfoil/1, privatemode/1. Eligibility requires
+    /// chutes/1 (per instance), privatemode/1. Eligibility requires
     /// matching provider, built-in verifier ID and complete validated material;
     /// custom profiles have no evidence-independent reuse capability. The
     /// configured verifier remains responsible for authenticating these facts.
