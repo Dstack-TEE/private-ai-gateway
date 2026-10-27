@@ -82,7 +82,7 @@ Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
 `phala-direct/1`, `chutes/1` (per instance), `tinfoil/1` and `privatemode/1`
 claims require the matching provider type and built-in verifier ID. Missing,
 unknown, mismatched or incomplete material remains evidence-sensitive. ArmetAI,
-SecretAI (both TDX and SNP), generic external verifiers and legacy Chutes outputs
+SecretAI (both TDX and SNP), 0G, generic external verifiers and legacy Chutes outputs
 remain evidence-sensitive; neither provider names nor markers alone opt in.
 Shape validation does not authenticate facts; the configured verifier owns that.
 

@@ -217,3 +217,50 @@ async fn withheld_instance_errors_preserve_status_without_citing_an_arbitrary_se
         }
     }
 }
+
+#[test]
+fn zero_g_preserves_instance_facts_and_requires_review_before_stable_reuse() {
+    use private_ai_gateway::aggregator::session::EvidenceRef;
+    let h = Harness::new(vec![]);
+    configure_instances(&h, "0g-private-computer");
+    {
+        let mut event = h.verifier.0.lock().unwrap();
+        event.verifier_id = "0g-private-computer/native-e2ee/v1".to_string();
+        event.provider_claims = Some(serde_json::json!({
+            "trust_boundary": "0g-provider-broker-tee",
+            "instances": {
+                "a": {"provider_address": "a", "tcb_status": "UpToDate"},
+                "b": {"provider_address": "b", "tcb_status": "OutOfDate"}
+            }
+        }));
+    }
+    let before = h.listed();
+    assert_eq!(before.len(), 2);
+    for session in &before {
+        let ChannelBinding::E2eePublicKeySha256 {
+            key_id: Some(id), ..
+        } = &session.document().channel_binding[0]
+        else {
+            panic!("expected instance binding")
+        };
+        assert_eq!(
+            session.document().claims.extra["provider_address"],
+            id.as_str()
+        );
+        assert_eq!(
+            session.document().claims.extra["tcb_status"],
+            if id == "a" { "UpToDate" } else { "OutOfDate" }
+        );
+    }
+    let evidence = EvidenceRef::from_bytes("application/json", br#"{"quote":"new round"}"#);
+    h.verifier.0.lock().unwrap().evidence = Some(serde_json::json!({
+        "digest": evidence.digest, "data": evidence.data_uri
+    }));
+    let after = h.listed();
+    assert!(
+        after.iter().all(|new| before
+            .iter()
+            .all(|old| old.session_id() != new.session_id())),
+        "0G has no reviewed stable-material profile; refreshed evidence must remain significant"
+    );
+}
