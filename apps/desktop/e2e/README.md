@@ -34,13 +34,14 @@ profile it cannot verify now. The phase must be `reconnecting` or
 `interrupted`, each agent's configuration must still point at the Local API,
 every agent token and the Local API client token must get 503
 `gateway_not_verified`. Once it observes the failed verification, the test
-snapshots usage, sends those probes, and checks that no newly recorded
-request left the device; a failure lists each such request with its agent,
-time and status. Releases up to 0.2.0-beta.11 withdraw agent tokens during an
-outage and answer 401 instead, so that check fails for them. After the network is reconnected, protection must be Protected
-again within three minutes, with the tokens accepted and a real reply through
-one agent. Finally, `pap stop` must restore every agent and revoke every
-token, and `pap service stop` must leave them restored.
+snapshots usage, sends those probes, and checks that no newly recorded request
+left the device; a failure lists each such request with its agent, time and
+status. Releases up to 0.2.0-beta.11 withdraw agent tokens during an outage
+and answer 401 instead, so that check fails for them. After the network is
+reconnected, protection must be Protected again within three minutes, with the
+tokens accepted and a real reply through one agent. Finally, `pap stop` must
+restore every agent and revoke every token, and `pap service stop` must leave
+them restored.
 
 When an agent's one-shot command times out or does not reply `PAP-OK`, the
 failure shows why: the last 40 lines of its stdout and stderr and its latest
