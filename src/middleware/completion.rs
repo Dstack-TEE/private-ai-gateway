@@ -1589,6 +1589,7 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         )
         | ServiceError::TestKeysInProduction
         | ServiceError::InvalidSourceProvenance
+        | ServiceError::InvalidAttestedSessionTtl
         | ServiceError::Keyset(_)
         | ServiceError::Key(_)
         | ServiceError::Receipt(_)
