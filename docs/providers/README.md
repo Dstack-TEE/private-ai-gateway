@@ -20,6 +20,15 @@ Each provider has a living `verification.md` page for the current adapter and, o
 
 `openai-compatible` and `anthropic` are supported transport adapters, but they do not create verified TEE sessions.
 
+## Candidate admission records
+
+These dated reviews record admission decisions for providers outside the
+implemented adapter matrix above.
+
+| Provider | Reviewed boundary | Dated audit decision |
+| --- | --- | --- |
+| Confidential AI | c8s front door on TDX node-as-CVMs; workers trusted transitively | [Not acceptable](confidential-ai/review.md), 2026-10-15 PDT (round 2) |
+
 ## What `verified` means
 
 A provider verifier returns `verified` only with at least one enforceable channel binding, and the gateway forwards a prompt only over a connection that enforces that binding; [Request-time flow](../upstream-verification-lifecycle.md#request-time-flow) describes the steps. The check lives in `src/aci/verifier/`, `src/aci/upstream/`, and `src/aggregator/service/forward.rs`, and `tests/upstream_verifier.rs::service_fails_if_selected_backend_cannot_enforce_channel_binding` covers the fail-closed case.
