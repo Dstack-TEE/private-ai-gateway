@@ -638,7 +638,11 @@ impl AciService {
                     let upstream_headers = upstream_response.headers;
                     let receipt_id = generate_receipt_id();
                     let served_at = admission.admitted_at;
-                    let keyset = self.current_keyset();
+                    // Early SSE headers may already cite a keyset. Preserve
+                    // that snapshot even if renewal happened during the wait.
+                    let keyset = receipt_journal
+                        .early_response_keyset()
+                        .unwrap_or_else(|| self.current_keyset());
                     let recorded = admission
                         .lease
                         .as_ref()

@@ -193,7 +193,10 @@ usually ends in an HTTP status such as `429` that the client should receive.
 
 An early-committed response cannot carry `X-Receipt-Id` because the upstream
 has not yet been selected. After a successful stream, the receipt is available
-by response `id`. If forwarding fails after the early commit, the gateway sends
+by response `id`. The gateway snapshots the keyset when committing the early
+`X-ACI-Keyset-Digest` header and uses that same snapshot for the eventual receipt,
+including when the keyset renews while awaiting the upstream response.
+If forwarding fails after the early commit, the gateway sends
 the surface's in-band error event, carrying the status the response would
 otherwise have used, and drafts no receipt. The control-plane usage report also
 records that real failure status rather than the HTTP `200` already sent to the

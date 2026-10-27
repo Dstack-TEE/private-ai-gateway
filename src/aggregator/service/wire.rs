@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
+use crate::aci::identity::SealedWorkloadKeyset;
 use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
 
@@ -178,7 +179,8 @@ pub struct InFlightAttempt {
 
 /// Per-request channel between the forwarder and the completion handler:
 /// the reserved receipt id, the receipt draft handed over at end of stream,
-/// and the candidate currently in flight.
+/// the keyset committed in early response headers, and the candidate currently
+/// in flight.
 #[derive(Clone, Default)]
 pub struct MiddlewareReceiptJournal {
     inner: Arc<Mutex<MiddlewareReceiptJournalState>>,
@@ -188,6 +190,7 @@ pub struct MiddlewareReceiptJournal {
 struct MiddlewareReceiptJournalState {
     receipt_id: Option<String>,
     draft: Option<MiddlewareReceiptDraft>,
+    early_response_keyset: Option<Arc<SealedWorkloadKeyset>>,
     in_flight: Option<InFlightAttempt>,
     /// Candidates the failover walk has abandoned so far, mirrored out of the
     /// forwarder's own list so a request cancelled mid-walk can still report
@@ -197,6 +200,21 @@ struct MiddlewareReceiptJournalState {
 }
 
 impl MiddlewareReceiptJournal {
+    pub(crate) fn set_early_response_keyset(&self, keyset: Arc<SealedWorkloadKeyset>) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .early_response_keyset = Some(keyset);
+    }
+
+    pub(crate) fn early_response_keyset(&self) -> Option<Arc<SealedWorkloadKeyset>> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .early_response_keyset
+            .clone()
+    }
+
     pub fn set_in_flight(&self, route_id: &str, attempt_index: u32) {
         self.inner
             .lock()

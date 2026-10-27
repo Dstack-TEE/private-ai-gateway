@@ -1052,6 +1052,10 @@ fn build_early_streaming_response(
     let endpoint_path = inputs.endpoint_path;
     let protocol = errors::sse_protocol(endpoint_path);
     let content_type = "text/event-stream";
+    // The pending forward resumes in the body, after these headers commit.
+    // Its receipt must cite this snapshot rather than a later renewal.
+    let keyset = service.current_keyset();
+    journal.set_early_response_keyset(keyset.clone());
     let downstream_abort = Arc::new(AtomicBool::new(false));
     let meter_settled = Arc::new(AtomicBool::new(false));
     // Template for a finalizer error that lands after the meter has already
@@ -1142,6 +1146,7 @@ fn build_early_streaming_response(
     // reserved yet. The receipt is still issued and retrievable by the response
     // `id`.
     let mut headers = gateway_owned_headers(content_type);
+    insert_header(&mut headers, "x-aci-keyset-digest", keyset.digest());
     headers.insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
