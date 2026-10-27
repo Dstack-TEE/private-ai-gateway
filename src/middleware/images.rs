@@ -1,19 +1,107 @@
 //! Buffered image generation validation and the public response schema.
 
+use std::pin::Pin;
+use std::sync::{Arc, LazyLock};
+use std::task::{Context, Poll};
+
 use axum::{
+    body::{Body, Bytes, HttpBody},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use tokio::sync::{Semaphore, SemaphorePermit, TryAcquireError};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-/// Bound large buffered image responses without queueing requests in memory.
-static IN_FLIGHT: Semaphore = Semaphore::const_new(16);
+/// Bound admitted image generation and buffered response bodies, without queueing.
+static IN_FLIGHT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(16)));
 
-pub fn try_acquire() -> Result<SemaphorePermit<'static>, TryAcquireError> {
-    IN_FLIGHT.try_acquire()
+pub fn try_acquire() -> Result<OwnedSemaphorePermit, TryAcquireError> {
+    IN_FLIGHT.clone().try_acquire_owned()
+}
+
+pub fn capacity_response() -> Response {
+    let reset_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |now| now.as_secs().saturating_add(1) as i64);
+    super::errors::rate_limit_response(
+        super::errors::Surface::Openai,
+        "image generation capacity reached",
+        16,
+        reset_at,
+        None,
+    )
+}
+
+/// The response body owns admission after the handler returns to Hyper.
+/// Completion, body errors, and disconnect/drop all release the slot.
+pub fn hold_permit(response: Response, permit: Option<OwnedSemaphorePermit>) -> Response {
+    match permit {
+        Some(permit) => response.map(|body| {
+            Body::new(PermitBody {
+                body,
+                permit: Some(Arc::new(permit)),
+            })
+        }),
+        None => response,
+    }
+}
+
+struct PermitBody {
+    body: Body,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
+}
+
+impl HttpBody for PermitBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.body).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                Poll::Ready(Some(Ok(frame.map_data(|bytes| {
+                    match self.permit.as_ref() {
+                        Some(permit) => Bytes::from_owner(PermitBytes {
+                            bytes,
+                            _permit: permit.clone(),
+                        }),
+                        None => bytes,
+                    }
+                }))))
+            }
+            frame @ Poll::Ready(None | Some(Err(_))) => {
+                self.permit.take();
+                frame
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+// Hyper may drop Body as soon as it takes the last frame, while retaining that
+// frame in its write buffer. Keep admission with the bytes until the writer
+// releases them too. Bytes::from_owner preserves the allocation without copying.
+struct PermitBytes {
+    bytes: Bytes,
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+impl AsRef<[u8]> for PermitBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 #[derive(Debug)]
@@ -311,6 +399,72 @@ mod tests {
         assert!(matches!(try_acquire(), Err(TryAcquireError::NoPermits)));
         drop(permits);
         assert!(try_acquire().is_ok());
+    }
+
+    #[tokio::test]
+    async fn response_body_owns_capacity_through_consumption_and_disconnect() {
+        use axum::body::to_bytes;
+
+        let capacity = Arc::new(Semaphore::new(1));
+        let response = hold_permit(
+            Response::new(Body::from("image")),
+            Some(capacity.clone().try_acquire_owned().unwrap()),
+        );
+        assert!(capacity.clone().try_acquire_owned().is_err());
+        assert_eq!(response.body().size_hint().exact(), Some(5));
+        let bytes = to_bytes(response.into_body(), 100).await.unwrap();
+        assert_eq!(bytes, "image");
+        // The buffered bytes may still belong to Hyper's pending write.
+        assert_eq!(capacity.available_permits(), 0);
+        drop(bytes);
+        assert_eq!(capacity.available_permits(), 1);
+
+        let response = hold_permit(
+            Response::new(Body::from("image")),
+            Some(capacity.clone().try_acquire_owned().unwrap()),
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        drop(response); // Client disconnected before polling the body.
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn queued_frame_owns_capacity_even_after_hyper_drops_the_body() {
+        use http_body_util::BodyExt;
+
+        let capacity = Arc::new(Semaphore::new(1));
+        let response = hold_permit(
+            Response::new(Body::from("image")),
+            Some(capacity.clone().try_acquire_owned().unwrap()),
+        );
+        let mut body = response.into_body();
+        let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert!(body.is_end_stream());
+        drop(body);
+        assert_eq!(capacity.available_permits(), 0);
+        let pending_write = bytes.clone();
+        drop(bytes);
+        assert_eq!(capacity.available_permits(), 0);
+        drop(pending_write);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn response_body_errors_release_capacity() {
+        use http_body_util::BodyExt;
+
+        let capacity = Arc::new(Semaphore::new(1));
+        let failing = futures_util::stream::once(async {
+            Err::<Bytes, _>(std::io::Error::other("body failed"))
+        });
+        let response = hold_permit(
+            Response::new(Body::from_stream(failing)),
+            Some(capacity.clone().try_acquire_owned().unwrap()),
+        );
+        let mut body = response.into_body();
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(body.frame().await.unwrap().is_err());
+        assert_eq!(capacity.available_permits(), 1);
     }
 
     #[test]

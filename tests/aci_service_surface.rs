@@ -3934,3 +3934,51 @@ async fn images_url_only_success_is_502_and_receipt_hashes_sanitized_error() {
         sha256_hex(&resp.body)
     );
 }
+
+#[tokio::test]
+async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"data":[{"b64_json":"image"}]}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..16 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(stream::poll_fn(move |_| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+            std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header("content-type", "application/json")
+            .header("content-length", "1000000")
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each handler has reached its stalled body read before the normal request.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester
+            .post("/v1/images/generations", IMAGE_REQUEST, &[]),
+    )
+    .await
+    .unwrap();
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
