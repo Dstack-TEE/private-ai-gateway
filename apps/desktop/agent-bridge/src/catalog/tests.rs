@@ -197,6 +197,55 @@ fn output_modalities_gate_surfaces_and_agent_projections() {
 }
 
 #[test]
+fn images_require_explicit_modality_and_bypass_text_inventory() {
+    let original = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "images", "output_modalities": ["image"] },
+            { "id": "mixed", "output_modalities": ["text", "image"] },
+            { "id": "text", "output_modalities": ["text"] },
+            { "id": "legacy" },
+            { "id": "empty", "output_modalities": [] },
+            { "id": "malformed", "output_modalities": "image" },
+            { "id": "null", "output_modalities": null }
+        ]}),
+        1,
+    )
+    .unwrap();
+    // The probe records all three text endpoints as unavailable for image-only
+    // models. These observations remain valid without adding an images entry.
+    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
+    for surface in [
+        Surface::ChatCompletions,
+        Surface::Messages,
+        Surface::Responses,
+    ] {
+        let check = json!({"status": "unavailable", "reason": "no_text_output"});
+        value["results"].as_array_mut().unwrap().push(json!({
+            "model": "images", "endpoint": surface.path(),
+            "status": "unavailable", "reason": "no_text_output",
+            "checks": {"streaming": check, "tools": check, "toolResult": check}
+        }));
+        assert!(!original.get("images").unwrap().supports(surface));
+        assert!(!original.get("images").unwrap().supports_agent(surface));
+    }
+    let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    for endpoint in [
+        "https://example.com",
+        "https://tee.redpill.ai",
+        "https://inference.phala.com/v1",
+    ] {
+        let mut catalog = original.clone();
+        catalog
+            .apply_endpoint_inventory(endpoint, &inventory)
+            .unwrap();
+        let images = catalog.for_surface(Surface::Images);
+        let ids: Vec<_> = images.models.iter().map(CatalogModel::id).collect();
+        assert_eq!(ids, ["images", "mixed"]);
+    }
+    assert_eq!(Surface::Images.path(), "/v1/images/generations");
+}
+
+#[test]
 fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
     let catalog = Catalog::from_remote(
         &json!({ "data": [

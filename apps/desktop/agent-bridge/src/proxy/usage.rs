@@ -57,16 +57,22 @@ pub(super) struct UsageCapture {
     pub(super) lines: DataLines,
     pub(super) latest: UsageValues,
     pub(super) body_overflow: bool,
+    max_body_bytes: usize,
 }
 
 impl UsageCapture {
-    pub(super) fn new(streamed: bool) -> Self {
+    pub(super) fn new(streamed: bool, surface: Surface) -> Self {
         Self {
             streamed,
             body: Vec::new(),
             lines: DataLines::new(),
             latest: UsageValues::default(),
             body_overflow: false,
+            max_body_bytes: if surface == Surface::Images {
+                MAX_IMAGE_USAGE_CAPTURE_BYTES
+            } else {
+                MAX_USAGE_CAPTURE_BYTES
+            },
         }
     }
 
@@ -75,7 +81,7 @@ impl UsageCapture {
             let latest = &mut self.latest;
             self.lines.push(bytes, |data| merge_event(latest, data));
         } else if !self.body_overflow {
-            if self.body.len().saturating_add(bytes.len()) <= MAX_USAGE_CAPTURE_BYTES {
+            if self.body.len().saturating_add(bytes.len()) <= self.max_body_bytes {
                 self.body.extend_from_slice(bytes);
             } else {
                 self.body.clear();
