@@ -824,15 +824,17 @@ impl AciService {
         allowed_ids: &[String],
         model_id: &str,
     ) -> Result<AdmittedUpstream, ServiceError> {
+        let sessions = self.record_attested_upstream_session(&event, self.clock.now_secs())?;
+        // Acquisition may wait behind a session established by another caller.
+        // The forwarding decision follows acquisition, never its lookup snapshot.
         let admitted_at = self.clock.now_secs();
-        let sessions = self.record_attested_upstream_session(&event, admitted_at)?;
         let allowed: HashSet<&str> = allowed_ids.iter().map(String::as_str).collect();
         let mut bindings = Vec::new();
         let mut admitted_sessions = Vec::new();
         for (binding, session) in event.channel_bindings.iter().cloned().zip(sessions) {
             if allowed.is_empty() || allowed.contains(session.lease.session_id()) {
-                if !(session.lease.established_at <= admitted_at
-                    && admitted_at < session.lease.expires_at)
+                if !(session.lease.established_at() <= admitted_at
+                    && admitted_at < session.lease.expires_at())
                 {
                     return Err(ServiceError::AdmissionInvariant(
                         "store returned a session outside its validity window",

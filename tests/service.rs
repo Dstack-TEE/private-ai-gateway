@@ -1223,3 +1223,60 @@ async fn ttl_changes_affect_only_new_documents_and_receipt_retention_is_independ
         .get_attested_session(replacement.session_id())
         .is_none());
 }
+
+#[tokio::test]
+async fn admission_uses_post_acquisition_time_for_a_concurrently_established_pin() {
+    use admission::{request, Attempt, Harness, TestClock};
+    use private_ai_gateway::aggregator::session_store::InMemorySessionStore;
+
+    struct ResumeAfterAcquire {
+        inner: Arc<InMemorySessionStore>,
+        clock: Arc<TestClock>,
+    }
+    impl SessionStore for ResumeAfterAcquire {
+        fn get_session(&self, id: &str, now: u64) -> Option<AttestedSession> {
+            self.inner.get_session(id, now)
+        }
+        fn current_or_seal(
+            &self,
+            fingerprint: &str,
+            retention_until: u64,
+            now: u64,
+            seal: &mut dyn FnMut() -> std::io::Result<AttestedSession>,
+        ) -> std::io::Result<SessionLease> {
+            let lease = self
+                .inner
+                .current_or_seal(fingerprint, retention_until, now, seal)?;
+            self.clock.set(101);
+            Ok(lease)
+        }
+        fn extend_retention(&self, lease: &SessionLease, deadline: u64) -> std::io::Result<()> {
+            self.inner.extend_retention(lease, deadline)
+        }
+    }
+
+    let mut h = Harness::new(vec![Attempt::Response {
+        status: 200,
+        at: 102,
+    }]);
+    let inner = Arc::new(InMemorySessionStore::default());
+    h.service = h.service.with_session_store(inner.clone());
+    h.clock.set(101);
+    let established = h.listed().remove(0);
+    // Resume an older lookup after another caller has established the channel.
+    h.clock.set(100);
+    h.service = h.service.with_session_store(Arc::new(ResumeAfterAcquire {
+        inner,
+        clock: h.clock.clone(),
+    }));
+    let response = h
+        .service
+        .forward_chat_completion_request(request(vec![established.session_id().to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        payload_event(&response.receipt, "upstream.verified")["session_id"],
+        established.session_id()
+    );
+    assert_eq!(response.receipt.document_json().unwrap()["served_at"], 101);
+}

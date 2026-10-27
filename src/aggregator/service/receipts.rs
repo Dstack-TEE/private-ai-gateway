@@ -113,6 +113,7 @@ impl AciService {
         let mut sessions = Vec::new();
         for event in requests.iter().filter_map(|r| verifier.cached(r)) {
             for sealed in self.record_attested_upstream_session(&event, now)? {
+                let now = self.clock.now_secs();
                 if !ids.insert(sealed.lease.session_id().to_string()) {
                     continue;
                 }

@@ -75,14 +75,22 @@ struct SessionLogRecord {
 #[derive(Debug, Clone)]
 pub struct SessionLease {
     session_id: String,
-    pub established_at: u64,
-    pub expires_at: u64,
+    established_at: u64,
+    expires_at: u64,
     token: Arc<()>,
 }
 
 impl SessionLease {
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn established_at(&self) -> u64 {
+        self.established_at
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
     }
 }
 
@@ -96,6 +104,11 @@ pub trait SessionStore: Send + Sync {
     /// Lease the channel's current valid session, extending retention to at least
     /// `retention_until`. Without one, atomically seal, store and lease a new
     /// session with a complete evidence bundle. Acquire under the index lock.
+    /// `now` is the lookup snapshot: another caller may establish the session
+    /// after it. The caller must check the returned validity window against an
+    /// admission timestamp captured after acquisition, before forwarding.
+    /// External wrappers must delegate acquisition and retention to the same
+    /// built-in store; the lease ownership token has no public constructor.
     fn current_or_seal(
         &self,
         fingerprint: &str,
@@ -322,7 +335,9 @@ impl SessionIndex {
         self.evict_lapsed(now);
         let id = self.by_fingerprint.get(fingerprint)?.clone();
         let entry = self.by_id.get(&id)?;
-        if !(entry.stripped.established_at <= now && now < entry.stripped.expires_at) {
+        // A caller can wait behind a later-timestamped seal. Reuse that entry;
+        // its earlier lookup snapshot must not replace the channel's session.
+        if now >= entry.stripped.expires_at {
             return None;
         }
         let lease = self.lease(&id);
@@ -1253,8 +1268,8 @@ mod tests {
         let barrier = std::sync::Barrier::new(2);
         let seals = AtomicU64::new(0);
         let ids = std::thread::scope(|scope| {
-            // Both admissions use the same timestamp. A caller predating a
-            // concurrently sealed document must not reuse that future session.
+            // Equal timestamps exercise simultaneous creation; the separate
+            // differing-timestamp tests cover a delayed lookup snapshot.
             let tasks: Vec<_> = [1_000, 1_000]
                 .into_iter()
                 .map(|now| {
@@ -1288,6 +1303,61 @@ mod tests {
         let store = InMemorySessionStore::default();
         let id = concurrently_seal(&store);
         assert!(store.get_session(&id, 1_002).is_some());
+    }
+
+    /// A captures its lookup timestamp, stalls, and reaches the store after B
+    /// has established the identical channel at a later timestamp.
+    fn interleaved_timestamps(store: &dyn SessionStore) -> (String, String) {
+        let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let delayed = scope.spawn(move || {
+                let now = 1_000;
+                captured_tx.send(()).unwrap();
+                resume_rx.recv().unwrap();
+                store
+                    .current_or_seal("shared", 9_000, now, &mut || {
+                        Ok(session("https://shared", now, 5_000))
+                    })
+                    .unwrap()
+                    .session_id()
+                    .to_string()
+            });
+            captured_rx.recv().unwrap();
+            let first = store
+                .current_or_seal("shared", 9_000, 1_001, &mut || {
+                    Ok(session("https://shared", 1_001, 5_000))
+                })
+                .unwrap();
+            resume_tx.send(()).unwrap();
+            (delayed.join().unwrap(), first.session_id().to_string())
+        })
+    }
+
+    #[test]
+    fn differing_timestamp_admissions_reuse_one_in_memory_session() {
+        let store = InMemorySessionStore::default();
+        let (delayed, first) = interleaved_timestamps(&store);
+        let next = reuse_only(&store, "shared", 9_000, 1_002).unwrap();
+        assert_eq!([delayed, next], [first.clone(), first]);
+    }
+
+    #[test]
+    fn differing_timestamp_admissions_reuse_one_session_after_compact_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.jsonl");
+        let store = open_store(&path);
+        let (delayed, first) = interleaved_timestamps(&store);
+        let next = reuse_only(&store, "shared", 9_000, 1_002).unwrap();
+        store.compact(1_002).unwrap();
+        drop(store);
+        let reopened = open_store_at(&path, 1_002);
+        let replayed = reuse_only(&reopened, "shared", 9_000, 1_002).unwrap();
+        assert_eq!(
+            [delayed, next, replayed],
+            [first.clone(), first.clone(), first]
+        );
+        assert_eq!(count_lines(&path), 2, "one evidence bundle and one session");
     }
 
     #[test]

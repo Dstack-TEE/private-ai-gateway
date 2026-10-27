@@ -62,6 +62,20 @@ request -> receipt (X-Receipt-Id)
         -> AttestedSession { claims with reasons, channel_binding, evidence }
 ```
 
+## Custom session-store migration
+
+`SessionStore::current_or_seal` returns an opaque `SessionLease` instead of a
+session ID, and `extend_retention` extends that lease's indexed entry before
+receipt publication. Lease IDs and validity timestamps have read-only accessors;
+leases cannot be constructed externally because their ownership token must match
+the retained entry.
+
+External wrappers must delegate both operations to the same built-in
+`InMemorySessionStore` or `JsonlSessionStore`, keeping the returned lease intact.
+Implementing a separate storage engine is a source-breaking migration that needs
+a supported lease-construction/ownership API; this version does not expose one.
+Do not synthesize leases or mix acquisition and retention across stores.
+
 ## Preflight survey
 
 `GET /v1/aci/sessions?upstream_name=&model=` derives sessions from the verifier's
