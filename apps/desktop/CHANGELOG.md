@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.3-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.2...desktop-v0.6.3-beta.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **aci:** keep client sessions working across keyset renewal ([#458](https://github.com/Dstack-TEE/private-ai-gateway/issues/458)) ([4c12bf6](https://github.com/Dstack-TEE/private-ai-gateway/commit/4c12bf642904eff55c1aee175211f5059c22ca61))
+
 ## [0.6.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.1...desktop-v0.6.2) (2026-10-21)
 
 
