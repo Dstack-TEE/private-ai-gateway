@@ -83,7 +83,7 @@ use tower_http::cors::CorsLayer;
 /// unlimited.
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-use crate::aggregator::service::AciService;
+use crate::aggregator::service::{AciService, IMAGES_GENERATIONS_PATH};
 use crate::aggregator::upstream_config::UpstreamConfigManager;
 use crate::middleware::Middleware;
 
@@ -228,7 +228,7 @@ fn build_router_inner(
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
         .route("/v1/systemone", post(systemone))
-        .route("/v1/images/generations", post(images_generations))
+        .route(IMAGES_GENERATIONS_PATH, post(images_generations))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(

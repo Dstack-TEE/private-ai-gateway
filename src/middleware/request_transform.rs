@@ -210,6 +210,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
+            return Ok(super::images::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::Messages) => {
             let chat = messages_to_chat_params(params)?;
             return transform_to_provider_request(format, &chat, Endpoint::ChatComplete, engine);
@@ -220,11 +223,7 @@ pub fn transform_to_provider_request(
         }
         _ => {}
     }
-    let mut params = if endpoint == Endpoint::ImagesGenerations {
-        super::images::upstream_body(params)
-    } else {
-        params.clone()
-    };
+    let mut params = params.clone();
     inject_stream_options(&mut params);
     let config = select_config(format, endpoint, engine)?;
     transform_using_provider_config(&config, &params)
@@ -799,24 +798,13 @@ fn select_config(
         (Openai, Complete) => openai_complete_config(),
         (Openai, Embed) => openai_embed_config(),
         (Openai, SystemOne) => openai_systemone_config(),
-        (Openai, ImagesGenerations) => pass![
-            "model",
-            "prompt",
-            "n",
-            "size",
-            "quality",
-            "background",
-            "output_format",
-            "output_compression",
-            "moderation",
-            "response_format"
-        ],
         (Anthropic, Complete) => anthropic_complete_config(),
         (Anthropic, ChatComplete) => anthropic_chat_complete_config(),
         // Converted to a chat request or passed through before shaping, or
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
@@ -3071,7 +3059,7 @@ mod tests {
             route("plain", vec![]),
             route("images", vec![IMAGES_GENERATIONS_PATH.into()]),
         ];
-        let params = json!({"model":"image","prompt":"hi","style":"vivid"});
+        let params = json!({"model":"image","prompt":"hi","n":2,"style":"vivid"});
         let shaped = build_candidates(
             &params,
             Endpoint::ImagesGenerations,
@@ -3084,7 +3072,7 @@ mod tests {
         assert_eq!(shaped[0].0, "images");
         assert_eq!(
             shaped[0].1,
-            json!({"model":"image","prompt":"hi","response_format":"b64_json"})
+            json!({"model":"image","prompt":"hi","n":2,"response_format":"b64_json"})
         );
         assert!(build_candidates(
             &params,

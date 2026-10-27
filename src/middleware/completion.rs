@@ -151,7 +151,6 @@ async fn run_inner(
             return err.into_response();
         }
     }
-    let image_request = (endpoint == Endpoint::ImagesGenerations).then(|| params.clone());
     let started = Instant::now();
     let client_endpoint = endpoint;
     let validated = match endpoint {
@@ -537,8 +536,11 @@ async fn run_inner(
                     .map_err(|err| err.to_string())
                     .and_then(|mut upstream_json| {
                         if client_endpoint == Endpoint::ImagesGenerations {
-                            super::images::validate_response(&upstream_json)
-                                .map_err(str::to_string)?;
+                            super::images::validate_response(
+                                &upstream_json,
+                                params.get("n").and_then(Value::as_u64).unwrap_or(1) as usize,
+                            )
+                            .map_err(str::to_string)?;
                         }
                         if exclude_reasoning {
                             response_transform::exclude_reasoning(&mut upstream_json);
@@ -590,9 +592,8 @@ async fn run_inner(
                 // Raw usage (pre-cost) goes to the report; cost is injected only
                 // into the client body's top-level usage.
                 let raw_usage = transformed.get("usage").cloned();
-                meter.images = image_request
-                    .as_ref()
-                    .map(|request| super::images::usage(&transformed, request));
+                meter.images = (client_endpoint == Endpoint::ImagesGenerations)
+                    .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
                         transformed,
