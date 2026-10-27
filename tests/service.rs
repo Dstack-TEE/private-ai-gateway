@@ -1502,6 +1502,15 @@ async fn streaming_exchange_keeps_its_admitted_keyset_across_renewals() {
 
 #[tokio::test]
 async fn buffered_receipt_uses_keyset_current_when_response_is_served() {
+    assert_buffered_receipt_uses_current_keyset(true).await;
+}
+
+#[tokio::test]
+async fn aggregator_receipt_uses_renewed_keyset_and_admitted_attempt_time() {
+    assert_buffered_receipt_uses_current_keyset(false).await;
+}
+
+async fn assert_buffered_receipt_uses_current_keyset(direct: bool) {
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use std::sync::atomic::Ordering;
@@ -1539,7 +1548,7 @@ async fn buffered_receipt_uses_keyset_current_when_response_is_served() {
     let clock = Arc::new(SettableClock(1_000.into()));
     let mut config = AciServiceConfig::for_test();
     config.keyset_not_after = 1_100;
-    config.service_capabilities.serving = "direct".to_string();
+    config.service_capabilities.serving = if direct { "direct" } else { "aggregator" }.to_string();
     let service = Arc::new(
         AciService::new(
             Arc::new(StaticKeyProvider::default()),
@@ -1594,5 +1603,5 @@ async fn buffered_receipt_uses_keyset_current_when_response_is_served() {
         .expect("receipt is stored");
     let document = receipt.document_json().expect("receipt parses");
     assert_eq!(document["workload_keyset_digest"], renewed_digest);
-    assert_eq!(document["served_at"], 1_101);
+    assert_eq!(document["served_at"], if direct { 1_101 } else { 1_000 });
 }
