@@ -28,6 +28,15 @@ impl SessionManager {
                 runtime.identify(&identity);
                 load_catalog = true;
             }
+            VerifierEvent::IdentityRenewed { identity } => {
+                // A failed verify or replaced delivery gate needs a fresh catalog epoch.
+                if runtime.state.status == VerificationStatus::Verified {
+                    runtime.show_identity(&identity);
+                } else {
+                    runtime.identify(&identity);
+                    load_catalog = true;
+                }
+            }
             // Verification lost: one atomic barrier (`lose_verification`).
             // The session goes on, also across a restart, until the user
             // stops it: agents stay pointed at the refusing Local API. A key

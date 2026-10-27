@@ -9,6 +9,7 @@ import {
   type ReceiptEnvelope,
   type WorkloadKeyset,
   type Check,
+  computeKeysetDigest,
 } from '../src/index.js';
 import * as fx from './fixtures.js';
 
@@ -124,4 +125,22 @@ test('findEvent locates events by type; a missing event fails the hash checks', 
   const noEvents = { ...fx.RECEIPT_PAYLOAD, event_log: [] };
   assert.equal(await checkRequestBodyHash(noEvents, fx.REQUEST_BODY), false);
   assert.equal(await checkResponseBodyHash(noEvents, fx.RESPONSE_BODY), false);
+});
+
+test('a receipt under a renewed digest verifies, but a different signing key does not', async () => {
+  const renewed = structuredClone(fx.KEYSET) as WorkloadKeyset;
+  renewed.not_after += 86_400;
+  const renewedDigest = await computeKeysetDigest(renewed);
+  const renewedDocument = await fx.makeDocument({
+    ...fx.RECEIPT_PAYLOAD,
+    workload_keyset_digest: renewedDigest,
+  });
+  assert.equal((await verifyReceipt(renewedDocument, renewed, renewedDigest)).ok, true);
+
+  const changed = structuredClone(renewed) as WorkloadKeyset;
+  const changedSigningKey = changed.receipt_signing_keys[0];
+  assert.ok(changedSigningKey);
+  changedSigningKey.public_key = '00'.repeat(32);
+  const changedDigest = await computeKeysetDigest(changed);
+  assert.equal((await verifyReceipt(renewedDocument, changed, changedDigest)).ok, false);
 });

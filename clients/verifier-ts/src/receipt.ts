@@ -77,14 +77,18 @@ export async function verifyReceipt(
     ok: versionOk,
     ...(versionOk ? {} : { detail: `api_version "${payload.api_version}" is not "aci/1"` }),
   });
-  // §9.3 check 2: the document binds back to the established keyset.
-  const ok = payload.workload_keyset_digest === establishedDigest;
+  // §9.3 check 2: the document binds back to the established keyset and was
+  // served before that keyset expired.
+  const ok = payload.workload_keyset_digest === establishedDigest
+    && Number.isSafeInteger(payload.served_at)
+    && payload.served_at >= 0
+    && payload.served_at < keyset.not_after;
   checks.push({
     name: 'workload_keyset_digest',
     ok,
     ...(ok
       ? {}
-      : { detail: `document ${payload.workload_keyset_digest} != established ${establishedDigest}` }),
+      : { detail: `document digest ${payload.workload_keyset_digest}, established ${establishedDigest}; served_at ${payload.served_at} must be a nonnegative integer before not_after ${keyset.not_after}` }),
   });
 
   return {
