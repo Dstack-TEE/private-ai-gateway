@@ -987,23 +987,4 @@ impl AciService {
             ),
         }
     }
-
-    pub(super) fn store_receipt(
-        &self,
-        receipt: SignedReceipt,
-        requester: Option<ReceiptOwner>,
-        lease: Option<&SessionLease>,
-    ) -> Result<(), ServiceError> {
-        let now = self.clock.now_secs();
-        let expires_at = now.saturating_add(self.config.receipt_ttl_seconds);
-        if let Some(lease) = lease {
-            self.session_store
-                .extend_retention(lease, expires_at)
-                .map_err(|err| {
-                    ServiceError::SessionStore(format!("failed to retain cited session: {err}"))
-                })?;
-        }
-        self.receipt_store.put(receipt, requester, now, expires_at);
-        Ok(())
-    }
 }

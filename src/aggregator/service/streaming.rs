@@ -266,18 +266,15 @@ impl FinalizerShared {
         lease: Option<&SessionLease>,
     ) -> Result<(), ServiceError> {
         let receipt = builder.finalize(self.keys.as_ref(), &self.key_id)?;
-        let now = self.clock.now_secs();
-        let expires_at = now.saturating_add(self.receipt_ttl_seconds);
-        if let Some(lease) = lease {
-            self.session_store
-                .extend_retention(lease, expires_at)
-                .map_err(|err| {
-                    ServiceError::SessionStore(format!("failed to retain cited session: {err}"))
-                })?;
-        }
-        self.receipt_store
-            .put(receipt, self.requester.clone(), now, expires_at);
-        Ok(())
+        super::receipts::store_receipt(
+            self.receipt_store.as_ref(),
+            self.session_store.as_ref(),
+            receipt,
+            self.requester.clone(),
+            self.clock.now_secs(),
+            self.receipt_ttl_seconds,
+            lease,
+        )
     }
 }
 

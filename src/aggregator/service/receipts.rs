@@ -2,14 +2,54 @@ use std::collections::HashSet;
 
 use super::helpers::legacy_signature_text;
 use super::{
-    AciService, LegacySignatureResult, ReceiptOwner, ServiceError, UpstreamVerificationRequest,
+    AciService, LegacySignatureResult, ReceiptOwner, ReceiptStore, ServiceError,
+    UpstreamVerificationRequest,
 };
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
 use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 use crate::aggregator::session::AttestedSession;
-use crate::aggregator::session_store::sort_sessions_newest_first;
+use crate::aggregator::session_store::{sort_sessions_newest_first, SessionLease, SessionStore};
+
+/// Retain the cited session before publishing its receipt, using one deadline.
+pub(super) fn store_receipt(
+    receipt_store: &dyn ReceiptStore,
+    session_store: &dyn SessionStore,
+    receipt: SignedReceipt,
+    requester: Option<ReceiptOwner>,
+    now: u64,
+    ttl_seconds: u64,
+    lease: Option<&SessionLease>,
+) -> Result<(), ServiceError> {
+    let expires_at = now.saturating_add(ttl_seconds);
+    if let Some(lease) = lease {
+        session_store
+            .extend_retention(lease, expires_at)
+            .map_err(|err| {
+                ServiceError::SessionStore(format!("failed to retain cited session: {err}"))
+            })?;
+    }
+    receipt_store.put(receipt, requester, now, expires_at);
+    Ok(())
+}
 
 impl AciService {
+    pub(super) fn store_receipt(
+        &self,
+        receipt: SignedReceipt,
+        requester: Option<ReceiptOwner>,
+        lease: Option<&SessionLease>,
+    ) -> Result<(), ServiceError> {
+        store_receipt(
+            self.receipt_store.as_ref(),
+            self.session_store.as_ref(),
+            receipt,
+            requester,
+            self.clock.now_secs(),
+            self.config.receipt_ttl_seconds,
+            lease,
+        )
+    }
+
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<SignedReceipt> {
         self.receipt_store
             .get_by_receipt_id(id, self.clock.now_secs())

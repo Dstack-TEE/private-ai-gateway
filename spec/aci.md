@@ -644,16 +644,20 @@ forms:
   this request: `true` when the serving endpoint is TEE-only (§1.2) or the
   request carried the §5.3 constraint, `false` when neither applies — the
   request was served best-effort and the recorded result is informational.
-  When required verification fails, the service refuses to forward with
-  `upstream_verification_failed` (§1.2). When no pinned session can
-  serve, it refuses with `session_not_accepted` (§5.3). Either refusal
-  error carries `X-Receipt-Id` (§5.2) so the refusal receipt can be
-  fetched.
+  If required verification fails before dispatch, the service refuses to
+  forward with `upstream_verification_failed` (§1.2). When no pinned session
+  can serve, it refuses with `session_not_accepted` (§5.3). Either refusal
+  error carries `X-Receipt-Id` (§5.2), and its receipt omits
+  `request.forwarded` because nothing was dispatched.
 - A verified event carries `session_id`, the content address of the
   attested session (§8) holding every verification detail.
-- A failed event carries `reason` instead of a `session_id`, because no
-  session served the request. With `required: false` the response still
-  proceeds, and the receipt shows the inference was served unverified.
+- A failed event carries `reason` instead of a `session_id`, because the
+  response cannot be attributed to a verified session. This can record a
+  refusal before dispatch, best-effort serving with `required: false`, or
+  an unauthenticated response after an admitted request was dispatched.
+  In the last case, `required` still records the effective policy and the
+  receipt MUST include `request.forwarded`. The failed event MUST NOT imply
+  that nothing was forwarded or that an unauthenticated response was verified.
 
 To a generic verifier this event proves only that the attested aggregator
 *asserted* the outcome. Deep audit (§9.2) upgrades it to independently
