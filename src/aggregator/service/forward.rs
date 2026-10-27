@@ -765,54 +765,59 @@ impl AciService {
         if self.serves_directly() || event.result != VerificationResult::Verified {
             return Ok(Vec::new());
         }
-        let bindings = canonical_bindings(&event.channel_bindings)?;
         let groups = if matches!(
             event.provider_type.as_deref(),
             Some("chutes") | Some("0g-private-computer")
         ) {
+            // Independent instances retain verifier priority (0G selects the
+            // first eligible provider); only bindings within a group are canonical.
             let mut instances = BTreeMap::new();
-            for binding in bindings {
-                let id = instance_id(event, &binding)
+            let mut groups = Vec::new();
+            for binding in &event.channel_bindings {
+                let id = instance_id(event, binding)
                     .filter(|id| !id.is_empty())
                     .ok_or(ServiceError::AdmissionInvariant(
                         "multi-instance binding has no instance identifier",
-                    ))?
-                    .to_string();
-                if instances.insert(id, binding).is_some() {
+                    ))?;
+                if let Some(previous) = instances.insert(id, binding) {
+                    if previous != binding {
+                        return Err(ServiceError::AdmissionInvariant(
+                            "conflicting instance bindings",
+                        ));
+                    }
+                    continue;
+                }
+                groups.push((Some(id.to_string()), vec![binding.clone()]));
+            }
+            groups
+        } else {
+            let bindings = canonical_bindings(&event.channel_bindings)?;
+            if bindings.len() <= 1 {
+                if bindings.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![(None, bindings)]
+                }
+            } else {
+                let ChannelBinding::TlsSpkiSha256 { origin, .. } = &bindings[0] else {
                     return Err(ServiceError::AdmissionInvariant(
-                        "conflicting instance bindings",
+                        "unsupported multi-binding channel",
+                    ));
+                };
+                if !bindings.iter().all(|binding| {
+                    matches!(binding,
+                    ChannelBinding::TlsSpkiSha256 { origin: other, .. } if other == origin)
+                }) || event
+                    .url_origin
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint != origin)
+                {
+                    return Err(ServiceError::AdmissionInvariant(
+                        "mixed or unsupported channel origins",
                     ));
                 }
-            }
-            instances
-                .into_iter()
-                .map(|(id, binding)| (Some(id), vec![binding]))
-                .collect::<Vec<_>>()
-        } else if bindings.len() <= 1 {
-            if bindings.is_empty() {
-                Vec::new()
-            } else {
                 vec![(None, bindings)]
             }
-        } else {
-            let ChannelBinding::TlsSpkiSha256 { origin, .. } = &bindings[0] else {
-                return Err(ServiceError::AdmissionInvariant(
-                    "unsupported multi-binding channel",
-                ));
-            };
-            if !bindings.iter().all(|binding| {
-                matches!(binding,
-                ChannelBinding::TlsSpkiSha256 { origin: other, .. } if other == origin)
-            }) || event
-                .url_origin
-                .as_ref()
-                .is_some_and(|endpoint| endpoint != origin)
-            {
-                return Err(ServiceError::AdmissionInvariant(
-                    "mixed or unsupported channel origins",
-                ));
-            }
-            vec![(None, bindings)]
         };
         let identity = Self::identity_from_provider_claims(event);
         groups

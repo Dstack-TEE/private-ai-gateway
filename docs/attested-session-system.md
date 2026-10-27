@@ -44,12 +44,20 @@ Two deadlines govern a stored session:
   its lease. A retained expired session remains fetchable but cannot authorize
   another admission.
 
-Admission builds complete logical groups before filtering by pins. One
-origin's TLS alternatives share one session, and the backend receives every
-accepted key in the selected group. The receipt cites that group whichever
-key connects. Chutes and 0G keep all admitted instances until the backend reports
-which instance served, then releases the sibling leases.
-A missing or unmatched serving instance identifier is an internal error.
+Admission groups complete verified channels before filtering by pins, using the
+same path as listing from current cached verification. One origin's TLS
+alternatives share one session: bindings are sorted by JCS and exact duplicates
+removed within that group. A pin authorizes the complete group, the backend
+receives every accepted key, and the receipt cites that group whichever key
+connects. Adding or removing a key changes the group's material.
+
+Chutes and 0G retain independently selectable instance groups in verifier order;
+0G uses that order as provider priority. They reject conflicting keys for an
+instance, keep all admitted groups until the backend reports which instance
+served, then cite that instance and release sibling leases. A missing or
+unmatched serving instance identifier is an internal error. Mixed-origin and
+other undefined multi-binding shapes fail closed.
+
 If an adapter withholds an unverified error body without identifying the
 serving instance, the gateway preserves its HTTP status and cites no instance
 session. Buffered receipts record failed verification and the forwarded
@@ -121,14 +129,6 @@ thereby authenticated. Failed, offline or unevaluable appraisal cannot emit the
 stable profile; parsed diagnostics and human-readable check details never supply
 it. Session expiry is capped at the accepted keyset's `not_after`, independently
 of the verifier cache cap, and admission at that deadline is rejected.
-
-TLS alternatives for one verified origin form one logical session. Bindings are
-sorted by JCS and exact duplicates removed before sealing and pin filtering.
-A pin authorizes the complete group; adding/removing a key changes its material.
-Chutes retains one session per instance, rejects conflicting keys for an instance,
-and cites the instance that served the response. Mixed-origin and other undefined
-multi-binding shapes fail closed. Listing uses this same grouping path from
-current cached verification, without network verification or historical entries.
 
 Equal reviewed material reuses an unexpired document byte for byte, including
 its establishing evidence, without extending validity. Binding, identity,

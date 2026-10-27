@@ -302,3 +302,57 @@ async fn instance_groups_reject_missing_ids_and_conflicting_keys_before_forwardi
         }
     }
 }
+
+#[tokio::test]
+async fn zero_g_preserves_preview_priority_with_unpinned_and_multiple_pinned_providers() {
+    for pinned in [false, true] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 100,
+        }]);
+        configure_instances(&h, "0g-private-computer");
+        // The router's preferred provider sorts after its second choice.
+        let preferred = format!("0x{}", "bb".repeat(20));
+        let second = format!("0x{}", "aa".repeat(20));
+        let preview = [preferred.clone(), second]
+            .into_iter()
+            .map(|address| ChannelBinding::E2eePublicKeySha256 {
+                provider: "0g-private-computer".to_string(),
+                key_id: Some(address),
+                algorithm: "0g-pc-v1-hpke-x25519-hkdf-sha256-chacha20poly1305".to_string(),
+                public_key_sha256: "aa".repeat(32),
+            })
+            .collect::<Vec<_>>();
+        h.verifier.0.lock().unwrap().channel_bindings = preview.clone();
+        *h.backend.instance.lock().unwrap() = Some(preferred.clone());
+        let listed = h.listed();
+        let pins = if pinned {
+            listed
+                .iter()
+                .rev()
+                .map(|s| s.session_id().to_string())
+                .collect()
+        } else {
+            vec![]
+        };
+        let response = h
+            .service
+            .forward_chat_completion_request(request(pins))
+            .await
+            .unwrap();
+        // The native 0G backend chooses the first eligible binding, so admission
+        // must pass preview priority through even when several pins are accepted.
+        assert_eq!(
+            h.backend.events.lock().unwrap()[0].channel_bindings,
+            preview
+        );
+        let cited = verified_event(&response.receipt)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(matches!(
+            &h.service.get_attested_session(&cited).unwrap().document().channel_binding[0],
+            ChannelBinding::E2eePublicKeySha256 { key_id: Some(id), .. } if id == &preferred
+        ));
+    }
+}
