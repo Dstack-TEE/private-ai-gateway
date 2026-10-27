@@ -159,9 +159,19 @@ pub(in crate::aci::verifier) async fn material_appraisal(
         session_material["advisory_ids"],
         json!(["INTEL-SA-A", "INTEL-SA-B"])
     );
+    let mut event = crate::aci::receipt::UpstreamVerifiedEvent {
+        provider_type: Some("aci-service".into()),
+        verifier_id: "aci-service/v2".into(),
+        aci_identity: identity.clone(),
+        ..Default::default()
+    };
     assert!(crate::aggregator::service::reviewed_session_material(
-        Some("aci-service"),
-        "aci-service/v2",
+        &event,
+        &session_material
+    ));
+    event.aci_identity = None;
+    assert!(!crate::aggregator::service::reviewed_session_material(
+        &event,
         &session_material
     ));
     // A diagnostic string cannot restore eligibility to a failed/unevaluable
@@ -283,8 +293,11 @@ async fn offline_or_failed_quote_appraisal_never_emits_stable_material() {
 }
 
 #[test]
-fn tdx_projection_matches_stage2_fields_and_excludes_only_fresh_report_data() {
-    use super::super::quote::tdx_session_material;
+fn tdx_projection_matches_shared_fixture_and_excludes_only_fresh_report_data() {
+    use super::super::session_material::TdxReportMaterial;
+    fn tdx_session_material(report: &dcap_qvl::quote::Report) -> Option<Value> {
+        serde_json::to_value(TdxReportMaterial::from_report(report)?).ok()
+    }
     use dcap_qvl::quote::{Report, TDReport15};
     let Report::TD10(mut base) = td10_report([0; 48]) else {
         unreachable!()

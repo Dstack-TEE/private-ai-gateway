@@ -41,6 +41,7 @@ mod privatemode;
 mod providers;
 mod quote;
 mod report;
+pub(crate) mod session_material;
 mod simple;
 #[cfg(test)]
 mod tests;

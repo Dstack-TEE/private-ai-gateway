@@ -24,10 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import dcap_qvl
-from tinfoil.client import VerificationDocument, VerificationStepState
-from tinfoil.attestation.types import Measurement, PredicateType, HardwareMeasurement
 from provider_verifier.common import tdx_session_material
-from provider_verifier import nearai, chutes, tinfoil
+from provider_verifier import nearai, chutes
 import soundness_phala_direct as phala
 
 # Serialized fixture layout from the pinned dcap-qvl TD report definitions.
@@ -82,27 +80,6 @@ def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
     return phala._run(report_builder=build, compose_hash=hashlib.sha256(compose.encode()).hexdigest())
 
 
-def tinfoil_doc():
-    measurement = Measurement(PredicateType.TDX_GUEST_V2, ["22" * 48] * 5)
-    return VerificationDocument(
-        config_repo="tinfoilsh/confidential-model-router", enclave_host="tinfoil.example",
-        release_digest="aa" * 32, code_measurement=measurement,
-        enclave_measurement=SimpleNamespace(measurement=copy.deepcopy(measurement)),
-        tls_public_key="ab" * 32, hpke_public_key="", code_fingerprint="bb" * 32,
-        enclave_fingerprint="cc" * 32, security_verified=True,
-        hardware_measurement=HardwareMeasurement("platform@digest", "dd" * 48, "ee" * 48),
-        steps={"verify_code": VerificationStepState("success")},
-    )
-
-
-def tinfoil_output(doc=None):
-    with patch("tinfoil.SecureClient.verify"), patch("tinfoil.SecureClient.get_verification_document", return_value=doc or tinfoil_doc()):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            asyncio.run(tinfoil.verify_tinfoil({"url_origin": "https://tinfoil.example"}))
-        return json.loads(output.getvalue())
-
-
 def chutes_instance(*, nonce="nonce-a", changes=None):
     key = base64.b64encode(b"key").decode()
     rd = hashlib.sha256((nonce + key).encode()).digest() + bytes(32)
@@ -126,7 +103,7 @@ def profile_fixtures():
         **instance["gpu"], "tdx_report": instance["tdx_report"], "tdx_report_sha256": instance["tdx_report_sha256"],
     }
     return {"near-ai": near_output()["provider_claims"], "phala-direct": phala_output()["provider_claims"],
-            "tinfoil": tinfoil_output()["provider_claims"], "chutes": chutes_claims,
+            "chutes": chutes_claims,
             "privatemode": {"session_material_version": "privatemode/1", "trust_boundary": "attested-compose-privatemode-proxy", "attestation_scope": "contrast-attested-e2ee-secret", "request_encryption": "privatemode-oae", "success_response_authentication": "privatemode-oae", "inference_secret_policy": "latest-per-attempt-fail-closed", "manifest_mode": "dynamic", "observed_manifest_sha256": "aa" * 32, "manifest_observed_at": "2026-10-16T12:00:00Z", "manifest_observation": "latest-proxy-fetch-log", "manifest_bound_to_active_secret": False}}
 
 
@@ -213,52 +190,6 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertEqual(claims["instance_tdx_report_sha256"], {"instance-a": material["tdx_report_sha256"]})
         self.assertEqual(claims["instance_advisory_ids"], {"instance-a": ["SA-A", "SA-B"]})
         self.assertIn("gpu_evidence_nonce_matched", claims["instance_gpu"]["instance-a"])
-
-    def test_tinfoil_independent_rounds_have_distinct_evidence(self):
-        first = tinfoil_output()
-        second = tinfoil_output()
-        self.assertEqual(first["provider_claims"], second["provider_claims"])
-        self.assertNotEqual(first["evidence"]["digest"], second["evidence"]["digest"])
-        documents = [json.loads(base64.b64decode(event["evidence"]["data"].split(",", 1)[1]))
-                     for event in (first, second)]
-        rounds = [doc.pop("verification_id") for doc in documents]
-        self.assertNotEqual(rounds[0], rounds[1])
-        self.assertEqual(documents[0], documents[1])
-
-    def test_tinfoil_document_material_and_evidence(self):
-        doc = tinfoil_doc()
-        base = tinfoil_output(doc)
-        claims = base["provider_claims"]
-        self.assertNotIn("session_material_version", claims)
-        snp = copy.deepcopy(doc)
-        snp.enclave_measurement.measurement = Measurement(PredicateType.SEV_GUEST_V2, ["22" * 48])
-        self.assertNotIn("session_material_version", tinfoil_output(snp)["provider_claims"])
-        self.assertEqual(claims["hpke_public_key"], "")
-        evidence = json.loads(base64.b64decode(base["evidence"]["data"].split(",", 1)[1]))
-        for key in ("code_measurement", "enclave_measurement", "hardware_measurement", "hpke_public_key"):
-            self.assertEqual(claims[key], evidence[key])
-        for field in ("enclave_host", "enclave_fingerprint", "hpke_public_key"):
-            changed = copy.deepcopy(doc)
-            setattr(changed, field, "changed")
-            self.assertNotEqual(claims, tinfoil_output(changed)["provider_claims"])
-        for field in ("code_measurement", "enclave_measurement"):
-            changed = copy.deepcopy(doc)
-            measurement = changed.code_measurement if field == "code_measurement" else changed.enclave_measurement.measurement
-            measurement.registers[0] = "ff" * 48
-            self.assertNotEqual(claims, tinfoil_output(changed)["provider_claims"])
-            setattr(changed, field, None)
-            self.assertNotIn("session_material_version", tinfoil_output(changed)["provider_claims"])
-        for field in ("id", "mrtd", "rtmr0"):
-            changed = copy.deepcopy(doc)
-            setattr(changed.hardware_measurement, field, "changed")
-            self.assertNotEqual(claims, tinfoil_output(changed)["provider_claims"])
-        doc.code_measurement.registers = [f"{i:02x}" * 48 for i in range(5)]
-        ordered = tinfoil_output(doc)["provider_claims"]
-        self.assertEqual(ordered["code_measurement"]["registers"], doc.code_measurement.registers)
-        doc.code_measurement.registers.reverse()
-        self.assertNotEqual(ordered, tinfoil_output(doc)["provider_claims"])
-        doc.hardware_measurement = None
-        self.assertIsNone(tinfoil_output(doc)["provider_claims"]["hardware_measurement"])
 
     def test_cross_language_fixtures_match_real_producers(self):
         self.assertEqual(profile_fixtures(), json.loads((ROOT / "tests/fixtures/session_material.json").read_text()))

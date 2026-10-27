@@ -417,6 +417,12 @@ impl ExternalProviderVerifier {
         Ok(output.stdout)
     }
 
+    /// Tinfoil's SDK returns a summary without the authenticated quote. Equal
+    /// summaries cannot prove unchanged platform state across verification runs.
+    fn evidence_binds_platform_state(&self) -> bool {
+        self.provider != "tinfoil"
+    }
+
     fn event_from_output(
         &self,
         request: UpstreamVerificationRequest,
@@ -445,6 +451,7 @@ impl ExternalProviderVerifier {
         }
         Ok(UpstreamVerifiedEvent {
             aci_identity: None,
+            verification_round: (!self.evidence_binds_platform_state()).then(Default::default),
             upstream_name: request.upstream_name,
             provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,
@@ -792,9 +799,9 @@ mod session_material_tests {
             };
             let event = verifier.event_from_output(request(), &output).unwrap();
             assert_eq!(event.result, VerificationResult::Verified);
+            assert!(event.verification_round.is_none());
             assert!(!reviewed_session_material(
-                event.provider_type.as_deref(),
-                &event.verifier_id,
+                &event,
                 event.provider_claims.as_ref().unwrap()
             ));
             let mut invalid = output;
@@ -807,16 +814,14 @@ mod session_material_tests {
             "../../../tests/fixtures/session_material.json"
         ))
         .unwrap();
-        assert!(!reviewed_session_material(
-            Some("near-ai"),
-            "custom/verifier/v1",
-            &complete["near-ai"]
-        ));
+        let mut event = UpstreamVerifiedEvent {
+            provider_type: Some("near-ai".into()),
+            verifier_id: "custom/verifier/v1".into(),
+            ..Default::default()
+        };
+        assert!(!reviewed_session_material(&event, &complete["near-ai"]));
+        event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
         complete["near-ai"]["tdx_report_sha256"] = Value::Null;
-        assert!(!reviewed_session_material(
-            Some("near-ai"),
-            "private-ai-verifier/near-ai-gateway/v1",
-            &complete["near-ai"]
-        ));
+        assert!(!reviewed_session_material(&event, &complete["near-ai"]));
     }
 }

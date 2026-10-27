@@ -441,6 +441,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
         }],
         provider_claims: None,
         aci_identity: None,
+        verification_round: None,
     };
 
     let err = svc
@@ -1059,7 +1060,7 @@ fn constructor_rejects_zero_and_overflowing_session_ttl() {
         );
         assert!(matches!(
             result,
-            Err(ServiceError::InvalidAttestedSessionTtl)
+            Err(ServiceError::SessionStore(message)) if message.contains("attested_session_ttl_seconds")
         ));
     }
     assert_eq!(

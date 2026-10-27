@@ -49,6 +49,17 @@ pub enum ReceiptError {
     Key(#[from] KeyError),
 }
 
+/// Gateway-local round token for evidence that does not bind platform state.
+/// Verifiers create it on a fresh run; caches clone it. Never served on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerificationRound([u8; 32]);
+
+impl Default for VerificationRound {
+    fn default() -> Self {
+        Self(rand::random())
+    }
+}
+
 /// The verification outcome an upstream verifier hands the aggregator.
 ///
 /// The receipt records only the slim §7.5 event; everything else here —
@@ -57,6 +68,8 @@ pub enum ReceiptError {
 /// ([`VerificationResult::Failed`]).
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamVerifiedEvent {
+    /// Present only when equal evidence cannot establish equal platform state.
+    pub verification_round: Option<VerificationRound>,
     /// The operator's per-endpoint upstream config `name` (e.g.
     /// "tinfoil-glm51").
     pub upstream_name: String,

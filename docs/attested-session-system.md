@@ -71,20 +71,6 @@ request -> receipt (X-Receipt-Id)
         -> AttestedSession { claims with reasons, channel_binding, evidence }
 ```
 
-## Custom session-store migration
-
-`SessionStore::current_or_seal` returns an opaque `SessionLease` instead of a
-session ID, and `extend_retention` extends that lease's indexed entry before
-receipt publication. Lease IDs and validity timestamps have read-only accessors;
-leases cannot be constructed externally because their ownership token must match
-the retained entry.
-
-External wrappers must delegate both operations to the same built-in
-`InMemorySessionStore` or `JsonlSessionStore`, keeping the returned lease intact.
-Implementing a separate storage engine is a source-breaking migration that needs
-a supported lease-construction/ownership API; this version does not expose one.
-Do not synthesize leases or mix acquisition and retention across stores.
-
 ## Reviewed material and snapshot evidence
 
 Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
@@ -106,17 +92,16 @@ report format, hex field lengths and recomputed report digest.
 Privatemode retains the observed manifest digest and `manifest_observed_at`;
 this observation is not bound to the active inference secret.
 
-Tinfoil preserves the SDK's code/enclave measurements, HPKE key and hardware
-summary in its evidence and claims, but these omit security-relevant platform
-attributes. Tinfoil TDX and SNP therefore remain evidence-sensitive. Reuse awaits
-the SDK exposing the authenticated quote or document behind
-`SecureClient.verify()`, followed by a complete reviewed projection. Each
-independent verification puts a fresh `verification_id` in evidence metadata;
-identical summaries therefore select different sessions across rounds. A cached
-event retains its identifier and session. The identifier separates rounds; it
-does not detect or expose hidden platform changes. Removing the incomplete
-`tinfoil/1` eligibility and adding round identifiers selects replacement sessions;
-fixed pins require explicit audit and acceptance under the migration rules below.
+Unreviewed material fingerprints the evidence digest by default. Identical complete
+0G broker evidence can therefore reuse a session after fresh verification; changed
+evidence selects another fingerprint. The verifier explicitly declares when its
+evidence does not bind platform state: currently Tinfoil's SDK summary omits the
+authenticated quote. Such events carry a gateway-local round token, created on each
+verifier run and cloned on cache hits. The token separates fingerprints across
+independent rounds without inserting a random value into provider evidence. It
+does not detect or expose platform changes hidden by the SDK summary. Reviewed
+profiles ignore this token. Byte-identical Tinfoil documents sealed in the same
+Unix second may still have the same content-addressed ID.
 
 ACI-service identity uses the accepted `ReportBinding` digest of the original
 keyset JSON, including unknown members, plus explicit `subject` (string or null)
@@ -150,30 +135,51 @@ serving CPU. Snapshot reuse establishes neither authenticated GPU identity nor
 continued use of a particular GPU. ArmetAI and SecretAI require separately reviewed,
 complete CPU/GPU projections before they can reuse across evidence changes.
 
-Legacy 0G fingerprints omitted the verification evidence digest. Stage 2 makes
-0G evidence-sensitive because its native verifier has no reviewed stable-material
-profile. Its first verification under Stage 2 therefore selects a replacement
-session; later evidence changes can replace it again. Fixed legacy pins require
-fetching, auditing and explicitly accepting the replacement, as described below.
-Rollback may select a retained legacy fingerprint or seal a legacy session.
+## Migration: pre-#456 to this version
 
-The new fingerprint domain/profile claims cause one expected session replacement
-for newly profiled channels. Existing JSONL fingerprints remain opaque; old records,
-IDs and pins are never rewritten or backfilled. Old and new records coexist under
-the usual retention rules, and new fingerprints can dedup after restart once usable
-verification is available. Fixed old pins receive `412 session_not_accepted`:
-fetch, audit and explicitly accept the replacement. Existing policy-based refresh
-may do so only under its existing policy. There is no unpinned downgrade. Rollback
-to the old binary may select an old fingerprint or seal a legacy session; clients
-must explicitly accept that replacement too. Stored wire documents stay compatible.
+New reviewed profiles (`near-ai/1`, `phala-direct/1`, `chutes/1` per instance,
+`privatemode/1`, `aci-service/1`) select one replacement session for their new
+fingerprint domain and complete claims. ACI-service identity includes the accepted
+original keyset digest, subject and expiry. Multi-key TLS channels replace former
+singleton sessions with a session covering the complete group; old singleton IDs
+cannot authorize a subset of that group.
 
-Stage 3 adds one ACI-service identity/profile migration and replaces former
-multi-key singleton sessions with one complete group. Old records remain
-retrievable but their singleton IDs cannot authorize a subset of the new group.
-Singleton non-ACI Stage 2 fingerprints and unchanged Chutes instance IDs remain
-stable. Restart reuse requires current verification of the complete group.
-Rollback preserves readable history but requires explicit audit and repinning;
-there are no ID aliases or pin-policy exceptions.
+0G previously omitted the evidence digest from its fingerprint. It selects one
+replacement session when the digest is first included, then reuses it while the
+complete evidence remains identical. Tinfoil's incomplete SDK summary uses a
+gateway-local round token in its fingerprint; this replaces its earlier
+fingerprint once and prevents cross-round dedup even when summaries match.
+Other unreviewed material keeps its evidence-digest fingerprint.
+
+JSONL fingerprints remain opaque. Existing records, IDs and pins are never
+rewritten or backfilled; old and new records coexist under normal retention.
+Stored session and receipt wire documents remain compatible. Fixed old pins
+receive `412 session_not_accepted`: fetch, audit and explicitly accept the
+replacement. Existing policy-based refresh may do so only under its existing
+policy; there is no unpinned downgrade or ID alias. Restart reuse requires current
+verification of the complete group. Rollback can select a retained old fingerprint
+or seal a legacy session and requires the same explicit audit and repinning.
+
+Rust integrations initialize the optional `UpstreamVerifiedEvent::verification_round`
+field to `None` for complete evidence; an adapter whose evidence omits platform
+state creates a token on fresh verification and clones it on cache hits. Callers
+of the removed KMS root-only helper use
+`verify_dstack_kms_receipt_custody(...)?.root_public_key`. Invalid session TTLs
+are rejected at service construction through the existing `SessionStore` error.
+
+### Custom session stores
+
+`SessionStore::current_or_seal` returns an opaque `SessionLease` instead of a
+session ID, and `extend_retention` extends that lease's indexed entry before
+receipt publication. Lease IDs and validity timestamps have read-only accessors;
+leases cannot be constructed externally because their ownership token must match
+the retained entry.
+
+External wrappers must delegate both operations to the same built-in
+`InMemorySessionStore` or `JsonlSessionStore`, keeping the returned lease intact.
+Implementing a separate storage engine is a source-breaking migration that needs
+a supported lease-construction/ownership API; this version does not expose one.
+Do not synthesize leases or mix acquisition and retention across stores.
 
 ## Preflight survey
 

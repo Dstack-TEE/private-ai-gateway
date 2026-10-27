@@ -14,9 +14,7 @@ use aci_verify::report::verify_report_binding;
 use serde_json::Value;
 
 use super::dstack::verify_dstack_kms_receipt_custody;
-use super::quote::{
-    parse_quote_evidence, tdx_session_material, verify_quote_to_root, QuoteStepError, VerifiedQuote,
-};
+use super::quote::{parse_quote_evidence, verify_quote_to_root, QuoteStepError, VerifiedQuote};
 use super::report::{AciReportValidationError, ReportBinding};
 use super::{dcap_report_data, verify_dstack_event_log, AciServiceVerifierPolicy};
 use crate::aci::receipt::ChannelBinding;
@@ -672,30 +670,31 @@ fn authenticated_session_material(
         CheckId::Channel,
     ]
     .iter()
-    .any(|id| !results.iter().any(|r| r.id == *id && r.passed()))
+    .any(|id| !results.iter().any(|r| r.id == *id))
         || results.iter().any(|r| !r.passed())
     {
         return None;
     }
+    use super::session_material::{AciServiceMaterial, Hex, ReceiptCustody, TdxMaterial};
+
     let quote = quote?;
     let provenance = provenance?;
     let custody = custody?;
-    let tdx = tdx_session_material(&quote.report)?;
-    let bytes = crate::aci::digest::jcs_bytes(&tdx).ok()?;
+    let tdx = TdxMaterial::from_quote(quote)?;
     let mut advisories = quote.advisory_ids.clone();
     advisories.sort();
     advisories.dedup();
-    Some(serde_json::json!({
-        "session_material_version": "aci-service/1",
-        "tdx_report_sha256": crate::aci::digest::sha256_hex(&bytes),
-        "tdx_report": tdx,
-        "tcb_status": quote.status,
-        "advisory_ids": advisories,
-        "measured_compose_hash": provenance.compose_hash,
-        "measured_app_id": hex::encode(provenance.app_id.as_ref()?),
-        "published_source_provenance": published,
-        "receipt_key_custody": custody,
-    }))
+    serde_json::to_value(AciServiceMaterial {
+        session_material_version: "aci-service/1".into(),
+        tdx,
+        tcb_status: quote.status.clone(),
+        advisory_ids: advisories,
+        measured_compose_hash: Hex::parse(&provenance.compose_hash)?,
+        measured_app_id: hex::encode(provenance.app_id.as_ref()?),
+        published_source_provenance: serde_json::to_value(published).ok()?.as_object()?.clone(),
+        receipt_key_custody: ReceiptCustody::from_verified(custody)?,
+    })
+    .ok()
 }
 
 #[cfg(test)]
