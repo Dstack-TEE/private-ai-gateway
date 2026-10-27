@@ -36,6 +36,7 @@ impl Clock for TestClock {
 pub enum Attempt {
     Response { status: u16, at: u64 },
     Pending,
+    Withheld { status: u16, at: u64 },
 }
 
 pub struct Backend {
@@ -58,6 +59,10 @@ impl Backend {
             .expect("scripted attempt");
         match attempt {
             Attempt::Pending => std::future::pending().await,
+            Attempt::Withheld { status, at } => {
+                self.clock.set(at);
+                Err(UpstreamError::Upstream { status })
+            }
             Attempt::Response { status, at } => {
                 self.clock.set(at);
                 Ok(UpstreamResponse {
