@@ -495,7 +495,8 @@ impl AciService {
                 .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
             let upstream_status = upstream_response.status_code;
             let upstream_headers = upstream_response.headers;
-            let upstream_body = collect_upstream_body(upstream_response.body).await?;
+            let upstream_body =
+                collect_upstream_body(upstream_response.body, &upstream_headers).await?;
             return Ok(StreamingForwardResult::UpstreamError(
                 StreamingUpstreamError {
                     upstream_status,

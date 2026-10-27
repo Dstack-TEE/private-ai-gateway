@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rand::RngCore;
 use serde::Deserialize;
 
@@ -7,8 +9,13 @@ use crate::aci::upstream::{collect_buffered_upstream_body, UpstreamBodyStream};
 
 pub(super) async fn collect_upstream_body(
     body: UpstreamBodyStream,
+    headers: &HashMap<String, String>,
 ) -> Result<Vec<u8>, ServiceError> {
-    Ok(collect_buffered_upstream_body(body, None).await?)
+    let content_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse().ok());
+    Ok(collect_buffered_upstream_body(body, content_length).await?)
 }
 
 pub(super) fn generate_receipt_id() -> String {

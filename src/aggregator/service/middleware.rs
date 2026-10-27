@@ -601,14 +601,27 @@ impl AciService {
                             status,
                             None,
                         );
-                        // Collect the (small) error body up front so the failover
-                        // decision can inspect it. A truncated/unreadable error body
-                        // must not abort the remaining candidates, so it degrades to
-                        // empty — the caller's normalizer emits its generic message.
+                        // Collect the error body up front so the failover decision
+                        // can inspect it. Oversized bodies are upstream failures;
+                        // other truncated/unreadable bodies still degrade to empty
+                        // for the caller's normalizer to emit its generic message.
                         let upstream_headers = upstream_response.headers;
-                        let upstream_body = collect_upstream_body(upstream_response.body)
-                            .await
-                            .unwrap_or_default();
+                        let upstream_body =
+                            match collect_upstream_body(upstream_response.body, &upstream_headers)
+                                .await
+                            {
+                                Ok(body) => body,
+                                Err(ServiceError::Upstream(
+                                    err @ UpstreamError::ResponseTooLarge,
+                                )) => {
+                                    if let Some(status) = abandoned_status(&err, &prepared) {
+                                        abandon(&mut failed_attempts, status);
+                                    }
+                                    upgrade_err(&mut aggregated_err, 2, err.into());
+                                    continue;
+                                }
+                                Err(_) => Vec::new(),
+                            };
                         // A last-candidate answer is retained rather than returned while
                         // a capacity-retry pass is still available and this pass produced
                         // any capacity signal: the walk exit decides whether to replay the
