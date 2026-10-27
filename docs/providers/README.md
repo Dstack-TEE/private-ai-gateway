@@ -27,7 +27,7 @@ implemented adapter matrix above.
 
 | Provider | Reviewed boundary | Dated audit decision |
 | --- | --- | --- |
-| Confidential AI | c8s front door on TDX node-as-CVMs; workers trusted transitively | [Not acceptable](confidential-ai/review.md), 2026-10-15 PDT (round 2) |
+| Confidential AI | c8s front door on TDX node-as-CVMs; workers trusted transitively | [Not acceptable](confidential-ai/review.md), 2026-10-27 PDT (round 3) |
 
 ## What `verified` means
 
