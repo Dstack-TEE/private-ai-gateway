@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 /** Request/response format that shapes the upstream call (mirrors the contract). */
 export type Format = 'openai' | 'anthropic';
 
-/** Per-token prices; string|number|null, used by the gateway to price usage. */
+/** Per-token and per-image prices used by the gateway to price usage. */
 export interface PricingConfig {
+  /** Image price: exact size|quality, size, then default; decimal strings. */
+  imageCostPerImage?: string | Record<string, string> | null;
   inputCostPerToken?: string | number | null;
   outputCostPerToken?: string | number | null;
   cacheReadCostPerToken?: string | number | null;

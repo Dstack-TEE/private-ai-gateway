@@ -6,7 +6,7 @@ import { loadConfig } from './config';
 /**
  * Control plane — config-driven, no database. Implements the gateway<->control
  * HTTP surface so the stack runs end-to-end. It only ever receives
- * `{ apiKeyHash, model }` and post-request usage counts.
+ * `{ apiKeyHash, model, endpoint }` and post-request usage counts.
  */
 const config = loadConfig();
 const allowList = new Set(config.keys ?? []);
@@ -37,6 +37,7 @@ app.post('/consult/pre', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as {
     apiKeyHash?: string;
     model?: string;
+    endpoint: string;
   };
   const model = body.model ?? '';
   if (!model) {

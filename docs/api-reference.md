@@ -37,6 +37,7 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
+| `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` before reading the body | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
@@ -48,6 +49,33 @@ The gateway passes native `state`, `questions`, and nested `answers` values thro
 without interpreting question types, scores, probabilities, or confidence. In
 middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
+
+Image generation requires string `model` and `prompt` (at most 32,000 Unicode
+characters). Optional `n` is an integer from 1 through 10; `size`, `quality`,
+`background`, `output_format`, and `moderation` are strings;
+`output_compression` is an integer from 0 through 100. Provider-specific values
+for the string options are validated upstream. `response_format` must be absent
+or `"b64_json"`; the gateway always forwards `"b64_json"`. `user` and `style`
+are accepted as strings and removed before forwarding. `provider` uses the
+existing routing and ACI constraints. Any other field returns `400` with
+`error.code: "unknown_parameter"` and `error.param` naming that field. `seed`
+is not supported.
+
+`response_format: "url"`, any `stream` or `partial_images` field, invalid types,
+and out-of-range integers return `400`. Images allow 16 concurrent requests
+per gateway process, with immediate `429 rate_limit_error` when full and no
+queue. There is no heartbeat while waiting for an image. The buffered upstream
+response limit remains 64 MiB. A 2xx response with an empty `data` array or any
+item missing a string `b64_json` becomes a sanitized `502 upstream_error` in
+both routing modes, before receipt hashing.
+
+The image response schema contains only top-level `created`, `data`, `usage`,
+`size`, `quality`, `output_format`, and `background`; each item retains only
+`b64_json` and `revised_prompt`. Usage retains `input_tokens`, `output_tokens`,
+`total_tokens`, `input_tokens_details`, `output_tokens_details`, and the gateway
+`cost`. URLs, provider IDs, model IDs, and other fields are removed. Image
+receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Middleware
+adds image cost using the [control-plane pricing contract](control-plane-contract.md#image-generation).
 
 The normal provider-backed response path adds:
 

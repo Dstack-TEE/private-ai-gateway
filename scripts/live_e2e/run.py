@@ -13,6 +13,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from live_e2e.cases.embeddings import run_embeddings_case  # noqa: E402
+from live_e2e.cases.images import run_images_case  # noqa: E402
 from live_e2e.cases.fidelity_structured_outputs import (  # noqa: E402
     run_structured_outputs_case,
 )
@@ -117,6 +118,16 @@ def main() -> None:
                     )
                 )
             summary["phases"]["embeddings"] = embeddings
+
+            images = []
+            for provider in providers:
+                if provider.has_capability("images"):
+                    images.append(run_images_case(
+                        base_url=aggregator.base_url,
+                        provider=provider,
+                        artifact_dir=artifact_dir,
+                    ))
+            summary["phases"]["images"] = images
 
             if args.profile in ("full", "strict-release"):
                 structured = []

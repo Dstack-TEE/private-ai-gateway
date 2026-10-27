@@ -138,7 +138,7 @@ inside the gateway process in both modes.
 ## API coverage
 
 The gateway serves OpenAI Chat Completions, Completions, Embeddings, and
-Responses, Anthropic Messages, and the ACI attestation, receipt, and session
+Responses, buffered Image Generations, Anthropic Messages, and the ACI attestation, receipt, and session
 endpoints. The [HTTP API reference](docs/api-reference.md) covers every route.
 
 ## Documentation

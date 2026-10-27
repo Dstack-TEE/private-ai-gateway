@@ -105,6 +105,10 @@ fn rate(pricing: &Value, key: &str) -> Option<Decimal> {
 
 /// Compute the request cost from usage and pricing, as an `f64`.
 pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
+    token_cost(usage, pricing).to_f64().unwrap_or(0.0)
+}
+
+fn token_cost(usage: &Value, pricing: &Value) -> Decimal {
     let resolved = resolve_usage(usage);
     let input_rate = rate(pricing, "inputCostPerToken").unwrap_or(Decimal::ZERO);
     let cache_read_rate = rate(pricing, "cacheReadCostPerToken").unwrap_or(input_rate);
@@ -113,11 +117,34 @@ pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
 
     let uncached_input = (resolved.prompt - resolved.cache_read - resolved.cache_creation).max(0);
 
-    let cost = Decimal::from(uncached_input) * input_rate
+    Decimal::from(uncached_input) * input_rate
         + Decimal::from(resolved.cache_read) * cache_read_rate
         + Decimal::from(resolved.cache_creation) * cache_creation_rate
-        + Decimal::from(resolved.completion) * output_rate;
-    cost.to_f64().unwrap_or(0.0)
+        + Decimal::from(resolved.completion) * output_rate
+}
+
+/// Image unit price uses exact dimensions, then size, then the default.
+/// Only decimal strings are accepted for image rates.
+pub fn compute_image_cost(
+    usage: Option<&Value>,
+    pricing: &Value,
+    images: &super::images::ImageUsage,
+) -> f64 {
+    let configured = pricing.get("imageCostPerImage");
+    let unit = match configured {
+        Some(Value::Object(rates)) => rates
+            .get(&format!("{}|{}", images.size, images.quality))
+            .or_else(|| rates.get(&images.size))
+            .or_else(|| rates.get("default")),
+        value => value,
+    }
+    .and_then(Value::as_str)
+    .and_then(|value| Decimal::from_str(value).ok())
+    .unwrap_or(Decimal::ZERO);
+    let tokens = usage.map_or(Decimal::ZERO, |usage| token_cost(usage, pricing));
+    (Decimal::from(images.count as u64) * unit + tokens)
+        .to_f64()
+        .unwrap_or(0.0)
 }
 
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
@@ -290,5 +317,40 @@ mod tests {
     fn cost_to_json_matches_js_integer_formatting() {
         assert_eq!(cost_to_json(0.0), json!(0));
         assert_eq!(cost_to_json(0.000135), json!(0.000135));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::middleware::images::ImageUsage;
+    use serde_json::json;
+
+    #[test]
+    fn image_lookup_precedence_and_combined_token_cost() {
+        let images = ImageUsage {
+            count: 2,
+            size: "512x512".into(),
+            quality: "high".into(),
+        };
+        for (rates, expected) in [
+            (json!("0.1"), 0.2),
+            (
+                json!({"512x512|high":"0.1","512x512":"0.2","default":"0.3"}),
+                0.2,
+            ),
+            (json!({"512x512":"0.2","default":"0.3"}), 0.4),
+            (json!({"default":"0.3"}), 0.6),
+            (json!({"other":"0.4"}), 0.0),
+        ] {
+            let pricing = json!({"imageCostPerImage":rates,"inputCostPerToken":"0.01","outputCostPerToken":"0.02"});
+            assert_eq!(compute_image_cost(None, &pricing, &images), expected);
+            let cost = compute_image_cost(
+                Some(&json!({"input_tokens":2,"output_tokens":3})),
+                &pricing,
+                &images,
+            );
+            assert!((cost - expected - 0.08).abs() < 1e-12);
+        }
     }
 }

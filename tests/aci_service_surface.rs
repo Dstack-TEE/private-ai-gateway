@@ -3821,3 +3821,116 @@ async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
         assert!(h.backend.events.lock().unwrap().is_empty());
     }
 }
+
+const IMAGE_REQUEST: &[u8] =
+    br#"{"model":"aci-model","prompt":"a blue circle","n":1,"user":"alice","style":"vivid"}"#;
+
+#[tokio::test]
+async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"created":1,"id":"upstream-id","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private"}]}"#,
+    ));
+    let resp = h
+        .requester
+        .post("/v1/images/generations", IMAGE_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}]})
+    );
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/images/generations"));
+        let body: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"model":"aci-model","prompt":"a blue circle","n":1,"response_format":"b64_json"})
+        );
+    }
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/images/generations");
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(IMAGE_REQUEST)
+    );
+    let fetched = h
+        .requester
+        .get(&format!("/v1/aci/receipts/{receipt_id}"), &[])
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
+    let h = harness();
+    for patch in [
+        r#""response_format":"url""#,
+        r#""stream":true"#,
+        r#""stream":false"#,
+        r#""seed":1"#,
+    ] {
+        let body = format!("{{\"model\":\"aci-model\",\"prompt\":\"hi\",{patch}}}");
+        let resp = h
+            .requester
+            .post("/v1/images/generations", body.as_bytes(), &[])
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        if patch.contains("seed") {
+            assert_eq!(json_body(&resp)["error"]["code"], "unknown_parameter");
+            assert_eq!(json_body(&resp)["error"]["param"], "seed");
+        }
+    }
+    for name in [
+        "x-signing-algo",
+        "x-e2ee-version",
+        "x-e2ee-unknown",
+        "x-client-pub-key",
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header(name, "x")
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(1), h.requester.call(request))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&resp), "e2ee_unsupported_endpoint");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn images_url_only_success_is_502_and_receipt_hashes_sanitized_error() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"data":[{"url":"https://private"}]}"#,
+    ));
+    let resp = h
+        .requester
+        .post("/v1/images/generations", IMAGE_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&resp.body).contains("https://private"));
+    assert_eq!(error_type(&resp), "upstream_error");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+}

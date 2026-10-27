@@ -31,8 +31,9 @@ The implementation lives in `scripts/live_e2e/`.
    and require `GET /v1/models` to list every entry's `public_model`.
 4. Run one chat lifecycle case for each provider with the `chat` capability.
 5. Run one embeddings case for each provider with the `embeddings` capability.
-6. Run structured-output fidelity cases for `full` and `strict-release` profiles.
-7. Write `summary.json` and stop the gateway.
+6. Run one image generation case for each provider with the `images` capability.
+7. Run structured-output fidelity cases for `full` and `strict-release` profiles.
+8. Write `summary.json` and stop the gateway.
 
 Every request in these cases is buffered. Receipt hashing over streamed SSE
 bytes is covered only by `streaming_smoke.py`; see
@@ -63,6 +64,28 @@ For each entry with the `chat` capability, the case:
 6. Fetches each cited session, recomputes its ID from the fetched bytes,
    requires the entry's `binding` type, checks the evidence digest, and
    requires `tee_attested` to be asserted.
+
+### Image generation case
+
+For each entry with the `images` capability, `cases/images.py` sends one
+`POST /v1/images/generations` request (`n=1`, `size=512x512`, 300-second timeout).
+It requires inline `b64_json`, rejects URL output, decodes strict base64, and
+checks PNG, JPEG, or WebP magic. It fetches the receipt by `X-Receipt-Id`, checks
+`endpoint == "/v1/images/generations"` and null `chat_id`, resolves the attested
+session, and runs `pap audit` against the exact request and response bytes.
+The NEAR entry is `near-ai-live-images`, using
+`black-forest-labs/FLUX.2-klein-4B` and TLS SPKI binding:
+
+```bash
+CARGO_BUILD_JOBS=2 python3 scripts/live_e2e/run.py --profile quick --provider near-ai-live-images
+```
+
+This requires `NEARAI_API_KEY`, `DSTACK_VERIFIER_URL`, a dstack SDK socket, and
+`pap`; it consumes one image generation. Strict-release additionally requires
+a separately reviewed model entry in `provider_refs/near-ai.json`.
+Credential-free coverage includes a buffered 120-second upstream delay using
+Tokio's controllable clock in `tests/middleware_completion.rs`, so CI does not
+wait two minutes and no heartbeat can turn an image into an SSE response.
 
 ### Embeddings case
 
@@ -209,7 +232,7 @@ Pass `--port 0` to allocate a free local port automatically.
 
 ## Profiles
 
-| Profile | Provider verification | Chat and embeddings | Structured outputs |
+| Profile | Provider verification | Chat, embeddings, and images | Structured outputs |
 | --- | --- | --- | --- |
 | `quick` | Live verifier result and channel-binding checks | Yes | No |
 | `full` | Same as `quick` | Yes | Yes, for entries with the capability |
@@ -237,7 +260,7 @@ Optional fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `capabilities` | Cases to enable, including `chat`, `embeddings`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
+| `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
 | `requires` | Additional environment variables preflight must find. |
 | `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |

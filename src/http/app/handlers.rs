@@ -22,7 +22,8 @@ use crate::aci::types::{
 };
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    SYSTEMONE_PATH,
 };
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
@@ -498,6 +499,38 @@ pub(super) async fn systemone(
     openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
+pub(super) async fn images_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    // Refuse before reading any body, including incomplete E2EE headers.
+    if has_e2ee_headers(&headers)
+        || headers
+            .keys()
+            .any(|key| key.as_str().starts_with("x-e2ee-"))
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE is not supported on /v1/images/generations",
+        );
+    }
+    let Ok(_permit) = crate::middleware::images::try_acquire() else {
+        let reset_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |now| now.as_secs().saturating_add(1) as i64);
+        return crate::middleware::errors::rate_limit_response(
+            Surface::Openai,
+            "image generation capacity reached",
+            16,
+            reset_at,
+            None,
+        );
+    };
+    openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
+}
+
 #[derive(Debug, Default)]
 struct AciConstraint {
     required: bool,
@@ -720,6 +753,11 @@ pub(super) async fn openai_completion_endpoint(
             );
         }
     };
+    if endpoint_path == IMAGES_GENERATIONS_PATH {
+        if let Err(err) = crate::middleware::images::validate_request(&parsed) {
+            return err.into_response();
+        }
+    }
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
     if headers.contains_key("x-upstream-verification") {
@@ -770,7 +808,9 @@ pub(super) async fn openai_completion_endpoint(
             MESSAGES_PATH => Endpoint::Messages,
             RESPONSES_PATH => Endpoint::CreateModelResponse,
             SYSTEMONE_PATH => Endpoint::SystemOne,
-            _ => Endpoint::ChatComplete,
+            IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
+            CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
+            _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
         // TEE-only host: force attested serving. The `tee_only` flag is carried
@@ -806,7 +846,12 @@ pub(super) async fn openai_completion_endpoint(
     }
 
     let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
-    let forwarded_body = if normalized || aci_stripped {
+    let direct_params = if endpoint_path == IMAGES_GENERATIONS_PATH {
+        crate::middleware::images::upstream_body(&direct_params)
+    } else {
+        direct_params
+    };
+    let forwarded_body = if normalized || aci_stripped || endpoint_path == IMAGES_GENERATIONS_PATH {
         match serde_json::to_vec(&direct_params) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
