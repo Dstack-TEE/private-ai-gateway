@@ -88,6 +88,6 @@
   },
   "dependencies": {
     "@phala/dcap-qvl": "^0.6.2",
-    "undici": "7.29.0"
+    "undici": "7.30.1"
   }
 }
