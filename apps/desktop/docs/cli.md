@@ -260,7 +260,8 @@ its receipt audits.
 after verification and once the listeners are bound, with `proxy_url`,
 `control_url` and the active `policy`; `request_complete` for each request and
 its optional `receipt_id`; `blocked` when forwarding fails closed;
-`identity_updated` after a successful re-verification; and `fatal` before an
+`identity_updated` after a successful re-verification; `identity_renewed` for
+same-family refreshes, with the same identity payload; and `fatal` before an
 unsuccessful exit. Human diagnostics stay on stderr.
 
 ## Lifecycle
