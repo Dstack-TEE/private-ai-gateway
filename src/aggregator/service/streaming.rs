@@ -18,13 +18,13 @@ use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
+use crate::aggregator::session_store::{SessionLease, SessionStore};
 
 pub(super) struct MiddlewareProviderResponseDraftingStream {
     inner: UpstreamBodyStream,
-    builder: Option<ReceiptBuilder>,
+    draft: Option<MiddlewareReceiptDraft>,
     journal: MiddlewareReceiptJournal,
     provider_response_hasher: Sha256,
-    receipt_id: String,
     endpoint_path: String,
     sse_parser: SseFramingObserver,
     metrics: Arc<ServiceMetrics>,
@@ -83,21 +83,18 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
 impl MiddlewareProviderResponseDraftingStream {
     pub(super) fn new(
         inner: UpstreamBodyStream,
-        builder: ReceiptBuilder,
+        draft: MiddlewareReceiptDraft,
         journal: MiddlewareReceiptJournal,
-        receipt_id: String,
-        endpoint_path: String,
         metrics: Arc<ServiceMetrics>,
         upstream_status: u16,
     ) -> Self {
         Self {
+            endpoint_path: draft.endpoint_path.clone(),
             inner,
-            builder: Some(builder),
+            draft: Some(draft),
             journal,
             provider_response_hasher: Sha256::new(),
-            receipt_id,
             sse_parser: SseFramingObserver::identifiers_only(),
-            endpoint_path,
             metrics,
             upstream_status,
             upstream_ended: false,
@@ -111,17 +108,16 @@ impl MiddlewareProviderResponseDraftingStream {
             hex::encode(self.provider_response_hasher.clone().finalize())
         );
         let response_model = self.sse_parser.model_id();
-        let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
-        builder.set_chat_id(self.sse_parser.chat_id());
-        builder.set_upstream_verified_model_id(response_model.clone());
-        builder.add_response_received_hash(provider_response_hash)?;
-        self.journal.set(MiddlewareReceiptDraft {
-            receipt_id: self.receipt_id.clone(),
-            builder,
-            endpoint_path: self.endpoint_path.clone(),
-            request_mode: RequestMode::Streaming,
-            response_model: response_model.clone(),
-        });
+        let mut draft = self.draft.take().ok_or(ReceiptError::EmptyReceipt)?;
+        draft.builder.set_chat_id(self.sse_parser.chat_id());
+        draft
+            .builder
+            .set_upstream_verified_model_id(response_model.clone());
+        draft
+            .builder
+            .add_response_received_hash(provider_response_hash)?;
+        draft.response_model = response_model.clone();
+        self.journal.set(draft);
         self.metrics.record_upstream_response(
             &self.endpoint_path,
             RequestMode::Streaming,
@@ -140,6 +136,7 @@ struct FinalizerShared {
     wire_hasher: Sha256,
     keys: Arc<dyn KeyProvider>,
     receipt_store: Arc<dyn ReceiptStore>,
+    session_store: Arc<dyn SessionStore>,
     key_id: String,
     requester: Option<ReceiptOwner>,
     receipt_ttl_seconds: u64,
@@ -174,6 +171,7 @@ impl FinalizerShared {
             wire_hasher: Sha256::new(),
             keys: service.keys.clone(),
             receipt_store: service.receipt_store.clone(),
+            session_store: service.session_store.clone(),
             key_id: service.default_receipt_key_id.clone(),
             requester,
             receipt_ttl_seconds: service.config.receipt_ttl_seconds,
@@ -262,13 +260,21 @@ impl FinalizerShared {
     }
 
     /// Sign the receipt and store it under the configured retention window.
-    fn sign_and_store(&self, builder: ReceiptBuilder) -> Result<(), ServiceError> {
+    fn sign_and_store(
+        &self,
+        builder: ReceiptBuilder,
+        lease: Option<&SessionLease>,
+    ) -> Result<(), ServiceError> {
         let receipt = builder.finalize(self.keys.as_ref(), &self.key_id)?;
-        let now = self.clock.now_secs();
-        let expires_at = now.saturating_add(self.receipt_ttl_seconds);
-        self.receipt_store
-            .put(receipt, self.requester.clone(), now, expires_at);
-        Ok(())
+        super::receipts::store_receipt(
+            self.receipt_store.as_ref(),
+            self.session_store.as_ref(),
+            receipt,
+            self.requester.clone(),
+            self.clock.now_secs(),
+            self.receipt_ttl_seconds,
+            lease,
+        )
     }
 }
 
@@ -443,7 +449,8 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
         draft
             .builder
             .add_response_returned_hash(self.shared.wire_hash())?;
-        self.shared.sign_and_store(draft.builder)?;
+        self.shared
+            .sign_and_store(draft.builder, draft.session_lease.as_ref())?;
 
         self.shared.metrics.record_receipt_issued(
             &draft.endpoint_path,
@@ -484,6 +491,7 @@ impl MiddlewareResponseFinalizingStream {
 pub(super) struct ReceiptFinalizingStream {
     inner: UpstreamBodyStream,
     builder: Option<ReceiptBuilder>,
+    session_lease: Option<SessionLease>,
     shared: FinalizerShared,
 }
 
@@ -517,7 +525,8 @@ impl FinalizingStream for ReceiptFinalizingStream {
         builder.set_chat_id(self.shared.sse_parser.chat_id());
         builder.set_upstream_verified_model_id(self.shared.sse_parser.model_id());
         builder.add_response_returned_hash(self.shared.wire_hash())?;
-        self.shared.sign_and_store(builder)?;
+        let lease = self.session_lease.take();
+        self.shared.sign_and_store(builder, lease.as_ref())?;
 
         self.shared.metrics.record_upstream_response(
             &self.shared.endpoint_path,
@@ -541,6 +550,7 @@ impl ReceiptFinalizingStream {
         service: &AciService,
         inner: UpstreamBodyStream,
         builder: ReceiptBuilder,
+        session_lease: Option<SessionLease>,
         requester: Option<ReceiptOwner>,
         endpoint_path: String,
         e2ee_transformer: Option<E2eeSseTransformer>,
@@ -550,6 +560,7 @@ impl ReceiptFinalizingStream {
         Self {
             inner,
             builder: Some(builder),
+            session_lease,
             shared: FinalizerShared::new(
                 service,
                 requester,

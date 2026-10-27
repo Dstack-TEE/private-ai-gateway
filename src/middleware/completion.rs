@@ -1555,6 +1555,7 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
 // Client-facing status for a forward/finalize `ServiceError`.
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
+        ServiceError::AdmissionInvariant(_) => 500,
         ServiceError::E2ee(_) => 400,
         // §5.3: nothing failed verification — none of the pinned sessions is
         // current, so the client re-fetches the list and re-pins.
@@ -1588,6 +1589,7 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         )
         | ServiceError::TestKeysInProduction
         | ServiceError::InvalidSourceProvenance
+        | ServiceError::InvalidAttestedSessionTtl
         | ServiceError::Keyset(_)
         | ServiceError::Key(_)
         | ServiceError::Receipt(_)

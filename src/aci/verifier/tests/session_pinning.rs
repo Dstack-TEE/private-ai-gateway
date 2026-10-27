@@ -354,3 +354,22 @@ async fn session_listing_matches_pin_gate_across_routes() {
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }
+
+/// Exercise production projection, sealing and store reuse with native events.
+pub(in crate::aci::verifier) fn material_service(
+    event: UpstreamVerifiedEvent,
+    now: u64,
+    store: Arc<dyn crate::aggregator::session_store::SessionStore>,
+) -> AciService {
+    AciService::new_with_upstream_verifier(
+        Arc::new(SessionKeys(SigningKey::from_bytes(&[7; 32]))),
+        Arc::new(UnusedQuoter),
+        Arc::new(FixtureBackend("aci", Mutex::new(Vec::new()))),
+        Arc::new(StaticUpstreamVerifier::new(event)),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(now)),
+    )
+    .unwrap()
+    .with_session_store(store)
+}

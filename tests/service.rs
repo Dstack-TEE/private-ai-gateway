@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use common::admission;
 mod common;
 
 use async_trait::async_trait;
@@ -16,7 +17,7 @@ use private_ai_gateway::aggregator::service::{
     UpstreamVerificationError, UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session::{AttestedSession, ClaimStatus};
-use private_ai_gateway::aggregator::session_store::SessionStore;
+use private_ai_gateway::aggregator::session_store::{SessionLease, SessionStore};
 
 use common::{failed_event, verified_event, StaticKeyProvider, StubQuoter};
 
@@ -44,13 +45,16 @@ struct StubUpstream {
 struct FailingSessionStore;
 
 impl SessionStore for FailingSessionStore {
+    fn extend_retention(&self, _lease: &SessionLease, _deadline: u64) -> std::io::Result<()> {
+        Err(std::io::Error::other("session store unavailable"))
+    }
     fn current_or_seal(
         &self,
         _fingerprint: &str,
         _retention_until: u64,
         _now: u64,
         _seal: &mut dyn FnMut() -> std::io::Result<AttestedSession>,
-    ) -> std::io::Result<String> {
+    ) -> std::io::Result<SessionLease> {
         Err(std::io::Error::other("session store unavailable"))
     }
 
@@ -113,9 +117,17 @@ impl UpstreamBackend for StubUpstream {
     async fn forward_verified_prepared(
         &self,
         req: PreparedUpstreamRequest,
-        _event: &UpstreamVerifiedEvent,
+        event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        self.forward(req.request).await
+        let mut response = self.forward(req.request).await?;
+        if event.provider_type.as_deref() == Some("chutes") {
+            if let Some(ChannelBinding::E2eePublicKeySha256 { key_id, .. }) =
+                event.channel_bindings.first()
+            {
+                response.served_instance_id = key_id.clone();
+            }
+        }
+        Ok(response)
     }
 }
 
@@ -314,22 +326,31 @@ async fn verified_upstream_binding_creates_attested_session() {
     );
 }
 
-/// Chutes verifies its whole fleet under one nonce, so the raw evidence bundle
-/// changes every round even when an instance's own material does not. The
-/// bundle therefore stays out of the dedup fingerprint — sealing it in would
-/// mint a fresh session per instance per round, growing the store without
-/// bound — but the establishing round's evidence must persist in the
-/// document: an empty `evidence` breaks §8.2 deep audit, and relying parties
-/// (§9.2 check 2) reject the record, which made every Chutes-routed model
-/// fail receipt verification.
+/// Only a complete reviewed Chutes profile may reuse its establishing snapshot
+/// across nonce-bound evidence rounds. Legacy output remains evidence-sensitive.
 #[tokio::test]
 async fn chutes_instance_session_is_stable_across_evidence_rounds() {
     use base64::Engine as _;
     let (svc, _) = make_service(br#"{"id":"chat-xyz","model":"x"}"#);
+    let profiles: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    let own = &profiles["chutes"];
+    let claims = serde_json::json!({
+        "session_material_version": "chutes/1", "trust_boundary": "model_instance",
+        "evidence_scope": "model_instance", "chute_id": "chute", "canonical_model_id": "model",
+        "instance_tdx_reports": {"instance-1": own["tdx_report"]},
+        "instance_tdx_report_sha256": {"instance-1": own["tdx_report_sha256"]},
+        "instance_advisory_ids": {"instance-1": own["advisory_ids"]},
+        "instance_measurements": {"instance-1": own["measurement"]},
+        "instance_tcb_statuses": {"instance-1": own["tcb_status"]},
+        "instance_gpu": {"instance-1": {"gpu_verified": false, "gpu_evidence_present": false,
+            "gpu_evidence_nonce_matched": null, "gpu_arch": null}},
+    });
     let chutes_event = |round: &str| UpstreamVerifiedEvent {
         provider_type: Some("chutes".to_string()),
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "private-ai-verifier/chutes/v1".to_string(),
+        provider_claims: Some(claims.clone()),
         // §8.2: the digest is over the decoded evidence bytes.
         evidence: Some(serde_json::json!({
             "digest": private_ai_gateway::aci::digest::sha256_hex(
@@ -419,6 +440,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
             spki_sha256: "aa".repeat(32),
         }],
         provider_claims: None,
+        aci_identity: None,
     };
 
     let err = svc
@@ -427,7 +449,10 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
         .expect_err("receipt must not cite a session that was not persisted");
 
     assert!(matches!(err, ServiceError::SessionStore(_)));
-    assert!(received.lock().unwrap().is_some());
+    assert!(
+        received.lock().unwrap().is_none(),
+        "persistence must precede forwarding"
+    );
 }
 
 #[tokio::test]
@@ -889,4 +914,377 @@ async fn session_listing_propagates_persistence_failure() {
     assert!(!String::from_utf8(body.to_vec())
         .unwrap()
         .contains("session store unavailable"));
+}
+
+#[tokio::test]
+async fn buffered_admission_survives_expiry_with_and_without_pins() {
+    use admission::{request, Attempt, Harness};
+    for pinned in [true, false] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 120,
+        }]);
+        let original = h.listed().remove(0);
+        assert_eq!(original.document().expires_at, 110);
+        h.clock.set(109);
+        let ids = if pinned {
+            vec![original.session_id().to_string()]
+        } else {
+            vec![]
+        };
+        let result = h
+            .service
+            .forward_chat_completion_request(request(ids))
+            .await
+            .unwrap();
+        assert_eq!(result.receipt.document_json().unwrap()["served_at"], 109);
+        assert_eq!(
+            payload_event(&result.receipt, "upstream.verified")["session_id"],
+            original.session_id()
+        );
+        // Publication at 120, not admission at 109, determines the deadline 125.
+        h.clock.set(124);
+        assert_eq!(
+            h.service.get_attested_session(original.session_id()),
+            Some(original.clone())
+        );
+        assert!(h
+            .service
+            .get_receipt_by_receipt_id(&result.receipt.receipt_id)
+            .is_some());
+        h.clock.set(125);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_none());
+        assert!(h
+            .service
+            .get_receipt_by_receipt_id(&result.receipt.receipt_id)
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn single_forward_stream_holds_admission_until_publication_or_cancellation() {
+    use admission::{request, Attempt, Harness};
+    use futures_util::StreamExt;
+    use private_ai_gateway::aggregator::service::StreamingForwardResult;
+    for cancel in [false, true] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 109,
+        }]);
+        let original = h.listed().remove(0);
+        h.clock.set(109);
+        let StreamingForwardResult::Stream(mut stream) = h
+            .service
+            .forward_chat_completion_stream_request(request(vec![]))
+            .await
+            .unwrap()
+        else {
+            panic!("stream expected")
+        };
+        h.clock.set(120);
+        assert!(h
+            .service
+            .get_attested_session(original.session_id())
+            .is_some());
+        let receipt_id = stream.receipt_id.clone();
+        if cancel {
+            drop(stream);
+            assert!(h
+                .service
+                .get_attested_session(original.session_id())
+                .is_none());
+            assert!(h.service.get_receipt_by_receipt_id(&receipt_id).is_none());
+        } else {
+            while let Some(chunk) = stream.body.next().await {
+                chunk.unwrap();
+            }
+            let receipt = h.service.get_receipt_by_receipt_id(&receipt_id).unwrap();
+            assert_eq!(receipt.document_json().unwrap()["served_at"], 109);
+            assert_eq!(
+                payload_event(&receipt, "upstream.verified")["session_id"],
+                original.session_id()
+            );
+            // The completed stream object must no longer hold a lease.
+            h.clock.set(125);
+            assert!(h
+                .service
+                .get_attested_session(original.session_id())
+                .is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn admission_overflow_and_persistence_failure_never_forward() {
+    use admission::{request, Attempt, Harness};
+    let mut h = Harness::new(vec![Attempt::Response {
+        status: 200,
+        at: 100,
+    }]);
+    h.clock.set(u64::MAX - 5);
+    assert!(matches!(
+        h.service
+            .forward_chat_completion_request(request(vec![]))
+            .await,
+        Err(ServiceError::SessionStore(_))
+    ));
+    assert!(h.backend.events.lock().unwrap().is_empty());
+    h.clock.set(100);
+    h.service = h.service.with_session_store(Arc::new(FailingSessionStore));
+    assert!(matches!(
+        h.service
+            .forward_chat_completion_request(request(vec![]))
+            .await,
+        Err(ServiceError::SessionStore(_))
+    ));
+    assert!(h.backend.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn constructor_rejects_zero_and_overflowing_session_ttl() {
+    for (ttl, now) in [(0, 100), (10, u64::MAX - 5)] {
+        let mut config = AciServiceConfig::for_test();
+        config.attested_session_ttl_seconds = ttl;
+        let (backend, _) = StubUpstream::new(b"{}");
+        let result = AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(backend),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            Arc::new(FixedClock(now)),
+        );
+        assert!(matches!(
+            result,
+            Err(ServiceError::InvalidAttestedSessionTtl)
+        ));
+    }
+    assert_eq!(
+        AciServiceConfig::for_test().attested_session_ttl_seconds,
+        3600
+    );
+}
+
+#[tokio::test]
+async fn multiple_tls_bindings_enforce_the_complete_cited_group_in_canonical_order() {
+    use admission::{request, Attempt, Harness};
+    let h = Harness::new(vec![
+        Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let low = ChannelBinding::TlsSpkiSha256 {
+        origin: "https://test".to_string(),
+        spki_sha256: "11".repeat(32),
+    };
+    let high = ChannelBinding::TlsSpkiSha256 {
+        origin: "https://test".to_string(),
+        spki_sha256: "ff".repeat(32),
+    };
+    h.verifier.0.lock().unwrap().channel_bindings = vec![high.clone(), low.clone()];
+    let listed = h.listed();
+    let result = h
+        .service
+        .forward_chat_completion_request(request(vec![]))
+        .await
+        .unwrap();
+    let session_id = payload_event(&result.receipt, "upstream.verified")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        h.service
+            .get_attested_session(&session_id)
+            .unwrap()
+            .document()
+            .channel_binding,
+        vec![low.clone(), high.clone()]
+    );
+    assert_eq!(
+        h.backend.events.lock().unwrap()[0].channel_bindings,
+        vec![low.clone(), high.clone()]
+    );
+    assert_eq!(listed.len(), 1);
+    let pinned = &listed[0];
+    h.service
+        .forward_chat_completion_request(request(vec![pinned.session_id().to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.backend.events.lock().unwrap()[1].channel_bindings,
+        vec![low, high]
+    );
+}
+
+#[tokio::test]
+async fn chutes_response_must_identify_an_admitted_instance_and_releases_siblings() {
+    use admission::{request, Attempt, Harness};
+    for served in [Some("b"), Some("unknown"), None] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 120,
+        }]);
+        {
+            let mut event = h.verifier.0.lock().unwrap();
+            event.provider_type = Some("chutes".to_string());
+            event.channel_bindings = ["a", "b"]
+                .into_iter()
+                .map(|id| ChannelBinding::E2eePublicKeySha256 {
+                    provider: "chutes".to_string(),
+                    key_id: Some(id.to_string()),
+                    algorithm: "chutes-ml-kem-768".to_string(),
+                    public_key_sha256: "aa".repeat(32),
+                })
+                .collect();
+        }
+        *h.backend.instance.lock().unwrap() = served.map(str::to_string);
+        let listed = h.listed();
+        h.clock.set(109);
+        let result = h
+            .service
+            .forward_chat_completion_request(request(vec![]))
+            .await;
+        assert_eq!(
+            h.backend.events.lock().unwrap().len(),
+            1,
+            "response invariant fails after forwarding"
+        );
+        if served == Some("b") {
+            let result = result.unwrap();
+            let id = payload_event(&result.receipt, "upstream.verified")["session_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let chosen = h.service.get_attested_session(&id).unwrap();
+            assert!(
+                matches!(&chosen.document().channel_binding[0], ChannelBinding::E2eePublicKeySha256 { key_id: Some(key), .. } if key == "b")
+            );
+            let sibling = listed.iter().find(|s| s.session_id() != id).unwrap();
+            assert!(h
+                .service
+                .get_attested_session(sibling.session_id())
+                .is_none());
+        } else {
+            assert!(
+                matches!(result, Err(ServiceError::AdmissionInvariant(_))),
+                "must not manufacture a pre-forward refusal"
+            );
+            for session in listed {
+                assert!(h
+                    .service
+                    .get_attested_session(session.session_id())
+                    .is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ttl_changes_affect_only_new_documents_and_receipt_retention_is_independent() {
+    use admission::Harness;
+    use private_ai_gateway::aggregator::session_store::InMemorySessionStore;
+    let mut h = Harness::new(vec![]);
+    let sessions = Arc::new(InMemorySessionStore::default());
+    h.service = h.service.with_session_store(sessions.clone());
+    let original = h.listed().remove(0);
+    let mut config = AciServiceConfig::for_test();
+    config.attested_session_ttl_seconds = 50;
+    config.receipt_ttl_seconds = 200;
+    h.clock.set(105);
+    h.service = AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        h.backend.clone(),
+        h.verifier.clone(),
+        Arc::new(InMemoryReceiptStore::default()),
+        config,
+        h.clock.clone(),
+    )
+    .unwrap()
+    .with_session_store(sessions);
+    assert_eq!(
+        h.listed(),
+        vec![original.clone()],
+        "new TTL must not reseal a valid document"
+    );
+    h.clock.set(110);
+    let replacement = h.listed().remove(0);
+    assert_ne!(replacement.session_id(), original.session_id());
+    assert_eq!(replacement.document().expires_at, 160);
+    // The longer initial receipt retention survives independently of validity.
+    h.clock.set(309);
+    assert_eq!(
+        h.service.get_attested_session(replacement.session_id()),
+        Some(replacement.clone())
+    );
+    h.clock.set(310);
+    assert!(h
+        .service
+        .get_attested_session(replacement.session_id())
+        .is_none());
+}
+
+#[tokio::test]
+async fn admission_uses_post_acquisition_time_for_a_concurrently_established_pin() {
+    use admission::{request, Attempt, Harness, TestClock};
+    use private_ai_gateway::aggregator::session_store::InMemorySessionStore;
+
+    struct ResumeAfterAcquire {
+        inner: Arc<InMemorySessionStore>,
+        clock: Arc<TestClock>,
+    }
+    impl SessionStore for ResumeAfterAcquire {
+        fn get_session(&self, id: &str, now: u64) -> Option<AttestedSession> {
+            self.inner.get_session(id, now)
+        }
+        fn current_or_seal(
+            &self,
+            fingerprint: &str,
+            retention_until: u64,
+            now: u64,
+            seal: &mut dyn FnMut() -> std::io::Result<AttestedSession>,
+        ) -> std::io::Result<SessionLease> {
+            let lease = self
+                .inner
+                .current_or_seal(fingerprint, retention_until, now, seal)?;
+            self.clock.set(101);
+            Ok(lease)
+        }
+        fn extend_retention(&self, lease: &SessionLease, deadline: u64) -> std::io::Result<()> {
+            self.inner.extend_retention(lease, deadline)
+        }
+    }
+
+    let mut h = Harness::new(vec![Attempt::Response {
+        status: 200,
+        at: 102,
+    }]);
+    let inner = Arc::new(InMemorySessionStore::default());
+    h.service = h.service.with_session_store(inner.clone());
+    h.clock.set(101);
+    let established = h.listed().remove(0);
+    // Resume an older lookup after another caller has established the channel.
+    h.clock.set(100);
+    h.service = h.service.with_session_store(Arc::new(ResumeAfterAcquire {
+        inner,
+        clock: h.clock.clone(),
+    }));
+    let response = h
+        .service
+        .forward_chat_completion_request(request(vec![established.session_id().to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        payload_event(&response.receipt, "upstream.verified")["session_id"],
+        established.session_id()
+    );
+    assert_eq!(response.receipt.document_json().unwrap()["served_at"], 101);
 }

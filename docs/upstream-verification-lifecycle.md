@@ -4,6 +4,29 @@ This page explains when the gateway verifies an upstream, how long a verified re
 
 For field definitions and defaults, see [Configuration reference](configuration-reference.md). For the resulting audit record, see [Attested sessions](attested-session-system.md).
 
+## Verification freshness and session validity
+
+The verifier cache TTL, `attested_session_ttl_seconds` (default 3600), and
+`receipt_ttl_seconds` govern different lifetimes. A failed proactive refresh may
+keep a still-valid cached result, but cannot extend its cache deadline (#399).
+Without usable verification, forwarding fails closed even if historical sessions
+are retained. A session expiring does not force network verification: a still-usable
+cached result can establish a replacement with older evidence.
+
+Before each forwarding attempt the gateway owns the admitted immutable session and
+retention lease. Binding retries acquire a new admission. The committed receipt cites
+that attempt's admitted session, with `served_at` equal to its admission time; later
+verification cannot substitute a newer snapshot. Streams, pending middleware and
+retained responses keep the snapshot available, and receipt publication extends
+retention through its receipt deadline without extending session validity.
+
+Complete reviewed profiles can revalidate equal material under an unexpired snapshot,
+retaining its original ID and evidence. Failure alone does not revoke history;
+equal recovery and A → B → A may reuse the original unexpired A. ArmetAI, SecretAI,
+custom verifiers and incomplete profiles retain evidence-sensitive dedup. See
+[the profile and migration contract](attested-session-system.md#reviewed-material-and-snapshot-evidence).
+Session creation, cache freshness and evidence collection time must not be conflated.
+
 ## Security property
 
 A request fails closed only when it requires ACI verification, as defined in
@@ -62,12 +85,17 @@ For a constrained request, the gateway follows this sequence:
 1. Resolve the candidate upstream and the body that would be forwarded.
 2. Obtain a cached successful verifier event or perform verification.
 3. Require a verified result.
-4. Derive current attested sessions and apply any `aci_session_ids` allowlist.
+4. Admit at one timestamp: persist/acquire current attested sessions, require
+   `established_at <= admitted_at < expires_at`, and apply any `aci_session_ids`
+   allowlist. This admission also runs for verified requests without pins.
 5. Connect through a client that enforces the verified channel binding.
 6. Forward the prompt only after the binding is satisfied.
-7. Record the verification event and selected session in the signed receipt.
+7. Record the admitted verification event and selected session in the signed
+   receipt, with `served_at = admitted_at` for the committed attempt. Keep its
+   lease while the response or draft is pending, then extend session retention
+   through the receipt's actual publication deadline before storing the receipt.
 
-TLS SPKI bindings are enforced by the pinned TLS client. Chutes E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
+TLS SPKI bindings are enforced by the pinned TLS client. Chutes and 0G E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
 
 ## Binding mismatch and reverification
 
@@ -75,7 +103,9 @@ A channel-binding mismatch can indicate normal rotation or an attack. The gatewa
 
 1. Invalidate the cached verifier event owned by the gateway.
 2. Run a fresh verification that bypasses the cache.
-3. Retry the forward only if the new result verifies and its binding can be enforced.
+3. Release the failed attempt's leases and obtain a new admission, reapplying
+   pins. Retry only if the new result verifies and its binding can be enforced;
+   the receipt uses the successful retry's admission.
 4. Repeat for a later mismatch, up to two fresh verifications per candidate.
 5. Treat a mismatch after the second fresh verification as terminal for that candidate, and leave the cache entry invalidated.
 

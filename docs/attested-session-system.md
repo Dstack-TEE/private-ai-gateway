@@ -20,8 +20,12 @@ byte-identically, and the session id is their SHA-256 (spec §8). Sealing never
 calls the model and never sees user data.
 
 Background upstream verification refreshes the verifier cache. Listing and the
-pin gate seal sessions on demand through the same process-owned store. Request
-completion records the session actually served on the receipt's
+admission step seal sessions on demand through the same process-owned store.
+Every verified forwarding attempt, with or without pins, acquires a retention
+lease before calling the backend. The receipt cites the immutable session
+admitted for the committed attempt; its `served_at` is that admission time.
+Completion may occur after expiry. Response selection records the session
+actually served on the receipt's
 `upstream.verified` event. `tests/service.rs::verified_upstream_binding_creates_attested_session`
 covers the session created from a verified binding.
 
@@ -29,10 +33,35 @@ Two deadlines govern a stored session:
 
 - The document's `expires_at` is an upper bound for new forwarding decisions
   and listing, not a freshness guarantee. Replacement or expiry of the verifier
-  cache can stop acceptance sooner. The validity period reuses `receipt_ttl_seconds`.
+  cache can stop acceptance sooner. The validity period uses
+  `attested_session_ttl_seconds` (default 3600), independently of receipt
+  retention and verifier-cache TTL. Changes apply only to newly sealed documents.
 - The store's `retention_until` bounds how long the session is served by id.
   Each citing receipt pushes it forward without touching the sealed bytes, so
-  a session outlives every receipt that cites it (spec §8).
+  a session outlives every receipt that cites it (spec §8). Pending responses,
+  retained failover responses, streams and middleware drafts hold leases that
+  prevent eviction, including during compaction. Dropping the last owner releases
+  its lease. A retained expired session remains fetchable but cannot authorize
+  another admission.
+
+Admission groups complete verified channels before filtering by pins, using the
+same path as listing from current cached verification. One origin's TLS
+alternatives share one session: bindings are sorted by JCS and exact duplicates
+removed within that group. A pin authorizes the complete group, the backend
+receives every accepted key, and the receipt cites that group whichever key
+connects. Adding or removing a key changes the group's material.
+
+Chutes and 0G retain independently selectable instance groups in verifier order;
+0G uses that order as provider priority. They reject conflicting keys for an
+instance, keep all admitted groups until the backend reports which instance
+served, then cite that instance and release sibling leases. A missing or
+unmatched serving instance identifier is an internal error. Mixed-origin and
+other undefined multi-binding shapes fail closed.
+
+If an adapter withholds an unverified error body without identifying the
+serving instance, the gateway preserves its HTTP status and cites no instance
+session. Buffered receipts record failed verification and the forwarded
+request; streaming errors keep their existing receipt behavior.
 
 The audit trail runs:
 
@@ -41,6 +70,110 @@ request -> receipt (X-Receipt-Id)
         -> upstream.verified { session_id }
         -> AttestedSession { claims with reasons, channel_binding, evidence }
 ```
+
+## Custom session-store migration
+
+`SessionStore::current_or_seal` returns an opaque `SessionLease` instead of a
+session ID, and `extend_retention` extends that lease's indexed entry before
+receipt publication. Lease IDs and validity timestamps have read-only accessors;
+leases cannot be constructed externally because their ownership token must match
+the retained entry.
+
+External wrappers must delegate both operations to the same built-in
+`InMemorySessionStore` or `JsonlSessionStore`, keeping the returned lease intact.
+Implementing a separate storage engine is a source-breaking migration that needs
+a supported lease-construction/ownership API; this version does not expose one.
+Do not synthesize leases or mix acquisition and retention across stores.
+
+## Reviewed material and snapshot evidence
+
+Evidence-independent reuse is an adapter capability. Complete `near-ai/1`,
+`phala-direct/1`, `chutes/1` (per instance), `privatemode/1` and
+`aci-service/1`
+claims require the matching provider type and built-in verifier ID. Missing,
+unknown, mismatched or incomplete material remains evidence-sensitive. ArmetAI,
+SecretAI (both TDX and SNP), Tinfoil (TDX and SNP), 0G, generic external verifiers
+and legacy Chutes outputs
+remain evidence-sensitive; neither provider names nor markers alone opt in.
+Shape validation does not authenticate facts; the configured verifier owns that.
+
+The private fingerprint for reviewed material is SHA-256 of JCS over
+`schema: "aci-session-material/1"`, provider type, upstream name, endpoint,
+verifier ID, identity, channel bindings and all recorded claims. TDX profiles
+preserve every supported TD10/TD15 security field except report data; non-freshness
+report-data inputs are retained as identity/bindings/claims. Rust checks the
+report format, hex field lengths and recomputed report digest.
+Privatemode retains the observed manifest digest and `manifest_observed_at`;
+this observation is not bound to the active inference secret.
+
+Tinfoil preserves the SDK's code/enclave measurements, HPKE key and hardware
+summary in its evidence and claims, but these omit security-relevant platform
+attributes. Tinfoil TDX and SNP therefore remain evidence-sensitive. Reuse awaits
+the SDK exposing the authenticated quote or document behind
+`SecureClient.verify()`, followed by a complete reviewed projection. Each
+independent verification puts a fresh `verification_id` in evidence metadata;
+identical summaries therefore select different sessions across rounds. A cached
+event retains its identifier and session. The identifier separates rounds; it
+does not detect or expose hidden platform changes. Removing the incomplete
+`tinfoil/1` eligibility and adding round identifiers selects replacement sessions;
+fixed pins require explicit audit and acceptance under the migration rules below.
+
+ACI-service identity uses the accepted `ReportBinding` digest of the original
+keyset JSON, including unknown members, plus explicit `subject` (string or null)
+and `keyset_not_after`. Its `aci-service/1` claims retain the authenticated TDX
+projection, DCAP TCB/advisories, measured compose/app ID, published source
+provenance and normalized receipt-custody identities (without signatures).
+Provenance is published metadata, not independently rebuilt source. Receipt-key
+derivation still relies on measured workload code; other key roles are not
+thereby authenticated. Failed, offline or unevaluable appraisal cannot emit the
+stable profile; parsed diagnostics and human-readable check details never supply
+it. Session expiry is capped at the accepted keyset's `not_after`, independently
+of the verifier cache cap, and admission at that deadline is rejected.
+
+Equal reviewed material reuses an unexpired document byte for byte, including
+its establishing evidence, without extending validity. Binding, identity,
+measurement, security outcome or claim changes select a different fingerprint.
+A → B → A can reuse unexpired A. Failure alone does not revoke history or force
+a generation; forwarding still needs usable current verification. Recovery may
+reuse equal material. Session expiry may reseal from a still-usable verifier cache
+without network verification: creation time does not mean evidence collection time.
+
+A session contains an establishing-evidence snapshot. A reused session does not
+supply evidence from every later verification round. Session and evidence hashes
+prove integrity; they do not perform provider-specific deep audit (§9.2(4)). Later
+revalidation is the attested aggregator's assertion. A policy requiring independent
+evidence for every authorizing round cannot rely on a snapshot alone.
+
+Phala and Chutes GPU checks are supplemental outcomes. Their current NVIDIA paths
+decode JWTs without signature verification and do not bind device identity to the
+serving CPU. Snapshot reuse establishes neither authenticated GPU identity nor
+continued use of a particular GPU. ArmetAI and SecretAI require separately reviewed,
+complete CPU/GPU projections before they can reuse across evidence changes.
+
+Legacy 0G fingerprints omitted the verification evidence digest. Stage 2 makes
+0G evidence-sensitive because its native verifier has no reviewed stable-material
+profile. Its first verification under Stage 2 therefore selects a replacement
+session; later evidence changes can replace it again. Fixed legacy pins require
+fetching, auditing and explicitly accepting the replacement, as described below.
+Rollback may select a retained legacy fingerprint or seal a legacy session.
+
+The new fingerprint domain/profile claims cause one expected session replacement
+for newly profiled channels. Existing JSONL fingerprints remain opaque; old records,
+IDs and pins are never rewritten or backfilled. Old and new records coexist under
+the usual retention rules, and new fingerprints can dedup after restart once usable
+verification is available. Fixed old pins receive `412 session_not_accepted`:
+fetch, audit and explicitly accept the replacement. Existing policy-based refresh
+may do so only under its existing policy. There is no unpinned downgrade. Rollback
+to the old binary may select an old fingerprint or seal a legacy session; clients
+must explicitly accept that replacement too. Stored wire documents stay compatible.
+
+Stage 3 adds one ACI-service identity/profile migration and replaces former
+multi-key singleton sessions with one complete group. Old records remain
+retrievable but their singleton IDs cannot authorize a subset of the new group.
+Singleton non-ACI Stage 2 fingerprints and unchanged Chutes instance IDs remain
+stable. Restart reuse requires current verification of the complete group.
+Rollback preserves readable history but requires explicit audit and repinning;
+there are no ID aliases or pin-policy exceptions.
 
 ## Preflight survey
 
@@ -91,11 +224,18 @@ again. It is never served. Receipt signatures link requests to session IDs.
 Backing up the log and keeping it private on disk are up to the deployment.
 
 The gateway locks a separate lock file so only one process can use the log.
-On startup and every hour after that, it writes the sessions that have not
-expired to a new file, flushes it to disk, and swaps it in with a single
-rename. This drops duplicate, expired, or damaged records and any bundle that
+On startup and every hour after that, it writes retained sessions, including
+expired sessions with outstanding leases, to a new file, flushes it to disk,
+and swaps it in with a single rename. This drops duplicate, unheld lapsed, or
+damaged records and any bundle that
 no remaining session uses. The file names and their `state_dir` location are
 listed in [Runtime state files](configuration-reference.md#runtime-state-files).
+
+Retention extensions update memory without appending records and are persisted
+by compaction. An uncompacted extension can be lost on restart; receipts and
+leases are process-local and are lost too. Replay preserves document IDs and
+expiry, but never warms the verifier cache. Existing pins can survive restart
+once the same current material is verified and their documents remain valid.
 
 ## How claims are derived
 
@@ -130,11 +270,12 @@ Mappers that read these provider-reported facts read them the same way:
   gateway records instead of rejecting. No status leaves it `unknown`.
 - `production_os_image` of `true` asserts `os_known_good` as
   `verifier_derived`, and `false` refutes it.
-- `gpu_verified` of `true`, set only for a verified and nonce-bound NVIDIA
-  confidential-computing attestation, asserts `gpu_attested` as
-  `verifier_derived`. It attests a genuine CC GPU, not its binding to the
-  serving CPU TEE (spec §8.3). `false` is ambiguous and leaves the claim
-  `unknown`.
+- `gpu_verified` of `true` asserts `gpu_attested` as `verifier_derived`.
+  For Phala and Chutes it records the supplemental check's accepted,
+  nonce-matched outcome, with the unsigned-JWT and CPU-binding limits above;
+  it must not be read as an authenticated device identity or continuity claim.
+  ArmetAI and SecretAI use mandatory signed GPU checks with their own CPU
+  bindings. `false` is ambiguous and leaves the claim `unknown`.
 
 `model_weights_provenance` is `unknown` for every current verifier. Each
 provider's verification page states which claims its adapter asserts and why:
@@ -154,8 +295,10 @@ A provider's attestation scope decides what one session covers:
   or proxy channel. The served model is recorded on the receipt, not in the
   session.
 - **Model** (Phala direct, `aci-service`): one session per upstream model.
-- **Instance** (Chutes): one session per verified instance, so fleet changes do
-  not change an unchanged instance's session id.
+- **Instance** (Chutes and 0G): one session per verified instance. With reviewed
+  Chutes material, unrelated fleet changes preserve an unchanged instance's
+  session ID. 0G remains evidence-sensitive: refreshed evidence, including changes
+  to fleet evidence, can replace its sessions.
 
 A bridged provider verifier declares its scope in `attested_scope`. The
 gateway rejects a verified result whose declared scope differs from the

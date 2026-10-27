@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
 
-fn verifier(origin: &str) -> AciServiceUpstreamVerifier {
+pub(in crate::aci::verifier) fn verifier(origin: &str) -> AciServiceUpstreamVerifier {
     AciServiceUpstreamVerifier::new_with_timeouts(
         origin,
         "http://127.0.0.1:1",
@@ -21,7 +21,7 @@ fn verifier(origin: &str) -> AciServiceUpstreamVerifier {
     .unwrap()
 }
 
-fn request(origin: &str) -> UpstreamVerificationRequest {
+pub(in crate::aci::verifier) fn request(origin: &str) -> UpstreamVerificationRequest {
     UpstreamVerificationRequest {
         upstream_name: "aci".to_string(),
         model_id: "model".to_string(),
@@ -95,6 +95,7 @@ impl Fixture {
         fn appraise(report: &AttestationReport, nonce: &str) -> super::super::appraisal::Appraisal {
             super::super::appraisal::Appraisal {
                 results: Vec::new(),
+                session_material: None,
                 channel_bindings: Vec::new(),
                 identity: Some(
                     aci_verify::report::verify_report_binding(report, Some(nonce)).unwrap(),
@@ -188,8 +189,9 @@ async fn absolute_keyset_expiry_invalidates_an_unexpired_monotonic_cache() {
     let deadline = Instant::now() + Duration::from_secs(300);
     let not_after = current_unix_secs() + 2;
     let verifier = verifier(origin).with_cached(CachedAciServiceVerification {
+        identity: report_binding(not_after),
+        session_material: None,
         expires_at: deadline,
-        not_after,
         evidence: None,
         channel_bindings: Vec::new(),
     });

@@ -21,6 +21,8 @@ pub struct ChutesProviderVerifier {
 }
 
 impl ChutesProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/chutes/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -215,6 +217,8 @@ pub struct NearAiProviderVerifier {
 }
 
 impl NearAiProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/near-ai-gateway/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -365,6 +369,8 @@ pub struct PhalaDirectProviderVerifier {
 }
 
 impl PhalaDirectProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/phala-direct/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }

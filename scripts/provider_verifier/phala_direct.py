@@ -18,6 +18,7 @@ from .common import (
     provider_options,
     tdx_debug_enabled,
     verifier_id_for,
+    tdx_session_material,
 )
 
 
@@ -201,11 +202,11 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         return
 
     # 4. GPU (NVIDIA confidential computing) evidence — SUPPLEMENTAL, never a gate.
+    # The NVIDIA path decodes JWTs without signature verification. Its outcome
+    # does not authenticate GPU identity or prove continued use of any device.
     # The CPU TEE quote + report_data binding + compose integrity above are the
-    # trust gate. A standalone gateway-side NRAS check only proves a CC-capable
-    # GPU exists for a nonce; it does not prove that GPU is bound to this CPU TEE
-    # or serving this request (that is the measured serving software's job, inside
-    # the quote). So we record the GPU outcome as metadata and do not fail on it.
+    # trust gate. Record the supplemental GPU outcome and nonce matching as
+    # metadata; neither establishes binding to the serving CPU or request.
     gpu_evidence_present = False
     gpu_evidence_nonce_matched: bool | None = None
     gpu_attested = False
@@ -263,6 +264,11 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         os_image_version = None
         production_os_image = None
 
+    material = tdx_session_material(intel_quote)
+    compose_hash = (app_info or {}).get("compose_hash")
+    if material and compose_hash:
+        material["session_material_version"] = "phala-direct/1"
+
     emit(
         {
             "result": "verified",
@@ -276,6 +282,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 }
             ],
             "provider_claims": {
+                **material,
                 "trust_boundary": "phala-dstack-cvm",
                 "evidence_scope": "model_instance",
                 "canonical_model_id": request["model_id"],
@@ -283,6 +290,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "tls_spki_from_report_data": True,
                 "signing_address": signing_address,
                 "report_data_nonce_matched": True,
+                "compose_hash": compose_hash,
                 "compose_hash_verified": True,
                 "tdx_debug_mode": False,
                 # OS-image provenance, resolved from dstack's published image and

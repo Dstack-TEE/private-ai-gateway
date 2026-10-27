@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use common::admission;
 mod common;
 
 use async_trait::async_trait;
@@ -3156,4 +3157,535 @@ async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
         hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
         id
     );
+}
+
+#[tokio::test]
+async fn current_listing_remains_admissible_but_expired_history_cannot_satisfy_pins() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        ..
+    } = admission::Harness::new(vec![admission::Attempt::Response {
+        status: 200,
+        at: 109,
+    }]);
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "phala-direct", "base_url": "https://test.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let listed = listed_sessions(&h, "").await;
+    let id = listed[0]["session_id"].as_str().unwrap();
+    clock.set(109);
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], id);
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
+    clock.set(110);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{id}"), &[])
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let new_listing = listed_sessions(&h, "").await;
+    assert_ne!(new_listing[0]["session_id"], id);
+    let refused = pin_session(&h, id).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(
+        backend.events.lock().unwrap().len(),
+        1,
+        "expired history must not authorize another forward"
+    );
+}
+
+fn session_profile(provider: &str) -> Value {
+    let profiles: Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    profiles[provider].clone()
+}
+
+#[tokio::test]
+async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        verifier,
+    } = admission::Harness::new(
+        [101, 103, 104, 106]
+            .into_iter()
+            .map(|at| admission::Attempt::Response { status: 200, at })
+            .collect(),
+    );
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".to_string());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".to_string();
+    event.provider_claims = Some(session_profile("near-ai"));
+    *verifier.0.lock().unwrap() = event.clone();
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "near-ai", "base_url": "https://near.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let original = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let full = h
+        .requester
+        .get(&format!("/v1/aci/sessions/{original}"), &[])
+        .await;
+    let original_bytes = full.body;
+    // A new successful round with different evidence keeps the establishing bytes.
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"round two")).unwrap());
+    // EvidenceRef serializes its data URI as `data`, just like the bridge.
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let accepted = pin_session(&h, &original).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), original);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    assert_eq!(backend.events.lock().unwrap()[0].evidence, event.evidence);
+
+    // B changes measured identity: a fixed A pin is refused before backend I/O.
+    clock.set(102);
+    let a = event.clone();
+    event.provider_claims.as_mut().unwrap()["compose_hash"] = serde_json::json!("ff".repeat(32));
+    *verifier.0.lock().unwrap() = event;
+    let b = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(b, original);
+    let refused = pin_session(&h, &original).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(backend.events.lock().unwrap().len(), 1);
+    assert_eq!(pin_session(&h, &b).await.status, StatusCode::OK);
+
+    // A -> B -> A can select the original still-unexpired A snapshot.
+    *verifier.0.lock().unwrap() = a.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let returned = pin_session(&h, &original).await;
+    assert_eq!(returned.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &returned), original);
+
+    // An unusable verification fails closed, without revoking immutable history.
+    clock.set(105);
+    let mut failed = a.clone();
+    failed.result = VerificationResult::Failed;
+    failed.reason = Some("fixture verification failure".to_string());
+    *verifier.0.lock().unwrap() = failed;
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_ne!(pin_session(&h, &original).await.status, StatusCode::OK);
+    assert_eq!(backend.events.lock().unwrap().len(), 3);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    *verifier.0.lock().unwrap() = a;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    assert_eq!(pin_session(&h, &original).await.status, StatusCode::OK);
+
+    // Expiry reseals from the same cached verification; fixed pins need replacement.
+    clock.set(110);
+    let replacement = listed_sessions(&h, "").await[0].clone();
+    assert_ne!(replacement["session_id"], original);
+    assert_eq!(replacement["established_at"], 110);
+    assert_eq!(replacement["expires_at"], 120);
+    assert_eq!(
+        pin_session(&h, &original).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
+    for provider in ["armet-ai", "secret-ai", "chutes", "custom"] {
+        for cpu in ["tdx", "sev-snp"] {
+            let h = admission::Harness::new(vec![]);
+            let mut event = common::verified_event("admission-test", "model-a");
+            event.provider_type = Some(provider.to_string());
+            event.verifier_id = format!("private-ai-verifier/{provider}/v1");
+            // An unsupported marker cannot opt in, even with copied complete TDX material.
+            let mut claims = session_profile("near-ai");
+            claims["session_material_version"] = serde_json::json!(format!("{provider}/1"));
+            claims["cpu_type"] = serde_json::json!(cpu);
+            event.provider_claims = Some(claims);
+            if provider == "chutes" {
+                event.channel_bindings = vec![ChannelBinding::E2eePublicKeySha256 {
+                    provider: "chutes".to_string(),
+                    algorithm: "rsa-oaep-sha256".to_string(),
+                    key_id: Some("instance-a".to_string()),
+                    public_key_sha256: "ab".repeat(32),
+                }];
+            }
+            *h.verifier.0.lock().unwrap() = event.clone();
+            let first = h.listed()[0].session_id().to_string();
+            event.evidence = Some(
+                serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new evidence"))
+                    .unwrap(),
+            );
+            *h.verifier.0.lock().unwrap() = event;
+            assert_ne!(h.listed()[0].session_id(), first, "{provider}/{cpu}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn tinfoil_tdx_and_snp_rounds_remain_evidence_sensitive() {
+    for (kind, registers) in [
+        ("tdx-guest", vec!["22".repeat(48); 5]),
+        ("sev-snp-guest", vec!["22".repeat(48)]),
+    ] {
+        let h = admission::Harness::new(vec![admission::Attempt::Response {
+            status: 200,
+            at: 101,
+        }]);
+        let mut event = common::verified_event("admission-test", "model-a");
+        event.provider_type = Some("tinfoil".to_string());
+        event.verifier_id = "private-ai-verifier/tinfoil/v1".to_string();
+        let mut claims = session_profile("tinfoil");
+        // A cached legacy marker must not opt this incomplete projection in.
+        claims["session_material_version"] = serde_json::json!("tinfoil/1");
+        for key in ["code_measurement", "enclave_measurement"] {
+            claims[key] = serde_json::json!({
+                "type": format!("https://tinfoil.sh/predicate/{kind}/v2"),
+                "registers": registers,
+            });
+        }
+        let mut summary = serde_json::json!({
+            "verification_id": "1c7abe93-6501-4db4-bfd0-2cf3e3c05f77",
+            "document": claims,
+        });
+        event.evidence = Some(
+            serde_json::to_value(EvidenceRef::from_bytes(
+                "application/json",
+                &serde_json::to_vec(&summary).unwrap(),
+            ))
+            .unwrap(),
+        );
+        event.provider_claims = Some(claims);
+        *h.verifier.0.lock().unwrap() = event.clone();
+        let original = h.listed()[0].session_id().to_string();
+        assert_eq!(h.listed()[0].session_id(), original);
+        // Two independent rounds can return identical SDK summaries. Only the
+        // explicit round identifier differs; a cached event keeps it unchanged.
+        summary["verification_id"] = serde_json::json!("8abed6c3-aace-4395-aea4-08c8e3f7bcc2");
+        event.evidence = Some(
+            serde_json::to_value(EvidenceRef::from_bytes(
+                "application/json",
+                &serde_json::to_vec(&summary).unwrap(),
+            ))
+            .unwrap(),
+        );
+        *h.verifier.0.lock().unwrap() = event;
+        let replacement = h.listed()[0].session_id().to_string();
+        assert_ne!(replacement, original, "{kind}: new evidence must rotate");
+        assert!(h
+            .service
+            .forward_chat_completion_request(admission::request(vec![original]))
+            .await
+            .is_err());
+        assert!(h.backend.events.lock().unwrap().is_empty());
+        let response = h
+            .service
+            .forward_chat_completion_request(admission::request(vec![replacement.clone()]))
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt_event(&response.receipt, "upstream.verified")["session_id"],
+            replacement
+        );
+    }
+}
+
+#[tokio::test]
+async fn privatemode_manifest_observation_time_is_material() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    event.provider_type = Some("privatemode".to_string());
+    event.verifier_id = "privatemode-proxy/co-deployed-contrast/v1".to_string();
+    event.provider_claims = Some(session_profile("privatemode"));
+    event.channel_bindings = vec![ChannelBinding::ProxyImageSha256 {
+        provider: "privatemode".to_string(),
+        proxy_image_digest: sha256_hex(b"image"),
+        credential_sha256: "ab".repeat(32),
+    }];
+    *h.verifier.0.lock().unwrap() = event.clone();
+    let first = h.listed()[0].session_id().to_string();
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"refreshed evidence")).unwrap(),
+    );
+    *h.verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(h.listed()[0].session_id(), first);
+    event.provider_claims.as_mut().unwrap()["manifest_observed_at"] =
+        serde_json::json!("2026-10-16T12:01:00Z");
+    *h.verifier.0.lock().unwrap() = event;
+    assert_ne!(h.listed()[0].session_id(), first);
+}
+
+fn admission_http(service: AciService, provider: &str) -> Harness {
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": provider, "base_url": "https://upstream.test",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[tokio::test]
+async fn tls_group_pins_keep_all_alternatives_and_reject_legacy_singletons() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".into());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
+    event.provider_claims = Some(session_profile("near-ai"));
+    let a = event.channel_bindings[0].clone();
+    let b = ChannelBinding::TlsSpkiSha256 {
+        origin: "https://upstream.test".into(),
+        spki_sha256: "22".repeat(32),
+    };
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "near-ai");
+    let singleton = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    event.channel_bindings = vec![b.clone(), a.clone(), b.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["channel_binding"].as_array().unwrap().len(), 2);
+    let group = listed[0]["session_id"].as_str().unwrap().to_string();
+    assert_ne!(group, singleton);
+    event.channel_bindings = vec![a.clone(), b.clone()];
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"fresh round")).unwrap());
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], group);
+    assert_eq!(
+        pin_session(&h, &singleton).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert!(backend.events.lock().unwrap().is_empty());
+    for key in ["11", "22"] {
+        *backend.tls_key.lock().unwrap() = Some(key.repeat(32));
+        let response = pin_session(&h, &group).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(cited_session(&h, &response), group);
+        assert_eq!(
+            backend
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .channel_bindings,
+            vec![a.clone(), b.clone()]
+        );
+    }
+    // Removing a member restores the original singleton material. A group ID
+    // cannot authorize the new smaller channel, even though it shares a key.
+    event.channel_bindings = vec![a];
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], singleton);
+    assert_eq!(
+        pin_session(&h, &group).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn chutes_groups_pin_instances_cite_the_served_instance_and_survive_sibling_churn() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("chutes".into());
+    event.verifier_id = "private-ai-verifier/chutes/v1".into();
+    let own = session_profile("chutes");
+    let mut fleet = serde_json::json!({});
+    for key in [
+        "session_material_version",
+        "trust_boundary",
+        "evidence_scope",
+        "chute_id",
+        "canonical_model_id",
+    ] {
+        fleet[key] = own[key].clone();
+    }
+    for (map, key) in [
+        ("instance_tdx_reports", "tdx_report"),
+        ("instance_tdx_report_sha256", "tdx_report_sha256"),
+        ("instance_tcb_statuses", "tcb_status"),
+        ("instance_measurements", "measurement"),
+        ("instance_advisory_ids", "advisory_ids"),
+    ] {
+        fleet[map] = serde_json::json!({});
+        for id in ["instance-a", "instance-b", "instance-c"] {
+            fleet[map][id] = own[key].clone();
+        }
+    }
+    fleet["instance_gpu"] = serde_json::json!({});
+    for id in ["instance-a", "instance-b", "instance-c"] {
+        fleet["instance_gpu"][id] = serde_json::json!({});
+        for key in [
+            "gpu_verified",
+            "gpu_arch",
+            "gpu_evidence_present",
+            "gpu_evidence_nonce_matched",
+        ] {
+            fleet["instance_gpu"][id][key] = own[key].clone();
+        }
+    }
+    event.provider_claims = Some(fleet);
+    let binding = |id: &str, byte: &str| ChannelBinding::E2eePublicKeySha256 {
+        provider: "chutes".into(),
+        algorithm: "rsa-oaep-sha256".into(),
+        key_id: Some(id.into()),
+        public_key_sha256: byte.repeat(32),
+    };
+    let a = binding("instance-a", "aa");
+    event.channel_bindings = vec![a.clone(), binding("instance-b", "bb"), a.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "chutes");
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 2);
+    let id = |name: &str| {
+        listed
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == name)
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let a_id = id("instance-a");
+    *backend.instance.lock().unwrap() = Some("instance-a".into());
+    let response = pin_session(&h, &a_id).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), a_id);
+    assert_eq!(
+        backend.events.lock().unwrap()[0].channel_bindings,
+        vec![a.clone()]
+    );
+    // Without a pin, citation follows the actual selected sibling, not order.
+    *backend.instance.lock().unwrap() = Some("instance-b".into());
+    let response = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), id("instance-b"));
+    event.channel_bindings = vec![a.clone(), binding("instance-c", "cc")];
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new fleet round")).unwrap(),
+    );
+    *verifier.0.lock().unwrap() = event.clone();
+    let after = listed_sessions(&h, "").await;
+    assert_eq!(
+        after
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == "instance-a")
+            .unwrap()["session_id"],
+        a_id
+    );
+    event.channel_bindings.push(binding("instance-a", "dd"));
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(
+        pin_session(&h, &a_id).await.status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    let a = event.channel_bindings[0].clone();
+    for extra in [
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://other.test".into(),
+            spki_sha256: "22".repeat(32),
+        },
+        ChannelBinding::E2eePublicKeySha256 {
+            provider: "other".into(),
+            algorithm: "x25519".into(),
+            key_id: None,
+            public_key_sha256: "22".repeat(32),
+        },
+    ] {
+        event.channel_bindings = vec![a.clone(), extra];
+        *h.verifier.0.lock().unwrap() = event.clone();
+        assert!(h
+            .service
+            .forward_chat_completion_request(admission::request(vec![]))
+            .await
+            .is_err());
+        assert!(h.backend.events.lock().unwrap().is_empty());
+    }
 }

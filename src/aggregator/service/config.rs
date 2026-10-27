@@ -1,6 +1,9 @@
 use super::ServiceError;
 use crate::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 
+/// Default validity period for newly sealed attested sessions.
+pub const DEFAULT_ATTESTED_SESSION_TTL_SECONDS: u64 = 3600;
+
 /// Default keyset lifetime: launch time + 30 days (§3.4 bounded lifetime).
 /// The launcher computes `keyset_not_after` from this unless configured.
 pub const DEFAULT_KEYSET_NOT_AFTER_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -49,8 +52,9 @@ pub struct AciServiceConfig {
     /// Optional policy-interpreted keyset `subject` (§3.1).
     pub subject: Option<String>,
     pub service_capabilities: ServiceCapabilities,
-    /// How long receipts stay queryable in the in-memory store. Also the
-    /// attested-session validity period and per-citation retention extension.
+    /// Validity period for newly sealed attested sessions.
+    pub attested_session_ttl_seconds: u64,
+    /// How long receipts stay queryable in the in-memory store.
     pub receipt_ttl_seconds: u64,
     pub allow_test_keys: bool,
     /// Overrides the TLS-SPKI digests reported by the key provider.
@@ -73,6 +77,7 @@ impl AciServiceConfig {
             keyset_not_after: 2_000_000_000,
             subject: None,
             service_capabilities: ServiceCapabilities::default(),
+            attested_session_ttl_seconds: DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
             receipt_ttl_seconds: 3600,
             allow_test_keys: true,
             tls_public_keys: None,

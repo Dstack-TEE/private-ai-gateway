@@ -34,6 +34,7 @@ pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 
 mod claims;
+pub(crate) use claims::reviewed_session_material;
 mod clock;
 mod config;
 mod e2ee;
@@ -50,7 +51,8 @@ mod wire;
 
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
-    validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    validate_source_provenance, AciServiceConfig, ReceiptOwner,
+    DEFAULT_ATTESTED_SESSION_TTL_SECONDS, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
@@ -132,6 +134,14 @@ impl AciService {
             return Err(ServiceError::TestKeysInProduction);
         }
         validate_source_provenance(&config.source_provenance)?;
+        if config.attested_session_ttl_seconds == 0
+            || clock
+                .now_secs()
+                .checked_add(config.attested_session_ttl_seconds)
+                .is_none()
+        {
+            return Err(ServiceError::InvalidAttestedSessionTtl);
+        }
 
         let tls_public_keys = config
             .tls_public_keys

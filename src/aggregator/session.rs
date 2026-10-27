@@ -12,7 +12,8 @@
 //! The id is not inside the document; the signed receipt commits to it, so a
 //! relying party recomputes the id from the fetched document to prove the
 //! record is exactly what the receipt cited. Sessions are never updated in
-//! place — re-verification produces a new document, period, and id.
+//! place. Re-verification can reuse an unexpired session with equivalent
+//! material; changed material or expiry establishes a new document and id.
 
 use std::collections::BTreeMap;
 
@@ -228,7 +229,8 @@ pub struct SessionDocument {
     /// Verified upstream origin, or `null` when the verifier established none.
     pub endpoint: Option<String>,
     pub verifier_id: String,
-    /// When this material was verified — the start of the validity period.
+    /// When this snapshot was established — the start of the validity period,
+    /// not necessarily the evidence collection time.
     pub established_at: u64,
     /// End of the validity period for new forwarding decisions. Retention
     /// (serving the record to relying parties) outlives this (§8).

@@ -3,7 +3,7 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
-use super::forward::{attested_route_eligible, cite_served_session, ReverifyOutcome};
+use super::forward::{attested_route_eligible, ReverifyOutcome, SelectedUpstream};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
@@ -182,7 +182,7 @@ pub(super) struct BufferedCommit {
     pub response: UpstreamResponse,
     /// Resolved where the response arrived, alongside its one metrics count.
     pub response_model: Option<String>,
-    pub recorded_event: UpstreamVerifiedEvent,
+    pub admission: SelectedUpstream,
     pub route_id: String,
     pub path: &'static str,
     pub middleware_forwarded_body: Vec<u8>,
@@ -247,8 +247,8 @@ impl AciService {
         Ok(builder)
     }
 
-    /// Turn one buffered upstream response into a committed result: seal the
-    /// attested session, build the receipt, and report the attempts that
+    /// Turn one buffered upstream response into a committed result: carry the
+    /// admitted session, build the receipt, and report the attempts that
     /// preceded it. Shared by the in-loop commit and the retained-response
     /// commit after the walk.
     fn commit_buffered_response(
@@ -262,7 +262,7 @@ impl AciService {
         let BufferedCommit {
             response,
             response_model,
-            recorded_event,
+            admission,
             route_id,
             path,
             middleware_forwarded_body,
@@ -271,10 +271,12 @@ impl AciService {
         let status = response.status_code;
 
         let receipt_id = generate_receipt_id();
-        let served_at = self.clock.now_secs();
+        let served_at = admission.admitted_at;
         let chat_id = extract_chat_id(&response.body);
-        let sealed = self.record_attested_upstream_session(&recorded_event)?;
-        let recorded = cite_served_session(&sealed, response.served_instance_id.as_deref());
+        let recorded = admission
+            .lease
+            .as_ref()
+            .map(|lease| lease.session_id().to_string());
         let session_id = recorded.clone();
         let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
             receipt_id: &receipt_id,
@@ -286,7 +288,7 @@ impl AciService {
             middleware_forwarded_body: &middleware_forwarded_body,
             selected_route_id: &route_id,
             forwarded_body: &forwarded_body,
-            recorded_event,
+            recorded_event: admission.event,
             recorded,
         })?;
         // The session is keyed on the requested (routed) model; record the
@@ -303,6 +305,7 @@ impl AciService {
                     endpoint_path: endpoint_path.to_string(),
                     request_mode: RequestMode::Buffered,
                     response_model,
+                    session_lease: admission.lease,
                 },
                 upstream_status: status,
                 upstream_body: response.body,
@@ -324,7 +327,7 @@ impl AciService {
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         // §5.3: a direct service satisfies `aci_verified` by construction — the
         // workload the client verified (§9.1) is the one serving (§4.1); pinned
-        // session lists are still refused in `apply_aci_session_constraint`.
+        // session lists are still refused in `admit_upstream`.
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
@@ -471,7 +474,7 @@ impl AciService {
                 // Unconstrained requests still record the verifier outcome.
                 let candidate_required = aci_required;
 
-                let mut recorded_event = match self
+                let recorded_event = match self
                     .recorded_upstream_event(
                         &prepared,
                         candidate_required,
@@ -492,22 +495,25 @@ impl AciService {
                     Err(err) => return Err(err),
                 };
 
-                if let Err(err) = self.apply_aci_session_constraint(
-                    &mut recorded_event,
+                let admission = match self.admit_upstream(
+                    recorded_event,
                     &req.aci_session_ids,
                     &prepared.model_id,
                 ) {
-                    if matches!(
-                        err,
-                        ServiceError::UpstreamVerification(
-                            UpstreamVerificationError::NoEligibleAttestedSession(_)
-                        )
-                    ) {
-                        upgrade_err(&mut aggregated_err, 0, err);
-                        continue;
+                    Ok(admission) => admission,
+                    Err(err) => {
+                        if matches!(
+                            err,
+                            ServiceError::UpstreamVerification(
+                                UpstreamVerificationError::NoEligibleAttestedSession(_)
+                            )
+                        ) {
+                            upgrade_err(&mut aggregated_err, 0, err);
+                            continue;
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
-                }
+                };
 
                 let forwarded_body = prepared.request.body.clone();
 
@@ -515,7 +521,7 @@ impl AciService {
                     let upstream_response = match self
                         .forward_with_binding_reverify(
                             &prepared,
-                            &mut recorded_event,
+                            admission,
                             candidate_required,
                             caller_supplied_upstream_event,
                             &req.aci_session_ids,
@@ -530,7 +536,9 @@ impl AciService {
                         )
                         .await
                     {
-                        ReverifyOutcome::Forwarded(response) => Ok(response),
+                        ReverifyOutcome::Forwarded(response, admission) => {
+                            Ok((response, admission))
+                        }
                         ReverifyOutcome::RefreshFailed(err) => {
                             let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                                 3
@@ -551,7 +559,7 @@ impl AciService {
                             Err(status)
                         }
                     };
-                    let upstream_response = match upstream_response {
+                    let (upstream_response, admission) = match upstream_response {
                         Ok(response) => response,
                         Err(status) => {
                             if let Some(status) = status {
@@ -561,6 +569,8 @@ impl AciService {
                         }
                     };
 
+                    let admission =
+                        (*admission).select(upstream_response.served_instance_id.as_deref())?;
                     let status = upstream_response.status_code;
                     if status != 200 {
                         self.metrics.record_upstream_response(
@@ -623,12 +633,11 @@ impl AciService {
                     // Commit this candidate.
                     let upstream_headers = upstream_response.headers;
                     let receipt_id = generate_receipt_id();
-                    let served_at = self.clock.now_secs();
-                    let sealed = self.record_attested_upstream_session(&recorded_event)?;
-                    let recorded = cite_served_session(
-                        &sealed,
-                        upstream_response.served_instance_id.as_deref(),
-                    );
+                    let served_at = admission.admitted_at;
+                    let recorded = admission
+                        .lease
+                        .as_ref()
+                        .map(|lease| lease.session_id().to_string());
                     let session_id = recorded.clone();
                     let builder =
                         self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
@@ -641,17 +650,22 @@ impl AciService {
                             middleware_forwarded_body: &candidate.body,
                             selected_route_id: &route_id,
                             forwarded_body: &forwarded_body,
-                            recorded_event,
+                            recorded_event: admission.event,
                             recorded,
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
-                        builder,
+                        MiddlewareReceiptDraft {
+                            receipt_id: receipt_id.clone(),
+                            builder,
+                            session_lease: admission.lease,
+                            endpoint_path: endpoint_path.to_string(),
+                            request_mode: RequestMode::Streaming,
+                            response_model: None,
+                        },
                         receipt_journal,
-                        receipt_id.clone(),
-                        endpoint_path.to_string(),
                         self.metrics.clone(),
                         status,
                     );
@@ -674,7 +688,7 @@ impl AciService {
                 let upstream_response = match self
                     .forward_with_binding_reverify(
                         &prepared,
-                        &mut recorded_event,
+                        admission,
                         candidate_required,
                         caller_supplied_upstream_event,
                         &req.aci_session_ids,
@@ -689,7 +703,7 @@ impl AciService {
                     )
                     .await
                 {
-                    ReverifyOutcome::Forwarded(response) => Ok(response),
+                    ReverifyOutcome::Forwarded(response, admission) => Ok((response, admission)),
                     ReverifyOutcome::RefreshFailed(err) => {
                         let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                             3
@@ -710,7 +724,7 @@ impl AciService {
                         Err(status)
                     }
                 };
-                let upstream_response = match upstream_response {
+                let (upstream_response, admission) = match upstream_response {
                     Ok(response) => response,
                     Err(status) => {
                         if let Some(status) = status {
@@ -719,6 +733,9 @@ impl AciService {
                         continue;
                     }
                 };
+
+                let admission =
+                    (*admission).select(upstream_response.served_instance_id.as_deref())?;
 
                 // Counted once, here, where the response arrives — a response that is
                 // held back and committed after the walk must not be counted again
@@ -751,7 +768,7 @@ impl AciService {
                         inputs: Box::new(BufferedCommit {
                             response: upstream_response,
                             response_model,
-                            recorded_event,
+                            admission,
                             route_id: route_id.clone(),
                             path: candidate.path,
                             middleware_forwarded_body: candidate.body.clone(),
@@ -768,7 +785,7 @@ impl AciService {
                     BufferedCommit {
                         response: upstream_response,
                         response_model,
-                        recorded_event,
+                        admission,
                         route_id,
                         path: candidate.path,
                         middleware_forwarded_body: candidate.body.clone(),
@@ -898,7 +915,7 @@ impl AciService {
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), requester);
+        self.store_receipt(receipt.clone(), requester, draft.session_lease.as_ref())?;
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,

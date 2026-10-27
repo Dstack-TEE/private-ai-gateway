@@ -4,7 +4,7 @@
 //!
 //! The only workload anchor is the app-id the verified RTMR3 event log
 //! measures. A report's `source_provenance.image_digest` is self-asserted and
-//! nothing measured corroborates it (§4.1; conformance gaps item 16), so it is
+//! nothing measured corroborates it (§4.1; conformance gaps item 11), so it is
 //! never an anchor here: an app under the same KMS root could claim it.
 
 use std::collections::BTreeSet;

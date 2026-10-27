@@ -10,6 +10,11 @@ pub enum ServiceError {
          allow_test_keys only in tests"
     )]
     TestKeysInProduction,
+    #[error("attested_session_ttl_seconds must be positive and its expiry representable as u64")]
+    InvalidAttestedSessionTtl,
+    /// The invariant detail is available via Debug, never in client-facing Display.
+    #[error("internal service error")]
+    AdmissionInvariant(&'static str),
     #[error(
         "invalid source provenance: repo provenance must include both repo_url and repo_commit; \
          runtime source provenance is loaded from git-launcher or omitted when unknown"

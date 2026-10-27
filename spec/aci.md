@@ -88,8 +88,10 @@ surface**, not its routing policy:
   commercial API), so a client can deliberately choose one. The receipt
   records the serving as unverified (`required: false`, §7.5) and no
   attested session exists (§8).
-- Each successful verification is captured as an immutable, content-addressed
-  **attested session** (§8) that a verifier can fetch and re-check.
+- A successful verification establishes an immutable, content-addressed
+  attested session (§8), or revalidates the verified channel material
+  represented by an unexpired session. The session preserves the evidence used
+  to establish it.
 
 How the aggregator verifies a given upstream (which quote formats, which
 measurements, which provenance) is verifier-specific and out of scope.
@@ -603,6 +605,13 @@ service extracts it from a protected request. Events are flat objects — `type`
 plus type-specific fields — and event order is the array order. The first event
 MUST be `request.received`.
 
+For an aggregator receipt that records forwarding, `served_at` is the time of
+the forwarding decision for the attempt whose upstream response the receipt
+records. The service MUST admit that attempt against its current verification
+state before forwarding. Response completion and receipt publication may occur
+later, including after the cited session expires. For a refusal without
+forwarding, `served_at` is the time the refusal is recorded.
+
 ### 7.4 Event vocabulary
 
 All hashes are computed inside the TEE over bytes the workload actually
@@ -642,20 +651,29 @@ forms:
   this request: `true` when the serving endpoint is TEE-only (§1.2) or the
   request carried the §5.3 constraint, `false` when neither applies — the
   request was served best-effort and the recorded result is informational.
-  When required verification fails, the service refuses to forward with
-  `upstream_verification_failed` (§1.2). When no pinned session can
-  serve, it refuses with `session_not_accepted` (§5.3). Either refusal
-  error carries `X-Receipt-Id` (§5.2) so the refusal receipt can be
-  fetched.
-- A verified event carries `session_id`, the content address of the
-  attested session (§8) holding every verification detail.
-- A failed event carries `reason` instead of a `session_id`, because no
-  session served the request. With `required: false` the response still
-  proceeds, and the receipt shows the inference was served unverified.
+  If required verification fails before dispatch, the service refuses to
+  forward with `upstream_verification_failed` (§1.2). When no pinned session
+  can serve, it refuses with `session_not_accepted` (§5.3). Either refusal
+  error carries `X-Receipt-Id` (§5.2), and its receipt omits
+  `request.forwarded` because nothing was dispatched.
+- A verified event carries `session_id`, the content address of the attested
+  session (§8) admitted for the forwarding attempt recorded by this receipt.
+  The session contains the establishing verification's evidence and claims.
+  The service MUST NOT substitute a session established after that forwarding
+  decision.
+- A failed event carries `reason` instead of a `session_id`, because the
+  response cannot be attributed to a verified session. This can record a
+  refusal before dispatch, best-effort serving with `required: false`, or
+  an unauthenticated response after an admitted request was dispatched.
+  In the last case, `required` still records the effective policy and the
+  receipt MUST include `request.forwarded`. The failed event MUST NOT imply
+  that nothing was forwarded or that an unauthenticated response was verified.
 
-To a generic verifier this event proves only that the attested aggregator
-*asserted* the outcome. Deep audit (§9.2) upgrades it to independently
-checked.
+A verified event is the attested aggregator's assertion that its verification
+policy authorized the forwarding attempt and that it enforced the cited
+session's channel binding. Deep audit (§9.2) independently checks the
+establishing evidence. It does not independently prove a later revalidation or
+reconstruct the verification round that authorized a particular request.
 
 ### 7.6 Access control
 
@@ -669,21 +687,36 @@ unauthenticated requests MAY be publicly retrievable.
 
 ## 8. Attested Sessions
 
-An aggregator forwards prompts to upstream TEE services. Before trusting
-one, it verifies that upstream's attestation (§1.2). An **attested
-session** is the saved proof of one such verification: which upstream,
-what was checked, the evidence itself, and the period it covers. Receipts
-cite the session by id, so every request can point at the proof without
-carrying it. Only a verified TEE upstream yields a session: serving
-through an upstream with no TEE (§1.2) appears on the receipt as
-unverified, with no session to cite (§7.5).
+An aggregator verifies an upstream's attestation before trusting its channel
+(§1.2). An attested session is an immutable snapshot of the verification used
+to establish that channel: the upstream, verified identity and channel
+material, claims, evidence, and validity period. Receipts cite this snapshot
+by id. Only a verified TEE upstream yields a session; serving through an
+upstream with no TEE appears as unverified, with no session to cite (§7.5).
 
-Sessions are per channel and per validity period, not per model or per
-request: a router-style upstream serving many models behind one TEE yields
-one session, and the model served is recorded on each receipt.
-Re-verification, after `expires_at` or whenever the verified material
-changes, produces a new session document with a new period and a new
-id. Sessions are never updated in place.
+Sessions are per verified channel and validity period, rather than per
+request. A router serving several models through the same verified channel may
+share one session; the receipt records the model served.
+
+A service MAY reuse an unexpired session when a successful verification
+establishes equivalent channel material. Equivalence MUST preserve the
+verified workload identity, channel bindings, security-relevant measurements
+and attributes, and recorded claims. Differences confined to
+verification-round freshness or evidence encoding do not by themselves require
+a new session. A verifier whose projection does not establish this equivalence
+MUST treat changed evidence as changed material.
+
+Reuse MUST NOT modify the session document or extend its `expires_at`. Changed
+material cannot be served under the old session. After expiry, a subsequent
+admission requires a new session. A temporary verification failure does not
+revoke an immutable session; successful recovery with equivalent material may
+reuse it while unexpired.
+
+Session validity, verifier-cache freshness, and evidence age are distinct.
+`established_at` records session creation, not necessarily evidence
+collection. Creating a session from a currently usable cached verification
+does not make its evidence newly collected. Every forwarding decision remains
+subject to the service's current verification and channel-enforcement rules.
 
 A session is immutable and content-addressed:
 
@@ -701,6 +734,11 @@ as the service still serves any receipt citing it (§7.1), and SHOULD
 remain available longer for receipts clients have archived. `expires_at`
 ends the validity period for new forwarding decisions, not the retention
 obligation.
+
+An admitted request MUST keep its cited session available while its response
+or receipt is pending. Publishing the receipt MUST retain that session through
+the receipt's retention deadline. Keeping a session available does not extend
+its validity for new forwarding decisions.
 
 ### 8.1 Endpoints
 
@@ -745,10 +783,12 @@ full record to verify (§9.2).
 - `identity` records the verified identity keys of the upstream (for
   example a response-signing address), when the verifier established
   one. Its fields are verifier-specific.
-- `evidence.data` is a data URI preserving the exact bytes the verifier
-  consumed (a multipart bundle when there were several inputs).
-  `evidence.digest` is the SHA-256 of those decoded bytes. A verifier MUST
-  reject a record whose `data` does not hash to `digest`.
+- `evidence.data` is a data URI preserving the evidence bytes retained for the
+  establishing verification, including a bundle when several inputs are
+  required. `evidence.digest` is the SHA-256 of those decoded bytes. A
+  verifier MUST reject a record whose data does not hash to its digest. Reuse
+  of a session does not replace this evidence with evidence from later
+  verification rounds.
 
 `channel_binding` states what the aggregator enforced when it connected to
 the upstream. Defined shapes:
@@ -757,6 +797,12 @@ the upstream. Defined shapes:
 { "type": "tls_spki_sha256",        "origin": "<https-origin>", "spki_sha256": "<hex>" }
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
+
+A session may represent a logical TLS channel with several accepted keys. Its
+`channel_binding` array then records the complete verified set of alternatives
+enforced for that channel; a connection uses one of those alternatives.
+Changing the set changes the session material. Distinct independently
+selectable upstream instances remain distinct sessions.
 
 A published extension may define another binding type; see Appendix B.
 
@@ -867,8 +913,13 @@ checks are the same:
 3. Shallow audit: the channel bindings and typed claims meet your policy
    — for example, `tee_attested` is `asserted` with source
    `hardware_proven`.
-4. Deep audit: re-verify the evidence itself under your policy for that
-   provider.
+4. Deep audit: re-verify the establishing evidence under your policy for that
+   provider, including its support for the recorded identity, bindings and
+   claims. Evaluate freshness using the evidence and the provider's verification
+   rules; session creation time alone is not evidence of collection time. Later
+   revalidation is the aggregator's assertion (§7.5). A policy requiring
+   independently verifiable evidence from each authorizing round MUST reject a
+   session snapshot as insufficient for that requirement.
 
 Pin the sessions that pass (`aci_session_ids`, §5.3). The service then
 refuses to serve you through anything else, and the receipt's cited id
@@ -910,8 +961,10 @@ Behind an aggregator, additionally:
    `session_id`. A client that requires verified serving rejects
    `"failed"` and `required: false`.
 6. The cited session verifies (§9.2), ideally one you verified before
-   sending. The receipt's `served_at` falls within the session's validity
-   window. If you pinned sessions (§5.3), the cited id is in your list.
+   sending. The receipt's `served_at` MUST satisfy `established_at <=
+   served_at < expires_at`. Response completion need not fall within that
+   window.
+   If you pinned sessions (§5.3), the cited id is in your list.
    `served_at` is self-asserted (§11), so this catches an honest service
    citing an expired session. Against a dishonest one, the fail-closed
    rule (§1.2) rests on the attested code.

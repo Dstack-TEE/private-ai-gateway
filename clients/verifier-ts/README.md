@@ -62,6 +62,8 @@ evidence) exactly as observed.
   not encrypt or decrypt content fields. Callers can implement that
   field-level wire contract or use a v2-capable client.
 
+A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
+
 ## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification
@@ -75,7 +77,7 @@ evidence) exactly as observed.
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
   stops there; neither in-tree verifier appraises the evidence itself
-  (conformance gaps item 17).
+  (conformance gaps item 12).
 - **Ed25519 receipts only.** A receipt keyed to any other algorithm is
   reported as a failed signature check, not verified.
 

@@ -37,7 +37,7 @@ use private_ai_gateway::aci::upstream::{
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
-    DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    DEFAULT_ATTESTED_SESSION_TTL_SECONDS, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
@@ -115,6 +115,8 @@ struct GatewayConfigFile {
     /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
     /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
     keyset_not_after_seconds: Option<u64>,
+    /// Validity period for newly sealed sessions, independent of receipt retention.
+    attested_session_ttl_seconds: u64,
     /// Optional policy-interpreted keyset `subject` (§3.1) — e.g. a dstack
     /// app-id URI. Never trusted by generic verifiers.
     subject: Option<String>,
@@ -156,6 +158,7 @@ impl Default for GatewayConfigFile {
             admin_token: None,
             admin_token_sha256: None,
             keyset_not_after_seconds: None,
+            attested_session_ttl_seconds: DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
             subject: None,
             tls: GatewayTlsConfig::default(),
             direct_serving: false,
@@ -187,6 +190,9 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
     let config: GatewayConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
+    if config.attested_session_ttl_seconds == 0 {
+        return Err("gateway attested_session_ttl_seconds must be greater than zero".to_string());
+    }
     if config.upstream_verification_concurrency == 0 {
         return Err(
             "gateway upstream_verification_concurrency must be greater than zero".to_string(),
@@ -587,6 +593,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "aggregator".to_string()
             },
         },
+        attested_session_ttl_seconds: gateway_config.attested_session_ttl_seconds,
         receipt_ttl_seconds: 3600,
         allow_test_keys: false,
         tls_public_keys,
@@ -837,6 +844,7 @@ mod tests {
         secret_file_non_empty, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
         validate_pull_token_separation, validate_sha256_secret_policy,
+        DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -1062,6 +1070,31 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         std::fs::write(&path, r#"{"upstream_verification_concurrency":0}"#).unwrap();
         let err = load_gateway_config(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("upstream_verification_concurrency must be greater than zero"));
+    }
+
+    #[test]
+    fn gateway_config_defaults_and_validates_session_ttl() {
+        for (body, expected) in [
+            ("{}", DEFAULT_ATTESTED_SESSION_TTL_SECONDS),
+            (r#"{"attested_session_ttl_seconds":17}"#, 17),
+        ] {
+            let (_dir, path) = temp_path("session-ttl");
+            std::fs::write(&path, body).unwrap();
+            let config = load_gateway_config(path.to_str().unwrap()).unwrap();
+            assert_eq!(config.attested_session_ttl_seconds, expected);
+        }
+        for value in ["0", "-1", "1.5", "18446744073709551616", "null", "\"3600\""] {
+            let (_dir, path) = temp_path("invalid-session-ttl");
+            std::fs::write(
+                &path,
+                format!(r#"{{"attested_session_ttl_seconds":{value}}}"#),
+            )
+            .unwrap();
+            assert!(
+                load_gateway_config(path.to_str().unwrap()).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

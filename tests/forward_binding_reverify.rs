@@ -7,6 +7,7 @@
 //! mismatching does: 1 initial verify + 2 reverify rounds, each round
 //! invalidating-then-verifying, then a terminal invalidate.
 
+use common::admission;
 mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -70,8 +71,8 @@ impl RecordingVerifier {
     }
 }
 
-/// Returns one binding for the first two verifications (seed + pinned initial
-/// attempt), then a rotated binding for the refresh after a mismatch.
+/// Returns a two-key TLS group for seed + pinned initial admission, then
+/// replaces one member on refresh. Sharing a key must not authorize the new group.
 #[derive(Default)]
 struct RotatingVerifier {
     verify_calls: AtomicUsize,
@@ -81,13 +82,19 @@ struct RotatingVerifier {
 impl UpstreamVerifier for RotatingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let call = self.verify_calls.fetch_add(1, Ordering::SeqCst);
-        let byte = if call < 2 { "aa" } else { "bb" };
+        let byte = if call < 2 { "bb" } else { "cc" };
         UpstreamVerifiedEvent {
             verifier_id: "rotating-verifier/v1".to_string(),
-            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
-                origin: UPSTREAM_ORIGIN.to_string(),
-                spki_sha256: byte.repeat(32),
-            }],
+            channel_bindings: vec![
+                ChannelBinding::TlsSpkiSha256 {
+                    origin: UPSTREAM_ORIGIN.to_string(),
+                    spki_sha256: "aa".repeat(32),
+                },
+                ChannelBinding::TlsSpkiSha256 {
+                    origin: UPSTREAM_ORIGIN.to_string(),
+                    spki_sha256: byte.repeat(32),
+                },
+            ],
             ..event_from_request(&request, VerificationResult::Verified)
         }
     }
@@ -99,18 +106,21 @@ impl UpstreamVerifier for RotatingVerifier {
 /// `usize::MAX` means "always mismatch". The same counter governs the buffered
 /// and streaming verified-forward entry points.
 struct MismatchingBackend {
+    calls: AtomicUsize,
     mismatches_remaining: AtomicUsize,
 }
 
 impl MismatchingBackend {
     fn always_mismatch() -> Self {
         Self {
+            calls: AtomicUsize::new(0),
             mismatches_remaining: AtomicUsize::new(usize::MAX),
         }
     }
 
     fn mismatch_times(n: usize) -> Self {
         Self {
+            calls: AtomicUsize::new(0),
             mismatches_remaining: AtomicUsize::new(n),
         }
     }
@@ -195,6 +205,7 @@ impl UpstreamBackend for MismatchingBackend {
         _req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.take_mismatch() {
             return Err(UpstreamError::ChannelBindingMismatch(
                 "mock channel binding mismatch".to_string(),
@@ -208,6 +219,7 @@ impl UpstreamBackend for MismatchingBackend {
         _req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         if self.take_mismatch() {
             return Err(UpstreamError::ChannelBindingMismatch(
                 "mock channel binding mismatch".to_string(),
@@ -382,7 +394,7 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
     );
 }
 #[tokio::test]
-async fn reverify_cannot_escape_the_requested_aci_session() {
+async fn reverify_cannot_escape_the_requested_aci_group() {
     let backend = Arc::new(MismatchingBackend::mismatch_times(0));
     let verifier = Arc::new(RotatingVerifier::default());
     let service = Arc::new(
@@ -427,8 +439,139 @@ async fn reverify_cannot_escape_the_requested_aci_session() {
         ServiceError::UpstreamVerification(UpstreamVerificationError::NoEligibleAttestedSession(_))
     ));
     assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        2,
+        "seed and initial pinned attempt only; rotated retry never forwards"
+    );
+    assert_eq!(
         verifier.verify_calls.load(Ordering::SeqCst),
         3,
         "seed + pinned initial verify + one refresh"
+    );
+}
+
+struct TimedRotatingVerifier {
+    calls: AtomicUsize,
+    clock: Arc<admission::TestClock>,
+}
+#[async_trait]
+impl UpstreamVerifier for TimedRotatingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.clock.set(if call == 0 { 100 } else { 120 });
+        UpstreamVerifiedEvent {
+            channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
+                origin: UPSTREAM_ORIGIN.to_string(),
+                spki_sha256: if call == 0 { "aa" } else { "bb" }.repeat(32),
+            }],
+            ..event_from_request(&request, VerificationResult::Verified)
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_retry_cites_its_own_admission() {
+    use std::sync::atomic::AtomicU64;
+    let backend = Arc::new(MismatchingBackend::mismatch_times(1));
+    let clock = Arc::new(admission::TestClock(AtomicU64::new(100)));
+    let verifier = Arc::new(TimedRotatingVerifier {
+        calls: AtomicUsize::new(0),
+        clock: clock.clone(),
+    });
+    let mut config = AciServiceConfig::for_test();
+    config.attested_session_ttl_seconds = 10;
+    config.receipt_ttl_seconds = 5;
+    let service = AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        backend.clone(),
+        verifier,
+        Arc::new(InMemoryReceiptStore::default()),
+        config,
+        clock,
+    )
+    .unwrap();
+    let result = service
+        .forward_chat_completion_request(forward_request(None))
+        .await
+        .unwrap();
+    let document = result.receipt.document_json().unwrap();
+    assert_eq!(document["served_at"], 120);
+    let id = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap();
+    let session = service.get_attested_session(id).unwrap();
+    assert_eq!(session.document().established_at, 120);
+    assert_eq!(
+        session.document().channel_binding,
+        vec![ChannelBinding::TlsSpkiSha256 {
+            origin: UPSTREAM_ORIGIN.to_string(),
+            spki_sha256: "bb".repeat(32)
+        }]
+    );
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn reverify_accepts_a_replacement_group_only_with_its_explicit_id() {
+    let backend = Arc::new(MismatchingBackend::mismatch_times(0));
+    let verifier = Arc::new(RotatingVerifier::default());
+    let service = AciService::new_with_upstream_verifier(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        backend.clone(),
+        verifier.clone(),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let cited = |receipt: &private_ai_gateway::aci::receipt::SignedReceipt| {
+        receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "upstream.verified")
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let original = cited(
+        &service
+            .forward_chat_completion_request(forward_request(None))
+            .await
+            .unwrap()
+            .receipt,
+    );
+    verifier.verify_calls.store(2, Ordering::SeqCst);
+    let replacement = cited(
+        &service
+            .forward_chat_completion_request(forward_request(None))
+            .await
+            .unwrap()
+            .receipt,
+    );
+    assert_ne!(original, replacement);
+    verifier.verify_calls.store(1, Ordering::SeqCst);
+    backend.set_mismatches(1);
+    let mut request = forward_request(None);
+    request.aci_session_ids = vec![original, replacement.clone()];
+    let result = service
+        .forward_chat_completion_request(request)
+        .await
+        .unwrap();
+    assert_eq!(cited(&result.receipt), replacement);
+    let document = service.get_attested_session(&replacement).unwrap();
+    assert_eq!(document.document().channel_binding.len(), 2);
+    assert_eq!(
+        backend.calls.load(Ordering::SeqCst),
+        4,
+        "two seeds plus both admitted retry attempts"
     );
 }

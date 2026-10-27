@@ -93,7 +93,7 @@ impl AciServiceVerifierPolicy {
     /// free-form subject is otherwise the workload's own claim (§3.1:
     /// "Generic verifiers MUST NOT trust it by itself") — or the report's
     /// source-provenance image digest (uncorroborated; conformance-gaps
-    /// item 16).
+    /// item 11).
     pub(super) fn accepts_measured(
         &self,
         keyset: &WorkloadKeyset,
@@ -229,9 +229,10 @@ impl From<QuoteStepError> for AciServiceVerificationError {
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
     pub(super) expires_at: Instant,
-    pub(super) not_after: u64,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
+    pub(super) identity: aci_verify::report::ReportBinding,
+    pub(super) session_material: Option<Value>,
 }
 
 impl CachedAciServiceVerification {
@@ -240,7 +241,8 @@ impl CachedAciServiceVerification {
         let wall = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time is before UNIX_EPOCH");
-        let remaining = ttl.min(Duration::from_secs(self.not_after).checked_sub(wall)?);
+        let remaining =
+            ttl.min(Duration::from_secs(self.identity.keyset.not_after).checked_sub(wall)?);
         (!remaining.is_zero()).then_some(remaining)
     }
 
@@ -251,6 +253,9 @@ impl CachedAciServiceVerification {
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
+            provider_type: Some("aci-service".to_string()),
+            aci_identity: Some(self.identity.clone()),
+            provider_claims: self.session_material.clone(),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
@@ -329,6 +334,8 @@ pub struct AciServiceUpstreamVerifier {
 }
 
 impl AciServiceUpstreamVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "aci-service/v2";
+
     pub fn new(
         report_base_url: impl Into<String>,
         pccs_url: impl Into<String>,
@@ -374,7 +381,7 @@ impl AciServiceUpstreamVerifier {
             verify_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             appraisal: None,
-            verifier_id: "aci-service/v2".to_string(),
+            verifier_id: Self::VERIFIER_ID.to_string(),
         })
     }
 
@@ -495,15 +502,12 @@ impl AciServiceUpstreamVerifier {
         if let Some(problem) = appraisal.first_problem() {
             return Err(problem.into());
         }
-        let keyset = appraisal
+        let identity = appraisal
             .identity
-            .as_ref()
-            .expect("an accepted appraisal establishes the keyset")
-            .keyset
-            .clone();
+            .expect("an accepted appraisal establishes the keyset");
         // Recency of a cached verification is bounded by the cache TTL and the
         // keyset's own expiry — the report carries no other freshness metadata.
-        if keyset.is_expired_at(current_unix_secs()) {
+        if identity.keyset.is_expired_at(current_unix_secs()) {
             return Err(AciReportValidationError::KeysetExpired.into());
         }
         let evidence = Some(raw_evidence(body, "application/json", None));
@@ -511,9 +515,10 @@ impl AciServiceUpstreamVerifier {
 
         Ok(CachedAciServiceVerification {
             expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
-            not_after: keyset.not_after,
             evidence,
             channel_bindings,
+            identity,
+            session_material: appraisal.session_material,
         })
     }
 
@@ -624,3 +629,6 @@ pub(super) fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> 
         dcap_qvl::quote::Report::SgxEnclave(_) => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

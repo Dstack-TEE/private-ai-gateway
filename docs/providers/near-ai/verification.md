@@ -48,7 +48,7 @@ These tampered inputs were rejected live against `cloud-api.near.ai`:
 | --- | --- |
 | `tee_attested` | Asserted as hardware-proven from the verified TDX quote and bound TLS channel. |
 | `tcb_up_to_date` | Hardware-proven from the dstack verifier's TCB status: asserted for `UpToDate`, refuted for any other reported status, unknown when absent. |
-| `gpu_attested` | Unknown, because the bridge does not emit GPU verdict fields in `provider_claims`. |
+| `gpu_attested` | Unknown. Supplemental GPU-check presence and acceptance are preserved in `claims.extra.gateway_gpu_check`, without an authenticated device-identity or CPU-binding claim. |
 | `os_known_good` | Unknown. |
 | `serving_software_known_good` | Unknown. |
 | `model_weights_provenance` | Unknown. |
@@ -60,7 +60,7 @@ These tampered inputs were rejected live against `cloud-api.near.ai`:
 - Nothing in the emitted session identifies the downstream model CVM that served a response.
 - A non-`UpToDate` TCB status can remain `is_valid` and is represented as a refuted typed claim, not a bridge failure.
 - Missing compose material is not a failure. A compose that does not match a present hash is rejected, but the adapter does not require both values.
-- GPU verification can run when the gateway report includes a payload, but the resulting GPU fields are not preserved in the emitted provider claims.
+- Supplemental GPU verification can run when the gateway report includes a payload. The bridge preserves its presence and acceptance in `gateway_gpu_check`, and reviewed material includes those outcomes. The NVIDIA path decodes JWTs without signature verification and does not bind device identity to the serving CPU, so it cannot establish authenticated GPU identity or continuity.
 
 ## Tests and reproduction
 
