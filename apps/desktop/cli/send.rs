@@ -232,6 +232,9 @@ fn chat_request(
         "messages": [{ "role": "user", "content": prompt }],
         "stream": stream,
     });
+    if let Some(max_tokens) = args.max_tokens {
+        body["max_tokens"] = json!(max_tokens);
+    }
     if !args.allow_unverified || !args.sessions.is_empty() {
         let mut provider = serde_json::Map::new();
         if !args.allow_unverified {
@@ -382,6 +385,36 @@ fn append_delta(
 mod tests {
     use super::{response_chat_id, SseTextCollector};
 
+    #[test]
+    fn chat_request_includes_max_tokens_only_when_set() {
+        use crate::args::Command;
+        use clap::{FromArgMatches, Subcommand};
+
+        let matches = Command::augment_subcommands(clap::Command::new("pap"))
+            .try_get_matches_from(["pap", "send", "https://example.com"])
+            .unwrap();
+        let Command::Send(args) = Command::from_arg_matches(&matches).unwrap() else {
+            panic!("expected send command");
+        };
+        let original = br#"{"model":"demo-model","messages":[{"role":"user","content":"hi"}],"stream":true,"provider":{"aci_verified":true}}"#;
+        assert_eq!(
+            super::chat_request(&args, "demo-model", "hi", true).unwrap(),
+            original
+        );
+
+        let matches = Command::augment_subcommands(clap::Command::new("pap"))
+            .try_get_matches_from(["pap", "send", "https://example.com", "--max-tokens", "8"])
+            .unwrap();
+        let Command::Send(args) = Command::from_arg_matches(&matches).unwrap() else {
+            panic!("expected send command");
+        };
+        let body = super::chat_request(&args, "demo-model", "hi", true).unwrap();
+        let mut body: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.remove("max_tokens"), Some(serde_json::json!(8)));
+        assert_eq!(serde_json::to_vec(&body).unwrap(), original);
+    }
+
     async fn send_receipt_fixture(
         refreshed_report: crate::aci::types::AttestationReport,
         digest: String,
@@ -465,6 +498,7 @@ mod tests {
             policy: Default::default(),
             model: Some("demo-model".into()),
             prompt: Some("hi".into()),
+            max_tokens: None,
             api_key_stdin: false,
             api_key: None,
             no_stream: true,

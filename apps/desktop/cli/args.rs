@@ -240,6 +240,13 @@ pub struct SendArgs {
     )]
     pub prompt: Option<String>,
     #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Maximum number of tokens to generate; must be greater than zero"
+    )]
+    pub max_tokens: Option<u64>,
+    #[arg(
         long = "api-key-stdin",
         help = "Read the bearer API key from stdin; otherwise it is read from the \
                 ACI_API_KEY environment variable"
@@ -490,6 +497,21 @@ mod tests {
             args.curl_args,
             ["--json", "{}", "--data-binary", "@request.json"].map(OsString::from)
         );
+    }
+
+    #[test]
+    fn send_max_tokens_requires_a_positive_integer() {
+        for value in ["0", "-1", "1.5", "many"] {
+            let error = Command::augment_subcommands(clap::Command::new("pap"))
+                .try_get_matches_from([
+                    "pap",
+                    "send",
+                    "https://example.com",
+                    &format!("--max-tokens={value}"),
+                ])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
     }
 
     #[test]

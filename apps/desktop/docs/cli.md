@@ -77,6 +77,10 @@ from an argument that other local processes can see. The old `--api-key KEY`
 option is hidden, still works with a warning, and will be removed in 0.3
 (see [Removal in 0.3](configuration.md#removal-in-03)).
 
+Use `pap send <url> --max-tokens <N>` to limit the generated response to a
+positive number of tokens. This sends `max_tokens: N` in the chat completion
+body; when omitted, no token limit is sent.
+
 ### Verification Policy
 
 `verify`, `audit`, `sessions`, `send`, `curl` and `serve` accept the same
