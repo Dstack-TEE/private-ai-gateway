@@ -313,16 +313,19 @@ function localApi(token, pathname, body) {
 // but not a different reply.
 const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'“”‘’.,;:!?]+$/g, "");
 
-function agentUsage(agent) {
+// Every usage record matching the filter, newest first.
+function usageRecords(...filter) {
   const records = [];
   let cursor;
   do {
-    const page = papJson("usage", "list", "--agent", agent.id, "--limit", "100", ...(cursor ? ["--cursor", cursor] : []));
+    const page = papJson("usage", "list", ...filter, "--limit", "100", ...(cursor ? ["--cursor", cursor] : []));
     records.push(...page.items);
     cursor = page.nextCursor;
   } while (cursor);
   return records;
 }
+
+const agentUsage = (agent) => usageRecords("--agent", agent.id);
 
 function assertReply(agent) {
   const [command, ...args] = agent.prompt;
@@ -510,7 +513,6 @@ test("fails closed while the network is down", async (t) => {
     connected.set(agent.id, { original, files: readFiles(agent), token: readToken(agent) });
   }
   const clientToken = pap(["token", "show", "--yes"]).trim();
-  const since = nowSeconds();
 
   await setNetwork("down");
   pap(["profiles", "use", "redpill-alt", "--yes"]);
@@ -518,6 +520,11 @@ test("fails closed while the network is down", async (t) => {
     const current = protection();
     return !["protected", "verifying"].includes(current) && current;
   });
+  // Only requests recorded once verification has failed count. The switch
+  // starts a new verifier generation, and the backend discards events from the
+  // old one, so a request still in flight from before the outage is never
+  // recorded after this point.
+  const before = new Set(usageRecords().map(({ id }) => id));
 
   await check(t, "outage phase", () => assert.ok(OUTAGE_PHASES.includes(phase), `phase ${phase}`));
   await check(t, "configs kept", () => {
@@ -538,9 +545,10 @@ test("fails closed while the network is down", async (t) => {
     assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" });
   });
   await check(t, "nothing forwarded", () => {
-    const { items } = papJson("usage", "list", "--since", String(since), "--limit", "100");
-    const forwarded = items.filter(({ leftDevice }) => leftDevice);
-    assert.equal(forwarded.length, 0, `forwarded: ${forwarded.map(({ path: p }) => p).join(", ")}`);
+    const forwarded = usageRecords().filter(({ id, leftDevice }) => leftDevice && !before.has(id));
+    const describe = ({ agent, method, path: p, status, at, detail }) =>
+      `${agent ?? "Local API client"} ${method} ${p}: HTTP ${status} at ${new Date(at * 1000).toISOString()}: ${detail}`;
+    assert.equal(forwarded.length, 0, redact(`forwarded during the outage:\n${forwarded.map(describe).join("\n")}`));
   });
 });
 
