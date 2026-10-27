@@ -5426,9 +5426,9 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             {"routeId":"plain:model","format":"openai"},
             {"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],
             "pricing":{"imageCostPerImage":{"512x512|high":"0.1","512x512|low":"99"},"inputCostPerToken":"0.01","outputCostPerToken":"0.02"}})).await;
-        let mut upstream = json!({"created":1,"id":"private","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":"circle","unknown":1}],"quality":"high","provider":"private"});
+        let mut upstream = json!({"created":1,"id":"private","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"},"unknown":1}],"quality":"high","background":{"url":"https://private"},"provider":"private"});
         if with_usage {
-            upstream["usage"] = json!({"input_tokens":2,"output_tokens":3,"trace":"private"});
+            upstream["usage"] = json!({"input_tokens":2,"output_tokens":3,"trace":"private","input_tokens_details":{"text_tokens":2,"url":"https://private/image"},"output_tokens_details":{"image_tokens":3,"provider":"private"}});
         }
         let (service, requests) = build_recording_service(
             200,
@@ -5442,10 +5442,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         )
         .await;
         assert_eq!(status, 200);
-        assert_eq!(
-            body["data"],
-            json!([{"b64_json":"aW1hZ2U=","revised_prompt":"circle"}])
-        );
+        assert_eq!(body["data"], json!([{"b64_json":"aW1hZ2U="}]));
         assert_eq!(
             body["usage"]["cost"],
             json!(if with_usage { 0.18 } else { 0.1 })
@@ -5454,6 +5451,14 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         assert!(body.get("model").is_none());
         assert!(body.get("provider").is_none());
         assert!(body["usage"].get("trace").is_none());
+        assert!(body.get("background").is_none());
+        if with_usage {
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3},"cost":0.18})
+            );
+        }
+        assert!(!body.to_string().contains("https://private"));
         let receipt = service
             .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
             .unwrap();
@@ -5486,6 +5491,38 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             }
         );
     }
+}
+
+#[tokio::test]
+async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report() {
+    let pricing = json!({"imageCostPerImage":"0.1","inputCostPerToken":rust_decimal::Decimal::MAX.to_string()});
+    let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],"pricing":pricing})).await;
+    let upstream_usage = json!({"input_tokens":2,"total_tokens":2,"cost":0});
+    let (service, _) = build_recording_service(
+        200,
+        serde_json::to_vec(&json!({"data":[{"b64_json":"ok"}],"usage":upstream_usage})).unwrap(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, images_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["usage"], json!({"input_tokens":2,"total_tokens":2}));
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let report = wait_for_post(&posts, |post| post["requestId"] == "req-images").await;
+    assert_eq!(report["status"], 200);
+    assert_eq!(
+        report["images"],
+        json!({"count":1,"size":"512x512","quality":"low"})
+    );
+    assert_eq!(report["usage"], upstream_usage);
+    assert_eq!(report["pricing"], pricing);
 }
 
 #[tokio::test]

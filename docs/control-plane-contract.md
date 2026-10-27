@@ -136,13 +136,17 @@ Only reviewed verifiable models should be offered; the initial NEAR model is
 `black-forest-labs/FLUX.2-klein-4B` over the existing TLS SPKI-bound adapter.
 
 `pricing.imageCostPerImage` is a decimal string, or an object of decimal strings.
+Each rate must be an unsigned plain decimal with an integer part, at most
+18 fractional digits, and a value no greater than `1000000`. Signs, exponents,
+underscores, whitespace, and a decimal point without following digits are invalid.
 Lookup uses `"<size>|<quality>"`, then `"<size>"`, then `"default"`. For example:
 
 ```json
 {"imageCostPerImage": {"512x512|high": "0.02", "512x512": "0.01", "default": "0.015"}}
 ```
 
-An absent, empty, or unparseable selected rate counts as zero. Image dimensions
+An absent, empty, or invalid selected rate counts as zero; an invalid exact
+match does not trigger a broader fallback. Image dimensions
 are resolved from the successful upstream response, then the request, then
 `"auto"`. `count` is the upstream `data.length` before canonicalization.
 The gateway uses decimal arithmetic for:
@@ -154,8 +158,14 @@ cost = count * image_unit_rate + token_cost
 ```
 
 Token rates and usage follow the existing token normalization rules; absent
-usage or rates contribute zero. On a successful image response with pricing,
-the gateway adds `usage.cost`, creating `usage: {"cost": ...}` when the provider
+usage or rates contribute zero. Arithmetic is checked: if an image or token
+component or their sum cannot be represented, the gateway logs a warning and
+omits the client's `usage.cost`, preserving other upstream usage fields and
+the post report. Token rates are not capped by this contract. The control
+plane computes billing independently from its pricing snapshot and reported
+usage; the gateway's `usage.cost` is informational. On a successful image
+response with representable pricing, the gateway adds `usage.cost`, creating
+`usage: {"cost": ...}` when the provider
 returned no usage. It reports raw usage separately and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.

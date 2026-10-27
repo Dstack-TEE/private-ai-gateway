@@ -5,7 +5,8 @@ export type Format = 'openai' | 'anthropic';
 
 /** Per-token and per-image prices used by the gateway to price usage. */
 export interface PricingConfig {
-  /** Image price: exact size|quality, size, then default; decimal strings. */
+  /** Image price: size|quality, size, then default; unsigned plain decimal strings,
+   * at most 18 fractional digits and <= 1000000. Invalid selected rates cost zero. */
   imageCostPerImage?: string | Record<string, string> | null;
   inputCostPerToken?: string | number | null;
   outputCostPerToken?: string | number | null;

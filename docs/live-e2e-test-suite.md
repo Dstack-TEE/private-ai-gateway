@@ -81,8 +81,13 @@ CARGO_BUILD_JOBS=2 python3 scripts/live_e2e/run.py --profile quick --provider ne
 ```
 
 This requires `NEARAI_API_KEY`, `DSTACK_VERIFIER_URL`, a dstack SDK socket, and
-`pap`; it consumes one image generation. Strict-release additionally requires
-a separately reviewed model entry in `provider_refs/near-ai.json`.
+`pap`; it consumes one image generation. The standalone verifier forwards
+`NEARAI_API_KEY` to the authenticated NEAR attestation endpoint and redacts it
+from saved requests. Strict-release uses the reviewed model entry in
+`provider_refs/near-ai.json` and requires `tls_spki_sha256`.
+This verifies the router TLS channel, not the downstream image model instance,
+workload, or weights. NEAR image responses carry no token usage; billing uses
+`images.count` and the gateway's synthesized `usage.cost`.
 Credential-free coverage includes a buffered 120-second upstream delay using
 Tokio's controllable clock in `tests/middleware_completion.rs`, so CI does not
 wait two minutes and no heartbeat can turn an image into an SSE response.
