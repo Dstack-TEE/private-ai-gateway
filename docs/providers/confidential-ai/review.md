@@ -1,19 +1,30 @@
 # Confidential AI Review
 
 Date: 2026-10-15 PDT (round 2).
+
+> [!NOTE]
+> This is a dated admission record; see [Documentation conventions](../../README.md#documentation-conventions).
+> Currency check, 2026-10-26 PDT: this review covers Confidential Inference
+> `v0.14.29` and c8s `v0.44.6` (`deca64d`). Newer releases include Confidential
+> Inference [v0.15.15](https://github.com/confidential-dot-ai/confidential-inference/releases/tag/v0.15.15)
+> (2026-10-20 PDT), [v0.15.18-staging](https://github.com/confidential-dot-ai/confidential-inference/releases/tag/v0.15.18-staging)
+> (2026-10-21 PDT), and c8s [v0.74.1](https://github.com/confidential-dot-ai/C8s/releases/tag/v0.74.1)
+> (2026-10-26 PDT). These releases and subsequent commits have not been reviewed
+> here. The findings and verdict below remain the 2026-10-15 assessment.
+
 Operator: Inexorable, Inc. d/b/a Confidential AI. Product: Confidential Inference.
 Endpoint: `https://api.confidential.ai`.
 
 Sources reviewed:
 
-- `confidential-dot-ai/confidential-inference` at
+- [`confidential-dot-ai/confidential-inference`](https://github.com/confidential-dot-ai/confidential-inference/tree/b5973fffd52d5072065eb711cd707cc18f67ba8a) at
   `b5973fffd52d5072065eb711cd707cc18f67ba8a` (`v0.14.29`, deployed), with the
-  threat model at `cedbe87fc6bc1e1d919ba1fc300b15f81b2300a4`
-- `confidential-dot-ai/c8s` at `deca64d1f5bf6c70e00c1a42ad0638bdf654efbc`
+  threat model at [`cedbe87fc6bc1e1d919ba1fc300b15f81b2300a4`](https://github.com/confidential-dot-ai/confidential-inference/blob/cedbe87fc6bc1e1d919ba1fc300b15f81b2300a4/docs/threat-model.md)
+- [`confidential-dot-ai/c8s`](https://github.com/confidential-dot-ai/C8s/tree/deca64d1f5bf6c70e00c1a42ad0638bdf654efbc) at `deca64d1f5bf6c70e00c1a42ad0638bdf654efbc`
   (v0.44.6, deployed) and `f0390b28767c0964766ae86c3896ce22bc73dcdf` (HEAD);
   AGPL-3.0, read for the protocol only
-- `confidential-dot-ai/TEErminator` at `6184215d76904db37efe862670305ffeb494ffb3`
-  and `confidential-dot-ai/c8s-verify-js` at
+- [`confidential-dot-ai/TEErminator`](https://github.com/confidential-dot-ai/TEErminator/tree/6184215d76904db37efe862670305ffeb494ffb3) at `6184215d76904db37efe862670305ffeb494ffb3`
+  and [`confidential-dot-ai/c8s-verify-js`](https://github.com/confidential-dot-ai/c8s-verify-js/tree/5ed071789114254af9ba20a8a25269ed5c28e004) at
   `5ed071789114254af9ba20a8a25269ed5c28e004` (both MIT)
 
 > **Gateway verification:** a `c8s` adapter exists for the schema v2
