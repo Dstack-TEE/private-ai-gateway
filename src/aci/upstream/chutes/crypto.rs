@@ -30,7 +30,9 @@ use super::{
     ChutesE2eeRequest, CHUTES_INFO_REQ, CHUTES_INFO_RESP, CHUTES_INFO_STREAM, CHUTES_MLKEM_CT_SIZE,
     CHUTES_TAG_SIZE,
 };
-use crate::aci::upstream::{UpstreamBodyStream, UpstreamError};
+use crate::aci::upstream::{
+    UpstreamBodyStream, UpstreamError, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+};
 
 pub(super) fn chutes_e2ee_pubkey_sha256(e2e_pubkey_b64: &str) -> Result<String, UpstreamError> {
     let pubkey = BASE64
@@ -178,11 +180,15 @@ fn gzip_compress(plaintext: &[u8]) -> Result<Vec<u8>, UpstreamError> {
 }
 
 fn gzip_decompress(compressed: &[u8]) -> Result<Vec<u8>, UpstreamError> {
-    let mut decoder = GzDecoder::new(compressed);
+    let mut decoder =
+        GzDecoder::new(compressed).take(MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 + 1);
     let mut plaintext = Vec::new();
     decoder
         .read_to_end(&mut plaintext)
         .map_err(|e| UpstreamError::Transport(e.to_string()))?;
+    if plaintext.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES {
+        return Err(UpstreamError::ResponseTooLarge);
+    }
     Ok(plaintext)
 }
 
@@ -322,5 +328,45 @@ impl Stream for ChutesE2eeDecryptingStream {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gzip_round_trip_under_limit() {
+        let plaintext = b"buffered Chutes response";
+        let compressed = gzip_compress(plaintext).unwrap();
+        assert_eq!(gzip_decompress(&compressed).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn gzip_accepts_exact_limit_and_rejects_oversized_output() {
+        for length in [
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1,
+        ] {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            std::io::copy(&mut std::io::repeat(b'x').take(length as u64), &mut encoder).unwrap();
+            let compressed = encoder.finish().unwrap();
+            let result = gzip_decompress(&compressed);
+            if length == MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES {
+                let plaintext = result.unwrap();
+                assert_eq!(plaintext.len(), length);
+                assert!(plaintext.iter().all(|byte| *byte == b'x'));
+            } else {
+                assert!(matches!(result, Err(UpstreamError::ResponseTooLarge)));
+            }
+        }
+    }
+
+    #[test]
+    fn gzip_rejects_invalid_compressed_data() {
+        assert!(matches!(
+            gzip_decompress(b"not gzip"),
+            Err(UpstreamError::Transport(_))
+        ));
     }
 }

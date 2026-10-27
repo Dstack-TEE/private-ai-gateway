@@ -65,6 +65,7 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
         UpstreamError::Upstream { .. }
         | UpstreamError::Routing(_)
         | UpstreamError::Transport(_)
+        | UpstreamError::ResponseTooLarge
         | UpstreamError::ChannelBindingMismatch(_) => Some(502),
     }
 }
@@ -906,7 +907,7 @@ impl AciService {
     pub fn finalize_middleware_receipt(
         &self,
         mut draft: MiddlewareReceiptDraft,
-        final_cleartext_body: &[u8],
+        final_cleartext_body: Vec<u8>,
         content_type: Option<&str>,
         requester: Option<ReceiptOwner>,
         e2ee: Option<E2eeRequestContext>,
@@ -914,22 +915,22 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         if is_sse {
             let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(final_cleartext_body);
+            parser.observe(&final_cleartext_body);
             if parser.chat_id().is_some() {
                 draft.builder.set_chat_id(parser.chat_id());
             }
-        } else if let Some(chat_id) = extract_chat_id(final_cleartext_body) {
+        } else if let Some(chat_id) = extract_chat_id(&final_cleartext_body) {
             draft.builder.set_chat_id(Some(chat_id));
         }
 
         let wire_body = match e2ee.as_ref() {
             Some(ctx) => encrypt_e2ee_final_response(
-                final_cleartext_body,
+                &final_cleartext_body,
                 ctx,
                 &draft.endpoint_path,
                 is_sse,
             )?,
-            None => final_cleartext_body.to_vec(),
+            None => final_cleartext_body,
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),

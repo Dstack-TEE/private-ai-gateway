@@ -149,6 +149,9 @@ async fn forward_to_backend_inner(
             Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
                 invalid_request_response(message)
             }
+            Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
+                upstream_proxy_error_response(err)
+            }
             Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
                 gateway_timeout_response(
                     surface_for_path(input.endpoint_path),
@@ -207,6 +210,9 @@ async fn forward_to_backend_inner(
         }
         Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
             invalid_request_response(message)
+        }
+        Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
+            upstream_proxy_error_response(err)
         }
         Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
             surface_for_path(input.endpoint_path),

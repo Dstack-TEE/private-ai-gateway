@@ -9,9 +9,9 @@ use serde_json::Value;
 
 use super::tls::{pinned_spki_client, response_headers};
 use super::{
-    transport_error, PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest,
-    UpstreamResponse, UpstreamStreamResponse, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+    read_buffered_upstream_response, transport_error, PreparedUpstreamRequest, UpstreamBackend,
+    UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
 
@@ -226,7 +226,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body = read_buffered_upstream_response(resp).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -276,7 +276,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body = read_buffered_upstream_response(resp).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -379,7 +379,7 @@ impl OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body = read_buffered_upstream_response(resp).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,

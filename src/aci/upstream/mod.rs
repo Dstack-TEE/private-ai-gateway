@@ -27,6 +27,7 @@ use futures_util::{stream, Stream};
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
+mod body;
 mod chutes;
 mod openai;
 mod privatemode;
@@ -35,6 +36,8 @@ mod streaming_usage;
 mod tls;
 mod zero_g;
 
+pub use body::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
+pub(crate) use body::{collect_buffered_upstream_body, read_buffered_upstream_response};
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
@@ -109,6 +112,10 @@ pub enum UpstreamError {
     InvalidRequest(String),
     #[error("upstream transport error: {0}")]
     Transport(String),
+    /// The buffered HTTP body or decompressed Chutes response exceeded the
+    /// gateway's size limit. Reported to the client as a 502.
+    #[error("buffered upstream response exceeds {MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES} bytes")]
+    ResponseTooLarge,
     /// A deadline the gateway's own HTTP client enforced (connect or read
     /// timeout) expired before the upstream answered. Kept apart from
     /// `Transport` because callers record it as 504 rather than 502: the

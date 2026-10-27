@@ -19,8 +19,9 @@ pub use session::ChutesSessionStore;
 
 use super::tls::response_headers;
 use super::{
-    transport_error, OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend,
-    UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    read_buffered_upstream_response, transport_error, OpenAICompatibleBackend,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crypto::{
@@ -219,7 +220,7 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_buffered_upstream_response(resp).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -254,7 +255,7 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_buffered_upstream_response(resp).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -337,7 +338,7 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body = read_buffered_upstream_response(resp).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -374,12 +375,7 @@ impl UpstreamBackend for ChutesProviderBackend {
         let status_code = invoke.status_code;
         let headers = invoke.headers;
         let served_instance_id = Some(invoke.instance_id);
-        let body = invoke
-            .response
-            .bytes()
-            .await
-            .map_err(transport_error)?
-            .to_vec();
+        let body = read_buffered_upstream_response(invoke.response).await?;
         if status_code != 200 {
             return Ok(UpstreamResponse {
                 status_code,

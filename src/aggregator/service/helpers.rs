@@ -1,18 +1,14 @@
-use futures_util::StreamExt;
 use rand::RngCore;
+use serde::Deserialize;
 
 use super::ServiceError;
 use crate::aci::receipt::{SignedReceipt, EVENT_REQUEST_RECEIVED, EVENT_RESPONSE_RETURNED};
-use crate::aci::upstream::UpstreamBodyStream;
+use crate::aci::upstream::{collect_buffered_upstream_body, UpstreamBodyStream};
 
 pub(super) async fn collect_upstream_body(
-    mut body: UpstreamBodyStream,
+    body: UpstreamBodyStream,
 ) -> Result<Vec<u8>, ServiceError> {
-    let mut out = Vec::new();
-    while let Some(chunk) = body.next().await {
-        out.extend_from_slice(&chunk?);
-    }
-    Ok(out)
+    Ok(collect_buffered_upstream_body(body, None).await?)
 }
 
 pub(super) fn generate_receipt_id() -> String {
@@ -23,28 +19,30 @@ pub(super) fn generate_receipt_id() -> String {
 }
 
 pub(super) fn extract_chat_id(body: &[u8]) -> Option<String> {
-    if body.is_empty() {
-        return None;
+    #[derive(Deserialize)]
+    struct ResponseId {
+        id: Option<String>,
     }
-    let trimmed = body.iter().position(|b| !b.is_ascii_whitespace())?;
+    let trimmed = body.iter().position(|byte| !byte.is_ascii_whitespace())?;
     if body[trimmed] != b'{' {
         return None;
     }
-    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let id = parsed.get("id")?.as_str()?;
-    Some(id.to_string())
+    serde_json::from_slice::<ResponseId>(body).ok()?.id
 }
 
 pub(super) fn accepted_response_model(status_code: u16, body: &[u8]) -> Option<String> {
-    if !(200..=299).contains(&status_code) || body.is_empty() {
+    #[derive(Deserialize)]
+    struct ResponseModel {
+        model: Option<String>,
+    }
+    if !(200..=299).contains(&status_code) {
         return None;
     }
-    let trimmed = body.iter().position(|b| !b.is_ascii_whitespace())?;
+    let trimmed = body.iter().position(|byte| !byte.is_ascii_whitespace())?;
     if body[trimmed] != b'{' {
         return None;
     }
-    let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
-    parsed.get("model")?.as_str().map(str::to_string)
+    serde_json::from_slice::<ResponseModel>(body).ok()?.model
 }
 
 pub(super) fn legacy_signature_text(receipt: &SignedReceipt) -> Option<String> {
@@ -66,4 +64,48 @@ pub(super) fn legacy_signature_text(receipt: &SignedReceipt) -> Option<String> {
 
 pub(super) fn strip_sha256_prefix(value: &str) -> Option<&str> {
     value.strip_prefix("sha256:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_identifiers_ignore_other_fields_and_non_string_siblings() {
+        let body = br#" {"id":"chat-1","model":"test-model","data":[{"b64_json":"image"}]} "#;
+        assert_eq!(extract_chat_id(body).as_deref(), Some("chat-1"));
+        assert_eq!(
+            accepted_response_model(200, body).as_deref(),
+            Some("test-model")
+        );
+        assert_eq!(
+            extract_chat_id(br#"{"id":"chat-1","model":123}"#).as_deref(),
+            Some("chat-1")
+        );
+        assert_eq!(
+            accepted_response_model(200, br#"{"id":123,"model":"test-model"}"#).as_deref(),
+            Some("test-model")
+        );
+        assert_eq!(accepted_response_model(400, body), None);
+    }
+
+    #[test]
+    fn response_identifiers_return_none_for_absent_or_invalid_fields() {
+        for body in [
+            b"".as_slice(),
+            b" ",
+            b"not JSON",
+            b"data: [DONE]\n\n",
+            b"null",
+            b"[]",
+            br#"["not-an-object"]"#,
+            b"{}",
+            br#"{"id":null,"model":null}"#,
+            br#"{"id":123,"model":false}"#,
+            br#"{"id":"chat-1","model":"test-model"} trailing"#,
+        ] {
+            assert_eq!(extract_chat_id(body), None);
+            assert_eq!(accepted_response_model(200, body), None);
+        }
+    }
 }

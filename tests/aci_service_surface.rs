@@ -34,8 +34,9 @@ use private_ai_gateway::aci::receipt::{
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
@@ -729,6 +730,53 @@ fn legacy_ecdsa_request(
         ("x-model-pub-key", model_key),
     ];
     (serde_json::to_vec(&body).unwrap(), headers)
+}
+
+// ---------------------------------------------------------------------------
+// Buffered upstream limits
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn oversized_buffered_upstream_response_returns_502() {
+    // No Content-Length: exercise the cap while reading the HTTP body rather
+    // than relying on the advertised-length fast rejection.
+    let fake_upstream = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+            let chunks = (0..=MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES / chunk.len())
+                .map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
+            Body::from_stream(stream::iter(chunks))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+    let upstream = OpenAICompatibleBackend::new(format!("http://{address}")).unwrap();
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(upstream),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let requester = Requester {
+        app: build_router(service),
+    };
+    let response = requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+    let body: Value = serde_json::from_slice(&response.body).unwrap();
+    assert_eq!(body["error"]["type"], "upstream_error");
+    assert!(!response.headers.contains_key("x-receipt-id"));
 }
 
 // ---------------------------------------------------------------------------
