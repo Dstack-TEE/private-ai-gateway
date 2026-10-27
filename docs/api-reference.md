@@ -77,7 +77,12 @@ The image response schema contains only top-level `created`, `data`, `usage`,
 `size`, `quality`, `output_format`, and `background`; each item retains only
 `b64_json` and `revised_prompt`. Usage retains `input_tokens`, `output_tokens`,
 `total_tokens`, `input_tokens_details`, `output_tokens_details`, and the gateway
-`cost`. URLs, provider IDs, model IDs, and other fields are removed. Image
+`cost`. `created` is an integer, dimensions and format fields are strings,
+and `revised_prompt` is a string or null. Token counts are non-negative
+integers; token detail objects retain only non-negative integer `text_tokens`,
+`image_tokens`, and `cached_tokens`. `cost` is numeric. Malformed optional
+fields are dropped, including structured values under allowed names.
+URLs, provider IDs, model IDs, and other fields are removed. Image
 receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Middleware
 adds image cost using the [control-plane pricing contract](control-plane-contract.md#image-generation).
 

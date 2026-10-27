@@ -607,12 +607,24 @@ async fn run_inner(
                 // cache-creation tokens.
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
                     if let Some(images) = meter.images.as_ref() {
-                        let cost =
-                            pricing::compute_image_cost(raw_usage.as_ref(), pricing_config, images);
-                        if !transformed.get("usage").is_some_and(Value::is_object) {
-                            transformed["usage"] = serde_json::json!({});
+                        if let Some(cost) =
+                            pricing::compute_image_cost(raw_usage.as_ref(), pricing_config, images)
+                        {
+                            if !transformed.get("usage").is_some_and(Value::is_object) {
+                                transformed["usage"] = serde_json::json!({});
+                            }
+                            transformed["usage"]["cost"] = pricing::cost_to_json(cost);
+                        } else {
+                            // Control bills independently from raw usage and its
+                            // pricing snapshot. Never display a free request on
+                            // arithmetic overflow or replace the upstream usage.
+                            if let Some(usage) =
+                                transformed.get_mut("usage").and_then(Value::as_object_mut)
+                            {
+                                usage.remove("cost");
+                            }
+                            tracing::warn!("image cost arithmetic overflow; omitting usage.cost");
                         }
-                        transformed["usage"]["cost"] = pricing::cost_to_json(cost);
                     } else if let Some(usage) = raw_usage
                         .clone()
                         .or_else(|| transformed.get("usage").cloned())

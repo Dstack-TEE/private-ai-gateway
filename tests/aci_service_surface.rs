@@ -3828,7 +3828,7 @@ const IMAGE_REQUEST: &[u8] =
 #[tokio::test]
 async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     let h = harness_with_upstream(RecordingUpstream::with_response_body(
-        br#"{"created":1,"id":"upstream-id","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private"}]}"#,
+        br#"{"created":1,"id":"upstream-id","model":"private","size":{"url":"https://private"},"data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"}}],"usage":{"input_tokens":-1,"input_tokens_details":{"text_tokens":1,"url":"https://private/image"},"output_tokens_details":[],"cost":{"provider":"private"}}}"#,
     ));
     let resp = h
         .requester
@@ -3837,7 +3837,7 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         json_body(&resp),
-        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}]})
+        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens_details":{"text_tokens":1}}})
     );
     {
         let calls = h.upstream_calls.lock().unwrap();

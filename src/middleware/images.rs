@@ -293,37 +293,41 @@ pub fn canonicalize(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
-    object.retain(|key, _| {
-        [
-            "created",
-            "data",
-            "usage",
-            "size",
-            "quality",
-            "output_format",
-            "background",
-        ]
-        .contains(&key.as_str())
+    object.retain(|key, value| match key.as_str() {
+        "created" => value.is_i64() || value.is_u64(),
+        "data" => value.is_array(),
+        "usage" => value.is_object(),
+        "size" | "quality" | "output_format" | "background" => value.is_string(),
+        _ => false,
     });
     if let Some(data) = object.get_mut("data").and_then(Value::as_array_mut) {
         for item in data {
             if let Some(item) = item.as_object_mut() {
-                item.retain(|key, _| ["b64_json", "revised_prompt"].contains(&key.as_str()));
+                item.retain(|key, value| match key.as_str() {
+                    "b64_json" => value.is_string(),
+                    "revised_prompt" => value.is_string() || value.is_null(),
+                    _ => false,
+                });
             }
         }
     }
     if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        usage.retain(|key, _| {
-            [
-                "input_tokens",
-                "output_tokens",
-                "total_tokens",
-                "input_tokens_details",
-                "output_tokens_details",
-                "cost",
-            ]
-            .contains(&key.as_str())
+        usage.retain(|key, value| match key.as_str() {
+            "input_tokens" | "output_tokens" | "total_tokens" => value.is_u64(),
+            "input_tokens_details" | "output_tokens_details" => value.is_object(),
+            "cost" => value.is_number(),
+            _ => false,
         });
+        for key in ["input_tokens_details", "output_tokens_details"] {
+            if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
+                details.retain(|key, value| {
+                    matches!(
+                        key.as_str(),
+                        "text_tokens" | "image_tokens" | "cached_tokens"
+                    ) && value.is_u64()
+                });
+            }
+        }
     }
 }
 
@@ -381,6 +385,7 @@ mod tests {
             json!({"data":[]}),
             json!({"data":[{"url":"https://private"}]}),
             json!({"data":[{"b64_json":"ok"}, {}]}),
+            json!({"data":[{"b64_json":{"url":"https://private"}}]}),
         ] {
             assert!(validate_response(&body).is_err());
         }
@@ -390,6 +395,53 @@ mod tests {
         assert_eq!(
             body,
             json!({"created":1,"data":[{"b64_json":"ok","revised_prompt":"hi"}],"usage":{"input_tokens":1,"input_tokens_details":{"text_tokens":1}}})
+        );
+    }
+
+    #[test]
+    fn optional_response_fields_cannot_contain_structured_provider_data() {
+        let mut body = json!({
+            "created": {"url":"https://private"},
+            "data": [{"b64_json":"ok", "revised_prompt":{"url":"https://private/image","provider":"private"}}],
+            "size": [], "quality": 1, "output_format": null, "background": {},
+            "usage": {
+                "input_tokens": -1, "output_tokens": 1.5, "total_tokens": "2",
+                "input_tokens_details": {"url":"https://private/image", "text_tokens":2,"image_tokens":3,"cached_tokens":1,"other":4},
+                "output_tokens_details": {"text_tokens":-1,"image_tokens":1.5,"cached_tokens":"1"},
+                "cost": {"url":"https://private"}
+            }
+        });
+        validate_response(&body).unwrap();
+        canonicalize(&mut body);
+        assert_eq!(
+            body,
+            json!({
+                "data":[{"b64_json":"ok"}],
+                "usage":{"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{}}
+            })
+        );
+        for invalid_usage in [json!([]), json!("private"), Value::Null] {
+            let mut body = json!({"data":[{"b64_json":"ok"}],"usage":invalid_usage});
+            canonicalize(&mut body);
+            assert!(body.get("usage").is_none());
+        }
+    }
+
+    #[test]
+    fn retains_only_valid_optional_response_values() {
+        let mut body = json!({
+            "created":1, "data":[{"b64_json":"ok","revised_prompt":null}],
+            "size":"512x512","quality":"high","output_format":"png","background":"opaque",
+            "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":[],"output_tokens_details":null,"cost":0.1}
+        });
+        canonicalize(&mut body);
+        assert_eq!(
+            body,
+            json!({
+                "created":1, "data":[{"b64_json":"ok","revised_prompt":null}],
+                "size":"512x512","quality":"high","output_format":"png","background":"opaque",
+                "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"cost":0.1}
+            })
         );
     }
 

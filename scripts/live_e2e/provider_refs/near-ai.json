@@ -1,9 +1,12 @@
 {
   "provider": "near-ai",
-  "reviewed_at": "2026-05-16",
+  "reviewed_at": "2026-10-27",
   "mode": "provider-current",
   "accepted_models": {
     "google/gemma-4-31B-it": {
+      "expected_binding": "tls_spki_sha256"
+    },
+    "black-forest-labs/FLUX.2-klein-4B": {
       "expected_binding": "tls_spki_sha256"
     }
   }
