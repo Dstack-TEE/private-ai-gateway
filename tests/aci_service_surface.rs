@@ -3870,14 +3870,12 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
 }
 
 #[tokio::test]
-async fn images_reject_unsupported_counts_before_forwarding() {
+async fn images_reject_invalid_counts_before_forwarding() {
     let h = harness();
-    for (n, code) in [
-        (serde_json::json!(2), "unsupported_value"),
-        (serde_json::json!(10), "unsupported_value"),
-        (serde_json::json!(0), "invalid_parameter"),
-        (serde_json::json!(11), "invalid_parameter"),
-        (serde_json::json!(1.5), "invalid_parameter"),
+    for n in [
+        serde_json::json!(0),
+        serde_json::json!(11),
+        serde_json::json!(1.5),
     ] {
         let body =
             serde_json::to_vec(&serde_json::json!({"model":"aci-model","prompt":"hello","n":n}))
@@ -3886,11 +3884,8 @@ async fn images_reject_unsupported_counts_before_forwarding() {
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
         let error = &json_body(&resp)["error"];
         assert_eq!(error["type"], "invalid_request_error");
-        assert_eq!(error["code"], code);
+        assert_eq!(error["code"], "invalid_parameter");
         assert_eq!(error["param"], "n");
-        if code == "unsupported_value" {
-            assert_eq!(error["message"], "only n=1 is currently supported");
-        }
     }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
@@ -3939,26 +3934,77 @@ async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
 }
 
 #[tokio::test]
-async fn images_url_only_success_is_502_and_receipt_hashes_sanitized_error() {
-    let h = harness_with_upstream(RecordingUpstream::with_response_body(
-        br#"{"data":[{"url":"https://private"}]}"#,
-    ));
-    let resp = h
-        .requester
-        .post("/v1/images/generations", IMAGE_REQUEST, &[])
-        .await;
-    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
-    assert!(!String::from_utf8_lossy(&resp.body).contains("https://private"));
-    assert_eq!(error_type(&resp), "upstream_error");
-    let receipt = h
-        .service
-        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+async fn images_forward_requested_maximum_and_accept_fewer_without_fill() {
+    for returned in 1..=2 {
+        let upstream = serde_json::to_vec(
+            &serde_json::json!({"data":vec![serde_json::json!({"b64_json":"ok"});returned]}),
+        )
         .unwrap();
-    assert!(receipt.chat_id.is_none());
-    assert_eq!(
-        payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
-        sha256_hex(&resp.body)
-    );
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                br#"{"model":"aci-model","prompt":"hello","n":2}"#,
+                &[],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(json_body(&resp)["data"].as_array().unwrap().len(), returned);
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&calls[0].body).unwrap()["n"],
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn images_malformed_success_is_502_and_receipt_hashes_sanitized_error() {
+    for (n, upstream) in [
+        (
+            Some(1),
+            serde_json::json!({"data":[{"url":"https://private"}]}),
+        ),
+        (
+            Some(2),
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+        (
+            None,
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+    ] {
+        let upstream = serde_json::to_vec(&upstream).unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let mut request = serde_json::json!({"model":"aci-model","prompt":"hello"});
+        if let Some(n) = n {
+            request["n"] = serde_json::json!(n);
+        }
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                &serde_json::to_vec(&request).unwrap(),
+                &[],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert!(!String::from_utf8_lossy(&resp.body).contains("https://private"));
+        assert_eq!(error_type(&resp), "upstream_error");
+        assert!(json_body(&resp).get("data").is_none());
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&resp.body)
+        );
+    }
 }
 
 #[tokio::test]
@@ -3968,7 +4014,7 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
     ));
     let mut uploads = Vec::new();
     let mut started = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..private_ai_gateway::middleware::images::MAX_IMAGE_IN_FLIGHT {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut tx = Some(tx);
         let upload = Body::from_stream(stream::poll_fn(move |_| {

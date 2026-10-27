@@ -318,9 +318,19 @@ impl AciService {
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
             if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+                #[derive(serde::Deserialize)]
+                struct ImageRequestCount {
+                    n: Option<usize>,
+                }
+                let requested_count = serde_json::from_slice::<ImageRequestCount>(&forwarded_body)
+                    .ok()
+                    .and_then(|request| request.n)
+                    .unwrap_or(1);
                 let validated = serde_json::from_slice::<Value>(&upstream_response.body)
                     .ok()
-                    .filter(|body| crate::middleware::images::validate_response(body).is_ok());
+                    .filter(|body| {
+                        crate::middleware::images::validate_response(body, requested_count).is_ok()
+                    });
                 upstream_headers.insert("content-type".to_string(), "application/json".to_string());
                 if let Some(mut body) = validated {
                     crate::middleware::images::canonicalize(&mut body);

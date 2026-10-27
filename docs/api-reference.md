@@ -51,7 +51,9 @@ middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
 
 Image generation requires string `model` and `prompt` (at most 32,000 Unicode
-characters). At launch, `n` must be omitted or the integer `1`; `size`, `quality`,
+characters). Request up to `n` images (`n` is an integer from 1 through 10,
+default 1); providers may return fewer, and image charges use the returned
+count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
 `background`, `output_format`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
 for the string options are validated upstream. `response_format` must be absent
@@ -59,11 +61,8 @@ or `"b64_json"`; the gateway always forwards `"b64_json"`. `user` and `style`
 are accepted as strings and removed before forwarding. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
 `error.code: "unknown_parameter"` and `error.param` naming that field. `seed`
-is not supported. Integers `2` through `10` return `400 invalid_request_error`
-with `code: "unsupported_value"`, `param: "n"`, and the message
-`"only n=1 is currently supported"`. Non-integer and out-of-range `n` values
-retain `code: "invalid_parameter"`. The launch NEAR FLUX backend returns one
-image even for `n=2`; per-model image count limits are a follow-up.
+is not supported. Non-integer and out-of-range `n` values return
+`400 invalid_request_error` with `code: "invalid_parameter"` and `param: "n"`.
 
 `response_format: "url"`, any `stream` or `partial_images` field, invalid types,
 and out-of-range integers return `400`. Images allow 16 concurrent generations
@@ -73,9 +72,10 @@ upload is read and validated; in middleware mode, it also follows control-plane
 admission and route selection. The response body and any pending write buffers
 retain the slot until completion, error, or disconnect releases them. There is
 no heartbeat while waiting for an image. The buffered upstream response limit
-remains 64 MiB. A 2xx response with an empty `data` array or any
-item missing a string `b64_json` becomes a sanitized `502 upstream_error` in
-both routing modes, before receipt hashing.
+remains 64 MiB. A 2xx response with an empty `data` array, more images than
+requested, or any item missing a string `b64_json` becomes a sanitized
+`502 upstream_error` in both routing modes, before receipt hashing and image
+billing.
 
 The image response schema contains only top-level `created`, `data`, `usage`,
 `size`, `quality`, `output_format`, and `background`; each item retains only

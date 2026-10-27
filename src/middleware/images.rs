@@ -14,8 +14,12 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+/// Protocol maximum for the requested number of images.
+pub const MAX_IMAGE_COUNT: i64 = 10;
 /// Bound admitted image generation and buffered response bodies, without queueing.
-static IN_FLIGHT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(16)));
+pub const MAX_IMAGE_IN_FLIGHT: usize = 16;
+static IN_FLIGHT: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_IMAGE_IN_FLIGHT)));
 
 pub fn try_acquire() -> Result<OwnedSemaphorePermit, TryAcquireError> {
     IN_FLIGHT.clone().try_acquire_owned()
@@ -28,7 +32,7 @@ pub fn capacity_response() -> Response {
     super::errors::rate_limit_response(
         super::errors::Surface::Openai,
         "image generation capacity reached",
-        16,
+        MAX_IMAGE_IN_FLIGHT as i64,
         reset_at,
         None,
     )
@@ -194,7 +198,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             return Err(RequestError::invalid(key, "parameter must be a string"));
         }
     }
-    for (key, min, max) in [("n", 1, 10), ("output_compression", 0, 100)] {
+    for (key, min, max) in [("n", 1, MAX_IMAGE_COUNT), ("output_compression", 0, 100)] {
         if let Some(value) = object.get(key) {
             if !value.as_i64().is_some_and(|n| (min..=max).contains(&n)) {
                 return Err(RequestError::invalid(
@@ -203,16 +207,6 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
                 ));
             }
         }
-    }
-    if object
-        .get("n")
-        .is_some_and(|value| value.as_i64() != Some(1))
-    {
-        return Err(RequestError {
-            code: "unsupported_value",
-            param: "n".into(),
-            message: "only n=1 is currently supported".into(),
-        });
     }
     if object
         .get("response_format")
@@ -256,11 +250,13 @@ pub fn upstream_body(body: &Value) -> Value {
     Value::Object(output)
 }
 
+/// Providers may return fewer images, but never more than the requested maximum.
 /// A malformed 2xx is an upstream failure; URL-only responses fail closed.
-pub fn validate_response(body: &Value) -> Result<(), &'static str> {
+pub fn validate_response(body: &Value, requested_count: usize) -> Result<(), &'static str> {
     match body.get("data").and_then(Value::as_array) {
         Some(data)
             if !data.is_empty()
+                && data.len() <= requested_count
                 && data
                     .iter()
                     .all(|item| item.get("b64_json").is_some_and(Value::is_string)) =>
@@ -347,7 +343,7 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":1, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
@@ -357,15 +353,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_accepts_only_one_image_and_preserves_type_and_range_errors() {
+    fn accepts_protocol_image_counts_and_preserves_type_and_range_errors() {
         validate_request(&json!({"model":"image","prompt":"hello"})).unwrap();
-        validate_request(&json!({"model":"image","prompt":"hello","n":1})).unwrap();
-        for n in 2..=10 {
-            let error =
-                validate_request(&json!({"model":"image","prompt":"hello","n":n})).unwrap_err();
-            assert_eq!(error.code, "unsupported_value");
-            assert_eq!(error.param, "n");
-            assert_eq!(error.message, "only n=1 is currently supported");
+        for n in 1..=MAX_IMAGE_COUNT {
+            let body = json!({"model":"image","prompt":"hello","n":n});
+            validate_request(&body).unwrap();
+            assert_eq!(upstream_body(&body)["n"], n);
         }
         for n in [
             json!(-1),
@@ -415,6 +408,16 @@ mod tests {
     }
 
     #[test]
+    fn response_count_may_be_lower_but_never_exceed_the_requested_maximum() {
+        for (requested, returned, valid) in
+            [(2, 1, true), (2, 2, true), (2, 3, false), (1, 2, false)]
+        {
+            let body = json!({"data":vec![json!({"b64_json":"ok"}); returned]});
+            assert_eq!(validate_response(&body, requested).is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn success_requires_inline_images_and_drops_provider_fields() {
         for body in [
             json!({"data":[]}),
@@ -422,10 +425,10 @@ mod tests {
             json!({"data":[{"b64_json":"ok"}, {}]}),
             json!({"data":[{"b64_json":{"url":"https://private"}}]}),
         ] {
-            assert!(validate_response(&body).is_err());
+            assert!(validate_response(&body, 1).is_err());
         }
         let mut body = json!({"created":1,"id":"private","model":"private","unknown":1,"data":[{"b64_json":"ok","url":"https://private","revised_prompt":"hi","other":true}],"usage":{"input_tokens":1,"private":2,"input_tokens_details":{"text_tokens":1}}});
-        validate_response(&body).unwrap();
+        validate_response(&body, 1).unwrap();
         canonicalize(&mut body);
         assert_eq!(
             body,
@@ -446,7 +449,7 @@ mod tests {
                 "cost": {"url":"https://private"}
             }
         });
-        validate_response(&body).unwrap();
+        validate_response(&body, 1).unwrap();
         canonicalize(&mut body);
         assert_eq!(
             body,
@@ -482,7 +485,9 @@ mod tests {
 
     #[test]
     fn image_capacity_is_bounded_and_never_queues() {
-        let permits: Vec<_> = (0..16).map(|_| try_acquire().unwrap()).collect();
+        let permits: Vec<_> = (0..MAX_IMAGE_IN_FLIGHT)
+            .map(|_| try_acquire().unwrap())
+            .collect();
         assert!(matches!(try_acquire(), Err(TryAcquireError::NoPermits)));
         drop(permits);
         assert!(try_acquire().is_ok());

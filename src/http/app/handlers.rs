@@ -741,11 +741,6 @@ pub(super) async fn openai_completion_endpoint(
             );
         }
     };
-    if endpoint_path == IMAGES_GENERATIONS_PATH {
-        if let Err(err) = crate::middleware::images::validate_request(&parsed) {
-            return err.into_response();
-        }
-    }
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
     if headers.contains_key("x-upstream-verification") {
@@ -833,6 +828,11 @@ pub(super) async fn openai_completion_endpoint(
         return middleware.handle_completion(&state.service, input).await;
     }
 
+    if endpoint_path == IMAGES_GENERATIONS_PATH {
+        if let Err(err) = crate::middleware::images::validate_request(&parsed) {
+            return err.into_response();
+        }
+    }
     let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
     let direct_params = if endpoint_path == IMAGES_GENERATIONS_PATH {
         crate::middleware::images::upstream_body(&direct_params)

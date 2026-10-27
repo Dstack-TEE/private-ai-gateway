@@ -5420,16 +5420,10 @@ fn images_input() -> CompletionInput {
 }
 
 #[tokio::test]
-async fn images_reject_unsupported_counts_before_consult() {
+async fn images_reject_invalid_counts_before_consult() {
     let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}]})).await;
     let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    for (n, code) in [
-        (json!(2), "unsupported_value"),
-        (json!(10), "unsupported_value"),
-        (json!(0), "invalid_parameter"),
-        (json!(11), "invalid_parameter"),
-        (json!(1.5), "invalid_parameter"),
-    ] {
+    for n in [json!(0), json!(11), json!(1.5)] {
         let mut input = images_input();
         input.params["n"] = n;
         input.received_body = serde_json::to_vec(&input.params).unwrap();
@@ -5441,11 +5435,8 @@ async fn images_reject_unsupported_counts_before_consult() {
         .await;
         assert_eq!(status, 400);
         assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["code"], "invalid_parameter");
         assert_eq!(body["error"]["param"], "n");
-        if code == "unsupported_value" {
-            assert_eq!(body["error"]["message"], "only n=1 is currently supported");
-        }
     }
     assert!(pres.lock().unwrap().is_empty());
     assert!(requests.lock().unwrap().is_empty());
@@ -5453,12 +5444,15 @@ async fn images_reject_unsupported_counts_before_consult() {
 
 #[tokio::test]
 async fn images_opt_in_consult_schema_cost_and_post_usage() {
-    for with_usage in [false, true] {
+    for (requested, returned, with_usage) in
+        [(Some(2), 1, false), (Some(2), 2, true), (None, 1, false)]
+    {
         let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
             {"routeId":"plain:model","format":"openai"},
             {"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],
             "pricing":{"imageCostPerImage":{"512x512|high":"0.1","512x512|low":"99"},"inputCostPerToken":"0.01","outputCostPerToken":"0.02"}})).await;
         let mut upstream = json!({"created":1,"id":"private","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"},"unknown":1}],"quality":"high","background":{"url":"https://private"},"provider":"private"});
+        upstream["data"] = json!(vec![upstream["data"][0].clone(); returned]);
         if with_usage {
             upstream["usage"] = json!({"input_tokens":2,"output_tokens":3,"trace":"private","input_tokens_details":{"text_tokens":2,"url":"https://private/image"},"output_tokens_details":{"image_tokens":3,"provider":"private"}});
         }
@@ -5468,17 +5462,22 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             "application/json",
         );
         let mut input = images_input();
-        if !with_usage {
+        if let Some(n) = requested {
+            input.params["n"] = json!(n);
+        } else {
             input.params.as_object_mut().unwrap().remove("n");
-            input.received_body = serde_json::to_vec(&input.params).unwrap();
         }
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
         let (status, headers, body) =
             response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 200);
-        assert_eq!(body["data"], json!([{"b64_json":"aW1hZ2U="}]));
+        assert_eq!(
+            body["data"],
+            json!(vec![json!({"b64_json":"aW1hZ2U="}); returned])
+        );
         assert_eq!(
             body["usage"]["cost"],
-            json!(if with_usage { 0.18 } else { 0.1 })
+            json!(if with_usage { 0.28 } else { 0.1 })
         );
         assert!(body.get("id").is_none());
         assert!(body.get("model").is_none());
@@ -5488,7 +5487,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         if with_usage {
             assert_eq!(
                 body["usage"],
-                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3},"cost":0.18})
+                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3},"cost":0.28})
             );
         }
         assert!(!body.to_string().contains("https://private"));
@@ -5501,7 +5500,10 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].path.as_deref(), Some("/v1/images/generations"));
             assert_eq!(requests[0].body["response_format"], "b64_json");
-            assert_eq!(requests[0].body.get("n"), with_usage.then_some(&json!(1)));
+            assert_eq!(
+                requests[0].body.get("n"),
+                requested.map(|n| json!(n)).as_ref()
+            );
             assert!(requests[0].body.get("style").is_none());
             assert!(requests[0].body.get("user").is_none());
         }
@@ -5514,7 +5516,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         assert_eq!(report["selectedRouteId"], "image:model");
         assert_eq!(
             report["images"],
-            json!({"count":1,"size":"512x512","quality":"high"})
+            json!({"count":returned,"size":"512x512","quality":"high"})
         );
         assert_eq!(
             report["usage"],
@@ -5580,24 +5582,34 @@ async fn images_no_opt_in_candidate_returns_model_not_found() {
 
 #[tokio::test]
 async fn images_malformed_2xx_is_not_billed_and_never_returns_url() {
-    for upstream in [
-        json!({"data":[{"url":"https://private"}]}),
-        json!({"data":[]}),
-        json!({"data":[{"b64_json":1}]}),
+    for (requested, upstream) in [
+        (Some(1), json!({"data":[{"url":"https://private"}]})),
+        (Some(1), json!({"data":[]})),
+        (Some(1), json!({"data":[{"b64_json":1}]})),
+        (
+            Some(2),
+            json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+        (None, json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"}]})),
     ] {
         let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],"pricing":{"imageCostPerImage":"1"}})).await;
-        let (service, _) = build_recording_service(
+        let (service, requests) = build_recording_service(
             200,
             serde_json::to_vec(&upstream).unwrap(),
             "application/json",
         );
-        let (status, headers, body) = response_parts(
-            middleware(url)
-                .handle_completion(&service, images_input())
-                .await,
-        )
-        .await;
+        let mut input = images_input();
+        if let Some(n) = requested {
+            input.params["n"] = json!(n);
+        } else {
+            input.params.as_object_mut().unwrap().remove("n");
+        }
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 502);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(body.get("data").is_none());
         let receipt = service
             .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
             .unwrap();
