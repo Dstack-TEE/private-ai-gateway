@@ -97,6 +97,29 @@ pub async fn run(
     prefix_hash_key: &PrefixHashKey,
     input: CompletionInput,
 ) -> Response {
+    let mut image_permit = None;
+    let response = run_inner(
+        control,
+        service,
+        sse_keepalive_ms,
+        send_request_features,
+        prefix_hash_key,
+        input,
+        &mut image_permit,
+    )
+    .await;
+    super::images::hold_permit(response, image_permit)
+}
+
+async fn run_inner(
+    control: &ControlClient,
+    service: &Arc<AciService>,
+    sse_keepalive_ms: Option<u64>,
+    send_request_features: bool,
+    prefix_hash_key: &PrefixHashKey,
+    input: CompletionInput,
+    image_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Response {
     let CompletionInput {
         endpoint,
         endpoint_path,
@@ -337,6 +360,13 @@ pub async fn run(
         meter.gateway_failure(404, ErrorSource::Control, ErrorClass::ModelNotFound, stream);
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
         return finalize_generated(404, body, &[], e2ee, outcome_ctx);
+    }
+    // Admit only validated uploads that the control plane allowed and can route.
+    if client_endpoint == Endpoint::ImagesGenerations {
+        match super::images::try_acquire() {
+            Ok(permit) => *image_permit = Some(permit),
+            Err(_) => return super::images::capacity_response(),
+        }
     }
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()

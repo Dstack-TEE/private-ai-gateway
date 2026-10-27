@@ -516,18 +516,6 @@ pub(super) async fn images_generations(
             "E2EE is not supported on /v1/images/generations",
         );
     }
-    let Ok(_permit) = crate::middleware::images::try_acquire() else {
-        let reset_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |now| now.as_secs().saturating_add(1) as i64);
-        return crate::middleware::errors::rate_limit_response(
-            Surface::Openai,
-            "image generation capacity reached",
-            16,
-            reset_at,
-            None,
-        );
-    };
     openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
 }
 
@@ -867,7 +855,18 @@ pub(super) async fn openai_completion_endpoint(
         None
     };
 
-    forward_to_backend(
+    // Uploads and invalid requests do not reserve image generation capacity.
+    // Middleware admission happens after its control-plane consult instead.
+    let permit = if endpoint_path == IMAGES_GENERATIONS_PATH {
+        match crate::middleware::images::try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => return crate::middleware::images::capacity_response(),
+        }
+    } else {
+        None
+    };
+
+    let response = forward_to_backend(
         state.service,
         BackendForwardInput {
             context,
@@ -881,7 +880,8 @@ pub(super) async fn openai_completion_endpoint(
             stream,
         },
     )
-    .await
+    .await;
+    crate::middleware::images::hold_permit(response, permit)
 }
 pub(super) async fn completions(
     State(state): State<AppState>,

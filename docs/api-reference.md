@@ -62,10 +62,14 @@ existing routing and ACI constraints. Any other field returns `400` with
 is not supported.
 
 `response_format: "url"`, any `stream` or `partial_images` field, invalid types,
-and out-of-range integers return `400`. Images allow 16 concurrent requests
-per gateway process, with immediate `429 rate_limit_error` when full and no
-queue. There is no heartbeat while waiting for an image. The buffered upstream
-response limit remains 64 MiB. A 2xx response with an empty `data` array or any
+and out-of-range integers return `400`. Images allow 16 concurrent generations
+and buffered response bodies per gateway process, with immediate
+`429 rate_limit_error` when full and no queue. Admission happens after the capped
+upload is read and validated; in middleware mode, it also follows control-plane
+admission and route selection. The response body and any pending write buffers
+retain the slot until completion, error, or disconnect releases them. There is
+no heartbeat while waiting for an image. The buffered upstream response limit
+remains 64 MiB. A 2xx response with an empty `data` array or any
 item missing a string `b64_json` becomes a sanitized `502 upstream_error` in
 both routing modes, before receipt hashing.
 
