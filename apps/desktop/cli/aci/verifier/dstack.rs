@@ -2,8 +2,8 @@
 //! from `aci-verify`; this module feeds them the DCAP quote and applies the
 //! custody policy's accepted KMS roots.
 
+use aci_verify::dstack::KeyCustodyError;
 pub use aci_verify::dstack::{dstack_rtmr3_event, DstackEventLog, VerifiedEventLog};
-use aci_verify::dstack::{verify_dstack_kms_receipt_chain, KeyCustodyError};
 use serde_json::Value;
 
 use super::policy::CustodyPolicy;
@@ -34,7 +34,8 @@ pub(super) fn verify_dstack_kms_receipt_custody(
     app_id: &[u8],
     policy: &CustodyPolicy,
 ) -> Result<(), CustodyError> {
-    let root = verify_dstack_kms_receipt_chain(evidence, keyset, app_id)?;
+    let root = aci_verify::dstack::verify_dstack_kms_receipt_custody(evidence, keyset, app_id)?
+        .root_public_key;
     if !policy.accepts_kms_root(&root) {
         return Err(CustodyError::KmsRootRejected);
     }

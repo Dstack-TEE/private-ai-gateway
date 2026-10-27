@@ -118,45 +118,5 @@
     "session_material_version": "privatemode/1",
     "success_response_authentication": "privatemode-oae",
     "trust_boundary": "attested-compose-privatemode-proxy"
-  },
-  "tinfoil": {
-    "code_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "code_measurement": {
-      "registers": [
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
-      ],
-      "type": "https://tinfoil.sh/predicate/tdx-guest/v2"
-    },
-    "config_repo": "tinfoilsh/confidential-model-router",
-    "enclave_fingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "enclave_host": "tinfoil.example",
-    "enclave_measurement": {
-      "registers": [
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
-        "222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
-      ],
-      "type": "https://tinfoil.sh/predicate/tdx-guest/v2"
-    },
-    "evidence_scope": "router",
-    "hardware_measurement": {
-      "id": "platform@digest",
-      "mrtd": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "rtmr0": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-    },
-    "hpke_public_key": "",
-    "release_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "tls_spki_from_report_data": true,
-    "trust_boundary": "router",
-    "used_router": true,
-    "verification_steps": {
-      "verify_code": "success"
-    }
   }
 }

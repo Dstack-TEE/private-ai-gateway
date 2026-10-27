@@ -53,12 +53,8 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
 /// Shape validation does not authenticate facts: the configured verifier still
 /// owns that responsibility. Unknown/incomplete output remains usable with
 /// evidence-sensitive dedup, including legacy Chutes output.
-pub(crate) fn reviewed_session_material(
-    provider: Option<&str>,
-    verifier_id: &str,
-    claims: &Value,
-) -> bool {
-    let Some(provider) = provider else {
+pub(crate) fn reviewed_session_material(event: &UpstreamVerifiedEvent, claims: &Value) -> bool {
+    let Some(provider) = event.provider_type.as_deref() else {
         return false;
     };
     let expected_id = match provider {
@@ -69,200 +65,17 @@ pub(crate) fn reviewed_session_material(
         "privatemode" => PrivatemodeProviderVerifier::VERIFIER_ID,
         _ => return false,
     };
-    if verifier_id != expected_id
+    if event.verifier_id != expected_id
+        || (provider == "aci-service" && event.aci_identity.is_none())
         || claims["session_material_version"].as_str() != Some(format!("{provider}/1").as_str())
     {
         return false;
     }
-    let string = |key: &str| claims[key].as_str().is_some_and(|s| !s.is_empty());
-    let boolean = |key: &str| claims[key].is_boolean();
-    let nullable_string = |key: &str| {
-        claims
-            .get(key)
-            .is_some_and(|v| v.is_null() || v.is_string())
-    };
-    let nullable_bool = |key: &str| {
-        claims
-            .get(key)
-            .is_some_and(|v| v.is_null() || v.is_boolean())
-    };
-    let strings = |keys: &[&str]| keys.iter().all(|k| string(k));
-    match provider {
-        "aci-service" => {
-            valid_tdx_material(claims)
-                && string("tcb_status")
-                && claims["advisory_ids"].as_array().is_some_and(|ids| {
-                    ids.iter().all(Value::is_string)
-                        && ids
-                            .windows(2)
-                            .all(|pair| pair[0].as_str() < pair[1].as_str())
-                })
-                && lower_hex(&claims["measured_compose_hash"], 32)
-                && claims["measured_app_id"].as_str().is_some_and(|s| {
-                    !s.is_empty() && lower_hex(&claims["measured_app_id"], s.len() / 2)
-                })
-                && claims["published_source_provenance"]
-                    .as_object()
-                    .is_some_and(|p| {
-                        p.get("image_digest").is_some_and(Value::is_string)
-                            || (p.get("repo_url").is_some_and(Value::is_string)
-                                && p.get("repo_commit").is_some_and(Value::is_string))
-                    })
-                && claims["receipt_key_custody"]["provider"] == "dstack-kms"
-                && claims["receipt_key_custody"]["purpose"] == "aci.receipt.ed25519.v1"
-                && lower_hex(&claims["receipt_key_custody"]["receipt_public_key"], 32)
-                && ["kms_public_key", "app_public_key", "root_public_key"]
-                    .iter()
-                    .all(|key| {
-                        let value = &claims["receipt_key_custody"][key];
-                        lower_hex(value, 33)
-                            && value
-                                .as_str()
-                                .is_some_and(|s| s.starts_with("02") || s.starts_with("03"))
-                    })
-        }
-        "near-ai" => {
-            valid_tdx_material(claims)
-                && strings(&[
-                    "trust_boundary",
-                    "signing_address",
-                    "compose_hash",
-                    "gateway_tls_spki_sha256",
-                ])
-                && lower_hex(&claims["compose_hash"], 32)
-                && signing_address(&claims["signing_address"])
-                && lower_hex(&claims["gateway_tls_spki_sha256"], 32)
-                && claims["gateway_verified"] == true
-                && nullable_string("tcb_status")
-                && claims["gateway_gpu_check"]["present"].is_boolean()
-                && claims["gateway_gpu_check"]["accepted"].is_boolean()
-        }
-        "phala-direct" => {
-            valid_tdx_material(claims)
-                && strings(&[
-                    "trust_boundary",
-                    "evidence_scope",
-                    "canonical_model_id",
-                    "signing_address",
-                    "compose_hash",
-                ])
-                && lower_hex(&claims["compose_hash"], 32)
-                && signing_address(&claims["signing_address"])
-                && claims["attestation_version"] == 2
-                && claims["tls_spki_from_report_data"] == true
-                && claims["report_data_nonce_matched"] == true
-                && claims["compose_hash_verified"] == true
-                && claims["tdx_debug_mode"] == false
-                && [
-                    "os_image_hash",
-                    "os_image_version",
-                    "gpu_arch",
-                    "tcb_status",
-                ]
-                .iter()
-                .all(|k| nullable_string(k))
-                && [
-                    "os_image_is_dev",
-                    "production_os_image",
-                    "gpu_evidence_nonce_matched",
-                ]
-                .iter()
-                .all(|k| nullable_bool(k))
-                && boolean("gpu_verified")
-                && boolean("gpu_evidence_present")
-        }
-        "chutes" => {
-            valid_tdx_material(claims)
-                && strings(&[
-                    "trust_boundary",
-                    "evidence_scope",
-                    "chute_id",
-                    "canonical_model_id",
-                    "instance_id",
-                    "measurement",
-                ])
-                && nullable_string("tcb_status")
-                && claims["advisory_ids"].as_array().is_some_and(|ids| {
-                    ids.iter().all(Value::is_string)
-                        && ids
-                            .windows(2)
-                            .all(|pair| pair[0].as_str() < pair[1].as_str())
-                })
-                && boolean("gpu_verified")
-                && boolean("gpu_evidence_present")
-                && nullable_string("gpu_arch")
-                && nullable_bool("gpu_evidence_nonce_matched")
-        }
-        "privatemode" => {
-            strings(&[
-                "trust_boundary",
-                "attestation_scope",
-                "request_encryption",
-                "success_response_authentication",
-                "inference_secret_policy",
-                "manifest_mode",
-                "manifest_observation",
-            ]) && lower_hex(&claims["observed_manifest_sha256"], 32)
-                && string("manifest_observed_at")
-                && claims["manifest_bound_to_active_secret"] == false
-        }
-        _ => false,
-    }
+    crate::aci::verifier::session_material::valid_profile(provider, claims)
 }
 
-fn signing_address(value: &Value) -> bool {
-    value.as_str().is_some_and(|s| {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
-    })
-}
-
-fn lower_hex(value: &Value, bytes: usize) -> bool {
-    value.as_str().is_some_and(|s| {
-        s.len() == bytes * 2
-            && s.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    })
-}
-
-fn valid_tdx_material(claims: &Value) -> bool {
-    let report = &claims["tdx_report"];
-    let extra_fields: &[(&str, usize)] = match report["report_format"].as_str() {
-        Some("td10") => &[],
-        Some("td15") => &[("tee_tcb_svn2", 16), ("mr_service_td", 48)],
-        _ => return false,
-    };
-    let fields = [
-        ("tee_tcb_svn", 16),
-        ("mr_seam", 48),
-        ("mr_signer_seam", 48),
-        ("seam_attributes", 8),
-        ("td_attributes", 8),
-        ("xfam", 8),
-        ("mr_td", 48),
-        ("mr_config_id", 48),
-        ("mr_owner", 48),
-        ("mr_owner_config", 48),
-        ("rt_mr0", 48),
-        ("rt_mr1", 48),
-        ("rt_mr2", 48),
-        ("rt_mr3", 48),
-    ];
-    // Exact shape prevents unsupported report additions from sharing this version.
-    if !report
-        .as_object()
-        .is_some_and(|m| m.len() == 1 + fields.len() + extra_fields.len())
-        || !fields
-            .iter()
-            .chain(extra_fields)
-            .all(|(key, len)| lower_hex(&report[key], *len))
-    {
-        return false;
-    }
-    crate::aci::digest::jcs_bytes(report).is_ok_and(|bytes| {
-        claims["tdx_report_sha256"].as_str()
-            == Some(crate::aci::digest::sha256_hex(&bytes).as_str())
-    })
+pub(super) fn is_multi_instance(provider_type: Option<&str>) -> bool {
+    matches!(provider_type, Some("chutes") | Some("0g-private-computer"))
 }
 
 /// The instance a binding attests (a Chutes instance id or a 0G provider
@@ -273,10 +86,7 @@ pub(super) fn instance_id<'a>(
     event: &UpstreamVerifiedEvent,
     binding: &'a ChannelBinding,
 ) -> Option<&'a str> {
-    if !matches!(
-        event.provider_type.as_deref(),
-        Some("chutes") | Some("0g-private-computer")
-    ) {
+    if !is_multi_instance(event.provider_type.as_deref()) {
         return None;
     }
     match binding {
@@ -721,6 +531,12 @@ mod claim_mapping_tests {
         }
     }
 
+    fn reviewed_profile(provider: Option<&str>, verifier_id: &str, claims: &Value) -> bool {
+        let mut event = event(provider, VerificationResult::Verified, None);
+        event.verifier_id = verifier_id.to_string();
+        super::reviewed_session_material(&event, claims)
+    }
+
     fn profiles() -> Value {
         serde_json::from_str(include_str!(
             "../../../tests/fixtures/session_material.json"
@@ -731,51 +547,35 @@ mod claim_mapping_tests {
     #[test]
     fn only_complete_matching_reviewed_profiles_are_eligible() {
         for (provider, claims) in profiles().as_object().unwrap() {
-            if provider == "tinfoil" {
-                assert!(!super::reviewed_session_material(
-                    Some(provider),
-                    "private-ai-verifier/tinfoil/v1",
-                    claims
-                ));
-                continue;
-            }
             let id = match provider.as_str() {
                 "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
                 "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),
                 _ => format!("private-ai-verifier/{provider}/v1"),
             };
-            assert!(
-                super::reviewed_session_material(Some(provider), &id, claims),
-                "{provider}"
-            );
-            assert!(!super::reviewed_session_material(
-                Some(provider),
-                "custom/v1",
-                claims
-            ));
+            assert!(reviewed_profile(Some(provider), &id, claims), "{provider}");
+            let mut extended = claims.clone();
+            extended["unknown_top_level_claim"] = json!({"preserved": true});
+            assert!(reviewed_profile(Some(provider), &id, &extended));
+            assert!(!reviewed_profile(Some(provider), "custom/v1", claims));
             for key in claims.as_object().unwrap().keys() {
                 let mut malformed = claims.clone();
                 malformed[key] = json!({"invalid": true});
                 assert!(
-                    !super::reviewed_session_material(Some(provider), &id, &malformed),
+                    !reviewed_profile(Some(provider), &id, &malformed),
                     "{provider}: malformed {key}"
                 );
                 let mut incomplete = claims.clone();
                 incomplete.as_object_mut().unwrap().remove(key);
                 assert!(
-                    !super::reviewed_session_material(Some(provider), &id, &incomplete),
+                    !reviewed_profile(Some(provider), &id, &incomplete),
                     "{provider}: missing {key}"
                 );
             }
             let mut unknown = claims.clone();
             unknown["session_material_version"] = json!(format!("{provider}/2"));
-            assert!(!super::reviewed_session_material(
-                Some(provider),
-                &id,
-                &unknown
-            ));
+            assert!(!reviewed_profile(Some(provider), &id, &unknown));
             for wrong in ["armet-ai", "secret-ai", "custom"] {
-                assert!(!super::reviewed_session_material(Some(wrong), &id, claims));
+                assert!(!reviewed_profile(Some(wrong), &id, claims));
             }
         }
     }
@@ -791,43 +591,91 @@ mod claim_mapping_tests {
             changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
                 &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
             ));
-            assert!(
-                !super::reviewed_session_material(Some("near-ai"), id, &changed),
-                "{key}"
-            );
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed), "{key}");
+        }
+        // Serde structs accept sequence input by default; the profile does not.
+        let report: crate::aci::verifier::session_material::TdxReportMaterial =
+            serde_json::from_value(base["tdx_report"].clone()).unwrap();
+        let report = serde_json::to_value(report).unwrap();
+        for (key, array) in [
+            (
+                "tdx_report",
+                json!(report.as_object().unwrap().values().collect::<Vec<_>>()),
+            ),
+            ("gateway_gpu_check", json!([false, false])),
+        ] {
+            let mut changed = base.clone();
+            changed[key] = array;
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed));
+        }
+        for value in [json!("22".repeat(16)), Value::Null] {
+            let mut changed = base.clone();
+            changed["tdx_report"]["tee_tcb_svn2"] = value;
+            changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+            ));
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed));
         }
         let mut changed = base.clone();
         changed["tdx_report_sha256"] = json!(format!("sha256:{}", "00".repeat(32)));
-        assert!(!super::reviewed_session_material(
-            Some("near-ai"),
-            id,
-            &changed
-        ));
+        assert!(!reviewed_profile(Some("near-ai"), id, &changed));
         changed = base.clone();
         changed["tdx_report"]["report_format"] = json!("td15");
-        assert!(!super::reviewed_session_material(
-            Some("near-ai"),
-            id,
-            &changed
-        ));
+        assert!(!reviewed_profile(Some("near-ai"), id, &changed));
         changed["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
         changed["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
         changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
             &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
         ));
-        assert!(super::reviewed_session_material(
-            Some("near-ai"),
-            id,
-            &changed
-        ));
+        assert!(reviewed_profile(Some("near-ai"), id, &changed));
         for key in ["tee_tcb_svn2", "mr_service_td"] {
             let mut malformed = changed.clone();
             malformed["tdx_report"][key] = json!("zz");
-            assert!(!super::reviewed_session_material(
-                Some("near-ai"),
-                id,
-                &malformed
-            ));
+            assert!(!reviewed_profile(Some("near-ai"), id, &malformed));
+        }
+    }
+
+    #[test]
+    fn tdx_profiles_require_string_formats_and_digest_the_supplied_report() {
+        let digest = |report: &Value| {
+            json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(report).unwrap()
+            ))
+        };
+        for provider in ["near-ai", "phala-direct", "chutes"] {
+            let verifier_id = if provider == "near-ai" {
+                "private-ai-verifier/near-ai-gateway/v1".to_string()
+            } else {
+                format!("private-ai-verifier/{provider}/v1")
+            };
+            for format in ["td10", "td15"] {
+                let mut claims = profiles()[provider].clone();
+                claims["tdx_report"]["report_format"] = json!(format);
+                if format == "td15" {
+                    claims["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
+                    claims["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
+                }
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // An externally tagged enum object must not be normalized to
+                // the string whose digest was supplied by the verifier.
+                claims["tdx_report"]["report_format"] = json!({(format): null});
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // A valid string report must hash its own supplied content,
+                // not another representation or another valid report.
+                claims["tdx_report"]["report_format"] = json!(format);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report"]["rt_mr0"] = json!("ff".repeat(48));
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+            }
         }
     }
 

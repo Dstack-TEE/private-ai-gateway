@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult,
+    VerificationResult, VerificationRound,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -19,7 +19,9 @@ use crate::aggregator::session::{
 };
 use crate::aggregator::session_store::SessionLease;
 
-use super::claims::{instance_id, per_instance_session_claims, session_claims_for_event};
+use super::claims::{
+    instance_id, is_multi_instance, per_instance_session_claims, session_claims_for_event,
+};
 use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
@@ -113,6 +115,19 @@ pub(super) struct SelectedUpstream {
 }
 
 impl AdmittedUpstream {
+    fn withheld_without_instance(mut self) -> Self {
+        if self.requires_instance {
+            self.sessions.clear();
+            self.requires_instance = false;
+            self.event.channel_bindings.clear();
+            self.event.result = VerificationResult::Failed;
+            self.event.reason = Some(
+                "upstream withheld an unverified response without a serving instance".to_string(),
+            );
+        }
+        self
+    }
+
     pub(super) fn select(
         mut self,
         served_instance_id: Option<&str>,
@@ -166,8 +181,9 @@ struct ChannelMaterial<'a> {
     identity: &'a Option<WorkloadIdentityRef>,
     channel_binding: &'a [ChannelBinding],
     claims: &'a SessionClaims,
-    #[serde(skip_serializing_if = "Option::is_none")]
     evidence_digest: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_round: Option<&'a VerificationRound>,
 }
 
 impl ChannelMaterial<'_> {
@@ -175,10 +191,7 @@ impl ChannelMaterial<'_> {
         // JCS form: `claims.extra` holds provider JSON whose member order
         // follows the parse, so a plain serialization would fingerprint the
         // same material differently across rounds.
-        let mut value = serde_json::to_value(self)?;
-        if self.schema.is_none() && self.evidence_digest.is_none() {
-            value["evidence_digest"] = Value::Null;
-        }
+        let value = serde_json::to_value(self)?;
         let bytes = digest::jcs_bytes(&value).map_err(serde::ser::Error::custom)?;
         Ok(digest::sha256_hex(&bytes))
     }
@@ -667,16 +680,7 @@ impl AciService {
                 // withheld. No serving instance was authenticated in this case,
                 // so do not cite an arbitrary instance's admitted session.
                 Err(UpstreamError::Upstream { status }) if !(200..300).contains(&status) => {
-                    if admission.requires_instance {
-                        admission.sessions.clear();
-                        admission.requires_instance = false;
-                        admission.event.channel_bindings.clear();
-                        admission.event.result = VerificationResult::Failed;
-                        admission.event.reason = Some(
-                            "upstream withheld an unverified response without a serving instance"
-                                .to_string(),
-                        );
-                    }
+                    admission = admission.withheld_without_instance();
                     return ReverifyOutcome::Forwarded(R::withheld(status), Box::new(admission));
                 }
                 Err(UpstreamError::ChannelBindingMismatch(_))
@@ -765,10 +769,7 @@ impl AciService {
         if self.serves_directly() || event.result != VerificationResult::Verified {
             return Ok(Vec::new());
         }
-        let groups = if matches!(
-            event.provider_type.as_deref(),
-            Some("chutes") | Some("0g-private-computer")
-        ) {
+        let groups = if is_multi_instance(event.provider_type.as_deref()) {
             // Independent instances retain verifier priority (0G selects the
             // first eligible provider); only bindings within a group are canonical.
             let mut instances = BTreeMap::new();
@@ -917,10 +918,7 @@ impl AciService {
             event.channel_bindings = bindings;
         }
         let requires_instance = !self.serves_directly()
-            && matches!(
-                event.provider_type.as_deref(),
-                Some("chutes") | Some("0g-private-computer")
-            )
+            && is_multi_instance(event.provider_type.as_deref())
             && event.result == VerificationResult::Verified;
         Ok(AdmittedUpstream {
             requires_instance,
@@ -947,13 +945,7 @@ impl AciService {
         let evidence = event.evidence.as_ref();
         let projected = serde_json::to_value(&claims.extra)
             .map_err(|err| ServiceError::SessionStore(err.to_string()))?;
-        let reviewed = (event.provider_type.as_deref() != Some("aci-service")
-            || event.aci_identity.is_some())
-            && reviewed_session_material(
-                event.provider_type.as_deref(),
-                &event.verifier_id,
-                &projected,
-            );
+        let reviewed = reviewed_session_material(event, &projected);
         let material = ChannelMaterial {
             schema: reviewed.then_some("aci-session-material/1"),
             provider_type: if reviewed {
@@ -972,6 +964,11 @@ impl AciService {
             } else {
                 evidence.and_then(|e| e["digest"].as_str())
             },
+            verification_round: if reviewed {
+                None
+            } else {
+                event.verification_round.as_ref()
+            },
         };
         let fingerprint = material
             .fingerprint()
@@ -982,10 +979,8 @@ impl AciService {
             .ok_or_else(|| {
                 ServiceError::SessionStore("attested session expiry overflow".to_string())
             })?;
-        if event.provider_type.as_deref() == Some("aci-service") {
-            if let Some(binding) = event.aci_identity.as_ref() {
-                expires_at = expires_at.min(binding.keyset.not_after);
-            }
+        if let Some(binding) = event.aci_identity.as_ref() {
+            expires_at = expires_at.min(binding.keyset.not_after);
         }
         if expires_at <= now {
             return Err(ServiceError::AdmissionInvariant(
@@ -1030,25 +1025,23 @@ impl AciService {
                 identity.signing_address = Some(addr.to_string());
             }
         }
-        if event.provider_type.as_deref() == Some("aci-service") {
-            if let Some(binding) = event.aci_identity.as_ref() {
-                identity.extra.insert(
-                    "workload_keyset_digest".into(),
-                    binding.keyset_digest.clone().into(),
-                );
-                identity.extra.insert(
-                    "subject".into(),
-                    binding
-                        .keyset
-                        .subject
-                        .clone()
-                        .map(Value::String)
-                        .unwrap_or(Value::Null),
-                );
-                identity
-                    .extra
-                    .insert("keyset_not_after".into(), binding.keyset.not_after.into());
-            }
+        if let Some(binding) = event.aci_identity.as_ref() {
+            identity.extra.insert(
+                "workload_keyset_digest".into(),
+                binding.keyset_digest.clone().into(),
+            );
+            identity.extra.insert(
+                "subject".into(),
+                binding
+                    .keyset
+                    .subject
+                    .clone()
+                    .map(Value::String)
+                    .unwrap_or(Value::Null),
+            );
+            identity
+                .extra
+                .insert("keyset_not_after".into(), binding.keyset.not_after.into());
         }
         (!identity.is_empty()).then_some(identity)
     }
@@ -1074,55 +1067,5 @@ impl AciService {
                 Some(&event.upstream_name),
             ),
         }
-    }
-}
-
-#[cfg(test)]
-mod fingerprint_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn legacy_format_is_preserved_and_reviewed_material_has_a_separate_domain() {
-        let claims = SessionClaims::default();
-        let endpoint = Some("https://up.example".to_string());
-        let identity = None;
-        let bindings = vec![];
-        let mut material = ChannelMaterial {
-            schema: None,
-            provider_type: None,
-            upstream_name: "up",
-            endpoint: &endpoint,
-            verifier_id: "custom/v1",
-            identity: &identity,
-            channel_binding: &bindings,
-            claims: &claims,
-            evidence_digest: Some("sha256:evidence"),
-        };
-        let mut legacy = json!({
-            "upstream_name": "up", "endpoint": endpoint, "verifier_id": "custom/v1",
-            "identity": null, "channel_binding": [], "claims": claims,
-            "evidence_digest": "sha256:evidence",
-        });
-        assert_eq!(
-            material.fingerprint().unwrap(),
-            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
-        );
-        material.evidence_digest = None;
-        legacy["evidence_digest"] = Value::Null;
-        assert_eq!(
-            material.fingerprint().unwrap(),
-            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
-        );
-        material.schema = Some("aci-session-material/1");
-        material.provider_type = Some("near-ai");
-        legacy.as_object_mut().unwrap().remove("evidence_digest");
-        legacy["schema"] = json!("aci-session-material/1");
-        legacy["provider_type"] = json!("near-ai");
-        let reviewed = material.fingerprint().unwrap();
-        assert_eq!(
-            reviewed,
-            digest::sha256_hex(&digest::jcs_bytes(&legacy).unwrap())
-        );
     }
 }

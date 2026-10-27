@@ -788,7 +788,6 @@ impl SessionStore for JsonlSessionStore {
             return Ok(id);
         }
         let split = SplitSession::new(seal()?)?;
-        validate_admission_window(&split, now)?;
         self.append(&mut w, fingerprint, split, retention_until, now)
             .map(|(_, lease)| lease)
     }
@@ -797,17 +796,6 @@ impl SessionStore for JsonlSessionStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .extend(lease, deadline)
-    }
-}
-
-fn validate_admission_window(split: &SplitSession, now: u64) -> io::Result<()> {
-    if split.stripped.established_at <= now && now < split.stripped.expires_at {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "session is outside its admission validity window",
-        ))
     }
 }
 
@@ -839,7 +827,6 @@ impl SessionStore for InMemorySessionStore {
             return Ok(id);
         }
         let split = SplitSession::new(seal()?)?;
-        validate_admission_window(&split, now)?;
         let id = split.session_id.clone();
         index.insert(fingerprint.to_string(), split, retention_until);
         let lease = index.lease(&id);

@@ -29,7 +29,8 @@ use private_ai_gateway::aci::e2ee::{
 };
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
+    VerificationResult, VerificationRound,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -3254,6 +3255,8 @@ async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
         .get(&format!("/v1/aci/sessions/{original}"), &[])
         .await;
     let original_bytes = full.body;
+    // A reviewed profile ignores the round token as well as fresh evidence.
+    event.verification_round = Some(VerificationRound::fresh());
     // A new successful round with different evidence keeps the establishing bytes.
     event.evidence =
         Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"round two")).unwrap());
@@ -3330,27 +3333,42 @@ async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
 
 #[tokio::test]
 async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
-    for provider in ["armet-ai", "secret-ai", "chutes", "custom"] {
+    for provider in [
+        "armet-ai",
+        "secret-ai",
+        "chutes",
+        "0g-private-computer",
+        "custom",
+    ] {
         for cpu in ["tdx", "sev-snp"] {
             let h = admission::Harness::new(vec![]);
-            let mut event = common::verified_event("admission-test", "model-a");
-            event.provider_type = Some(provider.to_string());
-            event.verifier_id = format!("private-ai-verifier/{provider}/v1");
-            // An unsupported marker cannot opt in, even with copied complete TDX material.
-            let mut claims = session_profile("near-ai");
-            claims["session_material_version"] = serde_json::json!(format!("{provider}/1"));
-            claims["cpu_type"] = serde_json::json!(cpu);
-            event.provider_claims = Some(claims);
-            if provider == "chutes" {
-                event.channel_bindings = vec![ChannelBinding::E2eePublicKeySha256 {
-                    provider: "chutes".to_string(),
-                    algorithm: "rsa-oaep-sha256".to_string(),
-                    key_id: Some("instance-a".to_string()),
-                    public_key_sha256: "ab".repeat(32),
-                }];
-            }
-            *h.verifier.0.lock().unwrap() = event.clone();
+            let verify = || {
+                let mut event = common::verified_event("admission-test", "model-a");
+                event.provider_type = Some(provider.to_string());
+                event.verifier_id = format!("private-ai-verifier/{provider}/v1");
+                // An unsupported marker cannot opt in, even with copied complete TDX material.
+                let mut claims = session_profile("near-ai");
+                claims["session_material_version"] = serde_json::json!(format!("{provider}/1"));
+                claims["cpu_type"] = serde_json::json!(cpu);
+                event.provider_claims = Some(claims);
+                if matches!(provider, "chutes" | "0g-private-computer") {
+                    event.channel_bindings = vec![ChannelBinding::E2eePublicKeySha256 {
+                        provider: provider.to_string(),
+                        algorithm: "rsa-oaep-sha256".to_string(),
+                        key_id: Some("instance-a".to_string()),
+                        public_key_sha256: "ab".repeat(32),
+                    }];
+                }
+                event
+            };
+            *h.verifier.0.lock().unwrap() = verify();
             let first = h.listed()[0].session_id().to_string();
+            // Fresh complete-evidence verifications with identical bytes reuse
+            // the session at a later time, including 0G broker responses.
+            h.clock.set(101);
+            let mut event = verify();
+            *h.verifier.0.lock().unwrap() = event.clone();
+            assert_eq!(h.listed()[0].session_id(), first, "{provider}/{cpu}");
             event.evidence = Some(
                 serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new evidence"))
                     .unwrap(),
@@ -3362,71 +3380,40 @@ async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
 }
 
 #[tokio::test]
-async fn tinfoil_tdx_and_snp_rounds_remain_evidence_sensitive() {
-    for (kind, registers) in [
-        ("tdx-guest", vec!["22".repeat(48); 5]),
-        ("sev-snp-guest", vec!["22".repeat(48)]),
-    ] {
-        let h = admission::Harness::new(vec![admission::Attempt::Response {
-            status: 200,
-            at: 101,
-        }]);
-        let mut event = common::verified_event("admission-test", "model-a");
-        event.provider_type = Some("tinfoil".to_string());
-        event.verifier_id = "private-ai-verifier/tinfoil/v1".to_string();
-        let mut claims = session_profile("tinfoil");
-        // A cached legacy marker must not opt this incomplete projection in.
-        claims["session_material_version"] = serde_json::json!("tinfoil/1");
-        for key in ["code_measurement", "enclave_measurement"] {
-            claims[key] = serde_json::json!({
-                "type": format!("https://tinfoil.sh/predicate/{kind}/v2"),
-                "registers": registers,
-            });
-        }
-        let mut summary = serde_json::json!({
-            "verification_id": "1c7abe93-6501-4db4-bfd0-2cf3e3c05f77",
-            "document": claims,
-        });
-        event.evidence = Some(
-            serde_json::to_value(EvidenceRef::from_bytes(
-                "application/json",
-                &serde_json::to_vec(&summary).unwrap(),
-            ))
-            .unwrap(),
-        );
-        event.provider_claims = Some(claims);
-        *h.verifier.0.lock().unwrap() = event.clone();
-        let original = h.listed()[0].session_id().to_string();
-        assert_eq!(h.listed()[0].session_id(), original);
-        // Two independent rounds can return identical SDK summaries. Only the
-        // explicit round identifier differs; a cached event keeps it unchanged.
-        summary["verification_id"] = serde_json::json!("8abed6c3-aace-4395-aea4-08c8e3f7bcc2");
-        event.evidence = Some(
-            serde_json::to_value(EvidenceRef::from_bytes(
-                "application/json",
-                &serde_json::to_vec(&summary).unwrap(),
-            ))
-            .unwrap(),
-        );
-        *h.verifier.0.lock().unwrap() = event;
-        let replacement = h.listed()[0].session_id().to_string();
-        assert_ne!(replacement, original, "{kind}: new evidence must rotate");
-        assert!(h
-            .service
-            .forward_chat_completion_request(admission::request(vec![original]))
-            .await
-            .is_err());
-        assert!(h.backend.events.lock().unwrap().is_empty());
-        let response = h
-            .service
-            .forward_chat_completion_request(admission::request(vec![replacement.clone()]))
-            .await
-            .unwrap();
-        assert_eq!(
-            receipt_event(&response.receipt, "upstream.verified")["session_id"],
-            replacement
-        );
-    }
+async fn incomplete_evidence_rounds_rotate_sessions_but_cache_hits_reuse() {
+    let h = admission::Harness::new(vec![admission::Attempt::Response {
+        status: 200,
+        at: 102,
+    }]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    event.provider_type = Some("tinfoil".into());
+    event.verifier_id = "private-ai-verifier/tinfoil/v1".into();
+    event.verification_round = Some(VerificationRound::fresh());
+    *h.verifier.0.lock().unwrap() = event.clone();
+    let original = h.listed()[0].session_id().to_string();
+    h.clock.set(101);
+    assert_eq!(h.listed()[0].session_id(), original, "cached event");
+
+    // The SDK summary can be identical while unreported platform state changes.
+    event.verification_round = Some(VerificationRound::fresh());
+    *h.verifier.0.lock().unwrap() = event;
+    let replacement = h.listed()[0].session_id().to_string();
+    assert_ne!(replacement, original, "independent verification round");
+    assert!(h
+        .service
+        .forward_chat_completion_request(admission::request(vec![original]))
+        .await
+        .is_err());
+    assert!(h.backend.events.lock().unwrap().is_empty());
+    let response = h
+        .service
+        .forward_chat_completion_request(admission::request(vec![replacement.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt_event(&response.receipt, "upstream.verified")["session_id"],
+        replacement
+    );
 }
 
 #[tokio::test]

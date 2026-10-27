@@ -7,7 +7,6 @@ import base64
 import contextlib
 import gzip
 import sys
-import uuid
 from typing import Any
 
 from .common import emit, failed, json_evidence_bundle, provider_options, verifier_id_for
@@ -28,28 +27,6 @@ def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
     if len(report_data) != 64:
         raise ValueError(f"invalid Tinfoil report_data length: {len(report_data)}")
     return report_data
-
-
-def tinfoil_document_material(doc: Any) -> dict[str, Any]:
-    """Preserve the official verified document's measurements and register order."""
-
-    def measurement(value):
-        return {"type": value.type.value, "registers": list(value.registers)}
-
-    try:
-        hardware = doc.hardware_measurement
-        return {
-            "enclave_host": doc.enclave_host,
-            "enclave_fingerprint": doc.enclave_fingerprint,
-            "hpke_public_key": doc.hpke_public_key,
-            "code_measurement": measurement(doc.code_measurement),
-            "enclave_measurement": measurement(doc.enclave_measurement.measurement),
-            "hardware_measurement": None if hardware is None else {
-                "id": hardware.id, "mrtd": hardware.mrtd, "rtmr0": hardware.rtmr0,
-            },
-        }
-    except (AttributeError, TypeError, ValueError):
-        return {}
 
 
 async def verify_tinfoil(request: dict[str, Any]) -> None:
@@ -95,13 +72,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         }
         for name, state in (doc.steps or {}).items()
     }
-    material = tinfoil_document_material(doc)
     evidence_doc = {
-        # The SDK summary omits the authenticated quote/platform attributes.
-        # Equal summaries cannot establish continuity across independent rounds;
-        # cached events retain this identifier and their session unchanged.
-        "verification_id": str(uuid.uuid4()),
-        **material,
         "config_repo": doc.config_repo,
         "enclave_host": doc.enclave_host,
         "release_digest": doc.release_digest,
@@ -165,7 +136,6 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 }
             ],
             "provider_claims": {
-                **material,
                 # Router channel scope — model-independent. The served model is
                 # deliberately NOT folded in: it would split one verified channel
                 # into a session per model, and it is recorded on the receipt.

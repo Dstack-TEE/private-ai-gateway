@@ -190,9 +190,6 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
     let config: GatewayConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
-    if config.attested_session_ttl_seconds == 0 {
-        return Err("gateway attested_session_ttl_seconds must be greater than zero".to_string());
-    }
     if config.upstream_verification_concurrency == 0 {
         return Err(
             "gateway upstream_verification_concurrency must be greater than zero".to_string(),
@@ -1073,7 +1070,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn gateway_config_defaults_and_validates_session_ttl() {
+    fn gateway_config_defaults_and_deserializes_session_ttl() {
         for (body, expected) in [
             ("{}", DEFAULT_ATTESTED_SESSION_TTL_SECONDS),
             (r#"{"attested_session_ttl_seconds":17}"#, 17),
@@ -1083,7 +1080,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             let config = load_gateway_config(path.to_str().unwrap()).unwrap();
             assert_eq!(config.attested_session_ttl_seconds, expected);
         }
-        for value in ["0", "-1", "1.5", "18446744073709551616", "null", "\"3600\""] {
+        for value in ["-1", "1.5", "18446744073709551616", "null", "\"3600\""] {
             let (_dir, path) = temp_path("invalid-session-ttl");
             std::fs::write(
                 &path,

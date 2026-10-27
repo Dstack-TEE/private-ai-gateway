@@ -735,6 +735,8 @@ async fn external_provider_verifier_caches_verified_bindings() {
     assert_eq!(first.result, VerificationResult::Verified);
     assert_eq!(second.result, VerificationResult::Verified);
     assert!(!second.required);
+    assert!(first.verification_round.is_some());
+    assert_eq!(first.verification_round, second.verification_round);
     assert_eq!(
         std::fs::read_to_string(&counter_path).unwrap(),
         "1",
@@ -744,6 +746,8 @@ async fn external_provider_verifier_caches_verified_bindings() {
     verifier.invalidate(&second_request);
     let third = verifier.verify(second_request).await;
     assert_eq!(third.result, VerificationResult::Verified);
+    assert_eq!(first.evidence, third.evidence);
+    assert_ne!(first.verification_round, third.verification_round);
     assert_eq!(
         std::fs::read_to_string(&counter_path).unwrap(),
         "2",

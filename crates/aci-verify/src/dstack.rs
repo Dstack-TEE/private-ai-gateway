@@ -200,18 +200,6 @@ pub struct VerifiedReceiptCustody {
     pub root_public_key: String,
 }
 
-/// Compatibility wrapper returning only the recovered root. The caller must
-/// still apply its accepted-root policy.
-#[must_use = "the recovered KMS root must be checked against the custody policy"]
-pub fn verify_dstack_kms_receipt_chain(
-    evidence: &Value,
-    keyset: &WorkloadKeyset,
-    app_id: &[u8],
-) -> Result<String, KeyCustodyError> {
-    verify_dstack_kms_receipt_custody(evidence, keyset, app_id)
-        .map(|custody| custody.root_public_key)
-}
-
 /// The dstack KMS chain behind the receipt key (§9.1(5)): the custody entry
 /// must name a receipt key the keyset attests, and its signature chain must
 /// lead from the measured `app_id` to a KMS root. Returns normalized public
@@ -412,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_receipt_custody_recovers_signed_identities_and_preserves_wrapper() {
+    fn structured_receipt_custody_recovers_signed_identities() {
         let (keyset, evidence, app_id, kms, app, root) = signed_custody();
         let custody = verify_dstack_kms_receipt_custody(&evidence, &keyset, &app_id).unwrap();
         assert_eq!(
@@ -423,12 +411,8 @@ mod tests {
                 purpose: "aci.receipt.ed25519.v1".into(),
                 kms_public_key: kms,
                 app_public_key: app,
-                root_public_key: root.clone(),
+                root_public_key: root,
             }
-        );
-        assert_eq!(
-            verify_dstack_kms_receipt_chain(&evidence, &keyset, &app_id).unwrap(),
-            root
         );
         assert!(serde_json::to_value(custody)
             .unwrap()
@@ -437,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn both_custody_entry_points_reject_invalid_chains() {
+    fn receipt_custody_rejects_invalid_chains() {
         let (keyset, evidence, app_id, ..) = signed_custody();
         for (field, value) in [
             ("signature_chain", serde_json::json!(["00", "00"])),
@@ -449,10 +433,6 @@ mod tests {
             bad["key_custody"]["keys"][0][field] = value;
             assert!(
                 verify_dstack_kms_receipt_custody(&bad, &keyset, &app_id).is_err(),
-                "{field}"
-            );
-            assert!(
-                verify_dstack_kms_receipt_chain(&bad, &keyset, &app_id).is_err(),
                 "{field}"
             );
         }

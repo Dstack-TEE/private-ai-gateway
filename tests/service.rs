@@ -441,6 +441,7 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
         }],
         provider_claims: None,
         aci_identity: None,
+        verification_round: None,
     };
 
     let err = svc

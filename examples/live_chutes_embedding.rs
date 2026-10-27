@@ -98,6 +98,7 @@ async fn run() -> Result<(), String> {
     // for the adapter's session-acquisition path to succeed.
     let event = UpstreamVerifiedEvent {
         aci_identity: None,
+        verification_round: None,
         upstream_name: "chutes".to_string(),
         // Live-probe bypass, not a real attestation — leave the provider type
         // unset so the session does not synthesize hardware-proven claims.
