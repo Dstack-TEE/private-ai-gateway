@@ -232,7 +232,6 @@ fn event_by_type<'a>(payload: &'a Value, event_type: &str) -> Option<&'a Value> 
     events(payload).find(|event| event["type"].as_str() == Some(event_type))
 }
 
-/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
 /// The session id admitted for the committed forwarding attempt.
 pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
     events(payload)
@@ -243,7 +242,6 @@ pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
         .find_map(|event| event["session_id"].as_str().map(str::to_string))
 }
 
-/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
 /// Fetch the cited snapshot, returning its raw 2xx response or a reason.
 pub async fn fetch_live_session(
     client: &AciClient,
@@ -662,7 +660,8 @@ fn check_upstream_event(
     }
 }
 
-/// Session integrity, validity and pin-membership checks. These checks do not perform provider-specific verification of the establishing evidence (§9.2(4)).
+/// Session integrity, validity and pin-membership checks; does not perform
+/// provider-specific verification of the establishing evidence (§9.2(4)).
 fn check_session_audit(
     transcript: &mut Transcript,
     payload: &Value,

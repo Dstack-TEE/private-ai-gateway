@@ -116,6 +116,13 @@ serving CPU. Snapshot reuse establishes neither authenticated GPU identity nor
 continued use of a particular GPU. ArmetAI and SecretAI require separately reviewed,
 complete CPU/GPU projections before they can reuse across evidence changes.
 
+Legacy 0G fingerprints omitted the verification evidence digest. Stage 2 makes
+0G evidence-sensitive because its native verifier has no reviewed stable-material
+profile. Its first verification under Stage 2 therefore selects a replacement
+session; later evidence changes can replace it again. Fixed legacy pins require
+fetching, auditing and explicitly accepting the replacement, as described below.
+Rollback may select a retained legacy fingerprint or seal a legacy session.
+
 The new fingerprint domain/profile claims cause one expected session replacement
 for newly profiled channels. Existing JSONL fingerprints remain opaque; old records,
 IDs and pins are never rewritten or backfilled. Old and new records coexist under
@@ -246,8 +253,10 @@ A provider's attestation scope decides what one session covers:
   or proxy channel. The served model is recorded on the receipt, not in the
   session.
 - **Model** (Phala direct, `aci-service`): one session per upstream model.
-- **Instance** (Chutes): one session per verified instance, so fleet changes do
-  not change an unchanged instance's session id.
+- **Instance** (Chutes and 0G): one session per verified instance. With reviewed
+  Chutes material, unrelated fleet changes preserve an unchanged instance's
+  session ID. 0G remains evidence-sensitive: refreshed evidence, including changes
+  to fleet evidence, can replace its sessions.
 
 A bridged provider verifier declares its scope in `attested_scope`. The
 gateway rejects a verified result whose declared scope differs from the
