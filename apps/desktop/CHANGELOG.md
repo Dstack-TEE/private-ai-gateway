@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.3-beta.1...desktop-v0.7.0-beta.1) (2026-10-27)
+
+
+### Features
+
+* **aggregator:** stable attested sessions across re-verification ([#403](https://github.com/Dstack-TEE/private-ai-gateway/issues/403)) ([#456](https://github.com/Dstack-TEE/private-ai-gateway/issues/456)) ([da7df70](https://github.com/Dstack-TEE/private-ai-gateway/commit/da7df70cd5a412ea58b69df3456f58c1db72b006))
+* **cli:** add --max-tokens to pap aci send ([#500](https://github.com/Dstack-TEE/private-ai-gateway/issues/500)) ([6475d5c](https://github.com/Dstack-TEE/private-ai-gateway/commit/6475d5c6b63c8b25cdc492f52b624270c328ed81))
+
 ## [0.6.3-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.2...desktop-v0.6.3-beta.1) (2026-10-27)
 
 
