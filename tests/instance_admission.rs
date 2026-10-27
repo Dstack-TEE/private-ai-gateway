@@ -198,7 +198,9 @@ async fn withheld_instance_errors_preserve_status_without_citing_an_arbitrary_se
                         .await
                         .unwrap();
                     assert_eq!(response.upstream_status, 503);
-                    assert!(response.upstream_body.is_empty());
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&response.upstream_body).unwrap();
+                    assert_eq!(body["error"]["type"], "service_unavailable");
                     let event = verified_event(&response.receipt);
                     assert_eq!(event["result"], "failed");
                     assert!(event["session_id"].is_null());
