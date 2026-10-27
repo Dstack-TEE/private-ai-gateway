@@ -5420,6 +5420,38 @@ fn images_input() -> CompletionInput {
 }
 
 #[tokio::test]
+async fn images_reject_unsupported_counts_before_consult() {
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}]})).await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for (n, code) in [
+        (json!(2), "unsupported_value"),
+        (json!(10), "unsupported_value"),
+        (json!(0), "invalid_parameter"),
+        (json!(11), "invalid_parameter"),
+        (json!(1.5), "invalid_parameter"),
+    ] {
+        let mut input = images_input();
+        input.params["n"] = n;
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, _, body) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], code);
+        assert_eq!(body["error"]["param"], "n");
+        if code == "unsupported_value" {
+            assert_eq!(body["error"]["message"], "only n=1 is currently supported");
+        }
+    }
+    assert!(pres.lock().unwrap().is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn images_opt_in_consult_schema_cost_and_post_usage() {
     for with_usage in [false, true] {
         let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
@@ -5435,12 +5467,13 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             serde_json::to_vec(&upstream).unwrap(),
             "application/json",
         );
-        let (status, headers, body) = response_parts(
-            middleware(url)
-                .handle_completion(&service, images_input())
-                .await,
-        )
-        .await;
+        let mut input = images_input();
+        if !with_usage {
+            input.params.as_object_mut().unwrap().remove("n");
+            input.received_body = serde_json::to_vec(&input.params).unwrap();
+        }
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 200);
         assert_eq!(body["data"], json!([{"b64_json":"aW1hZ2U="}]));
         assert_eq!(
@@ -5468,6 +5501,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].path.as_deref(), Some("/v1/images/generations"));
             assert_eq!(requests[0].body["response_format"], "b64_json");
+            assert_eq!(requests[0].body.get("n"), with_usage.then_some(&json!(1)));
             assert!(requests[0].body.get("style").is_none());
             assert!(requests[0].body.get("user").is_none());
         }

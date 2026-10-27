@@ -135,6 +135,11 @@ continues to route to it. `anthropic` format does not support image generation.
 Only reviewed verifiable models should be offered; the initial NEAR model is
 `black-forest-labs/FLUX.2-klein-4B` over the existing TLS SPKI-bound adapter.
 
+At launch, image requests accept only omitted `n` or integer `n=1`, validated
+before pre-consult. The NEAR FLUX backend returns one image even when `n=2`
+is forwarded. Per-model image count limits are a follow-up; billing continues
+to use the returned `data.length`, not the requested count.
+
 `pricing.imageCostPerImage` is a decimal string, or an object of decimal strings.
 Each rate must be an unsigned plain decimal with an integer part, at most
 18 fractional digits, and a value no greater than `1000000`. Signs, exponents,

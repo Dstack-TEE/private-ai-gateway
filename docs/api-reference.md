@@ -51,7 +51,7 @@ middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
 
 Image generation requires string `model` and `prompt` (at most 32,000 Unicode
-characters). Optional `n` is an integer from 1 through 10; `size`, `quality`,
+characters). At launch, `n` must be omitted or the integer `1`; `size`, `quality`,
 `background`, `output_format`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
 for the string options are validated upstream. `response_format` must be absent
@@ -59,7 +59,11 @@ or `"b64_json"`; the gateway always forwards `"b64_json"`. `user` and `style`
 are accepted as strings and removed before forwarding. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
 `error.code: "unknown_parameter"` and `error.param` naming that field. `seed`
-is not supported.
+is not supported. Integers `2` through `10` return `400 invalid_request_error`
+with `code: "unsupported_value"`, `param: "n"`, and the message
+`"only n=1 is currently supported"`. Non-integer and out-of-range `n` values
+retain `code: "invalid_parameter"`. The launch NEAR FLUX backend returns one
+image even for `n=2`; per-model image count limits are a follow-up.
 
 `response_format: "url"`, any `stream` or `partial_images` field, invalid types,
 and out-of-range integers return `400`. Images allow 16 concurrent generations
