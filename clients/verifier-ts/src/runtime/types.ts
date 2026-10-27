@@ -85,17 +85,7 @@ export interface VerifiedAciIdentity {
   tlsSpkiPins: readonly string[];
   verifiedAt: number;
   expiresAt: number;
-  /** Fresh-nonce verified digests in this renewal family. */
-  digests: readonly EstablishedDigest[];
   transcript: ReportTranscript;
-}
-
-export interface EstablishedDigest {
-  digest: string;
-  notAfter: number;
-  keyset: WorkloadKeyset;
-  /** The complete fresh-nonce report verified for this digest. */
-  report: AttestationReport;
 }
 
 export interface RecordedAciExchange {

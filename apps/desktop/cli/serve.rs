@@ -36,7 +36,7 @@ use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
 use crate::client::{AciClient, VERIFICATION_TIMEOUT};
 use crate::renewal::{
-    receipt_identity as select_receipt_identity, same_renewal_family, EstablishedDigest,
+    receipt_identity as select_receipt_identity, same_renewal_family, EstablishedMember,
 };
 use crate::sessions::audit_current_sessions;
 use crate::verify::{
@@ -111,10 +111,8 @@ type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
 /// for the currently verified renewal family.
 #[derive(Clone)]
 struct TrustedIdentity {
-    report: Arc<AttestationReport>,
-    keyset_digest: String,
     /// Every digest established by a fresh-nonce verification in this family.
-    digests: Vec<EstablishedDigest>,
+    members: Vec<EstablishedMember>,
     /// A response or receipt hint requests a fresh verification for admission.
     /// Success clears the gate even if another replica's digest was attested;
     /// receipt checks independently require an exactly established member.
@@ -133,22 +131,30 @@ impl TrustedIdentity {
         identity: EstablishedIdentity,
         delivery: CancellationToken,
     ) -> Self {
-        let digest = EstablishedDigest::new(report, identity);
+        let member = EstablishedMember::new(report, identity);
         Self {
-            keyset_digest: digest.digest.clone(),
-            report: digest.report.clone(),
-            digests: vec![digest],
+            members: vec![member],
             pending: None,
             delivery,
         }
     }
 
+    fn current(&self) -> &EstablishedMember {
+        // The newest member is always retained, even while awaiting refresh.
+        &self.members[0]
+    }
+
     fn same_renewal_family(&self, other: &Self) -> bool {
-        same_renewal_family(&self.report, &other.report)
+        same_renewal_family(&self.current().report, &other.current().report)
     }
 
     fn prune(&mut self, now: u64) {
-        self.digests.retain(|entry| now < entry.not_after);
+        let mut current = true;
+        self.members.retain(|entry| {
+            let keep = current || now < entry.not_after();
+            current = false;
+            keep
+        });
     }
 }
 
@@ -296,43 +302,47 @@ impl ProxyState {
 
     /// Adopt a freshly verified identity. A renewal keeps the delivery gate
     /// and the verified digests in its family; a real rotation replaces both.
-    fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) {
-        let mut adopted = TrustedIdentity::new(report, identity, self.shutdown.child_token());
+    fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) -> bool {
+        let member = EstablishedMember::new(report, identity);
         let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
-        let continuity = adopted.same_renewal_family(&trusted);
-        if continuity && !trusted.delivery.is_cancelled() {
-            adopted.delivery = trusted.delivery.clone();
-            let additions: Vec<_> = trusted
-                .digests
-                .iter()
-                .filter(|entry| (self.now_secs)() < entry.not_after)
-                .filter(|entry| !adopted.digests.iter().any(|new| new.digest == entry.digest))
-                .cloned()
-                .collect();
-            adopted.digests.extend(additions);
+        let renewal = same_renewal_family(&member.report, &trusted.current().report);
+        let now = (self.now_secs)();
+        if renewal && !trusted.delivery.is_cancelled() {
+            trusted
+                .members
+                .retain(|old| old.digest() != member.digest());
+            trusted.members.insert(0, member);
         } else {
             trusted.delivery.cancel();
+            trusted.members = vec![member];
+            trusted.delivery = self.shutdown.child_token();
         }
-        // A fresh valid identity authorizes future sends. The hinted replica
-        // need not be the one this verification reached.
-        adopted.prune((self.now_secs)());
-        *trusted = adopted;
+        // Fresh verification authorizes sends even if it reached another replica.
+        trusted.pending = None;
+        trusted.prune(now);
+        renewal
     }
 
     fn receipt_identity(
         &self,
         admitted: &TrustedIdentity,
         receipt: &Value,
-    ) -> Option<EstablishedDigest> {
+    ) -> Option<EstablishedMember> {
         let current = self.snapshot();
-        select_receipt_identity(&admitted.report, &admitted.digests, receipt)
-            .or_else(|| select_receipt_identity(&admitted.report, &current.digests, receipt))
+        select_receipt_identity(&admitted.current().report, &admitted.members, receipt).or_else(
+            || select_receipt_identity(&admitted.current().report, &current.members, receipt),
+        )
     }
 
     fn require_reverification(&self, digest: &str) -> bool {
         let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
-        trusted.prune((self.now_secs)());
-        if !trusted.digests.iter().any(|entry| entry.digest == digest) {
+        let now = (self.now_secs)();
+        trusted.prune(now);
+        if !trusted
+            .members
+            .iter()
+            .any(|entry| entry.digest() == digest && now < entry.not_after())
+        {
             trusted.pending = Some(digest.to_string());
             true
         } else {
@@ -365,7 +375,7 @@ impl ProxyState {
         let now = (self.now_secs)();
         trusted.delivery.is_cancelled()
             || trusted.pending.is_some()
-            || !trusted.digests.iter().any(|entry| now < entry.not_after)
+            || !trusted.members.iter().any(|entry| now < entry.not_after())
     }
 
     /// Block forwards until a fresh verify re-establishes trust: cancel the
@@ -499,54 +509,45 @@ impl ProxyState {
         let identity = verification
             .identity
             .ok_or("verified run carried no established identity")?;
-        let current = self.snapshot();
-        let candidate = TrustedIdentity::new(
-            verification.report.clone(),
-            EstablishedIdentity {
-                keyset: identity.keyset.clone(),
-                keyset_digest: identity.keyset_digest.clone(),
-            },
-            self.shutdown.child_token(),
-        );
-        let same_family = candidate.same_renewal_family(&current);
-        if !same_family {
-            self.block_for_keyset_change(
-                &current,
-                "upstream workload keys or provenance changed".to_string(),
-            );
-        }
         let event_identity = identity_event(
             &verification.report,
             &identity,
             verification.observed_spki.as_deref(),
             verification_summary,
         );
-        let identity_event = if same_family {
+        // Re-pin last among the fallible steps, so a failed re-verify never
+        // leaves the new key pinned under the old identity or changes its gate.
+        self.client.pin(&self.host, &pins)?;
+        let renewal = self.adopt(verification.report, identity);
+        let identity_event = if renewal {
             VerifierEvent::IdentityRenewed {
                 identity: event_identity,
             }
         } else {
+            (self.event_sink)(VerifierEvent::Blocked {
+                code: Some("keyset_changed".to_string()),
+                reason: "upstream workload keys or provenance changed".to_string(),
+            });
             VerifierEvent::IdentityUpdated {
                 identity: event_identity,
             }
         };
-        // Re-pin last among the fallible steps, so a failed re-verify never
-        // leaves the new key pinned under the old identity.
-        self.client.pin(&self.host, &pins)?;
-        self.adopt(verification.report, identity);
         (self.event_sink)(identity_event);
+        let change = if renewal {
+            "identity renewal"
+        } else {
+            "keyset change"
+        };
         let current_pins = self.client.pinned_spkis(&self.host);
         if !stale_pins.is_empty() && stale_pins != current_pins {
             tracing::info!(
-                "private-ai-proxy serve: re-verified after keyset change; TLS pin {} -> {}; \
+                "private-ai-proxy serve: re-verified after {change}; TLS pin {} -> {}; \
                  resuming forwards",
                 stale_pins.join(","),
                 current_pins.join(",")
             );
         } else {
-            tracing::info!(
-                "private-ai-proxy serve: re-verified after keyset change; resuming forwards"
-            );
+            tracing::info!("private-ai-proxy serve: re-verified after {change}; resuming forwards");
         }
         Ok(())
     }
@@ -1346,7 +1347,7 @@ fn rotation_gate(state: &ProxyState, admitted: &TrustedIdentity, headers: &Heade
             tracing::warn!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {}); \
                  re-verification required",
-                admitted.keyset_digest
+                admitted.current().digest()
             );
         }
     }

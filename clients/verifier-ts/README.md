@@ -177,7 +177,9 @@ receipt, session, rotation, and lifecycle implementation. Use `/node` or
 `aci.receipts()` lists the bounded in-memory exchange history. A receipt can
 only receive a complete transport audit while its exchange is retained; an
 unknown id fails instead of returning a misleading verdict with skipped body
-hashes.
+hashes. Failed re-verification after an unestablished digest hint reports
+`attestation_verification`; `identity_expired` still covers expiry and a send
+refused after a verified rotation. Both codes remain in the existing error API.
 
 #### OpenAI Agents SDK
 

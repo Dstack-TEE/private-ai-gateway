@@ -339,7 +339,10 @@ async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_success
     let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(upstream, tx);
-    state.trusted.lock().unwrap().digests[0].not_after = 0;
+    Arc::get_mut(&mut state.trusted.lock().unwrap().members[0].identity)
+        .unwrap()
+        .keyset
+        .not_after = 0;
     let expired = state.snapshot();
     adopt_fixture_identity(&state);
 
@@ -1933,7 +1936,10 @@ async fn timed_out_reverification_releases_waiters_and_keeps_old_pins() {
         "attestation did not trickle"
     );
     assert_eq!(state.client.pinned_spkis(&state.host), stale);
-    assert_eq!(state.snapshot().keyset_digest, observed.keyset_digest);
+    assert_eq!(
+        state.snapshot().current().digest(),
+        observed.current().digest()
+    );
     assert!(state.is_blocked());
     assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
 }
@@ -2346,13 +2352,13 @@ async fn delayed_retired_digest_response_does_not_strand_admission() {
     );
     assert!(!state
         .snapshot()
-        .digests
+        .members
         .iter()
-        .any(|entry| entry.digest == admitted.keyset_digest));
+        .any(|entry| entry.digest() == admitted.current().digest()));
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-aci-keyset-digest",
-        admitted.keyset_digest.parse().unwrap(),
+        admitted.current().digest().parse().unwrap(),
     );
     rotation_gate(&state, &admitted, &headers);
     queue_verified_report(&state, renewed);
@@ -2371,7 +2377,7 @@ async fn delayed_retired_digest_response_does_not_strand_admission() {
             .receipt_identity(
                 &admitted,
                 &json!({
-                    "workload_keyset_digest": admitted.keyset_digest, "served_at": SERVED_AT,
+                    "workload_keyset_digest": admitted.current().digest(), "served_at": SERVED_AT,
                 })
             )
             .is_some(),
@@ -2381,24 +2387,24 @@ async fn delayed_retired_digest_response_does_not_strand_admission() {
 
 #[tokio::test]
 async fn family_breaking_changes_cancel_delivery_and_refuse_the_pending_send() {
-    for change in ["subject", "provenance", "e2ee", "tee", "measurement"] {
+    let changes: [fn(&mut AttestationReport); 5] = [
+        |report| report.attestation.workload_keyset["subject"] = json!("other"),
+        |report| report.attestation.source_provenance.repo_commit = Some("other".into()),
+        |report| {
+            report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
+                json!("00".repeat(32))
+        },
+        |report| report.attestation.tee_type = "other".into(),
+        |report| report.attestation.evidence["app_compose"] = json!("other"),
+    ];
+    for (change, mutate) in changes.into_iter().enumerate() {
         let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut state = state_over(upstream, tx);
         let mut events = capture_events(&mut state);
         let admitted = state.snapshot();
         let mut report = renewed_fixture_report();
-        match change {
-            "subject" => report.attestation.workload_keyset["subject"] = json!("other"),
-            "provenance" => report.attestation.source_provenance.repo_commit = Some("other".into()),
-            "e2ee" => {
-                report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
-                    json!("00".repeat(32))
-            }
-            "tee" => report.attestation.tee_type = "other".into(),
-            "measurement" => report.attestation.evidence["app_compose"] = json!("other"),
-            _ => unreachable!(),
-        }
+        mutate(&mut report);
         report.workload_keyset_digest = crate::checks::established_identity(&report)
             .unwrap()
             .keyset_digest;
@@ -2422,6 +2428,70 @@ async fn family_breaking_changes_cancel_delivery_and_refuse_the_pending_send() {
 }
 
 #[test]
+fn a_failed_rotation_pin_preserves_the_previous_identity_and_gate() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let mut state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let mut events = capture_events(&mut state);
+    let previous = state.snapshot();
+    let mut report = renewed_fixture_report();
+    report.attestation.workload_keyset["subject"] = json!("other");
+    let result = state.apply_verified_identity(ServiceVerification {
+        identity: Some(crate::checks::established_identity(&report).unwrap()),
+        report,
+        transcript: Transcript::default(),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec![],
+    });
+    assert!(result.unwrap_err().contains("no attested TLS key to pin"));
+    assert_eq!(
+        state.snapshot().current().digest(),
+        previous.current().digest()
+    );
+    assert!(!previous.delivery.is_cancelled());
+    assert!(!state.is_blocked());
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn an_established_receipt_at_expiry_fails_receipt_two() {
+    use ed25519_dalek::Signer;
+    let (tx, _) = mpsc::unbounded_channel();
+    let state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let mut receipt = vector_receipt_envelope();
+    receipt["served_at"] = json!(KEYSET_NOT_AFTER);
+    let input = crate::aci::receipt::receipt_signing_input(&receipt).unwrap();
+    receipt["signature"] = json!(hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+            .sign(&input)
+            .to_bytes()
+    ));
+    let member = state
+        .receipt_identity(&state.snapshot(), &receipt)
+        .expect("an established digest must reach receipt-2");
+    let mut transcript = Transcript::default();
+    crate::checks::run_receipt_checks(
+        &mut transcript,
+        crate::checks::ReceiptContext::new(&receipt, &member.identity, None, None),
+    );
+    let signature = transcript
+        .checks
+        .iter()
+        .find(|check| check.def.id == "receipt-1")
+        .unwrap();
+    assert_eq!(signature.status, crate::transcript::Status::Pass);
+    let expiry = transcript
+        .checks
+        .iter()
+        .find(|check| check.def.id == "receipt-2")
+        .unwrap();
+    assert_eq!(expiry.status, crate::transcript::Status::Fail);
+    assert!(expiry.detail.contains("before not_after"));
+}
+
+#[test]
 fn renewal_keeps_delivery_and_accepts_the_family_receipt() {
     let (tx, _) = mpsc::unbounded_channel();
     let state = state_over("http://127.0.0.1:9".to_string(), tx);
@@ -2433,7 +2503,7 @@ fn renewal_keeps_delivery_and_accepts_the_family_receipt() {
     assert!(!previous.delivery.is_cancelled());
     assert!(!state.is_blocked());
     let old_receipt = json!({
-        "workload_keyset_digest": previous.keyset_digest,
+        "workload_keyset_digest": previous.current().digest(),
         "served_at": SERVED_AT,
     });
     assert!(state.receipt_identity(&previous, &old_receipt).is_some());
@@ -2510,7 +2580,10 @@ async fn expiry_reverification_adopts_a_renewal_without_leaving_pending_expired_
     let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(upstream, tx);
-    state.trusted.lock().unwrap().digests[0].not_after = SERVED_AT;
+    Arc::get_mut(&mut state.trusted.lock().unwrap().members[0].identity)
+        .unwrap()
+        .keyset
+        .not_after = SERVED_AT;
 
     let report = renewed_fixture_report();
     let identity = crate::checks::established_identity(&report).unwrap();

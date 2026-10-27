@@ -280,7 +280,7 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     // algorithm (§7.2).
     let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
     let served_at = cx.receipt["served_at"].as_u64();
-    check_signature(transcript, &cx, cx.keyset);
+    check_signature(transcript, &cx);
 
     // receipt-2 — the payload binds back to this established digest, and its
     // keyset was still valid when the service served it.
@@ -295,8 +295,8 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
         transcript.fail(
             RECEIPT_2,
             format!(
-                "payload carries workload_keyset_digest {payload_digest:?}, established {} valid at served_at",
-                cx.workload_keyset_digest
+                "payload workload_keyset_digest {payload_digest:?}, established {}; served_at {served_at:?} must be a nonnegative integer before not_after {}",
+                cx.workload_keyset_digest, cx.keyset.not_after
             ),
         );
     }
@@ -376,12 +376,13 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     }
 }
 
-fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>, keyset: &WorkloadKeyset) {
+fn check_signature(transcript: &mut Transcript, cx: &ReceiptContext<'_>) {
     let Some(key_id) = cx.receipt["key_id"].as_str() else {
         transcript.fail(RECEIPT_1, "receipt document has no key_id");
         return;
     };
-    let Some(receipt_key) = keyset
+    let Some(receipt_key) = cx
+        .keyset
         .receipt_signing_keys
         .iter()
         .find(|key| key.key_id == key_id)

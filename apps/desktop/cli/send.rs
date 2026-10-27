@@ -15,7 +15,7 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
-use crate::renewal::{receipt_identity as select_receipt_identity, EstablishedDigest};
+use crate::renewal::{receipt_identity as select_receipt_identity, EstablishedMember};
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, safe_multiline, write_stdout};
 
@@ -26,21 +26,21 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
     let policy = args.policy.verifier_policy()?;
     let verification = verify_service(&args.base_url, None, &policy, false).await?;
     let base_url = verification.base_url.clone();
-    run_verified(
-        args,
-        bearer,
-        verification,
-        verify_service(&base_url, None, &policy, false),
-    )
+    run_verified(args, bearer, verification, || {
+        verify_service(&base_url, None, &policy, false)
+    })
     .await
 }
 
-async fn run_verified(
+async fn run_verified<F>(
     args: SendArgs,
     bearer: Option<String>,
     verification: ServiceVerification,
-    refresh: impl std::future::Future<Output = Result<ServiceVerification, crate::verify::VerifyError>>,
-) -> Result<i32, String> {
+    refresh: impl FnOnce() -> F,
+) -> Result<i32, String>
+where
+    F: std::future::Future<Output = Result<ServiceVerification, crate::verify::VerifyError>>,
+{
     if !args.json {
         write_stdout(
             format!(
@@ -138,7 +138,7 @@ async fn run_verified(
 
     // id-2 already established the identity; a verified run always carries it.
     let identity = identity.ok_or("verified run carried no established identity")?;
-    let admitted = EstablishedDigest::new(report, identity);
+    let admitted = EstablishedMember::new(report, identity);
     let receipt_identity = if let Some(identity) =
         select_receipt_identity(&admitted.report, std::slice::from_ref(&admitted), &receipt)
     {
@@ -146,14 +146,14 @@ async fn run_verified(
     } else {
         // As in serve, attest once more without resending the inference.
         // A same-family replica authorizes only digests actually established.
-        let refreshed = refresh.await?;
+        let refreshed = refresh().await?;
         if !refreshed.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".into());
         }
         let identity = refreshed
             .identity
             .ok_or("verified run carried no established identity")?;
-        let member = EstablishedDigest::new(refreshed.report, identity);
+        let member = EstablishedMember::new(refreshed.report, identity);
         let selected =
             select_receipt_identity(&admitted.report, std::slice::from_ref(&member), &receipt)
                 .ok_or("receipt digest was not established for the admitted renewal family")?;
@@ -474,7 +474,7 @@ mod tests {
             sessions: Vec::new(),
         };
         let refreshed = verified(refreshed_report);
-        let result = super::run_verified(args, None, verified(initial_report), async {
+        let result = super::run_verified(args, None, verified(initial_report), || async {
             Ok(refreshed)
         })
         .await;
@@ -517,21 +517,17 @@ mod tests {
 
     #[tokio::test]
     async fn send_rejects_a_receipt_from_a_different_renewal_family() {
-        for change in ["subject", "provenance", "e2ee"] {
+        let changes: [fn(&mut crate::aci::types::AttestationReport); 3] = [
+            |report| report.attestation.workload_keyset["subject"] = serde_json::json!("other"),
+            |report| report.attestation.source_provenance.repo_commit = Some("other".into()),
+            |report| {
+                report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
+                    serde_json::json!("00".repeat(32))
+            },
+        ];
+        for (change, mutate) in changes.into_iter().enumerate() {
             let mut report = renewed_report();
-            match change {
-                "subject" => {
-                    report.attestation.workload_keyset["subject"] = serde_json::json!("other")
-                }
-                "provenance" => {
-                    report.attestation.source_provenance.repo_commit = Some("other".into())
-                }
-                "e2ee" => {
-                    report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
-                        serde_json::json!("00".repeat(32))
-                }
-                _ => unreachable!(),
-            }
+            mutate(&mut report);
             report.workload_keyset_digest = crate::checks::established_identity(&report)
                 .unwrap()
                 .keyset_digest;

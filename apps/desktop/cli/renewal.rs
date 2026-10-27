@@ -5,26 +5,32 @@ use std::sync::Arc;
 use crate::aci::types::AttestationReport;
 use crate::checks::EstablishedIdentity;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
-pub(crate) struct EstablishedDigest {
-    pub digest: String,
-    pub not_after: u64,
+pub(crate) struct EstablishedMember {
     pub identity: Arc<EstablishedIdentity>,
     pub report: Arc<AttestationReport>,
 }
 
-impl EstablishedDigest {
+impl EstablishedMember {
     pub fn new(report: AttestationReport, identity: EstablishedIdentity) -> Self {
         Self {
-            digest: identity.keyset_digest.clone(),
-            not_after: identity.keyset.not_after,
             identity: Arc::new(identity),
             report: Arc::new(report),
         }
     }
+
+    pub fn digest(&self) -> &str {
+        &self.identity.keyset_digest
+    }
+
+    pub fn not_after(&self) -> u64 {
+        self.identity.keyset.not_after
+    }
 }
 
+// Reports are verified within one API origin and unchanged verifier policy.
 pub(crate) fn same_renewal_family(left: &AttestationReport, right: &AttestationReport) -> bool {
     let mut left_keyset = left.attestation.workload_keyset.clone();
     let mut right_keyset = right.attestation.workload_keyset.clone();
@@ -33,30 +39,30 @@ pub(crate) fn same_renewal_family(left: &AttestationReport, right: &AttestationR
     else {
         return false;
     };
+    let (Some(left_compose), Some(right_compose)) = (
+        left.attestation.evidence["app_compose"].as_str(),
+        right.attestation.evidence["app_compose"].as_str(),
+    ) else {
+        return false;
+    };
     left_keyset.remove("not_after");
     right_keyset.remove("not_after");
     left_keyset == right_keyset
         && left.attestation.tee_type == right.attestation.tee_type
         && left.attestation.source_provenance == right.attestation.source_provenance
-        && left.attestation.evidence.get("app_compose")
-            == right.attestation.evidence.get("app_compose")
+        && Sha256::digest(left_compose.as_bytes()) == Sha256::digest(right_compose.as_bytes())
 }
 
 /// A hint never establishes a member. Select only an exactly attested digest
-/// in the admitted family that was valid when the receipt says it was served.
+/// in the admitted family. Receipt-2 checks its validity at served_at.
 pub(crate) fn receipt_identity(
     admitted: &AttestationReport,
-    established: &[EstablishedDigest],
+    established: &[EstablishedMember],
     receipt: &Value,
-) -> Option<EstablishedDigest> {
+) -> Option<EstablishedMember> {
     let digest = receipt["workload_keyset_digest"].as_str()?;
-    let served_at = receipt["served_at"].as_u64()?;
     established
         .iter()
-        .find(|entry| {
-            entry.digest == digest
-                && served_at < entry.not_after
-                && same_renewal_family(admitted, &entry.report)
-        })
+        .find(|entry| entry.digest() == digest && same_renewal_family(admitted, &entry.report))
         .cloned()
 }

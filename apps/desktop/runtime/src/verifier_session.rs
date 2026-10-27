@@ -175,14 +175,18 @@ impl RuntimeState {
         self.state.catalog = None;
     }
 
-    /// The verifier reported its identity, in a new epoch; the session stays
-    /// closed until the catalog read through this identity is in too.
-    fn identify(&mut self, identity: &IdentityEvent) {
+    /// Update the displayed identity without resetting the verified catalog.
+    fn show_identity(&mut self, identity: &IdentityEvent) {
         self.state.identity = Some(parse_identity(identity));
         self.state.checks = parse_checks(Some(&identity.verification));
         self.state.verification_failed = false;
         self.state.error = None;
         self.identity_ready = true;
+    }
+
+    /// Begin a new identity epoch and wait for its verified catalog.
+    fn identify(&mut self, identity: &IdentityEvent) {
+        self.show_identity(identity);
         self.epoch += 1;
         self.state.status = VerificationStatus::Verifying;
         self.state.progress = Some("Reading the verified model list".to_string());

@@ -6,7 +6,7 @@
  * by a party the client trusts (§9.3).
  */
 
-import { verifyEd25519, sha256Prefixed, jcsBytes, jcsEqual, fromHex } from './crypto.js';
+import { verifyEd25519, sha256Prefixed, jcsBytes, fromHex } from './crypto.js';
 import type {
   Check,
   ReceiptEnvelope,
@@ -15,12 +15,6 @@ import type {
   ReceiptVerification,
   WorkloadKeyset,
 } from './types.js';
-
-export function sameKeysetFamily(keyset: WorkloadKeyset, previous: WorkloadKeyset): boolean {
-  const { not_after: _currentExpiry, ...current } = keyset;
-  const { not_after: _previousExpiry, ...old } = previous;
-  return jcsEqual(current, old);
-}
 
 /**
  * §9.3 checks 1–2: the `signature` member verifies over JCS(document minus
@@ -94,7 +88,7 @@ export async function verifyReceipt(
     ok,
     ...(ok
       ? {}
-      : { detail: `document ${payload.workload_keyset_digest} does not match the established keyset valid at served_at` }),
+      : { detail: `document digest ${payload.workload_keyset_digest}, established ${establishedDigest}; served_at ${payload.served_at} must be a nonnegative integer before not_after ${keyset.not_after}` }),
   });
 
   return {

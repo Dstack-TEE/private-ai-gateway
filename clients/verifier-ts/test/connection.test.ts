@@ -3,18 +3,12 @@ import { test } from 'node:test';
 
 import { computeKeysetDigest } from '../src/index.js';
 import { connectAciWithTransport } from '../src/runtime/connection.js';
-import { AciConnectionError, type EstablishedDigest, type VerifiedAciIdentity } from '../src/runtime/types.js';
+import { AciConnectionError, type VerifiedAciIdentity } from '../src/runtime/types.js';
 import type { PinnedTransport, PinnedTransportFactory } from '../src/runtime/transport.js';
 import type { AttestationReport, ReceiptEnvelope, WorkloadKeyset } from '../src/types.js';
 import * as fx from './fixtures.js';
 
 function identity(report: AttestationReport, keyset: WorkloadKeyset, digest: string): VerifiedAciIdentity {
-  const established: EstablishedDigest = {
-    digest,
-    notAfter: keyset.not_after * 1000,
-    keyset,
-    report,
-  };
   return {
     origin: 'https://api.example.com',
     hostname: 'api.example.com',
@@ -24,8 +18,7 @@ function identity(report: AttestationReport, keyset: WorkloadKeyset, digest: str
     composeHash: 'compose',
     tlsSpkiPins: ['c0'.repeat(32)],
     verifiedAt: 1,
-    expiresAt: established.notAfter,
-    digests: [established],
+    expiresAt: keyset.not_after * 1000,
     transcript: {
       lines: [{ id: 'id-6', section: '9.1(6)', title: 'channel', status: 'pass' }],
       verdict: { verified: true, line: 'VERIFIED' },
@@ -102,7 +95,6 @@ test('header renewal re-verifies once, keeps transport, and audits the receipt u
   assert.equal(transports.length, 2);
   assert.equal(closed[0], false);
   assert.equal(closed[1], true);
-  assert.equal(connection.identity.digests.length, 2);
   assert.equal(connection.identity.workloadKeysetDigest, renewedDigest);
   assert.equal(audit.transcript.lines.find((line) => line.id === 'receipt-1')?.status, 'pass');
   assert.equal(audit.transcript.lines.find((line) => line.id === 'receipt-2')?.status, 'pass');
@@ -199,7 +191,6 @@ test('replica B hints do not pin admission to B when fresh attestations keep lan
       error instanceof AciConnectionError && error.code === 'receipt_verification');
     await (await connection.fetch('https://api.example.com/v1/models')).text();
     assert.equal(connection.identity.workloadKeysetDigest, fx.KEYSET_DIGEST);
-    assert.equal(connection.identity.digests.some((entry) => entry.digest === digestB), false);
     assert.equal(closed[0], false);
   } finally {
     await connection.close();
@@ -246,7 +237,6 @@ test('a delayed response naming a retired digest cannot strand admission', async
     await started;
     context.mock.timers.setTime(fx.NOT_AFTER * 1000);
     await connection.refresh();
-    assert.equal(connection.identity.digests.some((entry) => entry.digest === fx.KEYSET_DIGEST), false);
     release();
     await (await delayedResponse).text();
     await (await connection.fetch('https://api.example.com/v1/models')).text();
@@ -279,7 +269,6 @@ test('an exchange retains its established member for a historical receipt after 
     context.mock.timers.setTime(fx.NOT_AFTER * 1000);
     const audit = await connection.verifyReceipt();
     assert.equal(audit.transcript.lines.find((line) => line.id === 'receipt-2')?.status, 'pass');
-    assert.equal(connection.identity.digests.some((entry) => entry.digest === fx.KEYSET_DIGEST), false);
   } finally {
     await connection.close();
   }
@@ -312,7 +301,6 @@ for (const change of ['subject', 'provenance', 'e2ee', 'tee', 'measurement']) {
       await assert.rejects(connection.fetch('https://api.example.com/v1/models'), (error: unknown) =>
         error instanceof AciConnectionError && error.code === 'identity_expired');
       assert.equal(closed[0], true);
-      assert.equal(connection.identity.digests.length, 1);
     } finally {
       await connection.close();
     }
@@ -336,8 +324,33 @@ test('a receipt served at keyset expiry is rejected as expired', async () => {
     method: 'POST',
     body: fx.REQUEST_BODY,
   })).text();
-  await assert.rejects(
-    connection.verifyReceipt(fx.RECEIPT_PAYLOAD.receipt_id),
-    (error: unknown) => error instanceof AciConnectionError && error.code === 'receipt_verification',
+  const audit = await connection.verifyReceipt(fx.RECEIPT_PAYLOAD.receipt_id);
+  const check = audit.transcript.lines.find((line) => line.id === 'receipt-2');
+  assert.equal(audit.transcript.lines.find((line) => line.id === 'receipt-1')?.status, 'pass');
+  assert.equal(check?.status, 'fail');
+  assert.match(check?.detail ?? '', /served_at.*before not_after/);
+});
+
+test('an unestablished digest hint reports re-verification failure without claiming expiry', async () => {
+  const initial = identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST);
+  const { factory } = fakeTransportFactory(fx.ENVELOPE, 'unseen');
+  let refreshes = 0;
+  const connection = await connectAciWithTransport(
+    { baseURL: 'https://api.example.com/v1' }, factory,
+    async () => {
+      if (refreshes++ === 0) return initial;
+      throw new AciConnectionError('attestation_verification', 'quote verification failed');
+    },
   );
+  try {
+    await (await connection.fetch('https://api.example.com/v1/chat/completions', {
+      method: 'POST', body: fx.REQUEST_BODY,
+    })).text();
+    await assert.rejects(connection.fetch('https://api.example.com/v1/models'), (error: unknown) =>
+      error instanceof AciConnectionError && error.code === 'attestation_verification'
+        && /unestablished digest/.test(error.message));
+    assert.equal(connection.receipts().length, 1);
+  } finally {
+    await connection.close();
+  }
 });

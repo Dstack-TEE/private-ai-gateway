@@ -29,11 +29,7 @@ impl SessionManager {
                 load_catalog = true;
             }
             VerifierEvent::IdentityRenewed { identity } => {
-                runtime.state.identity = Some(parse_identity(&identity));
-                runtime.state.checks = parse_checks(Some(&identity.verification));
-                runtime.state.verification_failed = false;
-                runtime.state.error = None;
-                runtime.identity_ready = true;
+                runtime.show_identity(&identity);
             }
             // Verification lost: one atomic barrier (`lose_verification`).
             // The session goes on, also across a restart, until the user

@@ -263,10 +263,9 @@ Rules:
   keys by `algo`.
 
 Changing any key or identity field produces a new identity and requires a
-fresh attestation report. A **renewal** changes only `not_after`, to a later
-time, while keeping the same keys, subject, source provenance, and measured
-workload. It has a new digest, but remains in the same renewal family. A
-quote over the old digest cannot bind a fresh nonce.
+fresh attestation report. A **renewal** changes only `not_after` within the
+family defined below. It has a new digest; a quote over the old digest cannot
+bind a fresh nonce.
 
 Within one API origin and an unchanged verifier policy, two verified reports
 belong to the same **renewal family** exactly when:
@@ -276,18 +275,25 @@ belong to the same **renewal family** exactly when:
   and every entry, algorithm, identifier, key value, and domain in all key
   roles. Array order remains significant.
 - Their `attestation.tee_type` values are identical.
-- Their `source_provenance` fields `repo_url`, `repo_commit`, `image_digest`,
-  and `image_provenance` are equal (missing and null are equivalent; structured
-  values compare by JCS).
+- Their complete protocol-defined `source_provenance` structs are equal:
+  `repo_url`, `repo_commit`, `image_digest`, and `image_provenance`, with
+  missing fields normalized to null and structured values compared by JCS.
+  Unknown provenance extension fields are outside this struct.
 - Their policy-verified measured workload is identical. For the dstack policy
-  (§4.2), this is the same `app_compose` bytes, checked through their measured
-  digest. Fresh quote bytes, nonce bindings, and other changing verification
-  evidence are not family identifiers; each report still MUST pass §9.1.
+  (§4.2), this is the same policy-verified measured `sha256(app_compose)`.
+  Fresh quote bytes, nonce bindings, and other changing verification evidence
+  are not family identifiers; each report still MUST pass §9.1.
 
 Replicas can expose members of one renewal family with different expiry times.
 A fresh verification of any same-family keyset keeps continuity while that
 keyset is unexpired, even when its `not_after` is earlier than the previous
-member's. This rule provides no monotonic version or rollback protection.
+member's. A digest header is only a re-verification hint: fresh verification
+of any unexpired same-family member authorizes future sends, even when it
+reaches a different replica. A changed family revokes the old delivery gate.
+A receipt still requires its exact digest to have been established (§9.3);
+failure to resolve that digest fails its audit without blocking sends under
+the freshly verified family. This rule provides no monotonic version or
+rollback protection.
 
 ### 3.2 Attestation binding
 
@@ -484,7 +490,8 @@ see the header.
 Headers are unauthenticated hints. Only the attested keyset and the signed
 receipt bind anything. The header and receipt for one exchange carry the
 digest established for that exchange. A changed digest gates new sends until
-the client re-verifies; responses already in flight continue unaffected.
+the client re-verifies according to §3.1; responses already in flight
+continue unaffected.
 
 ### 5.3 Serving constraints (aggregators)
 
@@ -836,15 +843,8 @@ anything sensitive:
   through the same single-flight path when `not_after` has passed or the
   served `X-ACI-Keyset-Digest` changes (§5.2). A renewing service changes its
   digest well before expiry, so a client normally re-verifies during the
-  renewal rather than cutting an in-flight response. Also re-establish it when
-  your policy deny-lists the workload (§3.4).
-- A digest header is a re-verification hint, not evidence that establishes
-  that digest. Successful fresh verification of any unexpired same-family
-  member authorizes future sends, even if attestation reached a different
-  replica than the response. A changed family revokes the old delivery gate.
-  Resolving the exact digest for one receipt is a separate §9.3 operation:
-  failure to establish that member fails its audit, not future sends under
-  the freshly verified family.
+  renewal according to §3.1 rather than cutting an in-flight response. Also
+  re-establish it when your policy deny-lists the workload (§3.4).
 - Behind an aggregator, the session list (§8.1) shows which upstreams
   currently back a model. Verify the ones you would accept (§9.2) before
   you send, and pin them with `aci_session_ids` (§5.3).
@@ -888,12 +888,12 @@ Given an established keyset, plus a response and its receipt:
    entry's algorithm (§7.2).
 2. **Document.** The document's `api_version` is `aci/1` (Appendix B) and
    its `workload_keyset_digest` equals a digest the client established in
-   §9.1 in the admitted identity's renewal family, with that keyset
+   §9.1 in the admitted identity's renewal family (§3.1), with that keyset
    unexpired at `served_at`. Verify the signature under that keyset. Current
    wall-clock expiry does not invalidate this historical receipt check.
    A client MAY perform a fresh verification to resolve an unseen digest,
-   but MUST reject the receipt if that exact digest remains unestablished;
-   matching keys or a header hint alone are insufficient. The client MAY
+   but MUST reject the receipt if that exact digest remains unestablished
+   (§3.1). The client MAY
    retain established members for historical audits or discard them, in
    which case it cannot accept receipts whose necessary evidence it lacks.
 3. **Request.** `request.received.body_hash` matches the wire body for a
