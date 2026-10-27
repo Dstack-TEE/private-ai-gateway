@@ -2285,6 +2285,142 @@ fn renewed_fixture_report() -> AttestationReport {
     report
 }
 
+fn queue_verified_report(state: &ProxyState, report: AttestationReport) {
+    state.queue_verification(ServiceVerification {
+        transcript: Transcript::default(),
+        identity: Some(crate::checks::established_identity(&report).unwrap()),
+        report,
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec!["c0".repeat(32)],
+    });
+}
+
+#[tokio::test]
+async fn replica_b_hints_allow_sends_when_fresh_verification_keeps_landing_on_a() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(upstream, tx);
+    let admitted = state.snapshot();
+    let digest_b = renewed_fixture_report().workload_keyset_digest;
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    for _ in 0..3 {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-aci-keyset-digest", digest_b.parse().unwrap());
+        rotation_gate(&state, &admitted, &headers);
+        queue_verified_report(&state, vector_report());
+        assert_eq!(
+            reqwest::get(format!("{proxy}/v1/models"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert!(!state.is_blocked());
+        assert!(!admitted.delivery.is_cancelled());
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 3);
+    assert!(state
+        .receipt_identity(
+            &admitted,
+            &json!({
+                "workload_keyset_digest": digest_b, "served_at": SERVED_AT,
+            })
+        )
+        .is_none());
+}
+
+#[tokio::test]
+async fn delayed_retired_digest_response_does_not_strand_admission() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    Arc::get_mut(&mut state).unwrap().now_secs = || KEYSET_NOT_AFTER;
+    let admitted = state.snapshot();
+    let renewed = renewed_fixture_report();
+    state.adopt(
+        renewed.clone(),
+        crate::checks::established_identity(&renewed).unwrap(),
+    );
+    assert!(!state
+        .snapshot()
+        .digests
+        .iter()
+        .any(|entry| entry.digest == admitted.keyset_digest));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-aci-keyset-digest",
+        admitted.keyset_digest.parse().unwrap(),
+    );
+    rotation_gate(&state, &admitted, &headers);
+    queue_verified_report(&state, renewed);
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    assert_eq!(
+        reqwest::get(format!("{proxy}/v1/models"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!state.is_blocked());
+    assert!(!admitted.delivery.is_cancelled());
+    assert!(
+        state
+            .receipt_identity(
+                &admitted,
+                &json!({
+                    "workload_keyset_digest": admitted.keyset_digest, "served_at": SERVED_AT,
+                })
+            )
+            .is_some(),
+        "the admission snapshot retains its historical receipt evidence"
+    );
+}
+
+#[tokio::test]
+async fn family_breaking_changes_cancel_delivery_and_refuse_the_pending_send() {
+    for change in ["subject", "provenance", "e2ee", "tee", "measurement"] {
+        let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = state_over(upstream, tx);
+        let mut events = capture_events(&mut state);
+        let admitted = state.snapshot();
+        let mut report = renewed_fixture_report();
+        match change {
+            "subject" => report.attestation.workload_keyset["subject"] = json!("other"),
+            "provenance" => report.attestation.source_provenance.repo_commit = Some("other".into()),
+            "e2ee" => {
+                report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
+                    json!("00".repeat(32))
+            }
+            "tee" => report.attestation.tee_type = "other".into(),
+            "measurement" => report.attestation.evidence["app_compose"] = json!("other"),
+            _ => unreachable!(),
+        }
+        report.workload_keyset_digest = crate::checks::established_identity(&report)
+            .unwrap()
+            .keyset_digest;
+        state.require_reverification(&report.workload_keyset_digest);
+        queue_verified_report(&state, report);
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        assert_eq!(
+            reqwest::get(format!("{proxy}/v1/models"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{change}"
+        );
+        assert!(admitted.delivery.is_cancelled(), "{change}");
+        assert!(
+            matches!(events.try_recv(), Ok(VerifierEvent::Blocked { code: Some(code), .. }) if code == "keyset_changed"),
+            "{change}"
+        );
+    }
+}
+
 #[test]
 fn renewal_keeps_delivery_and_accepts_the_family_receipt() {
     let (tx, _) = mpsc::unbounded_channel();
@@ -2493,7 +2629,18 @@ async fn unknown_receipt_digest_reverifies_once_then_audit_fails() {
         .unwrap()
         .unwrap();
     assert_eq!(outcome.verified, None);
-    assert!(outcome.detail.contains("re-verification did not establish"));
+    assert!(outcome
+        .detail
+        .contains("receipt digest was not established"));
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
-    assert!(state.is_blocked());
+    assert!(!state.is_blocked());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    assert_eq!(
+        reqwest::get(format!("{proxy}/v1/models"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
 }

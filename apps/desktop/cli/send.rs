@@ -15,6 +15,7 @@ use crate::checks::{
     fetch_live_session, parse_receipt_document, run_response_checks, BodyDigest, UpstreamContext,
 };
 use crate::client::HttpResult;
+use crate::renewal::{receipt_identity as select_receipt_identity, EstablishedDigest};
 use crate::verify::{verify_service, ServiceVerification};
 use crate::{print_json, safe, safe_multiline, write_stdout};
 
@@ -22,8 +23,24 @@ const DEFAULT_PROMPT: &str = "Say hello and name the model serving this request.
 
 pub async fn run(args: SendArgs) -> Result<i32, String> {
     let bearer = api_key(&args)?;
-    let verification =
-        verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
+    let policy = args.policy.verifier_policy()?;
+    let verification = verify_service(&args.base_url, None, &policy, false).await?;
+    let base_url = verification.base_url.clone();
+    run_verified(
+        args,
+        bearer,
+        verification,
+        verify_service(&base_url, None, &policy, false),
+    )
+    .await
+}
+
+async fn run_verified(
+    args: SendArgs,
+    bearer: Option<String>,
+    verification: ServiceVerification,
+    refresh: impl std::future::Future<Output = Result<ServiceVerification, crate::verify::VerifyError>>,
+) -> Result<i32, String> {
     if !args.json {
         write_stdout(
             format!(
@@ -121,13 +138,35 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
 
     // id-2 already established the identity; a verified run always carries it.
     let identity = identity.ok_or("verified run carried no established identity")?;
+    let admitted = EstablishedDigest::new(report, identity);
+    let receipt_identity = if let Some(identity) =
+        select_receipt_identity(&admitted.report, std::slice::from_ref(&admitted), &receipt)
+    {
+        identity
+    } else {
+        // As in serve, attest once more without resending the inference.
+        // A same-family replica authorizes only digests actually established.
+        let refreshed = refresh.await?;
+        if !refreshed.transcript.verified() {
+            return Err("service re-verification did not reach VERIFIED".into());
+        }
+        let identity = refreshed
+            .identity
+            .ok_or("verified run carried no established identity")?;
+        let member = EstablishedDigest::new(refreshed.report, identity);
+        let selected =
+            select_receipt_identity(&admitted.report, std::slice::from_ref(&member), &receipt)
+                .ok_or("receipt digest was not established for the admitted renewal family")?;
+        transcript = refreshed.transcript;
+        selected
+    };
     // Audit the cited session (§9.2): its id is the hash of the parsed
     // document's JCS form, so any served encoding verifies.
     let (session_resp, no_session_reason) = fetch_live_session(&client, &base_url, &receipt).await;
     run_response_checks(
         &mut transcript,
         &receipt,
-        &identity,
+        &receipt_identity.identity,
         Some(&BodyDigest::of(&request_body)),
         Some(&BodyDigest::of(&response.body)),
         UpstreamContext {
@@ -136,7 +175,7 @@ pub async fn run(args: SendArgs) -> Result<i32, String> {
             pinned: (!args.sessions.is_empty()).then_some(args.sessions.as_slice()),
             // §5.3: pinning sessions implies verified serving.
             requires_verified: !args.allow_unverified || !args.sessions.is_empty(),
-            serving: &report.service_capabilities.serving,
+            serving: &receipt_identity.report.service_capabilities.serving,
             required_claims: &args.require_claims,
         },
     );
@@ -342,6 +381,168 @@ fn append_delta(
 #[cfg(test)]
 mod tests {
     use super::{response_chat_id, SseTextCollector};
+
+    async fn send_receipt_fixture(
+        refreshed_report: crate::aci::types::AttestationReport,
+        digest: String,
+    ) -> Result<i32, String> {
+        use crate::aci::receipt::receipt_signing_input;
+        use crate::checks::{established_identity, BodyDigest};
+        use crate::spec_fixtures::{
+            vector_receipt_envelope, vector_report, vector_session_bytes, RESPONSE_BODY,
+        };
+        use crate::transcript::{Transcript, ID_1, ID_2, ID_3, ID_4, ID_5, ID_6};
+        use crate::verify::ServiceVerification;
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let initial_report = vector_report();
+        let receipt = Arc::new(std::sync::Mutex::new(vector_receipt_envelope()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post({
+                    let receipt = receipt.clone();
+                    let calls = calls.clone();
+                    move |body: axum::body::Bytes| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let mut receipt = receipt.lock().unwrap();
+                        receipt["workload_keyset_digest"] = serde_json::json!(digest);
+                        receipt["event_log"][0]["body_hash"] =
+                            serde_json::json!(BodyDigest::of(&body).sha256);
+                        receipt["event_log"][1]["body_hash"] =
+                            receipt["event_log"][0]["body_hash"].clone();
+                        let signature = SigningKey::from_bytes(&[2; 32])
+                            .sign(&receipt_signing_input(&receipt).unwrap());
+                        receipt["signature"] = serde_json::json!(hex::encode(signature.to_bytes()));
+                        async { ([("x-receipt-id", "rcpt-0001")], RESPONSE_BODY) }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/receipts/{id}",
+                get({
+                    let receipt = receipt.clone();
+                    move || {
+                        let receipt = receipt.lock().unwrap().clone();
+                        async { Json(receipt) }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/sessions/{id}",
+                get(|| async { vector_session_bytes() }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let verified = |report| {
+            let mut transcript = Transcript::default();
+            for check in [ID_1, ID_2, ID_3, ID_4, ID_5, ID_6] {
+                transcript.pass(check, "freshly verified fixture");
+            }
+            ServiceVerification {
+                transcript,
+                identity: Some(established_identity(&report).unwrap()),
+                report,
+                client: crate::client::AciClient::new().unwrap(),
+                base_url: base_url.clone(),
+                host: crate::client::host_of(&base_url).unwrap(),
+                observed_spki: None,
+                tls_pins: vec!["c0".repeat(32)],
+            }
+        };
+        let args = crate::args::SendArgs {
+            base_url: base_url.clone(),
+            policy: Default::default(),
+            model: Some("demo-model".into()),
+            prompt: Some("hi".into()),
+            api_key_stdin: false,
+            api_key: None,
+            no_stream: true,
+            json: true,
+            allow_unverified: true,
+            require_claims: Vec::new(),
+            sessions: Vec::new(),
+        };
+        let refreshed = verified(refreshed_report);
+        let result = super::run_verified(args, None, verified(initial_report), async {
+            Ok(refreshed)
+        })
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        result
+    }
+
+    fn renewed_report() -> crate::aci::types::AttestationReport {
+        let mut report = crate::spec_fixtures::vector_report();
+        report.attestation.workload_keyset["not_after"] =
+            serde_json::json!(crate::spec_fixtures::KEYSET_NOT_AFTER + 86_400);
+        report.workload_keyset_digest = crate::checks::established_identity(&report)
+            .unwrap()
+            .keyset_digest;
+        report
+    }
+
+    #[tokio::test]
+    async fn send_resolves_a_renewal_receipt_without_repeating_inference() {
+        let report = renewed_report();
+        let digest = report.workload_keyset_digest.clone();
+        assert_eq!(send_receipt_fixture(report, digest).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_rejects_an_unseen_replica_digest_after_a_successful_refresh() {
+        let error = send_receipt_fixture(
+            crate::spec_fixtures::vector_report(),
+            renewed_report().workload_keyset_digest,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("receipt digest was not established"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_rejects_a_receipt_from_a_different_renewal_family() {
+        for change in ["subject", "provenance", "e2ee"] {
+            let mut report = renewed_report();
+            match change {
+                "subject" => {
+                    report.attestation.workload_keyset["subject"] = serde_json::json!("other")
+                }
+                "provenance" => {
+                    report.attestation.source_provenance.repo_commit = Some("other".into())
+                }
+                "e2ee" => {
+                    report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
+                        serde_json::json!("00".repeat(32))
+                }
+                _ => unreachable!(),
+            }
+            report.workload_keyset_digest = crate::checks::established_identity(&report)
+                .unwrap()
+                .keyset_digest;
+            let digest = report.workload_keyset_digest.clone();
+            let error = send_receipt_fixture(report, digest).await.unwrap_err();
+            assert!(
+                error.contains("receipt digest was not established"),
+                "{change}: {error}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn streamed_reply_surfaces_writer_errors_and_only_silences_closed_pipes() {

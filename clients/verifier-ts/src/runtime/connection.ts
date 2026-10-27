@@ -266,10 +266,9 @@ class RuntimeAciConnection implements AciConnection {
     this.currentIdentity = keepTransport && previousIdentity
       ? mergeIdentity(boundIdentity, previousIdentity)
       : boundIdentity;
-    if (this.currentIdentity.digests.some((entry) => entry.digest === this.pendingDigest
-      && Date.now() < entry.notAfter)) {
-      this.pendingDigest = undefined;
-    }
+    // Any freshly verified member authorizes admission. A hint may name a
+    // different replica; receipt audits still require its exact attested digest.
+    this.pendingDigest = undefined;
     if (keepTransport) await candidate.close();
     else if (previous) await previous.close();
     if (previousIdentity && pendingBefore !== undefined && !keepTransport) {
@@ -781,10 +780,10 @@ function sameProvenance(identity: VerifiedAciIdentity, previous: VerifiedAciIden
   return identity.origin === previous.origin
     && identity.composeHash === previous.composeHash
     && identity.report.attestation.tee_type === previous.report.attestation.tee_type
-    && jcsEqual(
-      identity.report.attestation.source_provenance ?? null,
-      previous.report.attestation.source_provenance ?? null,
-    );
+    && ['repo_url', 'repo_commit', 'image_digest', 'image_provenance'].every((field) => jcsEqual(
+      identity.report.attestation.source_provenance?.[field] ?? null,
+      previous.report.attestation.source_provenance?.[field] ?? null,
+    ));
 }
 
 function sameIdentityFamily(identity: VerifiedAciIdentity, previous: VerifiedAciIdentity): boolean {

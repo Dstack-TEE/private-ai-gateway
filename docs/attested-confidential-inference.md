@@ -161,6 +161,11 @@ The receipt commits to:
 
 Replicas may expose different expiry times for the same key family. A freshly
 verified family member remains continuous while its own keyset is unexpired.
+An unknown digest hint triggers fresh verification, but the attestation may
+reach another replica. Successful verification of any valid member restores
+future sends; a receipt still needs its exact digest established and fails
+its audit if that member cannot be obtained. The verifier does not enforce
+a monotonic version or provide rollback protection between unexpired members.
 
 The receipt stores hashes, not plaintext request or response bodies. For an
 aggregator, its `upstream.verified` event cites a content-addressed attested

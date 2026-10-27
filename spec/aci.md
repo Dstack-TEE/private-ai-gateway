@@ -241,9 +241,12 @@ Rules:
 - `subject` is naming metadata — a dstack app-id URI, SPIFFE ID, or DNS
   name — meaningful only under a verifier policy. Generic verifiers MUST
   NOT trust it by itself.
-- `not_after` is required: a Unix timestamp after which verifiers stop
-  accepting the keyset entirely (reports, TLS, E2EE, receipts). A verifier
-  SHOULD reject an implausibly distant `not_after`.
+- `not_after` is required: a Unix timestamp after which verifiers MUST NOT
+  establish the keyset from a new report or use it to authorize new TLS,
+  E2EE, or inference sends. A previously established keyset MAY still verify
+  a historical receipt whose `served_at` is earlier than that keyset's
+  `not_after`, subject to all of §9.3. A verifier SHOULD reject an implausibly
+  distant `not_after`.
 - `receipt_signing_keys` hold the keys that sign receipts (§7.2) —
   `ed25519` baseline (Appendix B).
 - `e2ee_public_keys` contains keys for separately specified E2EE extensions
@@ -265,10 +268,26 @@ time, while keeping the same keys, subject, source provenance, and measured
 workload. It has a new digest, but remains in the same renewal family. A
 quote over the old digest cannot bind a fresh nonce.
 
+Within one API origin and an unchanged verifier policy, two verified reports
+belong to the same **renewal family** exactly when:
+
+- Their complete `workload_keyset` objects, including extension fields, have
+  identical JCS forms after removing only `not_after`. This includes `subject`
+  and every entry, algorithm, identifier, key value, and domain in all key
+  roles. Array order remains significant.
+- Their `attestation.tee_type` values are identical.
+- Their `source_provenance` fields `repo_url`, `repo_commit`, `image_digest`,
+  and `image_provenance` are equal (missing and null are equivalent; structured
+  values compare by JCS).
+- Their policy-verified measured workload is identical. For the dstack policy
+  (§4.2), this is the same `app_compose` bytes, checked through their measured
+  digest. Fresh quote bytes, nonce bindings, and other changing verification
+  evidence are not family identifiers; each report still MUST pass §9.1.
+
 Replicas can expose members of one renewal family with different expiry times.
 A fresh verification of any same-family keyset keeps continuity while that
 keyset is unexpired, even when its `not_after` is earlier than the previous
-member's.
+member's. This rule provides no monotonic version or rollback protection.
 
 ### 3.2 Attestation binding
 
@@ -819,6 +838,13 @@ anything sensitive:
   digest well before expiry, so a client normally re-verifies during the
   renewal rather than cutting an in-flight response. Also re-establish it when
   your policy deny-lists the workload (§3.4).
+- A digest header is a re-verification hint, not evidence that establishes
+  that digest. Successful fresh verification of any unexpired same-family
+  member authorizes future sends, even if attestation reached a different
+  replica than the response. A changed family revokes the old delivery gate.
+  Resolving the exact digest for one receipt is a separate §9.3 operation:
+  failure to establish that member fails its audit, not future sends under
+  the freshly verified family.
 - Behind an aggregator, the session list (§8.1) shows which upstreams
   currently back a model. Verify the ones you would accept (§9.2) before
   you send, and pin them with `aci_session_ids` (§5.3).
@@ -863,7 +889,13 @@ Given an established keyset, plus a response and its receipt:
 2. **Document.** The document's `api_version` is `aci/1` (Appendix B) and
    its `workload_keyset_digest` equals a digest the client established in
    §9.1 in the admitted identity's renewal family, with that keyset
-   unexpired at `served_at`. Verify the signature under that keyset.
+   unexpired at `served_at`. Verify the signature under that keyset. Current
+   wall-clock expiry does not invalidate this historical receipt check.
+   A client MAY perform a fresh verification to resolve an unseen digest,
+   but MUST reject the receipt if that exact digest remains unestablished;
+   matching keys or a header hint alone are insufficient. The client MAY
+   retain established members for historical audits or discard them, in
+   which case it cannot accept receipts whose necessary evidence it lacks.
 3. **Request.** `request.received.body_hash` matches the wire body for a
    plaintext request. For a protected request, follow the advertised transport
    extension's receipt-integration rules (§6, §7.4).

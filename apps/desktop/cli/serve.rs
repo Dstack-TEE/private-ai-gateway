@@ -35,6 +35,9 @@ use crate::aci::tls::is_pin_mismatch;
 use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
 use crate::client::{AciClient, VERIFICATION_TIMEOUT};
+use crate::renewal::{
+    receipt_identity as select_receipt_identity, same_renewal_family, EstablishedDigest,
+};
 use crate::sessions::audit_current_sessions;
 use crate::verify::{
     verify_service, verify_service_with_timeout, ServiceVerification, VerifyError,
@@ -112,8 +115,9 @@ struct TrustedIdentity {
     keyset_digest: String,
     /// Every digest established by a fresh-nonce verification in this family.
     digests: Vec<EstablishedDigest>,
-    /// A response or receipt may request one re-verification. It is cleared
-    /// only when that verification establishes the requested digest.
+    /// A response or receipt hint requests a fresh verification for admission.
+    /// Success clears the gate even if another replica's digest was attested;
+    /// receipt checks independently require an exactly established member.
     pending: Option<String>,
     /// Delivery gate for this identity, read in the same snapshot as the
     /// identity itself. Cancelled when a rotation or refused pin is observed
@@ -123,62 +127,24 @@ struct TrustedIdentity {
     delivery: CancellationToken,
 }
 
-#[derive(Clone)]
-struct EstablishedDigest {
-    digest: String,
-    not_after: u64,
-    identity: Arc<EstablishedIdentity>,
-    report: Arc<AttestationReport>,
-}
-
 impl TrustedIdentity {
     fn new(
         report: AttestationReport,
         identity: EstablishedIdentity,
         delivery: CancellationToken,
     ) -> Self {
-        let report = Arc::new(report);
-        let identity = Arc::new(identity);
-        let digest = EstablishedDigest {
-            digest: report.workload_keyset_digest.clone(),
-            not_after: identity.keyset.not_after,
-            identity: identity.clone(),
-            report: report.clone(),
-        };
+        let digest = EstablishedDigest::new(report, identity);
         Self {
             keyset_digest: digest.digest.clone(),
-            report,
+            report: digest.report.clone(),
             digests: vec![digest],
             pending: None,
             delivery,
         }
     }
 
-    fn same_provenance_as(&self, other: &Self) -> bool {
-        self.report.attestation.tee_type == other.report.attestation.tee_type
-            && self.report.attestation.source_provenance
-                == other.report.attestation.source_provenance
-            && self.report.attestation.evidence.get("app_compose")
-                == other.report.attestation.evidence.get("app_compose")
-    }
-
     fn same_renewal_family(&self, other: &Self) -> bool {
-        let mut current = self.report.attestation.workload_keyset.clone();
-        let mut previous = other.report.attestation.workload_keyset.clone();
-        let (Some(current), Some(previous)) = (current.as_object_mut(), previous.as_object_mut())
-        else {
-            return false;
-        };
-        current.remove("not_after");
-        previous.remove("not_after");
-        current == previous && self.same_provenance_as(other)
-    }
-
-    fn digest(&self, digest: &str, now: u64) -> Option<EstablishedDigest> {
-        self.digests
-            .iter()
-            .find(|entry| entry.digest == digest && now < entry.not_after)
-            .cloned()
+        same_renewal_family(&self.report, &other.report)
     }
 
     fn prune(&mut self, now: u64) {
@@ -347,12 +313,8 @@ impl ProxyState {
         } else {
             trusted.delivery.cancel();
         }
-        adopted.pending = trusted.pending.take().filter(|pending| {
-            !adopted
-                .digests
-                .iter()
-                .any(|entry| entry.digest == *pending && (self.now_secs)() < entry.not_after)
-        });
+        // A fresh valid identity authorizes future sends. The hinted replica
+        // need not be the one this verification reached.
         adopted.prune((self.now_secs)());
         *trusted = adopted;
     }
@@ -362,16 +324,9 @@ impl ProxyState {
         admitted: &TrustedIdentity,
         receipt: &Value,
     ) -> Option<EstablishedDigest> {
-        let digest = receipt["workload_keyset_digest"].as_str()?;
-        let served_at = receipt["served_at"].as_u64()?;
         let current = self.snapshot();
-        admitted.digest(digest, served_at).or_else(|| {
-            if current.same_renewal_family(admitted) {
-                current.digest(digest, served_at)
-            } else {
-                None
-            }
-        })
+        select_receipt_identity(&admitted.report, &admitted.digests, receipt)
+            .or_else(|| select_receipt_identity(&admitted.report, &current.digests, receipt))
     }
 
     fn require_reverification(&self, digest: &str) -> bool {
@@ -441,8 +396,8 @@ impl ProxyState {
         }
     }
 
-    /// Re-verify once. If the requested digest remains unknown, this send
-    /// fails closed instead of looping.
+    /// Re-verify once for admission; exact hinted-digest resolution belongs
+    /// to the receipt audit and cannot strand unrelated future sends.
     async fn ensure_unblocked(self: &Arc<Self>) -> Result<(), String> {
         if !self.is_blocked() {
             return Ok(());
@@ -450,7 +405,7 @@ impl ProxyState {
         let attempts = self.reverify_attempts.load(Ordering::SeqCst);
         self.reverify_blocked(attempts, None).await?;
         if self.is_blocked() {
-            return Err("re-verification did not establish the advertised digest".to_string());
+            return Err("service identity still requires re-verification".to_string());
         }
         Ok(())
     }
