@@ -610,6 +610,18 @@ impl Default for RoutingUpstreamVerifier {
 
 #[async_trait]
 impl UpstreamVerifier for RoutingUpstreamVerifier {
+    async fn verify_response(
+        &self,
+        request: UpstreamVerificationRequest,
+        event: UpstreamVerifiedEvent,
+        headers: &HashMap<String, String>,
+    ) -> Result<Option<UpstreamVerifiedEvent>, String> {
+        match self.verifier_for(&request) {
+            Ok(verifier) => verifier.verify_response(request, event, headers).await,
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         match self.verifier_for(&request) {
             Ok(verifier) => verifier.verify(request).await,

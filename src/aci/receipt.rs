@@ -240,7 +240,11 @@ impl ReceiptBuilder {
         Ok(hash)
     }
 
-    fn append_hash(&mut self, event_type: &str, body_hash: String) -> Result<(), ReceiptError> {
+    pub(crate) fn append_hash(
+        &mut self,
+        event_type: &str,
+        body_hash: String,
+    ) -> Result<(), ReceiptError> {
         let mut fields = Map::new();
         fields.insert("body_hash".to_string(), Value::String(body_hash));
         self.append(event_type, fields)

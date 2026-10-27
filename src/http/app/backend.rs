@@ -129,7 +129,7 @@ async fn forward_to_backend_inner(
                 )
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
-            Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
+            Err(err) if err.upstream_verification_failure().is_some() => refusal_response(
                 &service,
                 input.endpoint_path,
                 user_model,
@@ -183,7 +183,7 @@ async fn forward_to_backend_inner(
             (status, resp_headers, forward.upstream_body).into_response()
         }
         // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
-        Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
+        Err(err) if err.upstream_verification_failure().is_some() => refusal_response(
             &service,
             input.endpoint_path,
             user_model,
@@ -219,7 +219,7 @@ fn refusal_response(
     requester: Option<ReceiptOwner>,
     err: ServiceError,
 ) -> Response {
-    let ServiceError::UpstreamVerification(uv) = err else {
+    let Some((uv, forwarded_body_hash)) = err.upstream_verification_failure() else {
         return internal_error_response(err);
     };
     let (status, error_type) = match uv {
@@ -238,10 +238,11 @@ fn refusal_response(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    match service.issue_upstream_refusal_receipt(
+    match service.issue_upstream_refusal_receipt_with_forwarded_hash(
         endpoint_path,
         user_model,
         received_body,
+        forwarded_body_hash,
         &reason,
         &body,
         requester,

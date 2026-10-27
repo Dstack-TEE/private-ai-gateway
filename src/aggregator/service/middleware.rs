@@ -532,7 +532,7 @@ impl AciService {
                     {
                         ReverifyOutcome::Forwarded(response) => Ok(response),
                         ReverifyOutcome::RefreshFailed(err) => {
-                            let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
+                            let priority = if err.upstream_verification_failure().is_some() {
                                 3
                             } else {
                                 2
@@ -691,7 +691,7 @@ impl AciService {
                 {
                     ReverifyOutcome::Forwarded(response) => Ok(response),
                     ReverifyOutcome::RefreshFailed(err) => {
-                        let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
+                        let priority = if err.upstream_verification_failure().is_some() {
                             3
                         } else {
                             2

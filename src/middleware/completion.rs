@@ -1560,8 +1560,13 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         // current, so the client re-fetches the list and re-pins.
         ServiceError::UpstreamVerification(
             UpstreamVerificationError::NoEligibleAttestedSession(_),
-        ) => 412,
-        ServiceError::UpstreamVerification(_) => 503,
+        )
+        | ServiceError::UpstreamVerificationAfterForwarding {
+            source: UpstreamVerificationError::NoEligibleAttestedSession(_),
+            ..
+        } => 412,
+        ServiceError::UpstreamVerification(_)
+        | ServiceError::UpstreamVerificationAfterForwarding { .. } => 503,
         ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
         ServiceError::Upstream(UpstreamError::InvalidRequest(_)) => 400,
         // The gateway's own connect/read deadline expired: the upstream was
@@ -1614,21 +1619,24 @@ fn service_error_response(
     };
     // §7.5: a fail-closed refusal names its §10 type and is receipt-committed,
     // exactly like the direct path (`http/app/backend.rs::refusal_response`).
-    if let ServiceError::UpstreamVerification(uv) = &err {
+    if let Some((uv, forwarded_body_hash)) = err.upstream_verification_failure() {
         let error_type = match uv {
             UpstreamVerificationError::NoEligibleAttestedSession(_) => "session_not_accepted",
             _ => "upstream_verification_failed",
         };
         let reason = uv.to_string();
         let body = errors::envelope_bytes(surface, error_type, &reason, Some(request_id));
-        return match outcome.service.issue_upstream_refusal_receipt(
-            outcome.endpoint_path,
-            (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
-            outcome.received_body,
-            &reason,
-            &body,
-            outcome.requester.clone(),
-        ) {
+        return match outcome
+            .service
+            .issue_upstream_refusal_receipt_with_forwarded_hash(
+                outcome.endpoint_path,
+                (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
+                outcome.received_body,
+                forwarded_body_hash,
+                &reason,
+                &body,
+                outcome.requester.clone(),
+            ) {
             Ok(receipt) => {
                 let headers = [("x-receipt-id", receipt.receipt_id.clone())];
                 finalize_generated(status, body, &headers, e2ee, outcome)
