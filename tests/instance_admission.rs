@@ -264,3 +264,41 @@ fn zero_g_preserves_instance_facts_and_requires_review_before_stable_reuse() {
         "0G has no reviewed stable-material profile; refreshed evidence must remain significant"
     );
 }
+
+#[tokio::test]
+async fn instance_groups_reject_missing_ids_and_conflicting_keys_before_forwarding() {
+    for provider in ["chutes", "0g-private-computer"] {
+        for missing_id in [false, true] {
+            let h = Harness::new(vec![]);
+            configure_instances(&h, provider);
+            {
+                let mut event = h.verifier.0.lock().unwrap();
+                if missing_id {
+                    let ChannelBinding::E2eePublicKeySha256 { key_id, .. } =
+                        &mut event.channel_bindings[0]
+                    else {
+                        panic!("expected instance binding")
+                    };
+                    *key_id = None;
+                } else {
+                    let mut conflicting = event.channel_bindings[0].clone();
+                    let ChannelBinding::E2eePublicKeySha256 {
+                        public_key_sha256, ..
+                    } = &mut conflicting
+                    else {
+                        panic!("expected instance binding")
+                    };
+                    *public_key_sha256 = "bb".repeat(32);
+                    event.channel_bindings.push(conflicting);
+                }
+            }
+            assert!(matches!(
+                h.service
+                    .forward_chat_completion_request(request(vec![]))
+                    .await,
+                Err(ServiceError::AdmissionInvariant(_))
+            ));
+            assert!(h.backend.events.lock().unwrap().is_empty());
+        }
+    }
+}
