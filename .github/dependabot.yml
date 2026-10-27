@@ -1,6 +1,7 @@
-# Dependabot version updates for the desktop app (apps/desktop) only; the
-# rest of the repository is out of scope. `chore(deps)` commits do not bump
-# the desktop version or appear in its release-please changelog.
+# Dependabot version updates for the desktop app (apps/desktop) and
+# TypeScript clients workspace (clients). `chore(deps)` commits do not bump
+# the desktop version or appear in its release-please changelog. Clients
+# releases are manual; see clients/releasing.md.
 version: 2
 updates:
   # Tauri's npm packages and crates must move together: @tauri-apps/api needs
@@ -48,6 +49,24 @@ updates:
           - windows-registry
           - windows-result
       desktop-cargo:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: npm
+    directory: /clients
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(clients)
+    # Advance exact pins without widening them for the published verifier.
+    versioning-strategy: increase
+    groups:
+      # Runtime and crypto dependencies stay in individual PRs for review.
+      clients-dev:
+        dependency-type: development
         patterns:
           - "*"
         update-types:
