@@ -356,7 +356,7 @@ async fn session_listing_matches_pin_gate_across_routes() {
 }
 
 /// Exercise production projection, sealing and store reuse with native events.
-pub(super) fn material_service(
+pub(in crate::aci::verifier) fn material_service(
     event: UpstreamVerifiedEvent,
     now: u64,
     store: Arc<dyn crate::aggregator::session_store::SessionStore>,

@@ -247,9 +247,7 @@ fn unreached(id: CheckId, why: &'static str) -> CheckResult {
 
 /// §9.1(2). The `nonce:null` form proves binding but not freshness, so it is
 /// reported as unevaluable rather than passed.
-pub(super) fn appraise_binding(
-    inputs: &AppraisalInputs<'_>,
-) -> (CheckResult, Option<ReportBinding>) {
+fn appraise_binding(inputs: &AppraisalInputs<'_>) -> (CheckResult, Option<ReportBinding>) {
     let binding = match verify_report_binding(inputs.report, inputs.nonce) {
         Ok(binding) => binding,
         Err(e) => {
@@ -358,10 +356,7 @@ async fn appraise_quote(
     )
 }
 
-pub(super) fn appraise_expiry(
-    inputs: &AppraisalInputs<'_>,
-    keyset: Option<&WorkloadKeyset>,
-) -> CheckResult {
+fn appraise_expiry(inputs: &AppraisalInputs<'_>, keyset: Option<&WorkloadKeyset>) -> CheckResult {
     let Some(keyset) = keyset else {
         return unreached(
             CheckId::Expiry,
@@ -390,13 +385,13 @@ pub(super) fn appraise_expiry(
     }
 }
 
-pub(super) struct MeasuredProvenance {
-    pub compose_hash: String,
-    pub app_id: Option<Vec<u8>>,
+struct MeasuredProvenance {
+    compose_hash: String,
+    app_id: Option<Vec<u8>>,
 }
 
 /// §9.1(4). Retains measured values separately from the diagnostic text.
-pub(super) async fn appraise_provenance(
+async fn appraise_provenance(
     inputs: &AppraisalInputs<'_>,
     quote_report: Option<&dcap_qvl::quote::Report>,
 ) -> (CheckResult, Option<MeasuredProvenance>) {
@@ -489,7 +484,7 @@ pub(super) async fn appraise_provenance(
     (result.with_explain(explain), material)
 }
 
-pub(super) fn appraise_custody(
+fn appraise_custody(
     inputs: &AppraisalInputs<'_>,
     keyset: Option<&WorkloadKeyset>,
     app_id: Option<&[u8]>,
@@ -567,7 +562,7 @@ pub(super) fn appraise_custody(
     )
 }
 
-pub(super) fn appraise_channel(
+fn appraise_channel(
     inputs: &AppraisalInputs<'_>,
     keyset: Option<&WorkloadKeyset>,
 ) -> (CheckResult, Vec<ChannelBinding>) {
@@ -661,7 +656,7 @@ pub(super) fn appraise_channel(
     (result.with_explain(explain), none)
 }
 
-pub(super) fn authenticated_session_material(
+fn authenticated_session_material(
     results: &[CheckResult],
     quote: Option<&VerifiedQuote>,
     provenance: Option<&MeasuredProvenance>,
@@ -702,3 +697,6 @@ pub(super) fn authenticated_session_material(
         "receipt_key_custody": custody,
     }))
 }
+
+#[cfg(test)]
+mod tests;

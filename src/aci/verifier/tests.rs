@@ -3,11 +3,9 @@ use std::sync::Arc;
 use aci_verify::dstack::verify_dstack_app_compose;
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
-use sha2::{Sha256, Sha384};
 use sha3::{Digest, Keccak256};
 
 use super::aci_service::{declared_tls_channel_bindings, CachedAciServiceVerification};
-use super::appraisal::appraise_provenance;
 use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
@@ -21,11 +19,11 @@ use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
 
-mod aci_service;
-mod session_pinning;
+pub(super) mod aci_service;
+pub(super) mod session_pinning;
 mod zero_g;
 
-fn signing_key(byte: u8) -> SigningKey {
+pub(super) fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
 }
 
@@ -33,16 +31,40 @@ fn public_key_uncompressed_hex(key: &SigningKey) -> String {
     hex::encode(key.verifying_key().to_encoded_point(false).as_bytes())
 }
 
-fn public_key_compressed_hex(key: &SigningKey) -> String {
+pub(super) fn public_key_compressed_hex(key: &SigningKey) -> String {
     hex::encode(key.verifying_key().to_sec1_bytes())
 }
 
-fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
+pub(super) fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
     let digest = Keccak256::new_with_prefix(message);
     let (signature, recid) = key.sign_digest_recoverable(digest).unwrap();
     let mut out = signature.to_vec();
     out.push(recid.to_byte());
     hex::encode(out)
+}
+
+fn report_binding(not_after: u64) -> ReportBinding {
+    use crate::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
+    let mut keyset = keyset_with_tls(Vec::new());
+    keyset.not_after = not_after;
+    let sealed = SealedWorkloadKeyset::seal(keyset).unwrap();
+    let statement = attestation_statement(sealed.digest(), None).unwrap();
+    aci_verify::report::verify_report_binding(
+        &AttestationReport {
+            api_version: "aci/1".to_string(),
+            workload_keyset_digest: sealed.digest().to_string(),
+            attestation: AttestationEnvelope {
+                tee_type: "tdx".to_string(),
+                workload_keyset: sealed.to_value(),
+                report_data_hex: hex::encode(report_data(&statement)),
+                source_provenance: SourceProvenance::default(),
+                evidence: json!({}),
+            },
+            service_capabilities: Default::default(),
+        },
+        None,
+    )
+    .unwrap()
 }
 
 fn keyset_with_tls(tls_public_keys: Vec<TlsSpki>) -> WorkloadKeyset {
@@ -59,7 +81,7 @@ fn keyset_with_tls(tls_public_keys: Vec<TlsSpki>) -> WorkloadKeyset {
 /// 32-byte KMS scalar in `receipt_scalar`: the keyset lists its Ed25519
 /// public key, and the evidence publishes the k256 counterpart the KMS chain
 /// covers.
-fn receipt_custody_fixture(
+pub(super) fn receipt_custody_fixture(
     receipt_scalar: [u8; 32],
     signature_chain: Vec<String>,
 ) -> (WorkloadKeyset, Value) {
@@ -959,10 +981,9 @@ fi"#
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
-        identity: None,
+        identity: report_binding(u64::MAX),
         session_material: None,
         expires_at: tokio::time::Instant::now(),
-        not_after: u64::MAX,
         evidence: Some(json!({
             "digest": "sha256:91e6e5801d0dfe51430cd6de68e48925ea49d48aeaba4bf83e09d1acf49ed51d",
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
@@ -1005,10 +1026,9 @@ async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     )
     .unwrap()
     .with_cached(CachedAciServiceVerification {
-        identity: None,
+        identity: report_binding(u64::MAX),
         session_material: None,
         expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
-        not_after: u64::MAX,
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "http://127.0.0.1:1".to_string(),
@@ -1329,137 +1349,4 @@ fn subject_anchor_requires_the_measured_app_id() {
     assert!(!policy.accepts_measured(&keyset, &provenance, &unlisted));
     keyset.subject = Some(format!("app-id:0x{}", hex::encode(unlisted)));
     assert!(!policy.accepts_measured(&keyset, &provenance, &unlisted));
-}
-
-// ---- §9.1(4) compose measurement (moved with the logic from the CLI) ----
-
-fn td10_report(rt_mr3: [u8; 48]) -> dcap_qvl::quote::Report {
-    dcap_qvl::quote::Report::TD10(dcap_qvl::quote::TDReport10 {
-        tee_tcb_svn: [0; 16],
-        mr_seam: [0; 48],
-        mr_signer_seam: [0; 48],
-        seam_attributes: [0; 8],
-        td_attributes: [0; 8],
-        xfam: [0; 8],
-        mr_td: [0; 48],
-        mr_config_id: [0; 48],
-        mr_owner: [0; 48],
-        mr_owner_config: [0; 48],
-        rt_mr0: [0; 48],
-        rt_mr1: [0; 48],
-        rt_mr2: [0; 48],
-        rt_mr3,
-        report_data: [0; 64],
-    })
-}
-
-fn provenance_report(evidence: Value, provenance: SourceProvenance) -> AttestationReport {
-    AttestationReport {
-        api_version: "aci/1".to_string(),
-        workload_keyset_digest: String::new(),
-        attestation: AttestationEnvelope {
-            tee_type: "tdx".to_string(),
-            workload_keyset: Value::Null,
-            report_data_hex: String::new(),
-            source_provenance: provenance,
-            evidence,
-        },
-        service_capabilities: Default::default(),
-    }
-}
-
-fn provenance_inputs<'a>(
-    report: &'a AttestationReport,
-    accepted_composes: &'a [String],
-) -> AppraisalInputs<'a> {
-    AppraisalInputs {
-        report,
-        nonce: None,
-        now_secs: 0,
-        expiry_waived: false,
-        quote: QuoteSource::Online {
-            pccs_url: "https://pccs.invalid",
-        },
-        accepted_composes,
-        custody: CustodyEvidence::Unimplemented {
-            reason: "not under test",
-        },
-        channel: ChannelEvidence::Unobservable {
-            reason: "not under test",
-        },
-        explain: false,
-    }
-}
-
-#[tokio::test]
-async fn compose_measurement_passes_and_an_allowlist_pins_the_measured_value() {
-    // Two RTMR3 boot events, measured the way dstack does: a runtime event's
-    // digest is SHA-384 over `event_type:event:payload`, and RTMR3 is the
-    // SHA-384 chain over those digests from a 48-byte-zero start.
-    let app_compose = "services:\n  gateway:\n    image: demo\n";
-    let compose_hash = hex::encode(Sha256::digest(app_compose.as_bytes()));
-    const RUNTIME_EVENT: u32 = 0x0800_0001;
-    let event_digest = |event: &str, payload_hex: &str| -> Vec<u8> {
-        let mut hasher = Sha384::new();
-        hasher.update(RUNTIME_EVENT.to_ne_bytes());
-        hasher.update(b":");
-        hasher.update(event.as_bytes());
-        hasher.update(b":");
-        hasher.update(hex::decode(payload_hex).unwrap());
-        hasher.finalize().to_vec()
-    };
-    let digests = [
-        event_digest("compose-hash", &compose_hash),
-        event_digest("system-ready", ""),
-    ];
-    let mut mr = vec![0u8; 48];
-    for d in &digests {
-        mr.extend_from_slice(d);
-        mr = Sha384::digest(&mr).to_vec();
-    }
-    let quote_report = td10_report(mr.as_slice().try_into().unwrap());
-    let mut evidence = json!({
-        "event_log": serde_json::to_string(&json!([
-            { "imr": 3, "event_type": RUNTIME_EVENT, "digest": hex::encode(&digests[0]),
-              "event": "compose-hash", "event_payload": compose_hash },
-            { "imr": 3, "event_type": RUNTIME_EVENT, "digest": hex::encode(&digests[1]),
-              "event": "system-ready", "event_payload": "" },
-        ]))
-        .unwrap(),
-        "app_compose": app_compose,
-    });
-    let provenance = SourceProvenance {
-        repo_url: Some("https://example.com/repo".to_string()),
-        repo_commit: Some("abc123".to_string()),
-        image_digest: None,
-        image_provenance: None,
-    };
-
-    let report = provenance_report(evidence.clone(), provenance.clone());
-    let (result, app_id) =
-        appraise_provenance(&provenance_inputs(&report, &[]), Some(&quote_report)).await;
-    assert!(result.passed(), "{}", result.detail);
-    assert!(
-        app_id.unwrap().app_id.is_none(),
-        "this log carries no app-id event"
-    );
-
-    // An allowlist pins the measured value: the real hash passes, any other
-    // list fails even though the measurement itself verified.
-    let accepted = vec![compose_hash.clone()];
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&report, &accepted), Some(&quote_report)).await;
-    assert!(result.passed(), "{}", result.detail);
-
-    let rejected = vec!["00".repeat(32)];
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&report, &rejected), Some(&quote_report)).await;
-    assert!(!result.passed(), "an unlisted compose must not pass");
-
-    // A different app_compose no longer matches the measured compose-hash.
-    evidence["app_compose"] = Value::String("tampered".to_string());
-    let tampered = provenance_report(evidence, provenance);
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&tampered, &[]), Some(&quote_report)).await;
-    assert!(!result.passed(), "a tampered compose must not pass");
 }
