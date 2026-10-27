@@ -44,11 +44,15 @@ Two deadlines govern a stored session:
   its lease. A retained expired session remains fetchable but cannot authorize
   another admission.
 
-For non-Chutes events with several bindings, admission filters by pins and
+For events other than Chutes and 0G with several bindings, admission filters by pins and
 selects one alternative in canonical JSON order before forwarding. The receipt
-cites the binding actually enforced. Chutes keeps all admitted instances until
+cites the binding actually enforced. Chutes and 0G keep all admitted instances until
 the backend reports which instance served, then releases the sibling leases.
-A missing or unmatched Chutes instance identifier is an internal error.
+A missing or unmatched serving instance identifier is an internal error.
+If an adapter withholds an unverified error body without identifying the
+serving instance, the gateway preserves its HTTP status and cites no instance
+session. Buffered receipts record failed verification and the forwarded
+request; streaming errors keep their existing receipt behavior.
 
 The audit trail runs:
 

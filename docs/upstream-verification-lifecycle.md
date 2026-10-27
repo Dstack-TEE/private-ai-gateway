@@ -72,7 +72,7 @@ For a constrained request, the gateway follows this sequence:
    lease while the response or draft is pending, then extend session retention
    through the receipt's actual publication deadline before storing the receipt.
 
-TLS SPKI bindings are enforced by the pinned TLS client. Chutes E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
+TLS SPKI bindings are enforced by the pinned TLS client. Chutes and 0G E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
 
 ## Binding mismatch and reverification
 
