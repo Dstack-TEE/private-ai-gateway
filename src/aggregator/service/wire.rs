@@ -115,7 +115,7 @@ pub struct MiddlewareAllFailed {
     /// and a non-empty error source is a request-level summary, not an
     /// attempt; attempt counting must only consider rows that carry a route.
     pub failed_attempts: Vec<FailedAttempt>,
-    /// The highest-priority underlying failure across the attempts.
+    /// The highest-priority underlying failure or a terminal gateway refusal.
     pub error: ServiceError,
 }
 

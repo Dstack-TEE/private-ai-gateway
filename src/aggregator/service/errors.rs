@@ -16,6 +16,10 @@ pub enum ServiceError {
     #[error("internal service error")]
     AdmissionInvariant(&'static str),
     #[error(
+        "the keyset committed in the response headers expired before forwarding; retry the request"
+    )]
+    EarlyResponseKeysetExpired,
+    #[error(
         "invalid source provenance: repo provenance must include both repo_url and repo_commit; \
          runtime source provenance is loaded from git-launcher or omitted when unknown"
     )]

@@ -503,8 +503,17 @@ impl AciService {
                     recorded_event,
                     &req.aci_session_ids,
                     &prepared.model_id,
+                    Some(&receipt_journal),
                 ) {
                     Ok(admission) => admission,
+                    Err(error @ ServiceError::EarlyResponseKeysetExpired) => {
+                        return Ok(MiddlewareForwardResult::AllFailed(Box::new(
+                            MiddlewareAllFailed {
+                                failed_attempts,
+                                error,
+                            },
+                        )));
+                    }
                     Err(err) => {
                         if matches!(
                             err,
@@ -529,6 +538,7 @@ impl AciService {
                             candidate_required,
                             caller_supplied_upstream_event,
                             &req.aci_session_ids,
+                            Some(&receipt_journal),
                             // Failover path: flush a possibly-stale binding on any
                             // terminal mismatch so the next candidate/request re-verifies.
                             true,
@@ -542,6 +552,16 @@ impl AciService {
                     {
                         ReverifyOutcome::Forwarded(response, admission) => {
                             Ok((response, admission))
+                        }
+                        ReverifyOutcome::RefreshFailed(
+                            error @ ServiceError::EarlyResponseKeysetExpired,
+                        ) => {
+                            return Ok(MiddlewareForwardResult::AllFailed(Box::new(
+                                MiddlewareAllFailed {
+                                    failed_attempts,
+                                    error,
+                                },
+                            )));
                         }
                         ReverifyOutcome::RefreshFailed(err) => {
                             let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
@@ -704,6 +724,7 @@ impl AciService {
                         candidate_required,
                         caller_supplied_upstream_event,
                         &req.aci_session_ids,
+                        None,
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,

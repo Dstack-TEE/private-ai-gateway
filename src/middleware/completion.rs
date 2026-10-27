@@ -1562,7 +1562,8 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
         ServiceError::UpstreamVerification(
             UpstreamVerificationError::NoEligibleAttestedRoute(_)
             | UpstreamVerificationError::NoEligibleAttestedSession(_),
-        ) => ErrorSource::Gateway,
+        )
+        | ServiceError::EarlyResponseKeysetExpired => ErrorSource::Gateway,
         _ => ErrorSource::Upstream,
     }
 }
@@ -1571,6 +1572,7 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
         ServiceError::AdmissionInvariant(_) => 500,
+        ServiceError::EarlyResponseKeysetExpired => 503,
         ServiceError::E2ee(_) => 400,
         // §5.3: nothing failed verification — none of the pinned sessions is
         // current, so the client re-fetches the list and re-pins.
