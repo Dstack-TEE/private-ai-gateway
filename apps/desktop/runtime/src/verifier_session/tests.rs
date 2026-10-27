@@ -379,6 +379,106 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     let _ = server.await;
 }
 
+#[tokio::test]
+async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catalog() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/models",
+        get({
+            let calls = calls.clone();
+            move || {
+                let id = format!("model-{}", calls.fetch_add(1, Ordering::SeqCst));
+                async move { Json(serde_json::json!({"data": [{"id": id}]})) }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://inference.phala.com".into(),
+        })
+        .unwrap();
+    let session_id = started.session_id.unwrap();
+    let generation = proxy.session().generation;
+    let mut identity = IdentityEvent {
+        tee_type: "tdx".into(),
+        trust_level: "hardware_verified".into(),
+        keyset_digest: "sha256:initial".into(),
+        keyset_not_after: 2_000_000_000,
+        tls_spki: None,
+        source_provenance: IdentitySourceProvenance::default(),
+        service_capabilities: ServiceCapabilities::default(),
+        verification: serde_json::json!({"checks": []}),
+    };
+    manager
+        .handle_event(
+            generation,
+            VerifierEvent::Ready {
+                identity: identity.clone(),
+                remote_url: base.clone(),
+                service: http_service(&base),
+            },
+        )
+        .unwrap();
+    manager
+        .wait_for_verification(&session_id, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let verified_epoch = proxy.session().epoch;
+
+    manager
+        .handle_event(
+            generation,
+            VerifierEvent::Blocked {
+                code: None,
+                reason: "re-verification failed: network unavailable".into(),
+            },
+        )
+        .unwrap();
+    let blocked = manager.snapshot();
+    assert_eq!(blocked.status, VerificationStatus::Blocked);
+    assert!(blocked.catalog.is_none());
+    assert!(!proxy.session().verified);
+    assert!(manager.is_running().unwrap());
+    assert!(!crate::recovery::should_retry(&blocked));
+
+    identity.keyset_digest = "sha256:renewed".into();
+    identity.keyset_not_after += 86_400;
+    manager
+        .handle_event(generation, VerifierEvent::IdentityRenewed { identity })
+        .unwrap();
+    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
+    assert!(!proxy.session().verified);
+    let recovered = manager
+        .wait_for_verification(&session_id, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(recovered.status, VerificationStatus::Verified);
+    assert_eq!(recovered.catalog.unwrap().models[0].id, "model-1");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(proxy.session().generation, generation);
+    assert!(proxy.session().epoch > verified_epoch);
+    assert!(proxy.session().verified);
+    assert!(manager.is_running().unwrap());
+    manager.stop().unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
 /// A failure the verifier authored, such as an unreachable host, answers the
 /// caller waiting on a profile verification as it is.
 #[tokio::test]

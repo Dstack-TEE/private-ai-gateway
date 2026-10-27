@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::aci::types::AttestationReport;
 use crate::checks::EstablishedIdentity;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub(crate) struct EstablishedMember {
@@ -50,7 +49,7 @@ pub(crate) fn same_renewal_family(left: &AttestationReport, right: &AttestationR
     left_keyset == right_keyset
         && left.attestation.tee_type == right.attestation.tee_type
         && left.attestation.source_provenance == right.attestation.source_provenance
-        && Sha256::digest(left_compose.as_bytes()) == Sha256::digest(right_compose.as_bytes())
+        && left_compose == right_compose
 }
 
 /// A hint never establishes a member. Select only an exactly attested digest
