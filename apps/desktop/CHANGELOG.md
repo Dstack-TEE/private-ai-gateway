@@ -2,10 +2,30 @@
 
 ## [0.7.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.7.0-beta.1...desktop-v0.7.0) (2026-10-28)
 
+Changes since stable 0.6.2, including both intervening betas and the reviewed #510 cleanup.
 
-### Miscellaneous Chores
+### Features
 
-* **desktop:** release 0.7.0 ([#511](https://github.com/Dstack-TEE/private-ai-gateway/issues/511)) ([9bea43e](https://github.com/Dstack-TEE/private-ai-gateway/commit/9bea43e110e48b04404773876dc3e13368a85daf))
+* **cli:** Add optional `--max-tokens <N>` to `pap send` to bound generated output. Values must be positive integers; omitting the flag preserves the previous request behavior ([#500](https://github.com/Dstack-TEE/private-ai-gateway/pull/500)).
+
+### Bug Fixes
+
+* **desktop:** Keep transport, the delivery gate and the model catalog across same-family gateway keyset renewal, and recover blocked sessions after successful verification ([#458](https://github.com/Dstack-TEE/private-ai-gateway/pull/458)).
+* **aci:** Audit receipts only against exactly attested members. Re-attest an unseen member without repeating inference; a same-family digest alone does not authorize a receipt ([#458](https://github.com/Dstack-TEE/private-ai-gateway/pull/458)).
+* **aci:** After re-verification accepts a different identity family, refuse the pending request with a retryable 503 so callers can retry after verification recovers. Unknown digest hints require fresh verification ([#458](https://github.com/Dstack-TEE/private-ai-gateway/pull/458)).
+* **aci:** Require integer receipt `served_at < not_after` and enforce the attested-session boundary `served_at < expires_at`. Historical receipts remain auditable at their serving time ([#458](https://github.com/Dstack-TEE/private-ai-gateway/pull/458), [#456](https://github.com/Dstack-TEE/private-ai-gateway/pull/456)).
+
+### Compatibility
+
+* **Lifecycle consumers:** `pap serve --json-events` adds the `identity_renewed` event for same-family renewal. Rust consumers must handle the new `VerifierEvent::IdentityRenewed { identity }` variant in exhaustive matches ([#458](https://github.com/Dstack-TEE/private-ai-gateway/pull/458)).
+* **Rust source consumers:** Receipt custody verification now returns structured authenticated public identities. Replace the removed `verify_dstack_kms_receipt_chain(...)` call with `verify_dstack_kms_receipt_custody(...)?.root_public_key` when only the root is needed, and continue applying the accepted-root policy. The #510 cleanup preserves session/receipt wire formats and the reviewed acceptance policy ([#456](https://github.com/Dstack-TEE/private-ai-gateway/pull/456), [#510](https://github.com/Dstack-TEE/private-ai-gateway/pull/510)).
+
+### Maintenance
+
+* Simplify shared dstack custody verification and include the reviewed stable-session cleanup ([#510](https://github.com/Dstack-TEE/private-ai-gateway/pull/510)).
+* Update desktop npm and Rust dependencies, including zbus 6 ([#483](https://github.com/Dstack-TEE/private-ai-gateway/pull/483), [#484](https://github.com/Dstack-TEE/private-ai-gateway/pull/484), [#488](https://github.com/Dstack-TEE/private-ai-gateway/pull/488)).
+* Correct the documented Phala API-key dashboard path ([#490](https://github.com/Dstack-TEE/private-ai-gateway/pull/490)).
+* Improve live-E2E diagnostics for hung/degenerate models and count only outage-period forwarding during fail-closed checks ([#486](https://github.com/Dstack-TEE/private-ai-gateway/pull/486), [#492](https://github.com/Dstack-TEE/private-ai-gateway/pull/492)).
 
 ## [0.7.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.6.3-beta.1...desktop-v0.7.0-beta.1) (2026-10-27)
 
