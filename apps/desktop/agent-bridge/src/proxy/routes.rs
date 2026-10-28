@@ -11,7 +11,10 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route("/v1/responses/compact", post(responses_compact))
         .route("/v1/systemone", post(systemone))
         .route(Surface::Images.path(), post(images))
-        .route("/v1/audio/transcriptions", post(audio_transcriptions))
+        .route(
+            Surface::AudioTranscriptions.path(),
+            post(audio_transcriptions),
+        )
         .fallback(not_found)
         .with_state(state)
 }
@@ -181,7 +184,7 @@ async fn audio_transcriptions(
         uri,
         body,
         Surface::AudioTranscriptions,
-        "/v1/audio/transcriptions",
+        Surface::AudioTranscriptions.path(),
     )
     .await
 }
@@ -192,8 +195,9 @@ async fn not_found() -> Response {
         StatusCode::NOT_FOUND,
         "not_found",
         &format!(
-            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, {}, and /v1/audio/transcriptions",
-            Surface::Images.path()
+            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, {}, and {}",
+            Surface::Images.path(),
+            Surface::AudioTranscriptions.path()
         ),
     )
 }

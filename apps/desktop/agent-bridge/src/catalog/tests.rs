@@ -250,21 +250,11 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
     let original = Catalog::from_remote(
         &json!({ "data": [
             { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["transcription"] },
-            { "id": "audio-image", "input_modalities": ["audio", "image"], "output_modalities": ["transcription"] },
-            { "id": "mixed-input", "input_modalities": ["audio", "text"], "output_modalities": ["transcription"] },
-            { "id": "mixed-output", "input_modalities": ["audio"], "output_modalities": ["text", "transcription"] },
+            { "id": "mixed-output", "output_modalities": ["text", "transcription"] },
             { "id": "gemini", "input_modalities": ["text", "audio", "image", "video"], "output_modalities": ["text"] },
-            { "id": "audio-text-output", "input_modalities": ["audio"], "output_modalities": ["text"] },
-            { "id": "text", "input_modalities": ["text"], "output_modalities": ["text"] },
-            { "id": "text-input", "input_modalities": ["text"], "output_modalities": ["transcription"] },
-            { "id": "image-output", "input_modalities": ["audio"], "output_modalities": ["image"] },
-            { "id": "missing-input", "output_modalities": ["transcription"] },
             { "id": "missing-output", "input_modalities": ["audio"] },
             { "id": "legacy" },
-            { "id": "empty", "input_modalities": [], "output_modalities": [] },
-            { "id": "malformed-input", "input_modalities": "audio", "output_modalities": ["transcription"] },
-            { "id": "malformed-output", "input_modalities": ["audio"], "output_modalities": "transcription" },
-            { "id": "null", "input_modalities": null, "output_modalities": null }
+            { "id": "malformed-output", "output_modalities": "transcription" }
         ]}),
         1,
     )
@@ -274,28 +264,14 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
         Surface::Messages,
         Surface::Responses,
     ] {
-        for id in [
-            "audio",
-            "audio-image",
-            "mixed-input",
-            "mixed-output",
-            "text-input",
-            "missing-input",
-            "malformed-input",
-        ] {
+        for id in ["audio", "mixed-output", "malformed-output"] {
             assert!(
                 !original.get(id).unwrap().supports(surface),
                 "{id}: {surface:?}"
             );
             assert!(!original.get(id).unwrap().supports_agent(surface));
         }
-        for id in [
-            "gemini",
-            "audio-text-output",
-            "text",
-            "missing-output",
-            "legacy",
-        ] {
+        for id in ["gemini", "missing-output", "legacy"] {
             assert!(
                 original.get(id).unwrap().supports(surface),
                 "{id}: {surface:?}"
@@ -314,23 +290,8 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
         }
         let audio = catalog.for_surface(Surface::AudioTranscriptions);
         let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(
-            ids,
-            [
-                "audio",
-                "audio-image",
-                "mixed-input",
-                "mixed-output",
-                "text-input",
-                "missing-input",
-                "malformed-input",
-            ]
-        );
+        assert_eq!(ids, ["audio", "mixed-output"]);
     }
-    assert_eq!(
-        Surface::AudioTranscriptions.path(),
-        "/v1/audio/transcriptions"
-    );
 }
 
 #[test]

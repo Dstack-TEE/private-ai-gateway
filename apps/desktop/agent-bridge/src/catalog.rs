@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
 pub(crate) const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
+pub(crate) const AUDIO_TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteModel {
@@ -182,7 +183,7 @@ impl Surface {
             Surface::Responses => "/v1/responses",
             Surface::SystemOne => "/v1/systemone",
             Surface::Images => IMAGES_GENERATIONS_PATH,
-            Surface::AudioTranscriptions => "/v1/audio/transcriptions",
+            Surface::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
         }
     }
 
@@ -211,15 +212,11 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        let transcription_output = self.advertises("output_modalities", "transcription");
-        let modalities = match surface {
-            Surface::AudioTranscriptions => transcription_output,
-            Surface::ChatCompletions | Surface::Messages | Surface::Responses => {
-                !transcription_output && self.outputs(surface.output_modality())
-            }
-            _ => self.outputs(surface.output_modality()),
-        };
-        modalities
+        self.outputs(surface.output_modality())
+            && !(matches!(
+                surface,
+                Surface::ChatCompletions | Surface::Messages | Surface::Responses
+            ) && self.outputs("transcription"))
             && (matches!(
                 surface,
                 Surface::SystemOne | Surface::Images | Surface::AudioTranscriptions
@@ -241,21 +238,13 @@ impl CatalogModel {
         self.remote
             .extra
             .get("output_modalities")
-            // Existing surfaces accept legacy catalogs without modality metadata;
-            // image generation requires an explicit advertisement.
-            .map_or(modality != "image", |modalities| {
+            // Text and decisions accept legacy catalogs without modality metadata;
+            // images and transcription require an explicit advertisement.
+            .map_or(matches!(modality, "text" | "decisions"), |modalities| {
                 modalities
                     .as_array()
                     .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
             })
-    }
-
-    fn advertises(&self, field: &str, modality: &str) -> bool {
-        self.remote
-            .extra
-            .get(field)
-            .and_then(Value::as_array)
-            .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
     }
 
     pub fn id(&self) -> &str {

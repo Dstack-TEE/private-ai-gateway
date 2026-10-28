@@ -23,7 +23,7 @@ use desktop_core::agents::Agent;
 
 use crate::{
     agents::AgentIntegration,
-    catalog::{Surface, IMAGES_GENERATIONS_PATH},
+    catalog::{Surface, AUDIO_TRANSCRIPTIONS_PATH, IMAGES_GENERATIONS_PATH},
 };
 
 const TOKEN_BYTES: usize = 32;
@@ -43,7 +43,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
                 | "/v1/chat/completions"
                 | "/v1/systemone"
                 | IMAGES_GENERATIONS_PATH
-                | "/v1/audio/transcriptions"
+                | AUDIO_TRANSCRIPTIONS_PATH
         );
     }
     let Ok(agent) = Agent::from_id(agent) else {
