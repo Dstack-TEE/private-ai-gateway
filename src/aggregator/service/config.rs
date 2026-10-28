@@ -4,8 +4,9 @@ use crate::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 /// Default validity period for newly sealed attested sessions.
 pub const DEFAULT_ATTESTED_SESSION_TTL_SECONDS: u64 = 3600;
 
-/// Default keyset lifetime: launch time + 30 days (§3.4 bounded lifetime).
-/// The launcher computes `keyset_not_after` from this unless configured.
+/// Default keyset lifetime: seal time + 30 days (§3.4 bounded lifetime).
+/// The launcher computes `keyset_not_after` from this unless configured and
+/// renews the keyset with the same lifetime at half-life.
 pub const DEFAULT_KEYSET_NOT_AFTER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 /// Validate source provenance before it is serialized in an attestation report.

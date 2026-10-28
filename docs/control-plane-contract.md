@@ -325,7 +325,7 @@ Streaming and cancellation do not erase accounting:
 | Upstream response | `upstream_http_error`, `upstream_quota_exhausted`, `upstream_capacity`, `upstream_image_fetch_failed`, `upstream_malformed_response`, `upstream_response_failed` |
 | Upstream connection | `upstream_timeout`, `upstream_transport`, `upstream_channel_binding_mismatch`, `upstream_verification_failed` |
 | Stream | `stream_inband_error`, `stream_truncated`, `stream_line_overflow` |
-| Gateway | `request_shaping_failed`, `no_eligible_attested_route`, `e2ee_failed`, `receipt_failed`, `downstream_finalizer_failed`, `internal_error` |
+| Gateway | `request_shaping_failed`, `no_eligible_attested_route`, `keyset_expired`, `e2ee_failed`, `receipt_failed`, `downstream_finalizer_failed`, `internal_error` |
 
 These values still reveal operational failure classes; apply access and
 retention controls to usage reports.

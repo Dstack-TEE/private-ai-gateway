@@ -36,7 +36,7 @@ Minimal container configuration:
 | `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
 | `admin_token_sha256` | hex string | unset | SHA-256 the admin token must match, whether it comes from `admin_token`, `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`, or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. Startup fails on a missing or mismatched token. |
-| `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a newly resolved workload keyset. Zero is rejected. |
+| `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a sealed workload keyset. The gateway re-seals the same keys with a fresh `not_after` once half the lifetime has passed, so the served keyset digest changes then. Zero is rejected. |
 | `attested_session_ttl_seconds` | positive integer | `3600` | Validity of newly sealed attested sessions, independent of receipt retention and verifier-cache TTL. Zero, negative, non-integer and unrepresentable expiry values are rejected. Existing documents keep their original expiry. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
 | `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |
@@ -193,7 +193,13 @@ usually ends in an HTTP status such as `429` that the client should receive.
 
 An early-committed response cannot carry `X-Receipt-Id` because the upstream
 has not yet been selected. After a successful stream, the receipt is available
-by response `id`. If forwarding fails after the early commit, the gateway sends
+by response `id`. The early `X-ACI-Keyset-Digest` header and eventual receipt
+share one keyset snapshot, including across renewal. Admission at or after that
+keyset's `not_after` ends the stream with an in-band `503`, reports
+`gateway/keyset_expired`, and issues no receipt (ACI §5.2). With the default
+30-day lifetime and half-life renewal, this normally requires a wait of about
+15 days, so it is mainly relevant to very short configured lifetimes.
+If forwarding fails after the early commit, the gateway sends
 the surface's in-band error event, carrying the status the response would
 otherwise have used, and drafts no receipt. The control-plane usage report also
 records that real failure status rather than the HTTP `200` already sent to the

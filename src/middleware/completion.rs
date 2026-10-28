@@ -628,6 +628,11 @@ pub async fn run(
                         StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let mut headers = gateway_owned_headers("application/json");
                     insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
+                    insert_header(
+                        &mut headers,
+                        "x-aci-keyset-digest",
+                        &finalized.receipt.workload_keyset_digest,
+                    );
                     apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                     (status, headers, finalized.wire_body).into_response()
                 }
@@ -740,6 +745,11 @@ pub async fn run(
                     match &receipt_id {
                         Some(receipt_id) => {
                             insert_header(&mut headers, "x-receipt-id", receipt_id);
+                            insert_header(
+                                &mut headers,
+                                "x-aci-keyset-digest",
+                                &forward.keyset_digest,
+                            );
                             apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                         }
                         None => apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), false),
@@ -1042,6 +1052,10 @@ fn build_early_streaming_response(
     let endpoint_path = inputs.endpoint_path;
     let protocol = errors::sse_protocol(endpoint_path);
     let content_type = "text/event-stream";
+    // The pending forward resumes in the body, after these headers commit.
+    // Its receipt must cite this snapshot rather than a later renewal.
+    let keyset = service.current_keyset();
+    journal.set_early_response_keyset(keyset.clone());
     let downstream_abort = Arc::new(AtomicBool::new(false));
     let meter_settled = Arc::new(AtomicBool::new(false));
     // Template for a finalizer error that lands after the meter has already
@@ -1132,6 +1146,7 @@ fn build_early_streaming_response(
     // reserved yet. The receipt is still issued and retrievable by the response
     // `id`.
     let mut headers = gateway_owned_headers(content_type);
+    insert_header(&mut headers, "x-aci-keyset-digest", keyset.digest());
     headers.insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -1547,7 +1562,8 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
         ServiceError::UpstreamVerification(
             UpstreamVerificationError::NoEligibleAttestedRoute(_)
             | UpstreamVerificationError::NoEligibleAttestedSession(_),
-        ) => ErrorSource::Gateway,
+        )
+        | ServiceError::EarlyResponseKeysetExpired => ErrorSource::Gateway,
         _ => ErrorSource::Upstream,
     }
 }
@@ -1556,6 +1572,7 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
 fn forward_error_status(err: &ServiceError) -> u16 {
     match err {
         ServiceError::AdmissionInvariant(_) => 500,
+        ServiceError::EarlyResponseKeysetExpired => 503,
         ServiceError::E2ee(_) => 400,
         // §5.3: nothing failed verification — none of the pinned sessions is
         // current, so the client re-fetches the list and re-pins.
@@ -1632,7 +1649,10 @@ fn service_error_response(
             outcome.requester.clone(),
         ) {
             Ok(receipt) => {
-                let headers = [("x-receipt-id", receipt.receipt_id.clone())];
+                let headers = vec![
+                    ("x-receipt-id", receipt.receipt_id.clone()),
+                    ("x-aci-keyset-digest", receipt.workload_keyset_digest),
+                ];
                 finalize_generated(status, body, &headers, e2ee, outcome)
             }
             // The receipt is part of the refusal contract (§5.2); a refusal

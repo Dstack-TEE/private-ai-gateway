@@ -4053,6 +4053,364 @@ fn middleware_with_keepalive(control_url: String, ms: u64) -> Middleware {
 }
 
 #[tokio::test]
+async fn early_keepalive_receipt_keeps_committed_keyset_across_renewal() {
+    use axum::{body::Body, http::Request};
+    use std::sync::atomic::AtomicU64;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    struct PausedStreamUpstream {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl UpstreamBackend for PausedStreamUpstream {
+        fn name(&self) -> &str {
+            "paused-stream"
+        }
+        fn url_origin(&self) -> Option<&str> {
+            None
+        }
+        async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            unreachable!("test only streams")
+        }
+        async fn forward_stream_verified_prepared(
+            &self,
+            _: PreparedUpstreamRequest,
+            _: &UpstreamVerifiedEvent,
+        ) -> Result<UpstreamStreamResponse, UpstreamError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(UpstreamStreamResponse {
+                status_code: 200,
+                headers: [("content-type".to_string(), "text/event-stream".to_string())].into(),
+                body: Box::pin(futures_util::stream::once(async {
+                    Ok(Bytes::from_static(
+                        b"data: {\"id\":\"upstream-chat\",\"model\":\"gpt\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+                    ))
+                })),
+                served_instance_id: None,
+            })
+        }
+    }
+
+    let (control_url, _) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
+    )
+    .await;
+    let clock = Arc::new(admission::TestClock(AtomicU64::new(1_000)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut config = AciServiceConfig::for_test();
+    config.keyset_not_after = 1_100;
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(PausedStreamUpstream {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            clock.clone(),
+        )
+        .unwrap(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
+            .unwrap(),
+    );
+    let router = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service.clone(),
+        manager,
+        None,
+        Arc::new(middleware_with_keepalive(control_url, 10)),
+    );
+    let original_keyset = service.keyset();
+    let original_digest = service.workload_keyset_digest();
+    let forward = tokio::spawn(
+        router.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt","messages":[],"stream":true}"#))
+                .unwrap(),
+        ),
+    );
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("upstream is awaiting release");
+    // The real router commits the early response while upstream headers are
+    // still pending. Renew only after that response has returned.
+    let response = tokio::time::timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("early response does not wait for upstream headers")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-aci-keyset-digest"], original_digest);
+    assert!(!response.headers().contains_key("x-receipt-id"));
+    clock.set(1_050);
+    assert_eq!(service.renew_keyset_if_due(100).unwrap(), Some(1_150));
+    assert_ne!(service.workload_keyset_digest(), original_digest);
+    // Complete after K0 expires: historical receipt validation depends on
+    // served_at, not the time its final byte is delivered.
+    clock.set(1_101);
+    release.notify_one();
+    let (headers, body) = raw_body(response).await;
+    assert!(body.starts_with(": PROCESSING"), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
+    let chat_id = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.strip_prefix("data: ")?).ok())
+        .find_map(|event| event["id"].as_str().map(str::to_owned))
+        .expect("stream includes the gateway chat id");
+    let receipt = service.get_receipt_by_chat_id(&chat_id).unwrap();
+    let document = receipt.document_json().unwrap();
+    assert_eq!(document["served_at"], 1_000);
+    assert!(document["served_at"].as_u64().unwrap() < original_keyset.not_after);
+    assert_eq!(document["workload_keyset_digest"], original_digest);
+    assert_eq!(
+        document["workload_keyset_digest"],
+        headers["x-aci-keyset-digest"].to_str().unwrap()
+    );
+    let signing_key = original_keyset
+        .receipt_signing_keys
+        .iter()
+        .find(|key| key.key_id == receipt.key_id)
+        .unwrap();
+    assert!(private_ai_gateway::aci::keys::verify_receipt_signature(
+        signing_key,
+        &private_ai_gateway::aci::receipt::receipt_signing_input(&document).unwrap(),
+        &hex::decode(&receipt.signature_hex).unwrap(),
+    ));
+}
+
+#[tokio::test]
+async fn early_keepalive_rejects_expired_initial_admission() {
+    for admitted_at in [1_101, 1_100] {
+        assert_early_keepalive_rejects_expired_admission(AdmissionDelay::Initial, admitted_at)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn early_keepalive_rejects_expired_failover_admission() {
+    assert_early_keepalive_rejects_expired_admission(AdmissionDelay::Failover, 1_101).await;
+}
+
+#[tokio::test]
+async fn early_keepalive_rejects_expired_binding_readmission() {
+    assert_early_keepalive_rejects_expired_admission(AdmissionDelay::BindingReverify, 1_101).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionDelay {
+    Initial,
+    Failover,
+    BindingReverify,
+}
+
+async fn assert_early_keepalive_rejects_expired_admission(delay: AdmissionDelay, admitted_at: u64) {
+    use axum::{body::Body, http::Request};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    struct PausedVerifier {
+        calls: AtomicUsize,
+        pause_on: usize,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    #[async_trait]
+    impl UpstreamVerifier for PausedVerifier {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == self.pause_on {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            event_from_request(&request, VerificationResult::Verified)
+        }
+    }
+
+    struct CountingUpstream {
+        delay: AdmissionDelay,
+        forwarded: Arc<Mutex<Vec<String>>>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    #[async_trait]
+    impl UpstreamBackend for CountingUpstream {
+        fn name(&self) -> &str {
+            "counting-upstream"
+        }
+        fn url_origin(&self) -> Option<&str> {
+            None
+        }
+        async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            unreachable!("test only streams")
+        }
+        async fn forward_stream_verified_prepared(
+            &self,
+            request: PreparedUpstreamRequest,
+            _: &UpstreamVerifiedEvent,
+        ) -> Result<UpstreamStreamResponse, UpstreamError> {
+            let first = {
+                let mut forwarded = self.forwarded.lock().unwrap();
+                forwarded.push(request.request.target_route_id.unwrap());
+                forwarded.len() == 1
+            };
+            if first && self.delay != AdmissionDelay::Initial {
+                self.entered.notify_one();
+                self.release.notified().await;
+                match self.delay {
+                    AdmissionDelay::Failover => {
+                        return Err(UpstreamError::Transport("try next route".into()));
+                    }
+                    AdmissionDelay::BindingReverify => {
+                        return Err(UpstreamError::ChannelBindingMismatch(
+                            "refresh binding".into(),
+                        ));
+                    }
+                    AdmissionDelay::Initial => {}
+                }
+            }
+            Ok(UpstreamStreamResponse {
+                status_code: 200,
+                headers: [("content-type".to_string(), "text/event-stream".to_string())].into(),
+                body: Box::pin(futures_util::stream::once(async {
+                    Ok(Bytes::from_static(b"data: {\"id\":\"unexpected-inference\",\"choices\":[]}\n\ndata: [DONE]\n\n"))
+                })),
+                served_instance_id: None,
+            })
+        }
+    }
+
+    let mut candidates = vec![json!({ "routeId": "openai:first", "format": "openai" })];
+    if delay == AdmissionDelay::Failover {
+        candidates.push(json!({ "routeId": "openai:second", "format": "openai" }));
+    }
+    let (control_url, posts) =
+        spawn_control_capturing(200, json!({ "allow": true, "candidates": candidates })).await;
+    let clock = Arc::new(admission::TestClock(AtomicU64::new(1_000)));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let upstream_entered = Arc::new(Notify::new());
+    let upstream_release = Arc::new(Notify::new());
+    let forwarded = Arc::new(Mutex::new(Vec::new()));
+    let mut config = AciServiceConfig::for_test();
+    config.keyset_not_after = 1_100;
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(CountingUpstream {
+                delay,
+                forwarded: forwarded.clone(),
+                entered: upstream_entered.clone(),
+                release: upstream_release.clone(),
+            }),
+            Arc::new(PausedVerifier {
+                calls: AtomicUsize::new(0),
+                pause_on: usize::from(delay != AdmissionDelay::Initial),
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            clock.clone(),
+        )
+        .unwrap(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
+            .unwrap(),
+    );
+    let router = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service.clone(),
+        manager,
+        None,
+        Arc::new(middleware_with_keepalive(control_url, 10)),
+    );
+    let digest = service.workload_keyset_digest();
+    let forward = tokio::spawn(
+        router.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"gpt","messages":[],"stream":true}"#))
+                .unwrap(),
+        ),
+    );
+    let first_wait = if delay == AdmissionDelay::Initial {
+        &entered
+    } else {
+        &upstream_entered
+    };
+    tokio::time::timeout(Duration::from_secs(5), first_wait.notified())
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("early response must commit while forwarding is pending")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-aci-keyset-digest"], digest);
+    assert!(!response.headers().contains_key("x-receipt-id"));
+    clock.set(1_050);
+    assert_eq!(service.renew_keyset_if_due(100).unwrap(), Some(1_150));
+    let complete = tokio::spawn(raw_body(response));
+    if delay != AdmissionDelay::Initial {
+        // Failover/reverify starts only after headers cite K0. Its new verifier
+        // wait then crosses K0's expiry before the next admission decision.
+        upstream_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+    }
+    clock.set(admitted_at);
+    release.notify_one();
+    let (headers, body) = complete.await.unwrap();
+    assert_eq!(headers["x-aci-keyset-digest"], digest);
+    let expected_calls = usize::from(delay != AdmissionDelay::Initial);
+    assert_eq!(
+        forwarded.lock().unwrap().len(),
+        expected_calls,
+        "expired admission must not forward"
+    );
+    assert!(body.starts_with(": PROCESSING"), "{body}");
+    assert!(body.contains("\"code\":503"), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
+    assert_eq!(
+        metric_total(&service, "private_ai_gateway_receipts_issued_total"),
+        0
+    );
+    let report = wait_for_post(&posts, |r| r["errorMessage"] == "keyset_expired").await;
+    assert_eq!(report["status"], 503);
+    assert_eq!(report["errorSource"], "gateway");
+    assert_eq!(report["selectedRouteId"], Value::Null);
+    assert_eq!(
+        report["attemptIndex"],
+        usize::from(delay == AdmissionDelay::Failover)
+    );
+    if delay == AdmissionDelay::Failover {
+        let first = wait_for_post(&posts, |r| r["selectedRouteId"] == "openai:first").await;
+        assert_eq!(first["status"], 502);
+        assert_eq!(first["attemptIndex"], 0);
+    }
+}
+
+#[tokio::test]
 async fn early_keepalive_commits_200_before_upstream_headers() {
     // The upstream takes longer than the keep-alive interval to answer. The
     // gateway must commit a 200 SSE body first, heartbeat, then splice in the
