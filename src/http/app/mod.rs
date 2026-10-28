@@ -4,8 +4,8 @@
 //!
 //! * `POST /v1/chat/completions` - OpenAI-shaped chat-completion
 //!   forwarding with ACI-side hashing and receipt signing. An
-//!   optional `Authorization: Bearer <token>` is recorded on the
-//!   receipt so later lookups can authenticate the original requester.
+//!   `Authorization: Bearer <token>` is required when inbound auth is
+//!   configured, and is recorded on the receipt for owner-authenticated lookup.
 //! * `POST /v1/completions` - compatibility surface. The aggregator
 //!   forwards legacy prompt completions through the same ACI receipt
 //!   path as chat completions. The E2EE v2 extension is an optional add-on here;
@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{DefaultBodyLimit, Request, State},
-    http::{HeaderName, HeaderValue},
+    http::{HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -71,6 +71,8 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1::Builder as HyperHttp1Builder;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tower::ServiceExt as _;
 use tower_http::cors::CorsLayer;
 
@@ -170,11 +172,12 @@ pub struct AppState {
     pub service: Arc<AciService>,
     pub upstream_config: Option<Arc<UpstreamConfigManager>>,
     pub admin_token: Option<String>,
+    inbound_token_sha256: Option<[u8; 32]>,
     middleware: Option<Arc<Middleware>>,
 }
 
 pub fn build_router(service: Arc<AciService>) -> Router {
-    build_router_inner(service, None, None, None)
+    build_router_inner(service, None, None, None, None)
 }
 
 pub fn build_router_with_admin(
@@ -182,7 +185,7 @@ pub fn build_router_with_admin(
     upstream_config: Arc<UpstreamConfigManager>,
     admin_token: Option<String>,
 ) -> Router {
-    build_router_inner(service, Some(upstream_config), admin_token, None)
+    build_router_inner(service, Some(upstream_config), admin_token, None, None)
 }
 
 /// Build the gateway router with the middleware, which consults the
@@ -197,7 +200,26 @@ pub fn build_router_with_admin_and_middleware(
         service,
         Some(upstream_config),
         admin_token,
+        None,
         Some(middleware),
+    )
+}
+
+/// Build the router with optional inference-only bearer authentication.
+/// Discovery and verification routes retain their existing access rules.
+pub fn build_router_with_auth(
+    service: Arc<AciService>,
+    upstream_config: Arc<UpstreamConfigManager>,
+    admin_token: Option<String>,
+    inbound_token: Option<String>,
+    middleware: Option<Arc<Middleware>>,
+) -> Router {
+    build_router_inner(
+        service,
+        Some(upstream_config),
+        admin_token,
+        inbound_token,
+        middleware,
     )
 }
 
@@ -205,27 +227,36 @@ fn build_router_inner(
     service: Arc<AciService>,
     upstream_config: Option<Arc<UpstreamConfigManager>>,
     admin_token: Option<String>,
+    inbound_token: Option<String>,
     middleware: Option<Arc<Middleware>>,
 ) -> Router {
     let state = AppState {
         service,
         upstream_config,
         admin_token,
+        inbound_token_sha256: inbound_token.map(|token| Sha256::digest(token.as_bytes()).into()),
         middleware,
     };
-    Router::new()
-        .route("/", get(root))
-        .route("/health", get(health))
-        // OpenAI- and Anthropic-compatible inference surface.
-        .route("/v1/models", get(models))
-        .route("/v1/models/*rest", get(models_subpath))
-        .route("/v1/embeddings/models", get(embeddings_models))
+    // Register every inference route in this group so authentication covers
+    // new surfaces too, without restricting discovery or owner-authenticated artifacts.
+    let inference = Router::new()
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
         .route("/v1/systemone", post(systemone))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            inbound_auth_middleware,
+        ));
+    Router::new()
+        .merge(inference)
+        .route("/", get(root))
+        .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/v1/models/*rest", get(models_subpath))
+        .route("/v1/embeddings/models", get(embeddings_models))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(
@@ -258,6 +289,33 @@ fn build_router_inner(
         // legitimate payloads fit.
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
+}
+
+async fn inbound_auth_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(expected) = state.inbound_token_sha256 {
+        let authenticated = util::extract_bearer(req.headers()).is_some_and(|token| {
+            // Compare fixed-size digests so secret length does not affect equality.
+            let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            bool::from(actual.ct_eq(&expected))
+        });
+        if !authenticated {
+            let mut response = error_responses::error_response(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "valid inference bearer token required",
+            );
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer"),
+            );
+            return response;
+        }
+    }
+    next.run(req).await
 }
 
 /// Middleware that stamps `X-ACI-Version` and `X-ACI-Keyset-Digest` on every

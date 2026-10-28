@@ -45,7 +45,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
-use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
+use private_ai_gateway::http::build_router_with_auth;
 use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
 use rand::Rng;
 use serde::Deserialize;
@@ -103,6 +103,37 @@ fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
 
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct InboundToken(String);
+
+impl std::fmt::Debug for InboundToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+fn resolve_inbound_token(
+    configured: Option<&str>,
+    environment: Option<String>,
+    file: Option<String>,
+) -> Result<Option<String>, String> {
+    let token = match environment {
+        Some(token) => Some(token),
+        None => match file {
+            Some(path) => Some(secret_file_non_empty(&path)?),
+            None => configured.map(str::to_string),
+        },
+    };
+    if token
+        .as_ref()
+        .is_some_and(|token| token.is_empty() || token.bytes().any(|byte| !byte.is_ascii_graphic()))
+    {
+        return Err("inbound_token must contain non-empty visible ASCII without whitespace".into());
+    }
+    Ok(token)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GatewayConfigFile {
@@ -112,6 +143,8 @@ struct GatewayConfigFile {
     upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
     admin_token_sha256: Option<String>,
+    inbound_token: Option<InboundToken>,
+    inbound_token_sha256: Option<String>,
     /// Keyset lifetime in seconds: `not_after` = seal time + this (§3.4),
     /// renewed in-process at half-life. Defaults to
     /// [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
@@ -123,7 +156,8 @@ struct GatewayConfigFile {
     subject: Option<String>,
     tls: GatewayTlsConfig,
     /// Inference runs inside this attested workload; the gateway forwards to
-    /// no third party. Reported as `serving: "direct"`, and receipts then
+    /// no third party. Requires an authoritative measured seed and forbids
+    /// runtime routing updates. Reported as `serving: "direct"`, and receipts then
     /// carry no `upstream.verified` event (§7.5).
     direct_serving: bool,
     /// Advertise and terminate the E2EE v2 compatibility extension. Enabled by
@@ -158,6 +192,8 @@ impl Default for GatewayConfigFile {
             upstream_pull: None,
             admin_token: None,
             admin_token_sha256: None,
+            inbound_token: None,
+            inbound_token_sha256: None,
             keyset_not_after_seconds: None,
             attested_session_ttl_seconds: DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
             subject: None,
@@ -235,6 +271,34 @@ fn validate_pull_token_separation(
     {
         return Err(
             "upstream_pull.token must be distinct from middleware.control_token".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_direct_serving(
+    config: &GatewayConfigFile,
+    admin_token: Option<&str>,
+) -> Result<(), String> {
+    if !config.direct_serving {
+        return Ok(());
+    }
+    if config.middleware.is_some() {
+        return Err("direct_serving cannot be combined with middleware".into());
+    }
+    if admin_token.is_some() || config.admin_token_sha256.is_some() {
+        return Err("direct_serving forbids admin_token-based upstream mutation".into());
+    }
+    if config.upstream_pull.is_some() {
+        return Err("direct_serving forbids upstream_pull".into());
+    }
+    if config
+        .upstream_config_seed_path
+        .as_deref()
+        .is_none_or(|path| path.trim().is_empty())
+    {
+        return Err(
+            "direct_serving requires upstream_config_seed_path from the measured deployment".into(),
         );
     }
     Ok(())
@@ -378,25 +442,30 @@ fn resolve_tls_public_keys(config: &GatewayTlsConfig) -> Result<Option<Vec<TlsSp
     Ok(None)
 }
 
-fn seed_upstream_config_if_empty(
+fn seed_upstream_config(
     target_path: &Path,
     seed_path: Option<&str>,
+    direct_serving: bool,
 ) -> Result<(), std::io::Error> {
     let Some(seed_path) = seed_path else {
         return Ok(());
     };
     let seed_path = Path::new(seed_path);
-    let target_has_config = match std::fs::read_to_string(target_path) {
-        Ok(text) => !text.trim().is_empty(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => {
-            return Err(std::io::Error::new(
-                err.kind(),
-                format!(
-                    "failed to read upstream config {} before applying seed: {err}",
-                    target_path.display()
-                ),
-            ));
+    let target_has_config = if direct_serving {
+        false
+    } else {
+        match std::fs::read_to_string(target_path) {
+            Ok(text) => !text.trim().is_empty(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    err.kind(),
+                    format!(
+                        "failed to read upstream config {} before applying seed: {err}",
+                        target_path.display()
+                    ),
+                ));
+            }
         }
     };
     if target_has_config {
@@ -430,7 +499,8 @@ fn seed_upstream_config_if_empty(
     tracing::info!(
         target = %target_path.display(),
         seed = %seed_path.display(),
-        "seeded initial upstream config"
+        direct_serving,
+        "seeded upstream config"
     );
     Ok(())
 }
@@ -477,17 +547,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway_config.admin_token_sha256.as_deref(),
     )
     .map_err(invalid_input)?;
+    let inbound_token = resolve_inbound_token(
+        gateway_config
+            .inbound_token
+            .as_ref()
+            .map(|token| token.0.as_str()),
+        env_non_empty("PRIVATE_AI_GATEWAY_INBOUND_TOKEN"),
+        env_non_empty("PRIVATE_AI_GATEWAY_INBOUND_TOKEN_FILE"),
+    )
+    .map_err(invalid_input)?;
+    validate_sha256_secret_policy(
+        "inbound_token",
+        inbound_token.as_deref(),
+        gateway_config.inbound_token_sha256.as_deref(),
+    )
+    .map_err(invalid_input)?;
+    validate_direct_serving(&gateway_config, admin_token.as_deref()).map_err(invalid_input)?;
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
     let middleware_config = gateway_config.middleware.clone();
-    if gateway_config.direct_serving && middleware_config.is_some() {
-        return Err(invalid_input(
-            "direct_serving asserts spec 4.1 single-workload serving, which the \
-             middleware (aggregator) topology contradicts; unset one",
-        )
-        .into());
-    }
     validate_pull_token_separation(&gateway_config, admin_token.as_deref())
         .map_err(invalid_input)?;
     let privatemode_proxy = gateway_config
@@ -511,7 +590,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let keys: Arc<dyn KeyProvider> = provider.clone();
     let quoter: Arc<dyn Quoter> = provider.clone();
-    seed_upstream_config_if_empty(&upstream_config_path, upstream_config_seed_path.as_deref())?;
+    seed_upstream_config(
+        &upstream_config_path,
+        upstream_config_seed_path.as_deref(),
+        gateway_config.direct_serving,
+    )?;
     let upstream_config = Arc::new(UpstreamConfigManager::load(
         upstream_config_path.clone(),
         UpstreamRuntimeOptions {
@@ -673,7 +756,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spawn_upstream_pull(puller, initial_pull_succeeded);
     }
 
-    let app = if let Some(middleware_config) = middleware_config {
+    let middleware = if let Some(middleware_config) = middleware_config {
         let prefix_hash_key = PrefixHashKey::new(provider.prefix_hash_key().await?);
         let middleware =
             Arc::new(Middleware::new(prefix_hash_key, &middleware_config).map_err(invalid_input)?);
@@ -681,10 +764,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             control_url = %middleware_config.control_url,
             "private-ai-gateway middleware enabled"
         );
-        build_router_with_admin_and_middleware(service, upstream_config, admin_token, middleware)
+        Some(middleware)
     } else {
-        build_router_with_admin(service, upstream_config, admin_token)
+        None
     };
+    let app = build_router_with_auth(
+        service,
+        upstream_config,
+        admin_token,
+        inbound_token,
+        middleware,
+    );
 
     tracing::info!(%bind, "private-ai-gateway listening");
     let listener = tokio::net::TcpListener::bind(&bind).await?;
@@ -862,9 +952,9 @@ mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        load_gateway_config, parse_sha256_policy, resolve_state_dir, resolve_tls_public_keys,
-        secret_file_non_empty, seed_upstream_config_if_empty, session_log_path,
-        source_provenance_from_git_launcher_config, upstream_config_path,
+        load_gateway_config, parse_sha256_policy, resolve_inbound_token, resolve_state_dir,
+        resolve_tls_public_keys, secret_file_non_empty, seed_upstream_config, session_log_path,
+        source_provenance_from_git_launcher_config, upstream_config_path, validate_direct_serving,
         validate_pull_token_separation, validate_sha256_secret_policy,
         DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
     };
@@ -912,6 +1002,120 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         std::fs::write(&path, " \n").unwrap();
         assert!(secret_file_non_empty(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn inbound_token_resolution_validation_and_digest_policy() {
+        let (_dir, path) = temp_path("inbound-token");
+        std::fs::write(&path, "file-token\n").unwrap();
+        let file = Some(path.to_str().unwrap().to_string());
+        assert_eq!(resolve_inbound_token(None, None, None).unwrap(), None);
+        assert_eq!(
+            resolve_inbound_token(Some("static-token"), None, None)
+                .unwrap()
+                .as_deref(),
+            Some("static-token")
+        );
+        let token = resolve_inbound_token(Some("static-token"), None, file.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(token, "file-token");
+        assert_eq!(
+            resolve_inbound_token(Some("static-token"), Some("env-token".into()), file.clone())
+                .unwrap()
+                .as_deref(),
+            Some("env-token")
+        );
+        let digest = private_ai_gateway::aci::digest::sha256_hex(token.as_bytes());
+        validate_sha256_secret_policy("inbound_token", Some(&token), Some(&digest)).unwrap();
+        assert!(
+            validate_sha256_secret_policy("inbound_token", Some("wrong-token"), Some(&digest))
+                .is_err()
+        );
+        assert!(validate_sha256_secret_policy("inbound_token", None, Some(&digest)).is_err());
+        for token in ["", " ", "has space", "has\nnewline", "non-ascii-🔒"] {
+            let error = resolve_inbound_token(Some(token), None, None).unwrap_err();
+            assert_eq!(
+                error,
+                "inbound_token must contain non-empty visible ASCII without whitespace"
+            );
+        }
+        std::fs::write(&path, " \n").unwrap();
+        assert!(resolve_inbound_token(None, None, file.clone()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(resolve_inbound_token(None, None, file).is_err());
+    }
+
+    #[test]
+    fn inbound_token_parses_without_debugging_the_secret() {
+        let (_dir, path) = temp_path("inbound-config");
+        std::fs::write(
+            &path,
+            r#"{"inbound_token":"do-not-print-this-token","inbound_token_sha256":"sha256:abc"}"#,
+        )
+        .unwrap();
+        let config = load_gateway_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            config.inbound_token.as_ref().unwrap().0,
+            "do-not-print-this-token"
+        );
+        assert_eq!(config.inbound_token_sha256.as_deref(), Some("sha256:abc"));
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("do-not-print-this-token"));
+        std::fs::write(&path, "{}").unwrap();
+        let config = load_gateway_config(path.to_str().unwrap()).unwrap();
+        assert!(config.inbound_token.is_none());
+        assert!(config.inbound_token_sha256.is_none());
+    }
+
+    #[test]
+    fn direct_serving_requires_seed_and_rejects_mutable_routing() {
+        let base = serde_json::json!({"direct_serving": true, "upstream_config_seed_path": "/measured/seed.json"});
+        let config = serde_json::from_value(base.clone()).unwrap();
+        validate_direct_serving(&config, None).unwrap();
+        assert!(validate_direct_serving(&config, Some("env-or-file-token"))
+            .unwrap_err()
+            .contains("admin_token"));
+        for (key, value, message) in [
+            (
+                "upstream_config_seed_path",
+                serde_json::Value::Null,
+                "requires upstream_config_seed_path",
+            ),
+            (
+                "upstream_config_seed_path",
+                serde_json::json!("  "),
+                "requires upstream_config_seed_path",
+            ),
+            (
+                "middleware",
+                serde_json::json!({"control_url": "https://control.example"}),
+                "middleware",
+            ),
+            (
+                "admin_token_sha256",
+                serde_json::json!("aa".repeat(32)),
+                "admin_token",
+            ),
+            (
+                "upstream_pull",
+                serde_json::json!({"url": "https://control.example/config", "token": "a".repeat(32)}),
+                "upstream_pull",
+            ),
+        ] {
+            let mut changed = base.clone();
+            changed[key] = value;
+            let mut config: super::GatewayConfigFile = serde_json::from_value(changed).unwrap();
+            assert!(
+                validate_direct_serving(&config, None)
+                    .unwrap_err()
+                    .contains(message),
+                "{key}"
+            );
+            config.direct_serving = false;
+            validate_direct_serving(&config, Some("admin-token")).unwrap();
+        }
     }
 
     #[test]
@@ -1405,7 +1609,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         )
         .unwrap();
 
-        seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap())).unwrap();
+        seed_upstream_config(&target, Some(seed.to_str().unwrap()), false).unwrap();
 
         let seeded = std::fs::read_to_string(&target).unwrap();
         assert!(seeded.contains("\"public-a\""));
@@ -1426,7 +1630,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         )
         .unwrap();
 
-        seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap())).unwrap();
+        seed_upstream_config(&target, Some(seed.to_str().unwrap()), false).unwrap();
 
         let kept = std::fs::read_to_string(&target).unwrap();
         assert!(kept.contains("\"kept\""));
@@ -1439,10 +1643,30 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let (_seed_dir, seed) = temp_path("seed-invalid");
         std::fs::write(&seed, r#"[{"name":"","base_url":"","models":{}}]"#).unwrap();
 
-        let err = seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap()))
+        let err = seed_upstream_config(&target, Some(seed.to_str().unwrap()), false)
             .expect_err("invalid seed must fail startup");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn direct_serving_replaces_persisted_routes_with_validated_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("upstreams.json");
+        let seed = dir.path().join("seed.json");
+        let measured = r#"[{"name":"local","base_url":"http://engine:8000","models":{"m":"m"}}]"#;
+        let persisted =
+            r#"[{"name":"external","base_url":"https://other.example","models":{"m":"m"}}]"#;
+        std::fs::write(&target, persisted).unwrap();
+        std::fs::write(&seed, measured).unwrap();
+        seed_upstream_config(&target, Some(seed.to_str().unwrap()), true).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), measured);
+        std::fs::write(&target, persisted).unwrap();
+        std::fs::write(&seed, "invalid").unwrap();
+        assert!(seed_upstream_config(&target, Some(seed.to_str().unwrap()), true).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), persisted);
+        std::fs::remove_file(&seed).unwrap();
+        assert!(seed_upstream_config(&target, Some(seed.to_str().unwrap()), true).is_err());
     }
 
     #[test]

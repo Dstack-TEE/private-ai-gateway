@@ -24,6 +24,12 @@ envelope does not.
 
 ## Inference endpoints
 
+When [inbound authentication](configuration-reference.md#inbound-inference-authentication)
+is configured, every endpoint below requires `Authorization: Bearer <token>`.
+Missing or invalid credentials return `401` with `WWW-Authenticate: Bearer`
+before forwarding. Without that setting, existing authentication behavior is
+unchanged. Discovery and verification routes retain their existing access rules.
+
 | Method and path | Surface | Streaming | ACI E2EE v2 | Notes |
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
@@ -114,8 +120,9 @@ requires the same bearer token:
   tenant's receipt, and
 - an inference request without a bearer token creates a public receipt.
 
-The incoming bearer token is used for receipt ownership and middleware API-key
-hashing. Provider credentials come from the upstream config.
+The incoming bearer token is used for configured inbound authentication,
+receipt ownership, and middleware API-key hashing. Provider credentials come
+from the upstream config.
 
 ### Receipt events in middleware mode
 

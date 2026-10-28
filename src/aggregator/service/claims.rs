@@ -22,6 +22,7 @@ pub(super) trait ProviderClaimMapper {
 /// `ProviderClaimMapper` implementations.
 pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn ProviderClaimMapper {
     match provider_type {
+        Some("aci-service") => &AciServiceClaims,
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
         Some("armet-ai") => &ArmetAiClaims,
@@ -224,6 +225,20 @@ impl ProviderClaimMapper for IntelTdxClaims {
             tcb_up_to_date: tcb_up_to_date_claim(event),
             os_known_good: os_known_good_claim(event),
             gpu_attested: gpu_attested_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Native ACI verifies a hardware quote and channel, and reports collateral TCB
+/// status. Measured compose identity is preserved in `extra`; measurement alone
+/// does not establish that serving software or the OS is known good.
+pub(super) struct AciServiceClaims;
+impl ProviderClaimMapper for AciServiceClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
             ..SessionClaims::default()
         }
     }
@@ -978,7 +993,7 @@ mod claim_mapping_tests {
         // The dstack-based providers surface a real TcbStatus from DCAP
         // collateral. (Tinfoil is excluded: its verifier exposes no raw status,
         // so its TCB claim is VerifierDerived, asserted earlier in this module.)
-        for provider in ["near-ai", "chutes", "phala-direct"] {
+        for provider in ["aci-service", "near-ai", "chutes", "phala-direct"] {
             // UpToDate asserts.
             let up = session_claims_for_event(&event(
                 Some(provider),
@@ -1047,6 +1062,46 @@ mod claim_mapping_tests {
             claims.serving_software_known_good.status,
             ClaimStatus::Unknown
         );
+    }
+
+    #[test]
+    fn aci_service_preserves_measured_identity_without_inventing_good_software() {
+        for result in [VerificationResult::Verified, VerificationResult::Failed] {
+            let facts = json!({
+                "tcb_status": "UpToDate",
+                "measured_compose_hash": "aa".repeat(32),
+                "measured_app_id": "bb".repeat(20),
+                // These fields are not authenticated by the native ACI adapter.
+                "production_os_image": true,
+                "gpu_verified": true,
+            });
+            let claims =
+                session_claims_for_event(&event(Some("aci-service"), result, Some(facts.clone())));
+            assert_eq!(serde_json::to_value(&claims.extra).unwrap(), facts);
+            if result == VerificationResult::Verified {
+                assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+                assert_eq!(
+                    claims.tee_attested.source,
+                    Some(ClaimSource::HardwareProven)
+                );
+                assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+                assert_eq!(
+                    claims.tcb_up_to_date.source,
+                    Some(ClaimSource::HardwareProven)
+                );
+            } else {
+                assert_eq!(claims.tee_attested.status, ClaimStatus::Unknown);
+                assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Unknown);
+            }
+            for claim in [
+                claims.os_known_good,
+                claims.serving_software_known_good,
+                claims.gpu_attested,
+                claims.model_weights_provenance,
+            ] {
+                assert_eq!(claim.status, ClaimStatus::Unknown);
+            }
+        }
     }
 
     #[test]

@@ -136,11 +136,19 @@ of `verified_at + verifier_cache_seconds` and the keyset's `not_after`. Every
 forward still enforces the cached TLS binding, and a mismatch triggers
 [re-verification](../../upstream-verification-lifecycle.md#binding-mismatch-and-reverification).
 
-A successful result stores the exact ACI report as session evidence. The event
-carries no provider type, so the generic claim mapper records only
-`tee_attested`, as verifier-derived. TCB freshness, OS provenance,
-serving-software provenance, GPU attestation, and model-weight provenance stay
-unknown.
+A successful result stores the exact ACI report as session evidence and carries
+`provider_type: "aci-service"`. Its provider-specific mapper records:
+
+| Claim | Source and behavior |
+| --- | --- |
+| `tee_attested` | Asserted, hardware-proven: the native verifier checked the quote and bound the request channel. |
+| `tcb_up_to_date` | Hardware-proven from verified collateral: `UpToDate` asserts, any other reported string refutes, and a missing status stays unknown. This does not add a TCB acceptance gate. |
+| `claims.extra.measured_compose_hash` and `measured_app_id` | Already-verified compose hash and app identity from the RTMR3-bound event log, preserved with the rest of the authenticated session material. |
+
+OS provenance, serving-software provenance, GPU attestation, and model-weight
+provenance stay unknown. A measured compose identifies software but does not
+establish that the software is reviewed or known good. Published source
+provenance remains distinct from the verified compose and app identity.
 
 ## What `verified` means
 
@@ -163,9 +171,8 @@ A verified result establishes that:
 - The verifier proves that the compose bytes were measured. It does not rebuild
   images, the launcher, dependencies, compiler output, or source from that
   compose.
-- DCAP verification returns the collateral TCB status, but this path does not
-  enforce an accepted-status policy or expose the status as a typed session
-  claim.
+- DCAP verification exposes the collateral TCB status as a typed session claim,
+  but this path does not enforce an accepted-status policy.
 - The custody check covers the receipt key. The E2EE custody entries are not
   matched against the keyset, and no custody entry covers TLS.
 - The event-log and KMS checks do not independently reconstruct and accept a
@@ -184,6 +191,7 @@ Run the native verifier tests:
 ```bash
 cargo test --locked --test upstream_verifier
 cargo test --locked aci::verifier
+cargo test --locked aggregator::service::claims::claim_mapping_tests
 ```
 
 The local and Phala smoke suites exercise the provider through real upstream

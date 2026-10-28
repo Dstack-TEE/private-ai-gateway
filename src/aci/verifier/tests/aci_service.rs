@@ -145,9 +145,10 @@ async fn public_cold_verification_is_single_flight_and_refresh_shares_the_lock()
         fixture.control.release.add_permits(1);
         calls.await
     };
-    assert!(initial
-        .iter()
-        .all(|event| event.result == VerificationResult::Verified));
+    assert!(initial.iter().all(|event| {
+        event.result == VerificationResult::Verified
+            && event.provider_type.as_deref() == Some("aci-service")
+    }));
     assert_eq!(fixture.control.calls.load(Ordering::SeqCst), 1);
     fixture.verifier.invalidate(&fixture.request);
     let verifier = fixture.verifier.clone();
