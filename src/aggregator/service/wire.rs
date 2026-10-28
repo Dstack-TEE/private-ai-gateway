@@ -424,8 +424,6 @@ pub struct GatewayRequestContext {
 /// Candidates are tried in order until one succeeds.
 #[derive(Debug, Clone)]
 pub struct ForwardCandidate {
-    /// Buffered audio slice shared across attempted routes; never serialized as JSON.
-    pub audio_form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
     pub route_id: String,
     pub body: Vec<u8>,
     pub path: &'static str,

@@ -79,11 +79,9 @@ Pending entries are skipped by default; select the provider explicitly for a
 diagnostic probe. The latter is intentionally blocked by the gateway's encrypted-path allowlist;
 it is not a launch-ready provider. No live provider call is part of unit tests.
 
-Before launch, test `json` duration and `verbose_json` per provider. Only set
-`audio_force_verbose_json` when a provider's JSON lacks billable duration.
-NEAR's native JSON contains only `text`, so its audio entry sets this option
-and the runner passes it into the gateway's upstream configuration. The gateway
-also forces this behavior for NEAR audio when the option is absent or false.
+Before launch, test `json` duration and `verbose_json` per provider.
+NEAR's native JSON contains only `text`, so the gateway automatically requests
+verbose output internally for NEAR audio while preserving the caller's format.
 Run on an authorized test CVM, then delete the CVM. Do not enable production
 routes until client fail-closed releases and control-plane audio ingestion ship.
 
@@ -292,7 +290,6 @@ Optional fields are:
 | `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |
 | `session_refresh_seconds` | Provider session refresh interval. |
-| `audio_force_verbose_json` | Pass the per-upstream duration compatibility option to the gateway; enabled for NEAR audio because its native JSON omits duration. |
 | `chutes_e2ee_api_base` | Alternate Chutes E2EE discovery origin. |
 | `chutes_chute_ids` | Map from upstream model to known chute identifier. |
 | `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |

@@ -18,11 +18,11 @@ static IMAGES: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::n
 
 static AUDIO: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_IN_FLIGHT)));
 
-pub fn try_acquire(endpoint: Endpoint) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+pub fn try_acquire(endpoint: Endpoint) -> Result<Option<OwnedSemaphorePermit>, TryAcquireError> {
     match endpoint {
-        Endpoint::ImagesGenerations => IMAGES.clone().try_acquire_owned(),
-        Endpoint::AudioTranscriptions => AUDIO.clone().try_acquire_owned(),
-        _ => unreachable!("admission is only used for buffered multimodal endpoints"),
+        Endpoint::ImagesGenerations => IMAGES.clone().try_acquire_owned().map(Some),
+        Endpoint::AudioTranscriptions => AUDIO.clone().try_acquire_owned().map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -195,5 +195,6 @@ mod tests {
         ));
         drop(permits);
         assert!(try_acquire(Endpoint::ImagesGenerations).is_ok());
+        assert!(try_acquire(Endpoint::ChatComplete).unwrap().is_none());
     }
 }

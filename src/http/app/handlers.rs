@@ -505,25 +505,7 @@ pub(super) async fn images_generations(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // Decide from headers before parsing or admission, including incomplete
-    // E2EE headers. Bounded transport discard preserves the JSON refusal.
-    if has_e2ee_headers(&headers)
-        || headers
-            .keys()
-            .any(|key| key.as_str().starts_with("x-e2ee-"))
-    {
-        return discard_before_reply(
-            body,
-            super::MAX_REQUEST_BODY_BYTES,
-            error_response(
-                StatusCode::BAD_REQUEST,
-                "e2ee_unsupported_endpoint",
-                "E2EE is not supported on /v1/images/generations",
-            ),
-        )
-        .await;
-    }
-    openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
 }
 
 pub(super) async fn audio_transcriptions(
@@ -531,23 +513,39 @@ pub(super) async fn audio_transcriptions(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
+}
+
+async fn buffered_multimodal_endpoint(
+    state: AppState,
+    headers: HeaderMap,
+    body: Body,
+    endpoint: Endpoint,
+) -> Response {
+    // Decide before parsing or admission. Bounded discard preserves the JSON refusal.
     if has_e2ee_headers(&headers)
         || headers
             .keys()
             .any(|key| key.as_str().starts_with("x-e2ee-"))
     {
+        let limit = if endpoint == Endpoint::AudioTranscriptions {
+            crate::middleware::audio::MAX_BODY_BYTES
+        } else {
+            super::MAX_REQUEST_BODY_BYTES
+        };
         return discard_before_reply(
+            &headers,
             body,
-            crate::middleware::audio::MAX_BODY_BYTES,
+            limit,
             error_response(
                 StatusCode::BAD_REQUEST,
                 "e2ee_unsupported_endpoint",
-                "E2EE is not supported on /v1/audio/transcriptions",
+                format!("E2EE is not supported on {}", endpoint.path()),
             ),
         )
         .await;
     }
-    openai_completion_endpoint(state, headers, body, AUDIO_TRANSCRIPTIONS_PATH, true).await
+    openai_completion_endpoint(state, headers, body, endpoint.path(), true).await
 }
 
 // The carrier is consumed here. It is routing policy, never an upstream header.
@@ -559,6 +557,9 @@ fn multipart_provider(headers: &HeaderMap) -> Result<Option<Value>, String> {
     };
     if values.next().is_some() || value.as_bytes().len() > MAX_MULTIPART_PROVIDER_BYTES {
         return Err("duplicate or oversized X-ACI-Provider".into());
+    }
+    if !value.as_bytes().is_ascii() {
+        return Err("X-ACI-Provider must contain only ASCII bytes".into());
     }
     let provider: Value =
         serde_json::from_slice(value.as_bytes()).map_err(|_| "invalid X-ACI-Provider JSON")?;
@@ -687,6 +688,10 @@ fn body_too_large_response(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    headers.insert(
+        axum::http::header::CONNECTION,
+        HeaderValue::from_static("close"),
+    );
     (StatusCode::PAYLOAD_TOO_LARGE, headers, body).into_response()
 }
 
@@ -709,6 +714,7 @@ pub(super) async fn openai_completion_endpoint(
     let is_audio = endpoint_path == AUDIO_TRANSCRIPTIONS_PATH;
     if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return discard_before_reply(
+            &headers,
             body,
             super::MAX_REQUEST_BODY_BYTES,
             error_response(
@@ -724,6 +730,7 @@ pub(super) async fn openai_completion_endpoint(
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
+                    &headers,
                     body,
                     crate::middleware::audio::MAX_BODY_BYTES,
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
@@ -894,18 +901,18 @@ pub(super) async fn openai_completion_endpoint(
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    let endpoint = match endpoint_path {
+        COMPLETIONS_PATH => Endpoint::Complete,
+        EMBEDDINGS_PATH => Endpoint::Embed,
+        MESSAGES_PATH => Endpoint::Messages,
+        RESPONSES_PATH => Endpoint::CreateModelResponse,
+        SYSTEMONE_PATH => Endpoint::SystemOne,
+        AUDIO_TRANSCRIPTIONS_PATH => Endpoint::AudioTranscriptions,
+        IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
+        CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
+        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
+    };
     if let Some(middleware) = state.middleware.clone() {
-        let endpoint = match endpoint_path {
-            COMPLETIONS_PATH => Endpoint::Complete,
-            EMBEDDINGS_PATH => Endpoint::Embed,
-            MESSAGES_PATH => Endpoint::Messages,
-            RESPONSES_PATH => Endpoint::CreateModelResponse,
-            SYSTEMONE_PATH => Endpoint::SystemOne,
-            AUDIO_TRANSCRIPTIONS_PATH => Endpoint::AudioTranscriptions,
-            IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
-            CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
-            _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
-        };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
         // TEE-only host: force attested serving. The `tee_only` flag is carried
         // to the control plane so a non-TEE model is a 404 before any forward,
@@ -970,22 +977,14 @@ pub(super) async fn openai_completion_endpoint(
 
     // Uploads and invalid requests do not reserve image generation capacity.
     // Middleware admission happens after its control-plane consult instead.
-    let permit = if is_audio || is_images {
-        match crate::middleware::admission::try_acquire(if is_audio {
-            Endpoint::AudioTranscriptions
-        } else {
-            Endpoint::ImagesGenerations
-        }) {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                if is_audio {
-                    state.service.record_audio_failure("admission_rejection");
-                }
-                return crate::middleware::admission::capacity_response();
+    let permit = match crate::middleware::admission::try_acquire(endpoint) {
+        Ok(permit) => permit,
+        Err(_) => {
+            if is_audio {
+                state.service.record_audio_failure("admission_rejection");
             }
+            return crate::middleware::admission::capacity_response();
         }
-    } else {
-        None
     };
 
     drop(upload_permit);

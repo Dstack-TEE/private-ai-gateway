@@ -127,8 +127,15 @@ def assert_audio_shape(provider: Provider, response: dict[str, Any]) -> None:
     seconds = usage.get("seconds") if isinstance(usage, dict) else None
     if isinstance(seconds, bool) or not isinstance(seconds, int) or not 0 < seconds < 30:
         raise RuntimeError(f"{provider.name} transcription billable seconds must be a positive integer below 30s")
-    if set(response) - {"text", "usage"}:
+    if set(response) - {"text", "usage", "languages"}:
         raise RuntimeError(f"{provider.name} json transcription response contains extra fields")
+    if "languages" in response:
+        languages = response["languages"]
+        if not isinstance(languages, list) or any(
+            not isinstance(item, dict) or set(item) != {"code"}
+            or not isinstance(item["code"], str) for item in languages
+        ):
+            raise RuntimeError(f"{provider.name} transcription languages must contain only string codes")
 
 
 def assert_audio_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:

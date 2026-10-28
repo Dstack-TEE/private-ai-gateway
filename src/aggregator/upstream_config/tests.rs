@@ -22,7 +22,6 @@ fn test_upstream_config(
         base_url: format!("https://{name}.example"),
         path: None,
         streaming_usage: None,
-        audio_force_verbose_json: false,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -1022,7 +1021,7 @@ fn streaming_usage_config_is_validated_and_visible_without_secrets() {
 }
 
 #[test]
-fn audio_transcription_config_rejects_unsupported_adapters_and_redacts_option() {
+fn audio_transcription_config_rejects_unsupported_adapters() {
     for provider in [
         UpstreamProvider::Chutes,
         UpstreamProvider::ZeroGPrivateComputer,
@@ -1030,24 +1029,8 @@ fn audio_transcription_config_rejects_unsupported_adapters_and_redacts_option() 
     ] {
         let mut config = test_upstream_config("audio", provider, "whisper", "whisper");
         config.path = Some("/v1/audio/transcriptions".into());
-        assert!(validate_config(&[config.clone()]).is_err());
-        config.path = None;
-        config.audio_force_verbose_json = true;
         assert!(validate_config(&[config]).is_err());
     }
-    let mut config = test_upstream_config(
-        "audio",
-        UpstreamProvider::NearAi,
-        "whisper",
-        "openai/whisper-large-v3",
-    );
-    config.path = Some("/v1/audio/transcriptions".into());
-    config.audio_force_verbose_json = true;
-    validate_config(&[config.clone()]).unwrap();
-    assert_eq!(
-        serde_json::to_value(config.redacted()).unwrap()["audio_force_verbose_json"],
-        true
-    );
 }
 
 #[test]
@@ -1055,42 +1038,28 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
     use crate::aci::upstream::UpstreamRequest;
     use bytes::Bytes;
 
-    for path in [None, Some("/v1/audio/transcriptions".into())] {
-        for verbose_option in [false, true] {
-            let mut config = test_upstream_config(
-                "near",
-                UpstreamProvider::NearAi,
-                "whisper",
-                "openai/whisper-large-v3",
-            );
-            config.path = path.clone();
-            config.audio_force_verbose_json = verbose_option;
-            let state =
-                build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
-            for audio in [false, true] {
-                let prepared = state
-                    .backend
-                    .prepare(UpstreamRequest {
-                        body: Bytes::from_static(
-                            br#"{"model":"whisper","response_format":"json"}"#,
-                        ),
-                        path: Some("/v1/audio/transcriptions".into()),
-                        form: audio.then(|| {
-                            Arc::new(crate::middleware::audio::AudioForm {
-                                file: Bytes::from_static(b"audio"),
-                                extension: "wav".into(),
-                            })
-                        }),
-                        ..Default::default()
+    for (provider, audio, expected_format) in [
+        (UpstreamProvider::NearAi, true, "verbose_json"),
+        (UpstreamProvider::NearAi, false, "json"),
+        (UpstreamProvider::OpenAiCompatible, true, "json"),
+    ] {
+        let config = test_upstream_config("audio", provider, "whisper", "upstream-whisper");
+        let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
+        let prepared = state
+            .backend
+            .prepare(UpstreamRequest {
+                body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
+                path: Some("/v1/audio/transcriptions".into()),
+                form: audio.then(|| {
+                    Arc::new(crate::middleware::audio::AudioForm {
+                        file: Bytes::from_static(b"audio"),
+                        extension: "wav".into(),
                     })
-                    .unwrap();
-                let fields: serde_json::Value =
-                    serde_json::from_slice(&prepared.request.body).unwrap();
-                assert_eq!(
-                    fields["response_format"],
-                    if audio { "verbose_json" } else { "json" }
-                );
-            }
-        }
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+        assert_eq!(fields["response_format"], expected_format);
     }
 }

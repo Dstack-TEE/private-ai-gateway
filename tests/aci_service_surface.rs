@@ -4064,7 +4064,7 @@ fn transcription_http(body: Vec<u8>) -> axum::http::request::Builder {
 
 #[tokio::test]
 async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_id() {
-    let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":1.2,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
+    let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":2.965,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
     let raw = transcription_request("");
     let request = transcription_http(raw.clone())
         .header("x-aci-provider", r#"{"order":["near"]}"#)
@@ -4074,7 +4074,7 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         json_body(&resp),
-        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":2}})
+        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":3}})
     );
     let forwarded = {
         let calls = h.upstream_calls.lock().unwrap();
@@ -4114,72 +4114,28 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
 }
 
 #[tokio::test]
-async fn audio_client_usage_matches_billable_seconds_and_preserves_verbose_duration() {
-    for with_usage in [false, true] {
-        for format in ["json", "verbose_json"] {
-            let mut upstream = serde_json::json!({"text":"hello","duration":2.965});
-            if with_usage {
-                upstream["usage"] = serde_json::json!({
-                    "type":"duration","seconds":2.965,"input_tokens":2
-                });
-            }
-            let h = harness_with_upstream(RecordingUpstream::with_response_body(
-                &serde_json::to_vec(&upstream).unwrap(),
-            ));
-            let raw = transcription_request(&format!(
-                "--upload\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\n{format}\r\n"
-            ));
-            let resp = h
-                .requester
-                .call(
-                    transcription_http(raw.clone())
-                        .body(Body::from(raw))
-                        .unwrap(),
-                )
-                .await;
-            assert_eq!(resp.status, StatusCode::OK);
-            let body = json_body(&resp);
-            assert_eq!(body["usage"]["seconds"].as_u64(), Some(3));
-            assert_eq!(body["usage"]["type"], "duration");
-            if with_usage {
-                assert_eq!(body["usage"]["input_tokens"], 2);
-            }
-            if format == "verbose_json" {
-                assert_eq!(body["duration"], 2.965);
-            } else {
-                assert!(body.get("duration").is_none());
-            }
-        }
-    }
-}
-
-#[tokio::test]
 async fn audio_malformed_duration_withholds_transcript_and_keeps_forwarded_receipt() {
-    for upstream in [
-        serde_json::json!({"text":"private transcript"}),
-        serde_json::json!({"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}),
-    ] {
-        let h = harness_with_upstream(RecordingUpstream::with_response_body(
-            &serde_json::to_vec(&upstream).unwrap(),
-        ));
-        let raw = transcription_request("");
-        let resp = h
-            .requester
-            .call(
-                transcription_http(raw.clone())
-                    .body(Body::from(raw))
-                    .unwrap(),
-            )
-            .await;
-        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
-        assert!(!String::from_utf8_lossy(&resp.body).contains("private transcript"));
-        let receipt = h
-            .service
-            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
-            .unwrap();
-        assert!(receipt.chat_id.is_none());
-        assert!(!payload_event(&receipt_payload(&receipt), "request.forwarded").is_null());
-    }
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}"#,
+    ));
+    let raw = transcription_request("");
+    let resp = h
+        .requester
+        .call(
+            transcription_http(raw.clone())
+                .body(Body::from(raw))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&resp.body).contains("private transcript"));
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert!(!payload_event(&receipt_payload(&receipt), "request.forwarded").is_null());
 }
 
 #[tokio::test(start_paused = true)]
@@ -4220,6 +4176,13 @@ async fn audio_rejects_e2ee_and_bad_carriers_without_parsing_upload() {
             .method("POST")
             .uri("/v1/audio/transcriptions")
             .header("x-aci-provider", "x".repeat(8193)),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header(
+                "x-aci-provider",
+                axum::http::HeaderValue::from_bytes(b"{\"order\":[\"n\xc3\xa9ar\"]}").unwrap(),
+            ),
     ] {
         let resp = tokio::time::timeout(
             Duration::from_secs(2),
@@ -4388,11 +4351,54 @@ async fn header_rejections_return_json_over_tcp_for_small_and_large_streamed_upl
 }
 
 #[tokio::test]
+async fn expect_continue_refusals_return_final_status_without_inviting_upload() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let h = harness();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            h.requester.app.clone(),
+        ),
+    );
+    for path in ["/v1/audio/transcriptions", "/v1/images/generations"] {
+        for (carrier, length, status) in [
+            ("x-e2ee-unknown: 1\r\n", 25 * 1024 * 1024, 400),
+            ("x-aci-provider: null\r\n", 25 * 1024 * 1024, 400),
+            ("", 33 * 1024 * 1024, 413),
+        ] {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nExpect: 100-continue\r\n{carrier}\r\n").as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
+                .await
+                .unwrap()
+                .expect("header-only refusal must close cleanly");
+            let response = String::from_utf8(response).unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{response}"
+            );
+            assert!(!response.contains("100 Continue"));
+            assert!(response
+                .to_ascii_lowercase()
+                .contains("connection: close\r\n"));
+            let (_, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(serde_json::from_str::<Value>(body).unwrap()["error"].is_object());
+        }
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn audio_unknown_parameters_reject_before_forwarding() {
     let h = harness();
     for name in [
         "provider",
-        "stream",
         "include[]",
         "chunking_strategy",
         "known_speaker_names[]",

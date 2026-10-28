@@ -5,7 +5,6 @@ import wave
 
 from scripts.live_e2e.cases.audio_transcriptions import FIXTURE, assert_audio_shape
 from scripts.live_e2e.common import ROOT, Provider, load_providers
-from scripts.live_e2e.launch_aggregator import build_upstream_config
 
 
 class AudioTranscriptionsTests(unittest.TestCase):
@@ -31,6 +30,7 @@ class AudioTranscriptionsTests(unittest.TestCase):
             "usage": {"type": "duration", "seconds": 3},
         }
         assert_audio_shape(self.provider, valid)
+        assert_audio_shape(self.provider, valid | {"languages": [{"code": "en"}]})
         for patch in [
             {"text": ""},
             {"usage": {}},
@@ -40,18 +40,11 @@ class AudioTranscriptionsTests(unittest.TestCase):
             {"usage": {"seconds": 3.0}},
             {"usage": {"seconds": float("nan")}},
             {"segments": []},
+            {"languages": [{"code": 1}]},
+            {"languages": [{"code": "en", "extra": "private"}]},
         ]:
             with self.subTest(patch=patch), self.assertRaises(RuntimeError):
                 assert_audio_shape(self.provider, valid | patch)
-
-    def test_near_audio_requests_verbose_duration_in_runtime_config(self) -> None:
-        path = ROOT / "scripts" / "live_e2e" / "providers.json"
-        providers = load_providers(path, ["near-ai-live-audio", "near-ai-live-images"])
-        config = build_upstream_config(providers, {"NEARAI_API_KEY": "test-credential"})
-        audio = next(item for item in config if item["name"] == "near-ai-live-audio")
-        images = next(item for item in config if item["name"] == "near-ai-live-images")
-        self.assertIs(audio["audio_force_verbose_json"], True)
-        self.assertNotIn("audio_force_verbose_json", images)
 
     def test_pending_privatemode_provider_requires_explicit_selection(self) -> None:
         path = ROOT / "scripts" / "live_e2e" / "providers.json"

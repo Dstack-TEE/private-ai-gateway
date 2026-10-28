@@ -192,11 +192,10 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
-        if (upstream
+        if upstream
             .path
             .as_deref()
             .is_some_and(|path| path.trim_start_matches('/') == "v1/audio/transcriptions")
-            || upstream.audio_force_verbose_json)
             && matches!(
                 upstream.provider,
                 UpstreamProvider::Chutes
