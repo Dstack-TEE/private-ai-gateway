@@ -50,6 +50,9 @@ pub(super) async fn prepare_request(
     if multipart && path == AUDIO_TRANSCRIPTIONS_PATH {
         let provider = match carrier {
             Some(value) => {
+                if !value.as_bytes().is_ascii() {
+                    return Err("X-ACI-Provider must contain only US-ASCII bytes".into());
+                }
                 if value.as_bytes().len() > MAX_MULTIPART_PROVIDER_BYTES {
                     return Err("X-ACI-Provider exceeds 8192 bytes".into());
                 }
@@ -74,12 +77,22 @@ pub(super) async fn prepare_request(
         }
         scan_multipart_headers(body.clone(), content_type).await?;
         if constrained || carrier.is_some() {
-            let value =
-                serde_json::to_vec(&provider).map_err(|_| "cannot encode X-ACI-Provider")?;
+            let json =
+                serde_json::to_string(&provider).map_err(|_| "cannot encode X-ACI-Provider")?;
+            let mut value = String::with_capacity(json.len());
+            for character in json.chars() {
+                if character.is_ascii() {
+                    value.push(character);
+                } else {
+                    for unit in character.encode_utf16(&mut [0; 2]) {
+                        value.push_str(&format!("\\u{unit:04x}"));
+                    }
+                }
+            }
             if value.len() > MAX_MULTIPART_PROVIDER_BYTES {
                 return Err("effective X-ACI-Provider exceeds 8192 bytes".into());
             }
-            let value = axum::http::HeaderValue::from_bytes(&value)
+            let value = axum::http::HeaderValue::from_bytes(value.as_bytes())
                 .map_err(|_| "X-ACI-Provider cannot be encoded as an HTTP header")?;
             headers.insert(MULTIPART_PROVIDER_HEADER, value);
         }

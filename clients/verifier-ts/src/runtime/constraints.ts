@@ -123,6 +123,9 @@ export async function constrainRequestBody(
   if (multipart && path === AUDIO_TRANSCRIPTIONS_PATH) {
     let provider: unknown = {};
     if (carrier !== null) {
+      if (/[\u0080-\uffff]/.test(carrier)) {
+        invalid('X-ACI-Provider must contain only US-ASCII bytes');
+      }
       if (Buffer.byteLength(carrier) > MAX_MULTIPART_PROVIDER_BYTES) {
         invalid('X-ACI-Provider exceeds 8192 bytes');
       }
@@ -141,7 +144,8 @@ export async function constrainRequestBody(
     }
     await rejectMultipartProvider(body, contentType);
     if (constrained || carrier !== null) {
-      const value = JSON.stringify(effective.provider);
+      const value = JSON.stringify(effective.provider).replace(/[\u0080-\uffff]/g,
+        (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`);
       if (Buffer.byteLength(value) > MAX_MULTIPART_PROVIDER_BYTES) {
         invalid('effective X-ACI-Provider exceeds 8192 bytes');
       }
@@ -166,6 +170,7 @@ async function rejectMultipartProvider(body: Uint8Array, contentType: string): P
     const form = await new Response(Buffer.from(body), {
       headers: { 'content-type': contentType },
     }).formData();
+    if (!form.has('model')) invalid('multipart body must contain a model part');
     if (form.has('provider')) {
       invalid('multipart provider form parts are forbidden; use X-ACI-Provider');
     }

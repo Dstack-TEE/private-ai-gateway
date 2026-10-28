@@ -2970,6 +2970,7 @@ async fn invalid_bodies_and_multipart_carriers_never_send_inference() {
         "null",
         "[]",
         "{}, {}",
+        r#"{"order":["café"]}"#,
         r#"{"aci_future":true}"#,
         r#"{"aci_verified":"yes"}"#,
         r#"{"aci_session_ids":[]}"#,
@@ -3071,8 +3072,10 @@ async fn multipart_preserves_bytes_and_audits_effective_header_pins_with_local_p
                         let (accepted, body) = (accepted.clone(), body.clone());
                         async move {
                             assert_eq!(received, body);
-                            let carrier: Value = serde_json::from_str(header_str(&headers, "x-aci-provider").unwrap()).unwrap();
-                            assert_eq!(carrier, json!({"order": ["upstream"], "aci_verified": true, "aci_session_ids": [accepted]}));
+                            let carrier = header_str(&headers, "x-aci-provider").unwrap();
+                            assert!(carrier.is_ascii());
+                            let carrier: Value = serde_json::from_str(carrier).unwrap();
+                            assert_eq!(carrier, json!({"order": ["café 🎙"], "aci_verified": true, "aci_session_ids": [accepted]}));
                             ([("x-receipt-id", "rcpt-0001")], RESPONSE_BODY)
                         }
                     }
@@ -3101,7 +3104,9 @@ async fn multipart_preserves_bytes_and_audits_effective_header_pins_with_local_p
                 .header("content-type", AUDIO_CONTENT_TYPE)
                 .header(
                     "x-aci-provider",
-                    json!({"order": ["upstream"], "aci_session_ids": caller_pins}).to_string(),
+                    json!({"order": ["café 🎙"], "aci_session_ids": caller_pins})
+                        .to_string()
+                        .replace("café 🎙", r"caf\u00e9 \ud83c\udf99"),
                 )
                 .body(body.clone())
                 .send()

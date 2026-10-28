@@ -170,7 +170,9 @@ constrained upload, the pinned attestation channel must advertise that path
 in `service_capabilities.supported_multipart_constraint_endpoints`.
 Multipart constraints use a single `X-ACI-Provider` JSON object with the same
 schema as JSON `provider`. Caller pins are intersected with locally accepted
-pins and are enforced even with `requireVerified: false`. Invalid carriers,
+pins. The carrier must be US-ASCII; encode non-ASCII string values with JSON
+`\uXXXX` escapes. Caller constraints are enforced even with
+`requireVerified: false`. Invalid carriers,
 disjoint pins, a multipart `provider` part, constrained malformed/non-object
 JSON, and unsupported constrained media types throw
 `invalid_serving_constraints` before sending inference. Multipart bytes stay

@@ -34,6 +34,8 @@ A session contains an establishing-evidence snapshot. A reused session does not 
 gateway's `service_capabilities.supported_multipart_constraint_endpoints`
 to list that path; otherwise the upload is refused locally. Policy travels
 in `X-ACI-Provider`, whose JSON object uses the JSON `provider` schema.
+The carrier must be US-ASCII; encode non-ASCII string values with JSON
+`\uXXXX` escapes.
 Caller pins are intersected with local pins, including when local verified
 serving is disabled. Duplicate or invalid carriers, a `provider` form part,
 constrained malformed JSON, and unsupported constrained media types return

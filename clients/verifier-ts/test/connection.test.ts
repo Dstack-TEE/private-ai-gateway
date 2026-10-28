@@ -396,7 +396,7 @@ test('invalid bodies and multipart carriers cause zero inference sends', async (
       [audioPath, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }],
       [audioPath, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.from([0, 255]) }],
       ['/v1/chat/completions', request()],
-      ...['{', 'null', '[]', '{} , {}', '{"aci_future":true}', '{"aci_verified":"yes"}',
+      ...['{', 'null', '[]', '{} , {}', '{"order":["café"]}', '{"aci_future":true}', '{"aci_verified":"yes"}',
         '{"aci_session_ids":[]}', '{"aci_session_ids":["bad"]}',
         JSON.stringify({ aci_session_ids: ['b'.repeat(64)] }),
         JSON.stringify({ aci_verified: false, aci_session_ids: ['a'.repeat(64)] }),
@@ -408,6 +408,10 @@ test('invalid bodies and multipart carriers cause zero inference sends', async (
         Buffer.from('--audio-test\r\nContent-Disposition: form-data; name="provider"\r\n\r\n{}\r\n--audio-test--\r\n'),
       ]) }],
       [audioPath, { ...request(), body: 'broken multipart' }],
+      [audioPath, { ...request(), body: '--audio-test--\r\n' }],
+      [audioPath, { ...request(), body: '--audio-test\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n\r\ndata\r\n--audio-test--\r\n' }],
+      // Bun can parse LF-only framing as empty FormData, hiding the provider part.
+      [audioPath, { ...request(), body: '--audio-test\nContent-Disposition: form-data; name="model"\n\nm\n--audio-test\nContent-Disposition: form-data; name="provider"\n\n{}\n--audio-test--\n' }],
       [audioPath, { ...request(), headers: [['content-type', multipartType], ['x-aci-provider', '{}'], ['x-aci-provider', '{}']] }],
       // These fragments form valid JSON after Fetch joins them with ", ".
       [audioPath, { ...request(), headers: [['content-type', multipartType], ['X-ACI-Provider', '{"order":["a"'], ['x-aci-provider', '"b"]}']] }],
@@ -471,8 +475,10 @@ test('multipart preserves wire bytes and audits the effective header pins with l
           if (input instanceof Request && input.method === 'POST') {
             sends++;
             assert.deepEqual(new Uint8Array(await input.clone().arrayBuffer()), new Uint8Array(body));
-            assert.deepEqual(JSON.parse(input.headers.get('x-aci-provider') ?? ''), {
-              order: ['upstream, primary', 'backup'], aci_session_ids: [accepted], aci_verified: true,
+            const carrier = input.headers.get('x-aci-provider') ?? '';
+            assert.doesNotMatch(carrier, /[\u0080-\uffff]/);
+            assert.deepEqual(JSON.parse(carrier), {
+              order: ['upstream, primary', 'café 🎙'], aci_session_ids: [accepted], aci_verified: true,
             });
           }
           return transport.fetch(input, init);
@@ -487,7 +493,7 @@ test('multipart preserves wire bytes and audits the effective header pins with l
           method: 'POST',
           headers: {
             'content-type': multipartType,
-            'x-aci-provider': JSON.stringify({ order: ['upstream, primary', 'backup'], aci_session_ids: requireVerified ? [accepted, 'c'.repeat(64)] : [accepted] }),
+            'x-aci-provider': JSON.stringify({ order: ['upstream, primary', 'café 🎙'], aci_session_ids: requireVerified ? [accepted, 'c'.repeat(64)] : [accepted] }).replace('café 🎙', String.raw`caf\u00e9 \ud83c\udf99`),
           },
           body: Buffer.from(body),
         })).text();
