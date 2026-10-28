@@ -3870,6 +3870,52 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
 }
 
 #[tokio::test]
+async fn images_complete_optional_output_token_details() {
+    for (details, expected) in [
+        (None, None),
+        (
+            Some(serde_json::json!({"image_tokens":7})),
+            Some(serde_json::json!({"text_tokens":0,"image_tokens":7})),
+        ),
+        (
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"text_tokens":0,"image_tokens":0})),
+        ),
+        (
+            Some(serde_json::json!({"text_tokens":-1,"image_tokens":"7"})),
+            Some(serde_json::json!({"text_tokens":0,"image_tokens":0})),
+        ),
+    ] {
+        let mut upstream =
+            serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{}});
+        if let Some(details) = details {
+            upstream["usage"]["output_tokens_details"] = details;
+        }
+        let upstream = serde_json::to_vec(&upstream).unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let resp = h
+            .requester
+            .post("/v1/images/generations", IMAGE_REQUEST, &[])
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let body = json_body(&resp);
+        let mut usage = serde_json::json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}});
+        if let Some(expected) = expected {
+            usage["output_tokens_details"] = expected;
+        }
+        assert_eq!(body["usage"], usage);
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&resp.body)
+        );
+    }
+}
+
+#[tokio::test]
 async fn images_reject_invalid_counts_before_forwarding() {
     let h = harness();
     for n in [

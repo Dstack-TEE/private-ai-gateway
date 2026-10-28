@@ -91,7 +91,9 @@ fields are dropped, including structured values under allowed names. Every
 successful response has a complete `usage` object with integer `input_tokens`,
 `output_tokens`, and `total_tokens`, plus `input_tokens_details` containing
 integer `text_tokens` and `image_tokens`. Missing or invalid required counters
-are filled with `0`. When the provider reports no token usage, all five
+are filled with `0`. Optional `output_tokens_details` is omitted when absent;
+when present, its missing or invalid `text_tokens` and `image_tokens` are also
+filled with `0`. When the provider reports no token usage, all five
 counters are `0`; image charges still use the returned image count. Middleware
 adds `usage.cost` when pricing applies, including for providers billed per image.
 URLs, provider IDs, model IDs, and other fields are removed. Image
