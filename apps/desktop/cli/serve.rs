@@ -1017,7 +1017,7 @@ async fn proxy_inference(
         &path,
         state.enforce_verified,
         &active_pins,
-        &trusted.current().report.service_capabilities,
+        &trusted.current.report.service_capabilities,
     )
     .await
     {
@@ -1069,7 +1069,7 @@ async fn proxy_inference(
                     &path,
                     state.enforce_verified,
                     &pins,
-                    &trusted.current().report.service_capabilities,
+                    &trusted.current.report.service_capabilities,
                 )
                 .await
                 {

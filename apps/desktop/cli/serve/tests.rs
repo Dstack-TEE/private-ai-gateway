@@ -27,7 +27,7 @@ fn audio_body(part: &str) -> Bytes {
 }
 
 fn enable_multipart(state: &ProxyState) {
-    Arc::make_mut(&mut state.trusted.lock().unwrap().members[0].report)
+    Arc::make_mut(&mut state.trusted.lock().unwrap().current.report)
         .service_capabilities
         .supported_multipart_constraint_endpoints = vec![AUDIO_PATH.into()];
 }
@@ -2985,7 +2985,7 @@ async fn invalid_bodies_and_multipart_carriers_never_send_inference() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    Arc::make_mut(&mut state.trusted.lock().unwrap().members[0].report)
+    Arc::make_mut(&mut state.trusted.lock().unwrap().current.report)
         .service_capabilities
         .supported_multipart_constraint_endpoints
         .clear();
