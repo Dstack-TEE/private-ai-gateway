@@ -450,7 +450,7 @@ impl AciService {
 
                 let prepared = match self.upstream.prepare(UpstreamRequest {
                     body: candidate.body.clone().into(),
-                    form: candidate.audio_form.clone(),
+                    form: req.audio_form.clone(),
                     content_type: None,
                     headers: upstream_headers.clone(),
                     path: Some(candidate.path.to_string()),

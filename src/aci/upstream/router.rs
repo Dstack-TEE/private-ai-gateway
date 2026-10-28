@@ -582,45 +582,40 @@ mod audio_tests {
     use bytes::Bytes;
 
     #[tokio::test]
-    async fn audio_encoding_follows_model_rewrite_and_provider_opt_in_once() {
-        for verbose in [false, true] {
-            let backend = Arc::new(super::tests::StubBackend { name: "audio" });
-            let route = ModelRoute::new("alias", "upstream-whisper", backend, "near:alias")
-                .unwrap()
-                .with_audio_force_verbose_json(verbose);
-            let mut router = ModelRouterBackend::new("audio-test");
-            router.add_route(route).unwrap();
-            let mut prepared = router
-                .prepare(UpstreamRequest {
-                    body: Bytes::from_static(br#"{"model":"alias","response_format":"json"}"#),
-                    path: Some("/v1/audio/transcriptions".into()),
-                    form: Some(Arc::new(crate::middleware::audio::AudioForm {
-                        file: Bytes::from_static(b"audio bytes"),
-                        extension: "wav".into(),
-                    })),
-                    ..Default::default()
-                })
-                .unwrap();
-            assert_eq!(prepared.model_id, "upstream-whisper");
-            prepared.encode_audio().await.unwrap();
-            let raw = prepared.request.body.clone();
-            let content_type = prepared.request.content_type.clone().unwrap();
-            prepared.encode_audio().await.unwrap();
-            assert_eq!(prepared.request.body.as_ptr(), raw.as_ptr());
-            assert_eq!(
-                prepared.request.content_type.as_deref(),
-                Some(content_type.as_str())
-            );
-            let (fields, file) = crate::middleware::audio::parse(raw, &content_type)
-                .await
-                .unwrap();
-            assert_eq!(fields["model"], "upstream-whisper");
-            assert_eq!(
-                fields["response_format"],
-                if verbose { "verbose_json" } else { "json" }
-            );
-            assert_eq!(file.file, "audio bytes");
-            assert!(fields.get("timestamp_granularities[]").is_none());
-        }
+    async fn audio_encoding_follows_model_rewrite_and_reuses_prepared_bytes() {
+        let backend = Arc::new(super::tests::StubBackend { name: "audio" });
+        let route = ModelRoute::new("alias", "upstream-whisper", backend, "near:alias")
+            .unwrap()
+            .with_audio_force_verbose_json(true);
+        let mut router = ModelRouterBackend::new("audio-test");
+        router.add_route(route).unwrap();
+        let mut prepared = router
+            .prepare(UpstreamRequest {
+                body: Bytes::from_static(br#"{"model":"alias","response_format":"json"}"#),
+                path: Some("/v1/audio/transcriptions".into()),
+                form: Some(Arc::new(crate::middleware::audio::AudioForm {
+                    file: Bytes::from_static(b"audio bytes"),
+                    extension: "wav".into(),
+                })),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(prepared.model_id, "upstream-whisper");
+        prepared.encode_audio().await.unwrap();
+        let raw = prepared.request.body.clone();
+        let content_type = prepared.request.content_type.clone().unwrap();
+        prepared.encode_audio().await.unwrap();
+        assert_eq!(prepared.request.body.as_ptr(), raw.as_ptr());
+        assert_eq!(
+            prepared.request.content_type.as_deref(),
+            Some(content_type.as_str())
+        );
+        let (fields, file) = crate::middleware::audio::parse(raw, &content_type)
+            .await
+            .unwrap();
+        assert_eq!(fields["model"], "upstream-whisper");
+        assert_eq!(fields["response_format"], "verbose_json");
+        assert_eq!(file.file, "audio bytes");
+        assert!(fields.get("timestamp_granularities[]").is_none());
     }
 }

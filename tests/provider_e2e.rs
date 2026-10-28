@@ -777,7 +777,6 @@ fn runtime_options(mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
 
 fn privatemode_upstream_config(base_url: String, verifier_cache_seconds: u64) -> UpstreamConfig {
     UpstreamConfig {
-        audio_force_verbose_json: false,
         name: "privatemode-provider".to_string(),
         provider: UpstreamProvider::Privatemode,
         base_url,
@@ -991,7 +990,6 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
-            audio_force_verbose_json: false,
             name: "private-chute".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url,
@@ -1041,7 +1039,6 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
-            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
@@ -1573,7 +1570,6 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     e2ee: None,
                 },
                 vec![ForwardCandidate {
-                    audio_form: None,
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
                     path: "/v1/chat/completions",
@@ -1652,7 +1648,6 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
-            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
@@ -1749,7 +1744,6 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None)).unwrap();
     manager
         .replace(vec![UpstreamConfig {
-            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),

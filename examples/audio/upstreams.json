@@ -4,7 +4,6 @@
     "provider": "near-ai",
     "base_url": "https://cloud-api.near.ai",
     "path": "/v1/audio/transcriptions",
-    "audio_force_verbose_json": true,
     "models": {"whisper-large-v3": "openai/whisper-large-v3"}
   }
 ]

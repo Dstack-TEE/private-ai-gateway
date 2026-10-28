@@ -327,25 +327,12 @@ impl AciService {
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
             if endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH {
                 upstream_headers.insert("content-type".into(), "application/json".into());
-                let within_limit =
-                    upstream_response.body.len() <= crate::middleware::audio::MAX_RESPONSE_BYTES;
-                if !within_limit {
-                    self.metrics.record_audio_failure("response_size_failure");
-                }
-                let validated = within_limit
-                    .then(|| serde_json::from_slice::<Value>(&upstream_response.body).ok())
-                    .flatten()
-                    .and_then(|mut body| {
-                        match crate::middleware::audio::usage(&body) {
-                            Ok(audio) => {
-                                crate::middleware::audio::normalize_usage(&mut body, &audio);
-                                crate::middleware::audio::canonicalize(&mut body);
-                                // Metadata was consumed by encoding; the original parsed request
-                                // remains available below as backend_input_body metadata.
-                                let params = audio_metadata.as_ref().unwrap_or(&Value::Null);
-                                crate::middleware::audio::reduce_format(&mut body, params);
-                                Some(body)
-                            }
+                let validated = serde_json::from_slice::<Value>(&upstream_response.body)
+                    .ok()
+                    .and_then(|body| {
+                        let params = audio_metadata.as_ref().unwrap_or(&Value::Null);
+                        match crate::middleware::audio::sanitize_response(body, params) {
+                            Ok((body, _)) => Some(body),
                             Err(_) => {
                                 self.metrics.record_audio_failure("malformed_duration");
                                 None

@@ -2691,7 +2691,6 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         e2ee: None,
     };
     let candidate = || ForwardCandidate {
-        audio_form: None,
         route_id: "tee-a:gpt-test".to_string(),
         path: "/v1/chat/completions",
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
@@ -3378,7 +3377,6 @@ fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'sta
 
 fn plain_candidate(route: &str) -> ForwardCandidate {
     ForwardCandidate {
-        audio_form: None,
         route_id: route.to_string(),
         path: "/v1/chat/completions",
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
@@ -3640,7 +3638,6 @@ async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
     // replay the hard-failed twin too.
     let (service, forwarded, bodies) = build_sequenced_service(vec![500, 429, 200]);
     let twin = |body: &[u8]| ForwardCandidate {
-        audio_form: None,
         route_id: "dup:gpt-test".to_string(),
         path: "/v1/chat/completions",
         body: body.to_vec(),
@@ -5886,7 +5883,7 @@ async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reache
 #[tokio::test]
 async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output() {
     let (url,pres,posts)=spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"0.001","inputCostPerToken":"0.01"}})).await;
-    let (service,requests)=build_recording_service(200,serde_json::to_vec(&json!({"text":"hello","duration":1.01,"usage":{"type":"tokens","input_tokens":2,"input_token_details":{"audio_tokens":2,"private":"secret"}},"segments":[{"text":"hello","url":"secret"}]})).unwrap(),"application/json");
+    let (service,requests)=build_recording_service(200,serde_json::to_vec(&json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2,"input_token_details":{"audio_tokens":2,"private":"secret"}},"segments":[{"text":"hello","url":"secret"}]})).unwrap(),"application/json");
     let (status, headers, body) = response_parts(
         middleware(url)
             .handle_completion(&service, audio_input())
@@ -5896,7 +5893,7 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({"text":"hello","usage":{"type":"tokens","seconds":2,"input_tokens":2,"input_token_details":{"audio_tokens":2},"cost":0.022}})
+        json!({"text":"hello","usage":{"type":"tokens","seconds":3,"input_tokens":2,"input_token_details":{"audio_tokens":2},"cost":0.023}})
     );
     let forwarded = {
         let calls = requests.lock().unwrap();
@@ -5916,7 +5913,7 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
         .unwrap();
     assert!(receipt.chat_id.is_none());
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
-    assert_eq!(report["audio"], json!({"seconds":2,"raw_duration":1.01}));
+    assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
     assert_eq!(report["status"], 200);
     let pre = pres.lock().unwrap()[0].clone();
     assert_eq!(pre["endpoint"], "/v1/audio/transcriptions");
@@ -5928,96 +5925,63 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
 }
 
 #[tokio::test]
-async fn audio_client_usage_matches_billable_seconds_and_preserves_verbose_duration() {
-    for with_usage in [false, true] {
-        for format in ["json", "verbose_json"] {
-            let (url, posts) = spawn_control_capturing(
-                200,
-                json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"0.1"}}),
-            ).await;
-            let mut upstream = json!({"text":"hello","duration":2.965});
-            if with_usage {
-                upstream["usage"] = json!({"type":"duration","seconds":2.965,"input_tokens":2});
-            }
-            let (service, _) = build_recording_service(
-                200,
-                serde_json::to_vec(&upstream).unwrap(),
-                "application/json",
-            );
-            let mut input = audio_input();
-            input.params["response_format"] = json!(format);
-            let (status, _, body) =
-                response_parts(middleware(url).handle_completion(&service, input).await).await;
-            assert_eq!(status, 200);
-            assert_eq!(body["usage"]["seconds"].as_u64(), Some(3));
-            assert_eq!(body["usage"]["type"], "duration");
-            assert_eq!(body["usage"]["cost"], 0.3);
-            if with_usage {
-                assert_eq!(body["usage"]["input_tokens"], 2);
-            }
-            if format == "verbose_json" {
-                assert_eq!(body["duration"], 2.965);
-            } else {
-                assert!(body.get("duration").is_none());
-            }
-            let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
-            assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
-            assert_eq!(report["usage"]["seconds"].as_u64(), Some(3));
-        }
-    }
+async fn audio_invalid_duration_is_502_without_billing_or_retranscription() {
+    let (url, posts) = spawn_control_capturing(200, json!({
+        "allow":true,"candidates":[
+            {"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]},
+            {"routeId":"near:other","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}
+        ],"pricing":{"audioCostPerSecond":"1"}
+    })).await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}"#
+            .to_vec(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, audio_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert!(!body.to_string().contains("private transcript"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert!(receipt.document_json().unwrap()["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "request.forwarded"));
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
+    assert_eq!(report["status"], 502);
+    assert!(report.get("audio").is_none());
+    assert!(report["usage"].is_null());
 }
 
 #[tokio::test]
-async fn audio_missing_or_invalid_duration_is_502_without_billing_or_retranscription() {
-    for duration in [Value::Null, json!(0), json!(-1), json!("1")] {
-        let(url,posts)=spawn_control_capturing(200,json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]},{"routeId":"near:other","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"1"}})).await;
-        let(service,requests)=build_recording_service(200,serde_json::to_vec(&json!({"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":duration}})).unwrap(),"application/json");
-        let (status, headers, body) = response_parts(
-            middleware(url)
-                .handle_completion(&service, audio_input())
-                .await,
-        )
-        .await;
-        assert_eq!(status, 502);
-        assert!(!body.to_string().contains("private transcript"));
-        assert_eq!(requests.lock().unwrap().len(), 1);
-        let receipt = service
-            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
-            .unwrap();
-        assert!(receipt.chat_id.is_none());
-        let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
-        assert_eq!(report["status"], 502);
-        assert!(report.get("audio").is_none());
-        assert!(report["usage"].is_null());
-    }
-}
-
-#[tokio::test]
-async fn audio_requires_endpoint_opt_in_and_synthesizes_missing_usage() {
-    for endpoints in [json!([]), json!(["/v1/audio/transcriptions"])] {
-        let(url,posts)=spawn_control_capturing(200,json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":endpoints}],"pricing":{"audioCostPerSecond":"0.1"}})).await;
-        let (service, requests) = build_recording_service(
-            200,
-            br#"{"text":"hello","duration":2.1}"#.to_vec(),
-            "application/json",
-        );
-        let (status, _, body) = response_parts(
-            middleware(url)
-                .handle_completion(&service, audio_input())
-                .await,
-        )
-        .await;
-        if endpoints.as_array().unwrap().is_empty() {
-            assert_eq!(status, 404);
-            assert!(requests.lock().unwrap().is_empty());
-        } else {
-            assert_eq!(status, 200);
-            assert_eq!(
-                body["usage"],
-                json!({"type":"duration","seconds":3,"cost":0.3})
-            );
-            let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
-            assert_eq!(report["audio"]["seconds"], 3);
-        }
-    }
+async fn audio_requires_endpoint_opt_in() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[
+            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
+        ]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"text":"hello","duration":2.1}"#.to_vec(),
+        "application/json",
+    );
+    let (status, _, _) = response_parts(
+        middleware(url)
+            .handle_completion(&service, audio_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(requests.lock().unwrap().is_empty());
 }

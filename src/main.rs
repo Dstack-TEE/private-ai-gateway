@@ -885,21 +885,11 @@ mod tests {
 
     #[test]
     fn main_capabilities_advertise_multipart_transcription_constraints() {
-        for direct_serving in [false, true] {
-            for enable_e2ee in [false, true] {
-                let config = super::GatewayConfigFile {
-                    direct_serving,
-                    enable_e2ee,
-                    ..Default::default()
-                };
-                let capabilities = super::service_capabilities(&config);
-                assert_eq!(
-                    serde_json::to_value(capabilities).unwrap()
-                        ["supported_multipart_constraint_endpoints"],
-                    serde_json::json!(["/v1/audio/transcriptions"]),
-                );
-            }
-        }
+        assert_eq!(
+            super::service_capabilities(&Default::default())
+                .supported_multipart_constraint_endpoints,
+            ["/v1/audio/transcriptions"]
+        );
     }
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----

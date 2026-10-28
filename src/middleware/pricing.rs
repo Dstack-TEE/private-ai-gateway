@@ -509,7 +509,7 @@ mod audio_tests {
     fn audio_cost_uses_canonical_seconds_exact_decimals_and_optional_tokens() {
         let audio = super::super::audio::AudioUsage {
             seconds: 3,
-            raw_duration: Some(2.1),
+            raw_duration: 2.1,
         };
         assert_eq!(
             compute_audio_cost(None, &json!({"audioCostPerSecond":"0.0001"}), &audio),
