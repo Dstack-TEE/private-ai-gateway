@@ -49,6 +49,7 @@ use super::{pricing, response_transform, stream_transform};
 /// termination and JSON normalization.
 pub struct CompletionInput {
     pub audio_form: Option<Arc<super::audio::AudioForm>>,
+    /// Byte-budget reservation for the buffered upload, held through consult.
     pub upload_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub endpoint: Endpoint,
     pub endpoint_path: &'static str,

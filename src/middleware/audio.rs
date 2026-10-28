@@ -20,9 +20,11 @@ pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_BODY_BYTES: usize = MAX_FILE_BYTES + MAX_TEXT_BYTES + 64 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_UPLOADS: usize = 16;
+// Charge bytes received, not connections or declared Content-Length.
+const UPLOAD_BYTE_BUDGET: usize = 16 * MAX_BODY_BYTES;
 const READ_DEADLINE: Duration = Duration::from_secs(60);
-static UPLOADS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_UPLOADS)));
+static UPLOAD_BYTES: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(UPLOAD_BYTE_BUDGET)));
 
 #[derive(Debug)]
 pub struct AudioError {
@@ -38,6 +40,13 @@ impl AudioError {
             param: param.into(),
         }
     }
+    fn capacity() -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "upload_capacity",
+            param: "body".into(),
+        }
+    }
     fn large() -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
@@ -50,20 +59,12 @@ impl AudioError {
     }
 }
 
-/// Upload slots are independent of inference slots and are held through consult
-/// until admission hands the request off to inference (or the request drops).
+/// Account for each received chunk until inference admission takes over, or
+/// the upload is refused, times out, or drops. Opening a connection reserves no bytes.
 pub async fn read_upload(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
-    let permit = UPLOADS
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| AudioError {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            code: "upload_capacity",
-            param: "body".into(),
-        })?;
     if headers
         .get("content-length")
         .and_then(|v| v.to_str().ok())
@@ -72,24 +73,39 @@ pub async fn read_upload(
     {
         return Err(AudioError::large());
     }
-    let bytes = tokio::time::timeout(READ_DEADLINE, axum::body::to_bytes(body, MAX_BODY_BYTES))
+    tokio::time::timeout(READ_DEADLINE, collect_upload(body, UPLOAD_BYTES.clone()))
         .await
         .map_err(|_| AudioError {
             status: StatusCode::REQUEST_TIMEOUT,
             code: "upload_timeout",
             param: "body".into(),
         })?
-        .map_err(|err| {
-            let mut source = std::error::Error::source(&err);
-            while let Some(current) = source {
-                if current.is::<http_body_util::LengthLimitError>() {
-                    return AudioError::large();
-                }
-                source = current.source();
-            }
-            AudioError::invalid("body")
-        })?;
-    Ok((bytes, permit))
+}
+
+async fn collect_upload(
+    body: Body,
+    budget: Arc<Semaphore>,
+) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
+    let mut permit = budget
+        .clone()
+        .try_acquire_many_owned(0)
+        .map_err(|_| AudioError::capacity())?;
+    let mut chunks = body.into_data_stream();
+    let mut bytes = bytes::BytesMut::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|_| AudioError::invalid("body"))?;
+        if chunk.len() > MAX_BODY_BYTES - bytes.len() {
+            return Err(AudioError::large());
+        }
+        let count = u32::try_from(chunk.len()).map_err(|_| AudioError::large())?;
+        let chunk_permit = budget
+            .clone()
+            .try_acquire_many_owned(count)
+            .map_err(|_| AudioError::capacity())?;
+        permit.merge(chunk_permit);
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((bytes.freeze(), permit))
 }
 
 /// Shared slices of the buffered upload; no caller filename or MIME is forwarded.
@@ -572,10 +588,69 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn slow_upload_has_deadline_and_releases_slot() {
-        let body = Body::from_stream(stream::pending::<Result<Bytes, std::io::Error>>());
+    async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
+        let available = UPLOAD_BYTES.available_permits();
+        let body = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
+                .chain(stream::pending()),
+        );
         let result = read_upload(&HeaderMap::new(), body).await;
         assert_eq!(result.unwrap_err().code, "upload_timeout");
+        assert_eq!(UPLOAD_BYTES.available_permits(), available);
+    }
+
+    #[tokio::test]
+    async fn upload_budget_counts_chunks_and_is_held_until_handoff() {
+        let budget = Arc::new(Semaphore::new(7));
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
+            Ok(Bytes::from_static(b"cde")),
+        ]));
+        let (bytes, permit) = collect_upload(body, budget.clone()).await.unwrap();
+        assert_eq!(bytes, "abcde");
+        assert_eq!(permit.num_permits(), 5);
+        assert_eq!(budget.available_permits(), 2);
+
+        let rejected = collect_upload(Body::from("xyz"), budget.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code, "upload_capacity");
+        assert_eq!(budget.available_permits(), 2);
+        drop(permit);
+        assert_eq!(budget.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn upload_errors_and_disconnects_release_partial_byte_reservations() {
+        let budget = Arc::new(Semaphore::new(7));
+        let body = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(b"ab")),
+            Err(std::io::Error::other("upload interrupted")),
+        ]));
+        assert_eq!(
+            collect_upload(body, budget.clone()).await.unwrap_err().code,
+            "invalid_parameter"
+        );
+        assert_eq!(budget.available_permits(), 7);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let body = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"ab")) }).chain(
+                stream::poll_fn(move |_| {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                    std::task::Poll::Pending
+                }),
+            ),
+        );
+        let task = tokio::spawn(collect_upload(body, budget.clone()));
+        rx.await.unwrap();
+        assert_eq!(budget.available_permits(), 5);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(budget.available_permits(), 7);
     }
 
     #[test]
