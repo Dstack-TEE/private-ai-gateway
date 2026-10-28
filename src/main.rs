@@ -175,6 +175,24 @@ impl Default for GatewayConfigFile {
     }
 }
 
+fn service_capabilities(config: &GatewayConfigFile) -> ServiceCapabilities {
+    ServiceCapabilities {
+        supported_multipart_constraint_endpoints: vec![
+            private_ai_gateway::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH.into(),
+        ],
+        supported_e2ee_versions: if config.enable_e2ee {
+            vec!["2".to_string()]
+        } else {
+            Vec::new()
+        },
+        serving: if config.direct_serving {
+            "direct".to_string()
+        } else {
+            "aggregator".to_string()
+        },
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct GatewayTlsConfig {
@@ -587,19 +605,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source_provenance,
         keyset_not_after,
         subject: gateway_config.subject.clone(),
-        service_capabilities: ServiceCapabilities {
-            supported_multipart_constraint_endpoints: vec!["/v1/audio/transcriptions".into()],
-            supported_e2ee_versions: if gateway_config.enable_e2ee {
-                vec!["2".to_string()]
-            } else {
-                Vec::new()
-            },
-            serving: if gateway_config.direct_serving {
-                "direct".to_string()
-            } else {
-                "aggregator".to_string()
-            },
-        },
+        service_capabilities: service_capabilities(&gateway_config),
         attested_session_ttl_seconds: gateway_config.attested_session_ttl_seconds,
         receipt_ttl_seconds: 3600,
         allow_test_keys: false,
@@ -876,6 +882,25 @@ mod tests {
         validate_pull_token_separation, validate_sha256_secret_policy,
         DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
     };
+
+    #[test]
+    fn main_capabilities_advertise_multipart_transcription_constraints() {
+        for direct_serving in [false, true] {
+            for enable_e2ee in [false, true] {
+                let config = super::GatewayConfigFile {
+                    direct_serving,
+                    enable_e2ee,
+                    ..Default::default()
+                };
+                let capabilities = super::service_capabilities(&config);
+                assert_eq!(
+                    serde_json::to_value(capabilities).unwrap()
+                        ["supported_multipart_constraint_endpoints"],
+                    serde_json::json!(["/v1/audio/transcriptions"]),
+                );
+            }
+        }
+    }
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
 MIIDEzCCAfugAwIBAgIURSrXHU8qZulH+2txkz9ZX8PE2rUwDQYJKoZIhvcNAQEL
