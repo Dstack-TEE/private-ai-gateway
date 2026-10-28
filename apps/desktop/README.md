@@ -89,9 +89,13 @@ The bridge passes the original multipart bytes, Content-Type, and
 uses the same `proxy_request` / `proxy_inference` path as `pap serve`. The
 verifier applies local serving constraints, checks the gateway's advertised
 multipart-constraint capability, and audits receipts. Connection headers cannot
-strip the carrier or Content-Type. This requires the client constraint support
-in [#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517) to be
-integrated and released before enabling the desktop route, plus the gateway
+strip the carrier or Content-Type. All Local API inference routes, including
+JSON routes, reject duplicate or invalid Content-Type headers and Connection
+nominations of Content-Type or X-ACI-Provider.
+
+The desktop audio relay PR must not be merged or released until the client
+constraint support in [#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517)
+is included in its base. End-to-end transcription also requires the gateway
 endpoint in [#516](https://github.com/Dstack-TEE/private-ai-gateway/pull/516).
 
 Only agents that are both linked and currently protected are authorized on the
