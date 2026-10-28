@@ -21,7 +21,10 @@ use desktop_core::private_fs::{
 
 use desktop_core::agents::Agent;
 
-use crate::{agents::AgentIntegration, catalog::Surface};
+use crate::{
+    agents::AgentIntegration,
+    catalog::{Surface, IMAGES_GENERATIONS_PATH},
+};
 
 const TOKEN_BYTES: usize = 32;
 pub const LOCAL_TOOLS_AGENT: &str = "local-tools";
@@ -39,6 +42,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
                 | "/v1/messages/count_tokens"
                 | "/v1/chat/completions"
                 | "/v1/systemone"
+                | IMAGES_GENERATIONS_PATH
         );
     }
     let Ok(agent) = Agent::from_id(agent) else {
@@ -344,6 +348,10 @@ mod tests {
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/responses"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/systemone"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/images/generations"));
+        for agent in Agent::ALL {
+            assert!(!agent_allows(agent.id(), "/v1/images/generations"));
+        }
         assert!(!agent_allows("codex", "/v1/systemone"));
         assert!(!agent_allows("claude-code", "/v1/systemone"));
         assert!(agent_allows("opencode", "/v1/models"));
