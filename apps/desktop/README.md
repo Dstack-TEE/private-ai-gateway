@@ -84,19 +84,10 @@ inventory. Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
 text within the existing 32 MiB body limit. File parts are drained without
 collecting another file buffer. Other Local API routes reject multipart.
 
-The bridge passes the original multipart bytes, Content-Type, and
-`X-ACI-Provider` carrier to `cli::serve::managed`'s in-process verifier, which
-uses the same `proxy_request` / `proxy_inference` path as `pap serve`. The
-verifier applies local serving constraints, checks the gateway's advertised
-multipart-constraint capability, and audits receipts. Connection headers cannot
-strip the carrier or Content-Type. All Local API inference routes, including
-JSON routes, reject duplicate or invalid Content-Type headers and Connection
+Multipart bytes, Content-Type, and the `X-ACI-Provider` serving constraints are
+preserved for verification. All Local API inference routes, including JSON
+routes, reject duplicate or invalid Content-Type headers and Connection
 nominations of Content-Type or X-ACI-Provider.
-
-The desktop audio relay PR must not be merged or released until the client
-constraint support in [#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517)
-is included in its base. End-to-end transcription also requires the gateway
-endpoint in [#516](https://github.com/Dstack-TEE/private-ai-gateway/pull/516).
 
 Only agents that are both linked and currently protected are authorized on the
 Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset
