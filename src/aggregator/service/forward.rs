@@ -30,9 +30,10 @@ use super::helpers::{
 use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
 use super::{
     reviewed_session_material, AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo,
-    ForwardResult, GatewayRequestContext, ReceiptOwner, ServiceError, StreamingForwardResult,
-    StreamingForwardStream, StreamingUpstreamError, UpstreamVerificationError,
-    UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS, CHAT_COMPLETIONS_PATH,
+    ForwardResult, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
+    StreamingForwardResult, StreamingForwardStream, StreamingUpstreamError,
+    UpstreamVerificationError, UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS,
+    CHAT_COMPLETIONS_PATH,
 };
 
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
@@ -264,8 +265,12 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
-        let admission =
-            self.admit_upstream(recorded_event, &req.aci_session_ids, &prepared.model_id)?;
+        let admission = self.admit_upstream(
+            recorded_event,
+            &req.aci_session_ids,
+            &prepared.model_id,
+            None,
+        )?;
 
         let (upstream_response, admission) = match self
             .forward_with_binding_reverify(
@@ -274,6 +279,7 @@ impl AciService {
                 verification_required,
                 caller_supplied_upstream_event,
                 &req.aci_session_ids,
+                None,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -341,11 +347,12 @@ impl AciService {
         let receipt_id = generate_receipt_id();
         let chat_id = extract_chat_id(&client_body);
         let served_at = selected.admitted_at;
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             receipt_id,
             chat_id,
             req.context.user_model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -445,8 +452,12 @@ impl AciService {
                 req.upstream_verification_event,
             )
             .await?;
-        let admission =
-            self.admit_upstream(recorded_event, &req.aci_session_ids, &prepared.model_id)?;
+        let admission = self.admit_upstream(
+            recorded_event,
+            &req.aci_session_ids,
+            &prepared.model_id,
+            None,
+        )?;
 
         let (upstream_response, admission) = match self
             .forward_with_binding_reverify(
@@ -455,6 +466,7 @@ impl AciService {
                 verification_required,
                 caller_supplied_upstream_event,
                 &req.aci_session_ids,
+                None,
                 // Single forward: only flush the cache for an event we own.
                 false,
                 |prepared, event| async move {
@@ -498,11 +510,12 @@ impl AciService {
 
         let receipt_id = generate_receipt_id();
         let served_at = selected.admitted_at;
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             receipt_id.clone(),
             None,
             req.context.user_model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -563,6 +576,7 @@ impl AciService {
 
         Ok(StreamingForwardResult::Stream(StreamingForwardStream {
             receipt_id,
+            keyset_digest: keyset.digest().to_string(),
             upstream_status: upstream_response.status_code,
             upstream_headers: upstream_response.headers,
             e2ee: e2ee_response,
@@ -662,6 +676,7 @@ impl AciService {
         verification_required: bool,
         caller_supplied_event: bool,
         aci_session_ids: &[String],
+        receipt_journal: Option<&MiddlewareReceiptJournal>,
         always_invalidate_on_mismatch: bool,
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
@@ -698,6 +713,7 @@ impl AciService {
                                 event,
                                 aci_session_ids,
                                 &prepared.model_id,
+                                receipt_journal,
                             ) {
                                 Ok(admission) => admission,
                                 Err(err) => return ReverifyOutcome::RefreshFailed(err),
@@ -857,11 +873,12 @@ impl AciService {
         wire_error_body: &[u8],
         requester: Option<ReceiptOwner>,
     ) -> Result<SignedReceipt, ServiceError> {
+        let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
             generate_receipt_id(),
             None,
             model.clone(),
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             self.clock.now_secs(),
@@ -887,11 +904,21 @@ impl AciService {
         mut event: UpstreamVerifiedEvent,
         allowed_ids: &[String],
         model_id: &str,
+        receipt_journal: Option<&MiddlewareReceiptJournal>,
     ) -> Result<AdmittedUpstream, ServiceError> {
         let sessions = self.record_attested_upstream_session(&event, self.clock.now_secs())?;
         // Acquisition may wait behind a session established by another caller.
         // The forwarding decision follows acquisition, never its lookup snapshot.
         let admitted_at = self.clock.now_secs();
+        // Early SSE may have committed a keyset while verification was pending.
+        // A later initial, failover, or refreshed attempt must still be valid
+        // under that member. Refuse before any prompt reaches the backend.
+        if receipt_journal
+            .and_then(MiddlewareReceiptJournal::early_response_keyset)
+            .is_some_and(|keyset| admitted_at >= keyset.keyset().not_after)
+        {
+            return Err(ServiceError::EarlyResponseKeysetExpired);
+        }
         let allowed: HashSet<&str> = allowed_ids.iter().map(String::as_str).collect();
         let mut bindings = Vec::new();
         let mut admitted_sessions = Vec::new();

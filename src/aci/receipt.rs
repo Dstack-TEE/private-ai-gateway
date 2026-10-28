@@ -184,6 +184,7 @@ pub struct SignedReceipt {
     /// Lookup ids, duplicated out of the document so stores never parse it.
     pub receipt_id: String,
     pub chat_id: Option<String>,
+    pub workload_keyset_digest: String,
     /// The §7.2 receipt document bytes as served.
     pub document: Vec<u8>,
     pub key_id: String,
@@ -479,6 +480,7 @@ impl ReceiptBuilder {
         Ok(SignedReceipt {
             receipt_id: self.receipt_id,
             chat_id: self.chat_id,
+            workload_keyset_digest: self.workload_keyset_digest,
             document: digest::jcs_bytes(&document)?,
             key_id: receipt_key.key_id,
             signature_hex,

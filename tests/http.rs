@@ -221,7 +221,7 @@ async fn attestation_report_endpoint_shape() {
             .unwrap()
             .as_str()
             .unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
     assert!(body
         .get("attestation")
@@ -429,7 +429,7 @@ async fn attestation_report_nonce_null_when_absent() {
 
     // Re-derive report_data with nonce=None and confirm match.
     let stmt = private_ai_gateway::aci::identity::attestation_statement(
-        h.service.workload_keyset_digest(),
+        &h.service.workload_keyset_digest(),
         None,
     )
     .unwrap();
@@ -683,7 +683,7 @@ async fn chat_optional_verification_forwards_and_signs_receipt_with_failed_event
             .unwrap()
             .to_str()
             .unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 
     let receipt = h

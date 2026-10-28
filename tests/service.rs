@@ -1291,3 +1291,319 @@ async fn admission_uses_post_acquisition_time_for_a_concurrently_established_pin
     );
     assert_eq!(response.receipt.document_json().unwrap()["served_at"], 101);
 }
+
+struct SettableClock(std::sync::atomic::AtomicU64);
+
+impl private_ai_gateway::aggregator::service::Clock for SettableClock {
+    fn now_secs(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn keyset_renews_at_half_life_with_the_same_keys() {
+    const LIFETIME: u64 = 100;
+    let clock = Arc::new(SettableClock(1_000.into()));
+    let (upstream, _) = StubUpstream::new(b"{}");
+    let mut cfg = AciServiceConfig::for_test();
+    cfg.keyset_not_after = 1_000 + LIFETIME;
+    let service = AciService::new(
+        Arc::new(StaticKeyProvider::default()),
+        Arc::new(StubQuoter::default()),
+        Arc::new(upstream),
+        Arc::new(InMemoryReceiptStore::default()),
+        cfg,
+        clock.clone(),
+    )
+    .unwrap();
+    let original = service.keyset();
+    let original_digest = service.workload_keyset_digest();
+
+    clock.0.store(1_049, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(service.renew_keyset_if_due(LIFETIME).unwrap(), None);
+    assert_eq!(service.workload_keyset_digest(), original_digest);
+
+    clock.0.store(1_050, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(service.renew_keyset_if_due(LIFETIME).unwrap(), Some(1_150));
+    let renewed = service.keyset();
+    assert_eq!(renewed.not_after, 1_150);
+    assert_eq!(renewed.receipt_signing_keys, original.receipt_signing_keys);
+    assert_eq!(renewed.e2ee_public_keys, original.e2ee_public_keys);
+    assert_eq!(renewed.tls_public_keys, original.tls_public_keys);
+    assert_ne!(service.workload_keyset_digest(), original_digest);
+
+    // The report binds and serves the renewed keyset.
+    let report = service.attestation_report(None).await.unwrap();
+    assert_eq!(
+        report.workload_keyset_digest,
+        service.workload_keyset_digest()
+    );
+    assert_eq!(report.attestation.workload_keyset, service.keyset_value());
+}
+
+/// Renewal before upstream headers and again during body delivery must not
+/// change the identity captured at HTTP admission.
+#[tokio::test]
+async fn streaming_exchange_keeps_its_admitted_keyset_across_renewals() {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use private_ai_gateway::aci::upstream::UpstreamStreamResponse;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    struct PausedUpstream {
+        first: AtomicBool,
+        entered: Arc<Notify>,
+        headers: Arc<Notify>,
+        body: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl UpstreamBackend for PausedUpstream {
+        fn name(&self) -> &str {
+            "paused"
+        }
+
+        fn url_origin(&self) -> Option<&str> {
+            None
+        }
+
+        async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            Ok(UpstreamResponse {
+                status_code: 200,
+                ..Default::default()
+            })
+        }
+
+        async fn forward_stream(
+            &self,
+            _: UpstreamRequest,
+        ) -> Result<UpstreamStreamResponse, UpstreamError> {
+            let paused = self.first.swap(false, Ordering::SeqCst);
+            if paused {
+                self.entered.notify_one();
+                self.headers.notified().await;
+            }
+            let release = self.body.clone();
+            let body = async_stream::stream! {
+                yield Ok(bytes::Bytes::from_static(b"data: first\n\n"));
+                if paused {
+                    release.notified().await;
+                }
+                yield Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+            };
+            Ok(UpstreamStreamResponse {
+                status_code: 200,
+                headers: [("content-type".to_string(), "text/event-stream".to_string())].into(),
+                body: Box::pin(body),
+                served_instance_id: None,
+            })
+        }
+    }
+
+    let entered = Arc::new(Notify::new());
+    let headers = Arc::new(Notify::new());
+    let body = Arc::new(Notify::new());
+    let clock = Arc::new(SettableClock(1_000.into()));
+    let mut config = AciServiceConfig::for_test();
+    config.keyset_not_after = 1_100;
+    config.service_capabilities.serving = "direct".to_string();
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(PausedUpstream {
+                first: AtomicBool::new(true),
+                entered: entered.clone(),
+                headers: headers.clone(),
+                body: body.clone(),
+            }),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            clock.clone(),
+        )
+        .expect("test service builds"),
+    );
+    let router = private_ai_gateway::http::build_router(service.clone());
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"test","messages":[],"stream":true}"#,
+            ))
+            .expect("request builds")
+    };
+    let old_digest = service.workload_keyset_digest();
+    let forward = tokio::spawn(router.clone().oneshot(request()));
+    entered.notified().await;
+    // Let the response headers be produced before renewing. The receipt keeps
+    // the same serving snapshot while the body remains in flight.
+    headers.notify_one();
+    let response = forward
+        .await
+        .expect("forward task completes")
+        .expect("router responds");
+    assert_eq!(response.headers()["x-aci-keyset-digest"], old_digest);
+    clock.0.store(1_050, Ordering::SeqCst);
+    assert_eq!(
+        service.renew_keyset_if_due(100).expect("renewal succeeds"),
+        Some(1_150)
+    );
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .expect("receipt header is text")
+        .to_string();
+    let mut stream = response.into_body();
+    let _first = stream
+        .frame()
+        .await
+        .expect("first frame exists")
+        .expect("frame succeeds");
+    clock.0.store(1_100, Ordering::SeqCst);
+    assert_eq!(
+        service.renew_keyset_if_due(100).expect("renewal succeeds"),
+        Some(1_200)
+    );
+    body.notify_one();
+    let _remaining = stream.collect().await.expect("stream completes");
+    let receipt = service
+        .get_receipt_by_receipt_id(&receipt_id)
+        .expect("receipt is stored");
+    assert_eq!(
+        receipt.document_json().expect("receipt parses")["workload_keyset_digest"],
+        old_digest
+    );
+
+    let response = router
+        .oneshot(request())
+        .await
+        .expect("next request succeeds");
+    let new_digest = service.workload_keyset_digest();
+    assert_ne!(new_digest, old_digest);
+    assert_eq!(response.headers()["x-aci-keyset-digest"], new_digest);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .expect("receipt header is text")
+        .to_string();
+    let _body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("next stream completes");
+    let receipt = service
+        .get_receipt_by_receipt_id(&receipt_id)
+        .expect("next receipt is stored");
+    assert_eq!(
+        receipt.document_json().expect("receipt parses")["workload_keyset_digest"],
+        new_digest
+    );
+}
+
+#[tokio::test]
+async fn buffered_receipt_uses_keyset_current_when_response_is_served() {
+    assert_buffered_receipt_uses_current_keyset(true).await;
+}
+
+#[tokio::test]
+async fn aggregator_receipt_uses_renewed_keyset_and_admitted_attempt_time() {
+    assert_buffered_receipt_uses_current_keyset(false).await;
+}
+
+async fn assert_buffered_receipt_uses_current_keyset(direct: bool) {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    struct PausedUpstream {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl UpstreamBackend for PausedUpstream {
+        fn name(&self) -> &str {
+            "paused-buffered"
+        }
+
+        fn url_origin(&self) -> Option<&str> {
+            None
+        }
+
+        async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(UpstreamResponse {
+                status_code: 200,
+                body: br#"{"id":"buffered"}"#.to_vec(),
+                ..Default::default()
+            })
+        }
+    }
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let clock = Arc::new(SettableClock(1_000.into()));
+    let mut config = AciServiceConfig::for_test();
+    config.keyset_not_after = 1_100;
+    config.service_capabilities.serving = if direct { "direct" } else { "aggregator" }.to_string();
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(PausedUpstream {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            clock.clone(),
+        )
+        .expect("test service builds"),
+    );
+    let router = private_ai_gateway::http::build_router(service.clone());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"test","messages":[]}"#))
+        .expect("request builds");
+    let old_digest = service.workload_keyset_digest();
+    let response_task = tokio::spawn(router.oneshot(request));
+    entered.notified().await;
+
+    clock.0.store(1_050, Ordering::SeqCst);
+    service
+        .renew_keyset_if_due(100)
+        .expect("renewal succeeds")
+        .expect("renewal is due");
+    let renewed_digest = service.workload_keyset_digest();
+    clock.0.store(1_101, Ordering::SeqCst);
+    release.notify_one();
+
+    let response = response_task
+        .await
+        .expect("request task completes")
+        .expect("router responds");
+    assert_eq!(response.headers()["x-aci-keyset-digest"], renewed_digest);
+    assert_ne!(renewed_digest, old_digest);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .expect("receipt header is text")
+        .to_string();
+    response
+        .into_body()
+        .collect()
+        .await
+        .expect("body completes");
+    let receipt = service
+        .get_receipt_by_receipt_id(&receipt_id)
+        .expect("receipt is stored");
+    let document = receipt.document_json().expect("receipt parses");
+    assert_eq!(document["workload_keyset_digest"], renewed_digest);
+    assert_eq!(document["served_at"], 1_000);
+}

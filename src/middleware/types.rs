@@ -326,6 +326,8 @@ pub enum ErrorClass {
     RequestShapingFailed,
     /// No attested route or session was eligible; no prompt was forwarded.
     NoEligibleAttestedRoute,
+    /// The keyset committed in early headers expired before a new admission.
+    KeysetExpired,
     /// The upstream answered with a non-2xx status.
     UpstreamHttpError,
     /// The upstream declared that this gateway's account with it is unpaid.
@@ -381,6 +383,7 @@ impl From<&UpstreamError> for ErrorClass {
 impl From<&ServiceError> for ErrorClass {
     fn from(err: &ServiceError) -> Self {
         match err {
+            ServiceError::EarlyResponseKeysetExpired => Self::KeysetExpired,
             ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(_)
                 | UpstreamVerificationError::NoEligibleAttestedSession(_),

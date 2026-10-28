@@ -174,6 +174,7 @@ mod tests {
         SignedReceipt {
             receipt_id: id.to_string(),
             chat_id: Some(chat_id.to_string()),
+            workload_keyset_digest: "sha256:00".to_string(),
             document: b"{}".to_vec(),
             key_id: "k".to_string(),
             signature_hex: "00".to_string(),
