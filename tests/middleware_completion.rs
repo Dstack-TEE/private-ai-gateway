@@ -5408,7 +5408,7 @@ async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
 }
 
 fn images_input() -> CompletionInput {
-    let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","style":"vivid"});
+    let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","safety_identifier":"hashed-user","style":"vivid"});
     CompletionInput {
         endpoint: Endpoint::ImagesGenerations,
         endpoint_path: "/v1/images/generations",
@@ -5455,6 +5455,8 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         upstream["data"] = json!(vec![upstream["data"][0].clone(); returned]);
         if with_usage {
             upstream["usage"] = json!({"input_tokens":2,"output_tokens":3,"trace":"private","input_tokens_details":{"text_tokens":2,"url":"https://private/image"},"output_tokens_details":{"image_tokens":3,"provider":"private"}});
+        } else {
+            upstream.as_object_mut().unwrap().remove("created");
         }
         let (service, requests) = build_recording_service(
             200,
@@ -5487,8 +5489,15 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         if with_usage {
             assert_eq!(
                 body["usage"],
-                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3},"cost":0.28})
+                json!({"input_tokens":2,"output_tokens":3,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0},"output_tokens_details":{"image_tokens":3},"cost":0.28})
             );
+            assert_eq!(body["created"], 1);
+        } else {
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1})
+            );
+            assert!(body["created"].as_u64().unwrap() > 0);
         }
         assert!(!body.to_string().contains("https://private"));
         let receipt = service
@@ -5506,6 +5515,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             );
             assert!(requests[0].body.get("style").is_none());
             assert!(requests[0].body.get("user").is_none());
+            assert!(requests[0].body.get("safety_identifier").is_none());
         }
         assert_eq!(
             pres.lock().unwrap()[0]["endpoint"],
@@ -5546,7 +5556,10 @@ async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report()
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(body["usage"], json!({"input_tokens":2,"total_tokens":2}));
+    assert_eq!(
+        body["usage"],
+        json!({"input_tokens":2,"output_tokens":0,"total_tokens":2,"input_tokens_details":{"text_tokens":0,"image_tokens":0}})
+    );
     let receipt = service
         .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
         .unwrap();

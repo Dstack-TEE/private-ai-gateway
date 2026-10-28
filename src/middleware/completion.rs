@@ -589,8 +589,8 @@ async fn run_inner(
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
-                // Raw usage (pre-cost) goes to the report; cost is injected only
-                // into the client body's top-level usage.
+                // Raw usage (before cost or image SDK defaults) goes to the
+                // report; only the client body's usage is normalized below.
                 let raw_usage = transformed.get("usage").cloned();
                 meter.images = (client_endpoint == Endpoint::ImagesGenerations)
                     .then(|| super::images::usage(&transformed, &params));

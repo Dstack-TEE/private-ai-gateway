@@ -154,6 +154,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "moderation",
             "response_format",
             "user",
+            "safety_identifier",
             "style",
             "provider",
             "stream",
@@ -192,6 +193,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         "output_format",
         "moderation",
         "user",
+        "safety_identifier",
         "style",
     ] {
         if object.get(key).is_some_and(|v| !v.is_string()) {
@@ -306,6 +308,12 @@ pub fn canonicalize(body: &mut Value) {
         "size" | "quality" | "output_format" | "background" => value.is_string(),
         _ => false,
     });
+    object.entry("created").or_insert_with(|| {
+        json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs())
+    });
     if let Some(data) = object.get_mut("data").and_then(Value::as_array_mut) {
         for item in data {
             if let Some(item) = item.as_object_mut() {
@@ -317,7 +325,10 @@ pub fn canonicalize(body: &mut Value) {
             }
         }
     }
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
+    // SDKs require the complete token shape even for providers that meter only
+    // images. This happens after middleware captures raw usage for billing.
+    let usage = object.entry("usage").or_insert_with(|| json!({}));
+    if let Some(usage) = usage.as_object_mut() {
         usage.retain(|key, value| match key.as_str() {
             "input_tokens" | "output_tokens" | "total_tokens" => value.is_u64(),
             "input_tokens_details" | "output_tokens_details" => value.is_object(),
@@ -334,6 +345,17 @@ pub fn canonicalize(body: &mut Value) {
                 });
             }
         }
+        for key in ["input_tokens", "output_tokens", "total_tokens"] {
+            usage.entry(key).or_insert(json!(0));
+        }
+        let details = usage
+            .entry("input_tokens_details")
+            .or_insert_with(|| json!({}));
+        if let Some(details) = details.as_object_mut() {
+            for key in ["text_tokens", "image_tokens"] {
+                details.entry(key).or_insert(json!(0));
+            }
+        }
     }
 }
 
@@ -343,12 +365,24 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
-        for key in ["user", "style", "provider"] {
+        for key in ["user", "safety_identifier", "style", "provider"] {
             assert!(upstream.get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn safety_identifier_must_be_a_string() {
+        for value in [Value::Null, json!(1), json!({"id":"private"})] {
+            let error = validate_request(
+                &json!({"model":"image", "prompt":"hello", "safety_identifier":value}),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_parameter");
+            assert_eq!(error.param, "safety_identifier");
         }
     }
 
@@ -432,7 +466,7 @@ mod tests {
         canonicalize(&mut body);
         assert_eq!(
             body,
-            json!({"created":1,"data":[{"b64_json":"ok","revised_prompt":"hi"}],"usage":{"input_tokens":1,"input_tokens_details":{"text_tokens":1}}})
+            json!({"created":1,"data":[{"b64_json":"ok","revised_prompt":"hi"}],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}})
         );
     }
 
@@ -451,17 +485,22 @@ mod tests {
         });
         validate_response(&body, 1).unwrap();
         canonicalize(&mut body);
+        assert!(body["created"].is_u64());
+        body.as_object_mut().unwrap().remove("created");
         assert_eq!(
             body,
             json!({
                 "data":[{"b64_json":"ok"}],
-                "usage":{"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{}}
+                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{}}
             })
         );
         for invalid_usage in [json!([]), json!("private"), Value::Null] {
             let mut body = json!({"data":[{"b64_json":"ok"}],"usage":invalid_usage});
             canonicalize(&mut body);
-            assert!(body.get("usage").is_none());
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}})
+            );
         }
     }
 
@@ -478,9 +517,57 @@ mod tests {
             json!({
                 "created":1, "data":[{"b64_json":"ok","revised_prompt":null}],
                 "size":"512x512","quality":"high","output_format":"png","background":"opaque",
-                "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"cost":0.1}
+                "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1}
             })
         );
+    }
+
+    #[test]
+    fn sdk_required_fields_are_complete_for_absent_partial_and_full_usage() {
+        let empty_usage = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}});
+        let full_usage = json!({"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"image_tokens":3},"cost":0.1});
+        for (usage, expected) in [
+            (None, empty_usage.clone()),
+            (
+                Some(json!({"cost":0.1})),
+                json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1}),
+            ),
+            (
+                Some(json!({"input_tokens":5,"input_tokens_details":{"text_tokens":2}})),
+                json!({"input_tokens":5,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0}}),
+            ),
+            (Some(full_usage.clone()), full_usage),
+        ] {
+            let mut body = json!({"created":1,"data":[{"b64_json":"ok"}]});
+            if let Some(usage) = usage {
+                body["usage"] = usage;
+            }
+            canonicalize(&mut body);
+            assert_eq!(body["created"], 1);
+            assert_eq!(body["usage"], expected);
+        }
+        for created in [
+            None,
+            Some(Value::Null),
+            Some(json!(1.5)),
+            Some(json!({"url":"private"})),
+        ] {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mut body = json!({"data":[{"b64_json":"ok"}]});
+            if let Some(created) = created {
+                body["created"] = created;
+            }
+            canonicalize(&mut body);
+            let after = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!((before..=after).contains(&body["created"].as_u64().unwrap()));
+            assert_eq!(body["usage"], empty_usage);
+        }
     }
 
     #[test]
