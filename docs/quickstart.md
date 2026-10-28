@@ -273,8 +273,11 @@ PASS  receipt-2    document workload_keyset_digest matches established digest [9
 PASS  receipt-3    request.received body_hash matches sent bytes [9.3(3)]
 PASS  receipt-4    response.returned body_hash matches received wire bytes [9.3(4)]
 PASS  upstream-1   upstream.verified result is verified and cites a session [9.3(5)]
-PASS  upstream-2   session deep audit: document hashes to cited id, served_at in window, evidence digest [9.2(1-2), 9.3(6)]
+PASS  upstream-2   session {id}: document hashes to cited id, served_at in window, evidence digest [9.2(1-2), 9.3(6)]
 ```
+
+`upstream-2` checks session integrity and applies any `--require-claim` policy.
+Provider-specific deep audit is a separate step ([aci.md](../spec/aci.md) §9.2(4)).
 
 If the service rewrote the request before inference, an `INFO receipt-note` line
 reports the differing `request.forwarded` hash; whether a rewrite is

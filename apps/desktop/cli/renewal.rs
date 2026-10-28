@@ -54,14 +54,14 @@ pub(crate) fn same_renewal_family(left: &AttestationReport, right: &AttestationR
 
 /// A hint never establishes a member. Select only an exactly attested digest
 /// in the admitted family. Receipt-2 checks its validity at served_at.
-pub(crate) fn receipt_identity(
+pub(crate) fn receipt_identity<'a>(
     admitted: &AttestationReport,
-    established: &[EstablishedMember],
+    established: impl IntoIterator<Item = &'a EstablishedMember>,
     receipt: &Value,
 ) -> Option<EstablishedMember> {
     let digest = receipt["workload_keyset_digest"].as_str()?;
     established
-        .iter()
+        .into_iter()
         .find(|entry| entry.digest() == digest && same_renewal_family(admitted, &entry.report))
         .cloned()
 }

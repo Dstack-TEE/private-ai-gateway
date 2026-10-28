@@ -27,6 +27,7 @@ use axum::response::Response;
 use axum::Router;
 use desktop_core::listen::http_endpoint;
 use desktop_runtime::verifier_session::{IdentityEvent, VerifierEvent, VerifierEventSink};
+use futures_util::future::BoxFuture;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -34,14 +35,12 @@ use tokio_util::sync::CancellationToken;
 use crate::aci::tls::is_pin_mismatch;
 use crate::args::ServeArgs;
 use crate::checks::{BodyDigest, EstablishedIdentity, RequiredClaim, VerifierPolicy};
-use crate::client::{AciClient, VERIFICATION_TIMEOUT};
+use crate::client::AciClient;
 use crate::renewal::{
     receipt_identity as select_receipt_identity, same_renewal_family, EstablishedMember,
 };
 use crate::sessions::audit_current_sessions;
-use crate::verify::{
-    verify_service, verify_service_with_timeout, ServiceVerification, VerifyError,
-};
+use crate::verify::{verify_service, ServiceVerification, VerifyError};
 use crate::{safe, write_stdout};
 
 mod audit;
@@ -106,13 +105,18 @@ pub struct RequestOutcome {
 }
 
 type Reporter = Arc<dyn Fn(RequestOutcome) + Send + Sync>;
+type Verify = Arc<
+    dyn Fn(&ProxyState) -> BoxFuture<'_, Result<ServiceVerification, VerifyError>> + Send + Sync,
+>;
 
 /// The attested identity the proxy currently trusts. Digests are retained only
 /// for the currently verified renewal family.
 #[derive(Clone)]
 struct TrustedIdentity {
-    /// Every digest established by a fresh-nonce verification in this family.
-    members: Vec<EstablishedMember>,
+    /// The latest freshly verified member, retained even while awaiting refresh.
+    current: EstablishedMember,
+    /// Earlier freshly verified members in this family, retained until expiry.
+    earlier: Vec<EstablishedMember>,
     /// A response or receipt hint requests a fresh verification for admission.
     /// Success clears the gate even if another replica's digest was attested;
     /// receipt checks independently require an exactly established member.
@@ -131,30 +135,24 @@ impl TrustedIdentity {
         identity: EstablishedIdentity,
         delivery: CancellationToken,
     ) -> Self {
-        let member = EstablishedMember::new(report, identity);
         Self {
-            members: vec![member],
+            current: EstablishedMember::new(report, identity),
+            earlier: Vec::new(),
             pending: None,
             delivery,
         }
     }
 
-    fn current(&self) -> &EstablishedMember {
-        // The newest member is always retained, even while awaiting refresh.
-        &self.members[0]
+    fn members(&self) -> impl Iterator<Item = &EstablishedMember> {
+        std::iter::once(&self.current).chain(&self.earlier)
     }
 
     fn same_renewal_family(&self, other: &Self) -> bool {
-        same_renewal_family(&self.current().report, &other.current().report)
+        same_renewal_family(&self.current.report, &other.current.report)
     }
 
     fn prune(&mut self, now: u64) {
-        let mut current = true;
-        self.members.retain(|entry| {
-            let keep = current || now < entry.not_after();
-            current = false;
-            keep
-        });
+        self.earlier.retain(|entry| now < entry.not_after());
     }
 }
 
@@ -230,11 +228,8 @@ pub struct ProxyState {
     /// Standalone `serve` owns a token that remains live for the listener's
     /// lifetime. Every identity's delivery gate is a child of it.
     shutdown: CancellationToken,
-    #[cfg(test)]
-    pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
-    verify_timeout: std::time::Duration,
-    #[cfg(test)]
-    queued_verifications: Mutex<VecDeque<ServiceVerification>>,
+    /// Fresh-nonce verification, replaceable like the clock and event sink.
+    verify: Verify,
     event_sink: VerifierEventSink,
 }
 
@@ -276,20 +271,10 @@ impl ProxyState {
             reporter,
             event_sink,
             shutdown,
-            #[cfg(test)]
-            pause: Mutex::new(None),
-            verify_timeout: VERIFICATION_TIMEOUT,
-            #[cfg(test)]
-            queued_verifications: Mutex::new(VecDeque::new()),
+            verify: Arc::new(|state| {
+                Box::pin(verify_service(&state.base_url, None, &state.policy, false))
+            }),
         }
-    }
-
-    #[cfg(test)]
-    fn queue_verification(&self, verification: ServiceVerification) {
-        self.queued_verifications
-            .lock()
-            .expect("queued verifications poisoned")
-            .push_back(verification);
     }
 
     fn record(&self, exchange: RecordedExchange) {
@@ -305,16 +290,20 @@ impl ProxyState {
     fn adopt(&self, report: AttestationReport, identity: EstablishedIdentity) -> bool {
         let member = EstablishedMember::new(report, identity);
         let mut trusted = self.trusted.lock().expect("trusted identity poisoned");
-        let renewal = same_renewal_family(&member.report, &trusted.current().report);
+        let renewal = same_renewal_family(&member.report, &trusted.current.report);
         let now = (self.now_secs)();
         if renewal && !trusted.delivery.is_cancelled() {
             trusted
-                .members
+                .earlier
                 .retain(|old| old.digest() != member.digest());
-            trusted.members.insert(0, member);
+            let previous = std::mem::replace(&mut trusted.current, member);
+            if previous.digest() != trusted.current.digest() {
+                trusted.earlier.insert(0, previous);
+            }
         } else {
             trusted.delivery.cancel();
-            trusted.members = vec![member];
+            trusted.current = member;
+            trusted.earlier.clear();
             trusted.delivery = self.shutdown.child_token();
         }
         // Fresh verification authorizes sends even if it reached another replica.
@@ -329,8 +318,8 @@ impl ProxyState {
         receipt: &Value,
     ) -> Option<EstablishedMember> {
         let current = self.snapshot();
-        select_receipt_identity(&admitted.current().report, &admitted.members, receipt).or_else(
-            || select_receipt_identity(&admitted.current().report, &current.members, receipt),
+        select_receipt_identity(&admitted.current.report, admitted.members(), receipt).or_else(
+            || select_receipt_identity(&admitted.current.report, current.members(), receipt),
         )
     }
 
@@ -339,8 +328,7 @@ impl ProxyState {
         let now = (self.now_secs)();
         trusted.prune(now);
         if !trusted
-            .members
-            .iter()
+            .members()
             .any(|entry| entry.digest() == digest && now < entry.not_after())
         {
             trusted.pending = Some(digest.to_string());
@@ -375,7 +363,7 @@ impl ProxyState {
         let now = (self.now_secs)();
         trusted.delivery.is_cancelled()
             || trusted.pending.is_some()
-            || !trusted.members.iter().any(|entry| now < entry.not_after())
+            || !trusted.members().any(|entry| now < entry.not_after())
     }
 
     /// Block forwards until a fresh verify re-establishes trust: cancel the
@@ -472,27 +460,12 @@ impl ProxyState {
     }
 
     async fn reverify(self: &Arc<Self>) -> Result<(), String> {
-        #[cfg(test)]
-        if let Some(verification) = self
-            .queued_verifications
-            .lock()
-            .expect("queued verifications poisoned")
-            .pop_front()
-        {
-            return self.apply_verified_identity(verification);
-        }
         let verification = tokio::select! {
             biased;
             _ = self.shutdown.cancelled() => {
                 return Err("verifier stopped during re-verification".to_string());
             }
-            result = verify_service_with_timeout(
-                &self.base_url,
-                None,
-                &self.policy,
-                false,
-                self.verify_timeout,
-            ) => result?,
+            result = (self.verify)(self) => result?,
         };
         if !verification.transcript.verified() {
             return Err("service re-verification did not reach VERIFIED".to_string());
@@ -1053,14 +1026,6 @@ async fn proxy_inference(
             .body(body)
             .send()
     };
-    #[cfg(test)]
-    {
-        let pause = state.pause.lock().expect("pause poisoned").clone();
-        if let Some((reached, resume)) = pause {
-            reached.notify_one();
-            resume.notified().await;
-        }
-    }
     let mut resp = match send_upstream(
         &state,
         &mut trusted,
@@ -1347,7 +1312,7 @@ fn rotation_gate(state: &ProxyState, admitted: &TrustedIdentity, headers: &Heade
             tracing::warn!(
                 "!! upstream X-ACI-Keyset-Digest changed ({observed} != {}); \
                  re-verification required",
-                admitted.current().digest()
+                admitted.current.digest()
             );
         }
     }
