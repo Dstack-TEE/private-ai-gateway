@@ -23,6 +23,9 @@ import {
   type VerifiedAciIdentity,
 } from './types.js';
 
+import { constrainRequestBody } from './constraints.js';
+export { constrainJsonBody } from './constraints.js';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECEIPT_HISTORY_SIZE = 32;
 
@@ -35,6 +38,7 @@ interface InternalExchange extends RecordedAciExchange {
   identity: VerifiedAciIdentity;
   members: ReadonlyMap<string, VerifiedAciIdentity>;
   pinnedSessions: string[];
+  requiresVerified: boolean;
 }
 
 export async function connectAciWithTransport(
@@ -157,8 +161,7 @@ class RuntimeAciConnection implements AciConnection {
       {
         ...(session === undefined ? {} : { session }),
         ...(exchange.pinnedSessions.length ? { pinnedSessions: exchange.pinnedSessions } : {}),
-        requiresVerified:
-          this.options.serving?.requireVerified !== false || exchange.pinnedSessions.length > 0,
+        requiresVerified: exchange.requiresVerified,
         ...(typeof serving === 'string' ? { serving } : {}),
       },
     );
@@ -224,8 +227,9 @@ class RuntimeAciConnection implements AciConnection {
       ...(this.options.proxy === undefined ? {} : { proxy: this.options.proxy }),
       ...(this.options.ca === undefined ? {} : { ca: this.options.ca }),
     });
+    let multipartEndpoints: string[];
     try {
-      await probePinnedChannel(candidate, this.attestationURL, this.options);
+      multipartEndpoints = await probePinnedChannel(candidate, this.attestationURL, this.options);
       if (this.closed) throw new AciConnectionError('closed', 'ACI connection closed during refresh');
     } catch (error) {
       await candidate.close();
@@ -255,7 +259,17 @@ class RuntimeAciConnection implements AciConnection {
         `pinned ACI channel did not satisfy id-6: ${channelCheck?.detail ?? 'check did not run'}`,
       );
     }
-    const boundIdentity: VerifiedAciIdentity = { ...identity, transcript };
+    const boundIdentity: VerifiedAciIdentity = {
+      ...identity,
+      transcript,
+      report: {
+        ...identity.report,
+        service_capabilities: {
+          ...identity.report.service_capabilities,
+          supported_multipart_constraint_endpoints: multipartEndpoints,
+        },
+      },
+    };
 
     const previous = this.transport;
     const previousIdentity = this.currentIdentity;
@@ -288,7 +302,7 @@ class RuntimeAciConnection implements AciConnection {
     if (!transport) throw new AciConnectionError('closed', 'ACI connection is closed');
     const identity = this.identity;
     const members = this.members;
-    const prepared = await prepareRequest(input, init, this.options);
+    const prepared = await prepareRequest(input, init, this.options, identity.report.service_capabilities);
     const response = await transport.fetch(prepared.request);
     const observedDigest = response.headers.get('x-aci-keyset-digest');
     if (observedDigest) this.observeDigest(observedDigest);
@@ -373,6 +387,7 @@ class RuntimeAciConnection implements AciConnection {
       identity,
       members,
       pinnedSessions: prepared.pinnedSessions,
+      requiresVerified: prepared.requiresVerified,
     };
     entry.completion = digestResponse(response.clone()).then((digest) => {
       entry.responseDigest = digest;
@@ -414,7 +429,9 @@ interface PreparedRequest {
   request: Request;
   bodyDigest: string;
   pinnedSessions: string[];
+  requiresVerified: boolean;
   authorization?: string;
+  localPolicyApplied: boolean;
 }
 
 /** @internal Exported for transport-policy conformance tests. */
@@ -422,6 +439,7 @@ export async function prepareRequest(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   options: ConnectAciOptions,
+  capabilities?: AttestationReport['service_capabilities'],
 ): Promise<PreparedRequest> {
   const original = new Request(input, init);
   const authorization = original.headers.get('authorization')?.trim() || undefined;
@@ -430,97 +448,26 @@ export async function prepareRequest(
       request: original,
       bodyDigest: await digestRequest(original),
       pinnedSessions: [],
+      requiresVerified: false,
+      localPolicyApplied: false,
       ...(authorization ? { authorization } : {}),
     };
   }
   const bytes = new Uint8Array(await original.clone().arrayBuffer());
-  const constrained = constrainJsonBody(bytes, options);
   const headers = new Headers(original.headers);
+  const constrained = await constrainRequestBody(
+    bytes, headers, new URL(original.url).pathname, options, capabilities,
+  );
   headers.delete('content-length');
-  const request =
-    constrained.body === bytes
-      ? original
-      : new Request(original, { body: Buffer.from(constrained.body), headers });
+  const request = new Request(original, { method: 'POST', body: Buffer.from(constrained.body), headers });
   return {
     request,
     bodyDigest: digestBytes(constrained.body),
     pinnedSessions: constrained.pinnedSessions,
+    requiresVerified: constrained.requiresVerified,
+    localPolicyApplied: constrained.localPolicyApplied,
     ...(authorization ? { authorization } : {}),
   };
-}
-
-/** @internal Exported for transport-policy conformance tests. */
-export function constrainJsonBody(
-  body: Uint8Array,
-  options: ConnectAciOptions,
-): { body: Uint8Array; pinnedSessions: string[] } {
-  const fixed = [...(options.serving?.acceptedSessionIds ?? [])];
-  const enforceVerified = options.serving?.requireVerified !== false;
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder().decode(body));
-  } catch {
-    return { body, pinnedSessions: [] };
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return { body, pinnedSessions: [] };
-  }
-  const root = value as Record<string, unknown>;
-  const providerValue = root.provider;
-  if (
-    providerValue !== undefined &&
-    (providerValue === null || typeof providerValue !== 'object' || Array.isArray(providerValue))
-  ) {
-    if (!enforceVerified && fixed.length === 0) return { body, pinnedSessions: [] };
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'provider must be a JSON object when ACI serving constraints are enabled',
-    );
-  }
-  const provider =
-    providerValue !== null && typeof providerValue === 'object' && !Array.isArray(providerValue)
-      ? { ...(providerValue as Record<string, unknown>) }
-      : {};
-  const supplied = parseSessionIds(provider.aci_session_ids);
-  if (!enforceVerified && fixed.length === 0 && supplied.length === 0) {
-    return { body, pinnedSessions: [] };
-  }
-  const pinnedSessions =
-    fixed.length === 0
-      ? supplied
-      : supplied.length === 0
-        ? fixed
-        : supplied.filter((id) => fixed.includes(id));
-  if (fixed.length > 0 && supplied.length > 0 && pinnedSessions.length === 0) {
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'request session ids do not intersect the connection acceptedSessionIds policy',
-    );
-  }
-  if (pinnedSessions.length > 0) provider.aci_session_ids = pinnedSessions;
-  if (enforceVerified || pinnedSessions.length > 0) {
-    provider.aci_verified = true;
-  }
-  root.provider = provider;
-  return {
-    body: new TextEncoder().encode(JSON.stringify(root)),
-    pinnedSessions,
-  };
-}
-
-function parseSessionIds(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.some((id) => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id))
-  ) {
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'provider.aci_session_ids must be a non-empty array of lowercase 64-hex ids',
-    );
-  }
-  return [...new Set(value)];
 }
 
 async function digestRequest(request: Request): Promise<string> {
@@ -722,7 +669,7 @@ async function probePinnedChannel(
   transport: PinnedTransport,
   attestationURL: string,
   options: ConnectAciOptions,
-): Promise<void> {
+): Promise<string[]> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', randomBytes(32).toString('hex'));
   const response = await timedFetch(
@@ -741,7 +688,17 @@ async function probePinnedChannel(
       `pinned ACI channel probe returned HTTP ${response.status}`,
     );
   }
-  await response.body?.cancel();
+  try {
+    const report: unknown = await response.json();
+    if (report === null || typeof report !== 'object' || Array.isArray(report)) return [];
+    const capabilities = (report as Record<string, unknown>).service_capabilities;
+    if (capabilities === null || typeof capabilities !== 'object' || Array.isArray(capabilities)) return [];
+    const endpoints = (capabilities as Record<string, unknown>).supported_multipart_constraint_endpoints;
+    return Array.isArray(endpoints) && endpoints.every((path): path is string => typeof path === 'string')
+      ? endpoints : [];
+  } catch (error) {
+    throw new AciConnectionError('channel_binding', 'pinned ACI attestation is not valid JSON', { cause: error });
+  }
 }
 
 async function timedFetch(

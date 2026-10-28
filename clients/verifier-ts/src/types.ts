@@ -58,7 +58,11 @@ export interface AttestationReport {
   api_version: string;
   workload_keyset_digest: string;
   attestation: Attestation;
-  service_capabilities?: { supported_e2ee_versions?: string[]; [key: string]: unknown };
+  service_capabilities?: {
+    supported_e2ee_versions?: string[];
+    supported_multipart_constraint_endpoints?: string[];
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 

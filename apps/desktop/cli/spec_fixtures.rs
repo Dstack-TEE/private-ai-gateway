@@ -63,6 +63,7 @@ pub fn vector_report() -> AttestationReport {
             }),
         },
         service_capabilities: ServiceCapabilities {
+            supported_multipart_constraint_endpoints: Vec::new(),
             supported_e2ee_versions: vec!["2".to_string()],
             serving: "aggregator".to_string(),
         },

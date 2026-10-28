@@ -18,7 +18,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::aci::types::{AttestationReport, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED};
+use crate::aci::types::AttestationReport;
 use crate::capture::{tee, CompletionHook, StreamEnd};
 use agent_bridge::proxy::{hop_by_hop_names, ForwardContext, MAX_BODY_BYTES};
 use axum::body::{Body, Bytes};
@@ -45,6 +45,7 @@ use crate::verify::{
 use crate::{safe, write_stdout};
 
 mod audit;
+mod constraints;
 mod control;
 pub mod managed;
 mod report;
@@ -52,6 +53,7 @@ mod report;
 mod tests;
 
 use audit::audit_exchange;
+use constraints::{prepare_request, PreparedRequest};
 use control::build_control_router;
 use report::{
     default_reporter, identity_event, json_event_sink, json_reporter, lifecycle_json,
@@ -99,7 +101,7 @@ pub struct RequestOutcome {
     /// Whether the receipt records a service-side rewrite of the request
     /// (§9.3 note); known only once the receipt was checked.
     pub rewritten: Option<bool>,
-    /// Whether this proxy changed the request body before forwarding (ACI
+    /// Whether this proxy applied local serving constraints before forwarding (ACI
     /// policy: `provider.aci_verified` / pinned sessions, re-serialized).
     /// True when local verification policy was applied to the outgoing request.
     pub local_policy_applied: bool,
@@ -172,13 +174,15 @@ pub struct RecordedExchange {
     /// or the partial body when delivery failed or the client stopped reading.
     pub response: BodyDigest,
     delivery: ResponseDelivery,
-    /// The client's §5.3 pinned session ids from the request body.
+    /// The effective §5.3 pins from the JSON body or multipart carrier.
     pub pinned_sessions: Vec<String>,
+    /// Effective verified-serving requirement, including caller constraints.
+    pub requires_verified: bool,
     pub at: u64,
     /// Verdict of the last verification, when one reached a verdict.
     pub verified: Option<bool>,
     pub context: Option<ForwardContext>,
-    /// Whether the forwarded body differs from what the caller sent.
+    /// Whether local policy changed the body or applied multipart constraints.
     pub local_policy_applied: bool,
 }
 
@@ -1035,23 +1039,30 @@ async fn proxy_inference(
         );
     };
     let active_pins = state.active_pins();
-    // A policy-derived set is refreshed only when it actually constrained this
-    // request. Requests without a local policy keep their own pins unchanged.
-    let injected_policy_pins = !state.required_claims.is_empty()
-        && !active_pins.is_empty()
-        && pinned_session_ids(&body).is_empty();
-    let mut request_body =
-        match apply_constraints(body.to_vec(), state.enforce_verified, &active_pins) {
-            Ok(body) => body,
-            Err(reason) => {
-                tracing::warn!("!! POST {path} -> 400: {reason}");
-                return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
-            }
-        };
-    let send = |body: Vec<u8>| {
-        forward_headers(state.client.request(Method::POST, url.as_str()), &headers)
-            .body(body)
-            .send()
+    let mut prepared = match prepare_request(
+        body.clone(),
+        &headers,
+        &path,
+        state.enforce_verified,
+        &active_pins,
+        &trusted.current().report.service_capabilities,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(reason) => {
+            tracing::warn!("!! POST {path} -> 400: {reason}");
+            return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
+        }
+    };
+    let injected_policy_pins = !state.required_claims.is_empty() && prepared.policy_derived_pins;
+    let send = |prepared: &PreparedRequest| {
+        forward_headers(
+            state.client.request(Method::POST, url.as_str()),
+            &prepared.headers,
+        )
+        .body(prepared.body.clone())
+        .send()
     };
     #[cfg(test)]
     {
@@ -1065,7 +1076,7 @@ async fn proxy_inference(
         &state,
         &mut trusted,
         (&Method::POST, &path, &context),
-        || send(request_body.clone()),
+        || send(&prepared),
     )
     .await
     {
@@ -1087,15 +1098,23 @@ async fn proxy_inference(
                     pins.len()
                 );
                 *state.policy_pins.lock().expect("policy pins poisoned") = pins.clone();
-                request_body = match apply_constraints(body.to_vec(), state.enforce_verified, &pins)
+                prepared = match prepare_request(
+                    body.clone(),
+                    &headers,
+                    &path,
+                    state.enforce_verified,
+                    &pins,
+                    &trusted.current().report.service_capabilities,
+                )
+                .await
                 {
-                    Ok(body) => body,
+                    Ok(prepared) => prepared,
                     Err(reason) => {
                         tracing::warn!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
                         return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
                     }
                 };
-                match race_delivery(&delivery, send(request_body.clone())).await {
+                match race_delivery(&delivery, send(&prepared)).await {
                     None => return delivery_revoked_response(&path),
                     Some(Ok(retried)) => resp = retried,
                     Some(Err(e)) => {
@@ -1132,11 +1151,12 @@ async fn proxy_inference(
     // Non-success responses without receipts also use this passthrough path.
     let hook_state = state.clone();
     let hook_path = path.clone();
-    let local_policy_applied = request_body.as_slice() != body.as_ref();
-    let request_digest = BodyDigest::of(&request_body);
+    let local_policy_applied = prepared.local_policy_applied;
+    let request_digest = BodyDigest::of(&prepared.body);
     // §9.3(6): the pinned ids ride along so the asynchronous audit enforces
     // the same membership rule as `private-ai-proxy send --session`.
-    let pinned_sessions = pinned_session_ids(&request_body);
+    let pinned_sessions = prepared.pinned_sessions;
+    let requires_verified = prepared.requires_verified;
     let audit_bearer = bearer_token(&headers);
     let hook_delivery = delivery.clone();
     let hook: CompletionHook = Box::new(move |end| {
@@ -1174,6 +1194,7 @@ async fn proxy_inference(
                 response,
                 delivery: delivery.clone(),
                 pinned_sessions,
+                requires_verified,
                 at: desktop_core::now_secs(),
                 verified: None,
                 context: context.clone(),
@@ -1361,73 +1382,6 @@ fn join_url(base_url: &str, uri: &Uri) -> Result<url::Url, url::ParseError> {
     url.set_path(&path);
     url.set_query(uri.query());
     Ok(url)
-}
-
-/// The `provider.aci_session_ids` a client pinned in its request body (§5.3),
-/// for the client-side §9.3(6) membership check. Malformed bodies pin nothing;
-/// the service rejects them itself.
-fn pinned_session_ids(body: &[u8]) -> Vec<String> {
-    let parsed: Value = serde_json::from_slice(body).unwrap_or_default();
-    let ids = parsed["provider"][PROVIDER_ACI_SESSION_IDS].as_array();
-    ids.into_iter()
-        .flatten()
-        .filter_map(|id| id.as_str().map(str::to_string))
-        .collect()
-}
-
-/// Tighten an inference body (§5.3): demand verified serving and compose the
-/// client's own pins with the local accepted set. A narrower client set is
-/// preserved; disjoint policies fail locally instead of bypassing either one.
-fn apply_constraints(
-    body: Vec<u8>,
-    enforce_verified: bool,
-    pins: &[String],
-) -> Result<Vec<u8>, String> {
-    if !enforce_verified && pins.is_empty() {
-        return Ok(body);
-    }
-    let Ok(mut parsed) = serde_json::from_slice::<Value>(&body) else {
-        return Ok(body);
-    };
-    let Some(members) = parsed.as_object_mut() else {
-        return Err("JSON request body must have an object top level".to_string());
-    };
-    let provider = members.entry("provider").or_insert_with(|| json!({}));
-    if provider.is_null() {
-        *provider = json!({});
-    }
-    let Some(provider) = provider.as_object_mut() else {
-        return Err("JSON request provider must be an object or null".to_string());
-    };
-    let supplied = match provider.get(PROVIDER_ACI_SESSION_IDS) {
-        None => None,
-        Some(value) => Some(
-            value
-                .as_array()
-                .filter(|ids| ids.iter().all(Value::is_string))
-                .ok_or_else(|| "provider.aci_session_ids must be an array of strings".to_string())?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>(),
-        ),
-    };
-    // Pinning implies verified serving (§5.3).
-    provider.insert(PROVIDER_ACI_VERIFIED.to_string(), Value::Bool(true));
-    if !pins.is_empty() {
-        let accepted: Vec<&String> = match supplied {
-            Some(ref ids) => ids
-                .iter()
-                .filter_map(|id| pins.iter().find(|pin| pin.as_str() == id))
-                .collect(),
-            None => pins.iter().collect(),
-        };
-        if supplied.is_some() && accepted.is_empty() {
-            return Err("request pins and local accepted session set are disjoint".to_string());
-        }
-        provider.insert(PROVIDER_ACI_SESSION_IDS.to_string(), json!(accepted));
-    }
-    Ok(serde_json::to_vec(&parsed).unwrap_or(body))
 }
 
 /// Derive the §5.3 pin set from the service's current attested sessions:

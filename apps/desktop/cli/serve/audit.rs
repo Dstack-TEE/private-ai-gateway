@@ -170,7 +170,7 @@ pub(super) async fn verify_exchange(
             no_session_reason: &no_session_reason,
             pinned: (!exchange.pinned_sessions.is_empty())
                 .then_some(exchange.pinned_sessions.as_slice()),
-            requires_verified: state.enforce_verified || !exchange.pinned_sessions.is_empty(),
+            requires_verified: exchange.requires_verified,
             serving: &receipt_identity.report.service_capabilities.serving,
             required_claims: &state.required_claims,
         },

@@ -124,7 +124,7 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
   serving: {
-    // Every successful JSON POST must carry a receipt and cite verified serving.
+    // Every successful POST must carry a receipt and cite verified serving.
     requireVerified: true,
     requireReceipt: true,
   },
@@ -163,6 +163,20 @@ selects the matching pinned transport. Set `ACI_API_KEY` to the RedPill key.
 The SDK adds it to the inference request; `aci.fetch` retains that request's
 authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.
+
+Serving constraints apply to JSON objects and multipart
+`POST /v1/audio/transcriptions` requests (including `FormData`). Before any
+constrained upload, the pinned attestation channel must advertise that path
+in `service_capabilities.supported_multipart_constraint_endpoints`.
+Multipart constraints use a single `X-ACI-Provider` JSON object with the same
+schema as JSON `provider`. Caller pins are intersected with locally accepted
+pins and are enforced even with `requireVerified: false`. Invalid carriers,
+disjoint pins, a multipart `provider` part, constrained malformed/non-object
+JSON, and unsupported constrained media types throw
+`invalid_serving_constraints` before sending inference. Multipart bytes stay
+unchanged; receipt audits retain the effective header policy because body
+hashes do not commit to headers. Release these client protections before a
+gateway enables transcription uploads.
 
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`. Take the hash from authenticated release

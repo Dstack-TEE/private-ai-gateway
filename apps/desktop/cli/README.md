@@ -28,3 +28,16 @@ and checks only a relying party can run, are recorded in
 against a live deployment.
 
 A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
+
+`pap serve` applies serving policy to JSON objects and to multipart
+`POST /v1/audio/transcriptions` requests. Multipart requires the verified
+gateway's `service_capabilities.supported_multipart_constraint_endpoints`
+to list that path; otherwise the upload is refused locally. Policy travels
+in `X-ACI-Provider`, whose JSON object uses the JSON `provider` schema.
+Caller pins are intersected with local pins, including when local verified
+serving is disabled. Duplicate or invalid carriers, a `provider` form part,
+constrained malformed JSON, and unsupported constrained media types return
+400 before an inference send. The original multipart bytes are preserved.
+Receipts hash the body, so the client separately retains and audits the
+effective header policy. These client protections must be released before
+a gateway enables transcription uploads.

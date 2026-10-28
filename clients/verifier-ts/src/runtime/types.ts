@@ -59,7 +59,7 @@ export type AciFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise
 export interface ConnectAciOptions {
   baseURL: string;
   policy?: AciPolicy;
-  /** Gateway serving constraints applied to JSON POST bodies. */
+  /** Gateway serving constraints applied to JSON and supported multipart POSTs. */
   serving?: AciServingPolicy;
   /** Attestation/PCCS request timeout. Default: 10 seconds. */
   timeoutMs?: number;
