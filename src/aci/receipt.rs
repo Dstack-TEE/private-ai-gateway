@@ -192,10 +192,6 @@ pub struct SignedReceipt {
 }
 
 impl SignedReceipt {
-    pub fn workload_keyset_digest(&self) -> &str {
-        &self.workload_keyset_digest
-    }
-
     /// Parse the stored document (for legacy surfaces and tests).
     pub fn document_json(&self) -> Result<Value, serde_json::Error> {
         serde_json::from_slice(&self.document)
@@ -237,10 +233,6 @@ impl ReceiptBuilder {
             served_at,
             events: Vec::new(),
         }
-    }
-
-    pub fn workload_keyset_digest(&self) -> &str {
-        &self.workload_keyset_digest
     }
 
     fn append(&mut self, event_type: &str, fields: Map<String, Value>) -> Result<(), ReceiptError> {

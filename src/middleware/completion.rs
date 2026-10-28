@@ -631,7 +631,7 @@ pub async fn run(
                     insert_header(
                         &mut headers,
                         "x-aci-keyset-digest",
-                        finalized.receipt.workload_keyset_digest(),
+                        &finalized.receipt.workload_keyset_digest,
                     );
                     apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
                     (status, headers, finalized.wire_body).into_response()
@@ -1649,11 +1649,10 @@ fn service_error_response(
             outcome.requester.clone(),
         ) {
             Ok(receipt) => {
-                let mut headers = vec![("x-receipt-id", receipt.receipt_id.clone())];
-                headers.push((
-                    "x-aci-keyset-digest",
-                    receipt.workload_keyset_digest().to_string(),
-                ));
+                let headers = vec![
+                    ("x-receipt-id", receipt.receipt_id.clone()),
+                    ("x-aci-keyset-digest", receipt.workload_keyset_digest),
+                ];
                 finalize_generated(status, body, &headers, e2ee, outcome)
             }
             // The receipt is part of the refusal contract (§5.2); a refusal

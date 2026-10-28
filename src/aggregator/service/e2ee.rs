@@ -148,11 +148,12 @@ impl AciService {
     /// (v2 cannot be produced without one — matching the proxy).
     fn legacy_tls_spki_fingerprint(&self, domain: Option<&str>) -> Result<[u8; 32], ServiceError> {
         let key_err = |msg: String| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg));
-        let keyset = self.keyset();
+        let keyset = self.current_keyset();
         let spki_hex = domain
             .and_then(normalize_downstream_domain)
             .and_then(|domain| {
                 keyset
+                    .keyset()
                     .tls_public_keys
                     .iter()
                     .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -222,7 +223,8 @@ impl AciService {
 
     pub(super) fn downstream_tls_binding(&self, domain: &str) -> Option<Value> {
         let domain = normalize_downstream_domain(domain)?;
-        self.keyset()
+        self.current_keyset()
+            .keyset()
             .tls_public_keys
             .iter()
             .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -235,7 +237,8 @@ impl AciService {
     }
 
     fn requires_host_for_downstream_tls_binding(&self) -> bool {
-        self.keyset()
+        self.current_keyset()
+            .keyset()
             .tls_public_keys
             .iter()
             .any(|key| key.domain.is_some())
@@ -272,8 +275,9 @@ impl AciService {
         // The client selects an E2EE v2 §4 suite by the `algo` of the keyset
         // entry it encrypts to (§7). Match `X-Model-Pub-Key` against each suite entry
         // under that suite's own normalization; the first match fixes the suite.
-        let keyset = self.keyset();
+        let keyset = self.current_keyset();
         let selected_key = keyset
+            .keyset()
             .e2ee_public_keys
             .iter()
             .find(|key| {

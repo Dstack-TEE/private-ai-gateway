@@ -387,6 +387,13 @@ impl AciService {
         // attempt's status is chosen is documented on `FailedAttempt`.
         let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
 
+        let all_failed = |failed_attempts, error| {
+            MiddlewareForwardResult::AllFailed(Box::new(MiddlewareAllFailed {
+                failed_attempts,
+                error,
+            }))
+        };
+
         // The most recent candidate that actually answered, held back in case
         // nothing better follows. See [`RetainedResponse`].
         let mut retained: Option<RetainedResponse> = None;
@@ -507,12 +514,7 @@ impl AciService {
                 ) {
                     Ok(admission) => admission,
                     Err(error @ ServiceError::EarlyResponseKeysetExpired) => {
-                        return Ok(MiddlewareForwardResult::AllFailed(Box::new(
-                            MiddlewareAllFailed {
-                                failed_attempts,
-                                error,
-                            },
-                        )));
+                        return Ok(all_failed(failed_attempts, error));
                     }
                     Err(err) => {
                         if matches!(
@@ -556,12 +558,7 @@ impl AciService {
                         ReverifyOutcome::RefreshFailed(
                             error @ ServiceError::EarlyResponseKeysetExpired,
                         ) => {
-                            return Ok(MiddlewareForwardResult::AllFailed(Box::new(
-                                MiddlewareAllFailed {
-                                    failed_attempts,
-                                    error,
-                                },
-                            )));
+                            return Ok(all_failed(failed_attempts, error));
                         }
                         ReverifyOutcome::RefreshFailed(err) => {
                             let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
@@ -685,7 +682,7 @@ impl AciService {
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
-                    let keyset_digest = builder.workload_keyset_digest().to_string();
+                    let keyset_digest = keyset.digest().to_string();
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         MiddlewareReceiptDraft {
@@ -724,7 +721,7 @@ impl AciService {
                         candidate_required,
                         caller_supplied_upstream_event,
                         &req.aci_session_ids,
-                        None,
+                        Some(&receipt_journal),
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
@@ -900,12 +897,7 @@ impl AciService {
                 candidate_route_ids.join(", ")
             )))
         });
-        Ok(MiddlewareForwardResult::AllFailed(Box::new(
-            MiddlewareAllFailed {
-                failed_attempts,
-                error,
-            },
-        )))
+        Ok(all_failed(failed_attempts, error))
     }
 
     /// Start a streaming chat completion. The response stream hashes

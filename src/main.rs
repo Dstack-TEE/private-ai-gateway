@@ -560,7 +560,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
 
-    // Keyset lifetime (§3.4): launch time plus a configurable duration. A
+    // Keyset lifetime (§3.4): seal time plus a configurable duration. A
     // background task re-seals the keyset with a later expiry once half of
     // this lifetime has passed, so a long-running replica never expires.
     let keyset_not_after_seconds = gateway_config

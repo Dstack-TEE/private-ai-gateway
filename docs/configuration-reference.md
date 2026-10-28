@@ -193,18 +193,12 @@ usually ends in an HTTP status such as `429` that the client should receive.
 
 An early-committed response cannot carry `X-Receipt-Id` because the upstream
 has not yet been selected. After a successful stream, the receipt is available
-by response `id`. The gateway snapshots the keyset when committing the early
-`X-ACI-Keyset-Digest` header and uses that same snapshot for the eventual receipt,
-including when the keyset renews while awaiting the upstream response.
-Every new admission, including failover and binding re-verification, must occur
-before that pinned keyset's `not_after`. If verification or session acquisition
-outlasts it, the gateway stops before forwarding that attempt, ends the stream
-with an in-band `503`, and reports `errorSource: gateway` with
-`errorMessage: keyset_expired`. It issues no receipt for this post-commit failure
-(ACI §5.2). An attempt admitted before expiry may still finish afterward with
-a historical receipt. With the default 30-day lifetime and half-life renewal,
-reaching this guard normally requires a wait longer than the remaining half-life
-(about 15 days), so it primarily affects very short configured lifetimes.
+by response `id`. The early `X-ACI-Keyset-Digest` header and eventual receipt
+share one keyset snapshot, including across renewal. Admission at or after that
+keyset's `not_after` ends the stream with an in-band `503`, reports
+`gateway/keyset_expired`, and issues no receipt (ACI §5.2). With the default
+30-day lifetime and half-life renewal, this normally requires a wait of about
+15 days, so it is mainly relevant to very short configured lifetimes.
 If forwarding fails after the early commit, the gateway sends
 the surface's in-band error event, carrying the status the response would
 otherwise have used, and drafts no receipt. The control-plane usage report also

@@ -1603,5 +1603,5 @@ async fn assert_buffered_receipt_uses_current_keyset(direct: bool) {
         .expect("receipt is stored");
     let document = receipt.document_json().expect("receipt parses");
     assert_eq!(document["workload_keyset_digest"], renewed_digest);
-    assert_eq!(document["served_at"], if direct { 1_101 } else { 1_000 });
+    assert_eq!(document["served_at"], 1_000);
 }

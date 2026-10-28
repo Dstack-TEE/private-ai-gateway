@@ -186,7 +186,7 @@ async fn forward_to_backend_inner(
             insert_str_header(
                 &mut resp_headers,
                 "x-aci-keyset-digest",
-                forward.receipt.workload_keyset_digest(),
+                &forward.receipt.workload_keyset_digest,
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
@@ -261,7 +261,7 @@ fn refusal_response(
             insert_str_header(
                 &mut headers,
                 "x-aci-keyset-digest",
-                receipt.workload_keyset_digest(),
+                &receipt.workload_keyset_digest,
             );
         }
         // The receipt is part of the refusal contract (§5.2, §7.5): a refusal

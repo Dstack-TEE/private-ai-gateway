@@ -15,7 +15,7 @@ All responses, including errors, carry:
 | Header | Value |
 | --- | --- |
 | `X-ACI-Version` | `aci/1` |
-| `X-ACI-Keyset-Digest` | digest captured with served_at when response headers are produced, also used by that exchange's receipt |
+| `X-ACI-Keyset-Digest` | digest of the keyset current when the response headers were produced; the exchange's receipt cites the same digest. |
 
 The router permits cross-origin browser requests. Inference handlers read JSON
 bodies under a 32 MiB limit. A larger body receives `413` in the surface's JSON
