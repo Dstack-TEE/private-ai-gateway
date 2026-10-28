@@ -63,6 +63,13 @@ updates:
       prefix: chore(clients)
     # Advance exact pins without widening them for the published verifier.
     versioning-strategy: increase
+    ignore:
+      # Review type majors against the verifier's Node >=20.18.1 floor.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Preserve Node >=20.18.1 support; undici 8 requires Node >=22.19.0.
+      - dependency-name: undici
+        update-types: ["version-update:semver-major"]
     groups:
       # Runtime and crypto dependencies stay in individual PRs for review.
       clients-dev:
