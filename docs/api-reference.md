@@ -27,7 +27,8 @@ envelope does not.
 When [inbound authentication](configuration-reference.md#inbound-inference-authentication)
 is configured, every endpoint below requires `Authorization: Bearer <token>`.
 Missing or invalid credentials return `401` with `WWW-Authenticate: Bearer`
-before forwarding. Without that setting, existing authentication behavior is
+before forwarding. The `Bearer` scheme is case-insensitive; token values remain
+case-sensitive. Without that setting, existing authentication behavior is
 unchanged. Discovery and verification routes retain their existing access rules.
 
 | Method and path | Surface | Streaming | ACI E2EE v2 | Notes |

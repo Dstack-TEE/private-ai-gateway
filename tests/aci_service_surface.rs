@@ -485,6 +485,7 @@ async fn inbound_auth_protects_every_inference_route_before_forwarding() {
         for headers in [
             vec![],
             vec![("authorization", "Bearer wrong-secret")],
+            vec![("authorization", "BEARER INFERENCE-SECRET")],
             vec![("authorization", "Bearer separate-admin-token")],
             vec![("authorization", "Basic inference-secret")],
             vec![("authorization", "Bearer ")],
@@ -613,6 +614,60 @@ async fn inbound_auth_keeps_discovery_artifacts_and_cors_public() {
             .status,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn bearer_scheme_case_is_shared_by_inbound_admin_and_receipt_auth() {
+    let harness = harness_with_inbound_auth();
+    for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+        let authorization = format!("{scheme}\t inference-secret  ");
+        let response = harness
+            .requester
+            .post(
+                "/v1/chat/completions",
+                CHAT_REQUEST,
+                &[("authorization", &authorization)],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{scheme}");
+        let receipt = response.headers["x-receipt-id"].to_str().unwrap();
+        assert_eq!(
+            harness
+                .service
+                .owner_of_receipt(receipt)
+                .unwrap()
+                .auth_token_sha256,
+            sha256_hex(b"inference-secret")
+        );
+        let uri = format!("/v1/aci/receipts/{receipt}");
+        for header in ["Bearer inference-secret", authorization.as_str()] {
+            assert_eq!(
+                harness
+                    .requester
+                    .get(&uri, &[("authorization", header)])
+                    .await
+                    .status,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            harness
+                .requester
+                .get(&uri, &[("authorization", "bEaReR INFERENCE-SECRET")])
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        let admin = format!("{scheme}\tseparate-admin-token");
+        assert_eq!(
+            harness
+                .requester
+                .get("/v1/admin/upstreams", &[("authorization", &admin)])
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
 }
 
 #[tokio::test]
