@@ -213,9 +213,7 @@ impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
         let transcription_output = self.advertises("output_modalities", "transcription");
         let modalities = match surface {
-            Surface::AudioTranscriptions => {
-                self.advertises("input_modalities", "audio") && transcription_output
-            }
+            Surface::AudioTranscriptions => transcription_output,
             Surface::ChatCompletions | Surface::Messages | Surface::Responses => {
                 !transcription_output && self.outputs(surface.output_modality())
             }

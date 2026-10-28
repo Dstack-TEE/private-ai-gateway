@@ -77,9 +77,9 @@ image responses. Missing usage is not estimated. The request body limit is
 32 MiB and the upstream call timeout is 660 seconds.
 
 Audio transcription accepts multipart/form-data with a unique UTF-8 `model`
-text part. The catalog must explicitly advertise `audio` in `input_modalities`
-and `transcription` in `output_modalities`; older catalogs do not enable
-transcription. Models advertising `transcription` output are excluded from
+text part. The catalog must explicitly advertise `transcription` in
+`output_modalities`; eligibility does not depend on `input_modalities`.
+Models advertising `transcription` output are excluded from
 chat, Messages, and Responses. Models such as Gemini that accept audio and text
 and advertise only `text` output keep their chat endpoints.
 Like System One and images, this route bypasses the text endpoint compatibility

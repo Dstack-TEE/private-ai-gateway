@@ -584,10 +584,6 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
     model
         .remote
         .extra
-        .insert("input_modalities".into(), json!(["audio"]));
-    model
-        .remote
-        .extra
         .insert("output_modalities".into(), json!(["transcription"]));
     state.publish(session);
     let proxy = spawn(router(state.clone())).await;
@@ -631,12 +627,10 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!events.recv().await.unwrap().left_device);
     }
-    // Reject a missing or incompatible modality even when the model is listed.
+    // Reject missing or incompatible output even when the model is listed.
     for (input, output) in [
-        (Some(json!(["text"])), Some(json!(["transcription"]))),
         (Some(json!(["audio", "text"])), Some(json!(["text"]))),
         (Some(json!(["audio"])), Some(json!(["text"]))),
-        (None, Some(json!(["transcription"]))),
         (Some(json!(["audio"])), None),
         (Some(json!(["audio"])), Some(json!(["image"]))),
     ] {

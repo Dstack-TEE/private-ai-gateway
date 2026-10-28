@@ -246,7 +246,7 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
 }
 
 #[test]
-fn transcriptions_require_audio_input_and_transcription_output_and_bypass_inventory() {
+fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
     let original = Catalog::from_remote(
         &json!({ "data": [
             { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["transcription"] },
@@ -314,7 +314,18 @@ fn transcriptions_require_audio_input_and_transcription_output_and_bypass_invent
         }
         let audio = catalog.for_surface(Surface::AudioTranscriptions);
         let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(ids, ["audio", "audio-image", "mixed-input", "mixed-output"]);
+        assert_eq!(
+            ids,
+            [
+                "audio",
+                "audio-image",
+                "mixed-input",
+                "mixed-output",
+                "text-input",
+                "missing-input",
+                "malformed-input",
+            ]
+        );
     }
     assert_eq!(
         Surface::AudioTranscriptions.path(),
