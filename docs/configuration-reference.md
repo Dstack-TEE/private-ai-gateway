@@ -488,9 +488,12 @@ v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4
 Public source refs did not establish that support; do not add an unencrypted
 fallback. NEAR's launch model is `openai/whisper-large-v3`.
 
-Transcription limits are process constants: 25 MiB file, 64 KiB text, 16 upload
-slots (60-second read deadline), independent 16 inference slots, and 8 MiB
-upstream response. `private_ai_gateway_audio_failures_total{reason}` uses fixed
+Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
+402 MiB upload byte budget (60-second read deadline), independent 16 inference
+slots, and 8 MiB upstream response. Upload bytes are charged chunk by chunk
+until handoff or drop; connections with no buffered data and declared
+`Content-Length` do not reserve upload capacity.
+`private_ai_gateway_audio_failures_total{reason}` uses fixed
 reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
 `response_size_failure`. `private_ai_gateway_audio_provider_latency_seconds`
 measures provider attempt latency without audio, prompts, or filenames.

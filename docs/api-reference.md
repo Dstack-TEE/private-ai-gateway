@@ -118,9 +118,12 @@ without brackets) accepts `word` and/or `segment`, once each, only with
 parts, and malformed multipart return `400`.
 
 Limits: 16 parts, 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
-255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads have their
-own 16 slots and a 60-second read deadline (`408 upload_timeout`); saturation
-returns `429 upload_capacity`. A separate 16-slot transcription inference
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
+402 MiB byte budget (16 times the whole-body limit) and a 60-second read deadline
+(`408 upload_timeout`). Each received chunk reserves only its actual bytes;
+`Content-Length` is used only for early 413 rejection. Connections with no
+buffered data reserve no upload capacity. Budget exhaustion returns
+`429 upload_capacity`. A separate 16-slot transcription inference
 admission follows validation and, in middleware mode, successful control-plane
 authorization and route selection. Upload accounting remains held until that
 handoff. Response bodies and pending write buffers own inference admission until

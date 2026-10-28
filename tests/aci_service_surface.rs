@@ -19,7 +19,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
@@ -4299,4 +4299,66 @@ async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eig
             "private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"
         ));
     }
+}
+
+#[tokio::test]
+async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"hello","duration":1}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..32 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"-")) }).chain(
+                stream::poll_fn(move |_| {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                    std::task::Poll::Pending
+                }),
+            ),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            // A declared full upload must not reserve that much capacity.
+            .header(
+                "content-length",
+                private_ai_gateway::middleware::audio::MAX_BODY_BYTES,
+            )
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each unauthenticated connection has delivered one byte and stalled.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let raw = transcription_request("");
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester.call(
+            transcription_http(raw.clone())
+                .header("authorization", "Bearer requester")
+                .body(Body::from(raw))
+                .unwrap(),
+        ),
+    )
+    .await;
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let response = response.expect("stalled uploads must not consume per-connection slots");
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(json_body(&response)["text"], "hello");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 }
