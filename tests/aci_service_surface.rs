@@ -4395,16 +4395,19 @@ async fn expect_continue_refusals_return_final_status_without_inviting_upload() 
 }
 
 #[tokio::test]
-async fn audio_unknown_parameters_reject_before_forwarding() {
+async fn audio_invalid_parameters_reject_before_forwarding() {
     let h = harness();
-    for name in [
-        "provider",
-        "include[]",
-        "chunking_strategy",
-        "known_speaker_names[]",
+    for (name, value, code) in [
+        ("provider", "true", "unknown_parameter"),
+        ("include[]", "true", "unknown_parameter"),
+        ("chunking_strategy", "true", "unknown_parameter"),
+        ("known_speaker_names[]", "true", "unknown_parameter"),
+        ("response_format", "text", "invalid_parameter"),
+        ("response_format", "srt", "invalid_parameter"),
+        ("response_format", "vtt", "invalid_parameter"),
     ] {
         let raw = transcription_request(&format!(
-            "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\ntrue\r\n"
+            "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
         ));
         let resp = h
             .requester
@@ -4415,7 +4418,10 @@ async fn audio_unknown_parameters_reject_before_forwarding() {
             )
             .await;
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(&resp)["error"]["code"], "unknown_parameter");
+        let error = &json_body(&resp)["error"];
+        assert_eq!(error["code"], code);
+        assert_eq!(error["type"], "invalid_request_error");
+        assert_eq!(error["param"], name);
     }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
