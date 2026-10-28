@@ -80,7 +80,7 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@types/bun": "^1.4.4",
-    "@types/node": "^24.0.0",
+    "@types/node": "^20.0.0",
     "buffer": "^6.0.3",
     "esbuild": "^0.28.2",
     "publint": "^0.3.25",
