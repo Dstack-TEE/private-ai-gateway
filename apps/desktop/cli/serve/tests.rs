@@ -3196,7 +3196,7 @@ async fn bridge_multipart_uses_managed_constraints_and_refuses_missing_capabilit
             catalog: Some(
                 Catalog::from_remote(
                     &json!({"data": [{
-                        "id": "m", "input_modalities": ["audio"], "output_modalities": ["text"]
+                        "id": "m", "input_modalities": ["audio"], "output_modalities": ["transcription"]
                     }]}),
                     1,
                 )

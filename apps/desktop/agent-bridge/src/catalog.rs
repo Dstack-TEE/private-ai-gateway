@@ -190,10 +190,8 @@ impl Surface {
         match self {
             Surface::SystemOne => "decisions",
             Surface::Images => "image",
-            Surface::ChatCompletions
-            | Surface::Messages
-            | Surface::Responses
-            | Surface::AudioTranscriptions => "text",
+            Surface::AudioTranscriptions => "transcription",
+            Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
         }
     }
 }
@@ -213,14 +211,13 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        let audio_only_input = self.advertises("input_modalities", "audio")
-            && !self.advertises("input_modalities", "text");
+        let transcription_output = self.advertises("output_modalities", "transcription");
         let modalities = match surface {
             Surface::AudioTranscriptions => {
-                audio_only_input && self.advertises("output_modalities", "text")
+                self.advertises("input_modalities", "audio") && transcription_output
             }
             Surface::ChatCompletions | Surface::Messages | Surface::Responses => {
-                !audio_only_input && self.outputs(surface.output_modality())
+                !transcription_output && self.outputs(surface.output_modality())
             }
             _ => self.outputs(surface.output_modality()),
         };

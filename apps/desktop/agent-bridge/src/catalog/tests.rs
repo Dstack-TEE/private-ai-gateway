@@ -246,20 +246,24 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
 }
 
 #[test]
-fn transcriptions_require_audio_without_text_input_and_text_output_and_bypass_inventory() {
+fn transcriptions_require_audio_input_and_transcription_output_and_bypass_inventory() {
     let original = Catalog::from_remote(
         &json!({ "data": [
-            { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["text"] },
-            { "id": "audio-image", "input_modalities": ["audio", "image"], "output_modalities": ["text"] },
+            { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["transcription"] },
+            { "id": "audio-image", "input_modalities": ["audio", "image"], "output_modalities": ["transcription"] },
+            { "id": "mixed-input", "input_modalities": ["audio", "text"], "output_modalities": ["transcription"] },
+            { "id": "mixed-output", "input_modalities": ["audio"], "output_modalities": ["text", "transcription"] },
             { "id": "gemini", "input_modalities": ["text", "audio", "image", "video"], "output_modalities": ["text"] },
+            { "id": "audio-text-output", "input_modalities": ["audio"], "output_modalities": ["text"] },
             { "id": "text", "input_modalities": ["text"], "output_modalities": ["text"] },
+            { "id": "text-input", "input_modalities": ["text"], "output_modalities": ["transcription"] },
             { "id": "image-output", "input_modalities": ["audio"], "output_modalities": ["image"] },
-            { "id": "missing-input", "output_modalities": ["text"] },
+            { "id": "missing-input", "output_modalities": ["transcription"] },
             { "id": "missing-output", "input_modalities": ["audio"] },
             { "id": "legacy" },
             { "id": "empty", "input_modalities": [], "output_modalities": [] },
-            { "id": "malformed-input", "input_modalities": "audio", "output_modalities": ["text"] },
-            { "id": "malformed-output", "input_modalities": ["audio"], "output_modalities": "text" },
+            { "id": "malformed-input", "input_modalities": "audio", "output_modalities": ["transcription"] },
+            { "id": "malformed-output", "input_modalities": ["audio"], "output_modalities": "transcription" },
             { "id": "null", "input_modalities": null, "output_modalities": null }
         ]}),
         1,
@@ -270,14 +274,28 @@ fn transcriptions_require_audio_without_text_input_and_text_output_and_bypass_in
         Surface::Messages,
         Surface::Responses,
     ] {
-        for id in ["audio", "audio-image", "missing-output"] {
+        for id in [
+            "audio",
+            "audio-image",
+            "mixed-input",
+            "mixed-output",
+            "text-input",
+            "missing-input",
+            "malformed-input",
+        ] {
             assert!(
                 !original.get(id).unwrap().supports(surface),
                 "{id}: {surface:?}"
             );
             assert!(!original.get(id).unwrap().supports_agent(surface));
         }
-        for id in ["gemini", "text", "legacy"] {
+        for id in [
+            "gemini",
+            "audio-text-output",
+            "text",
+            "missing-output",
+            "legacy",
+        ] {
             assert!(
                 original.get(id).unwrap().supports(surface),
                 "{id}: {surface:?}"
@@ -296,7 +314,7 @@ fn transcriptions_require_audio_without_text_input_and_text_output_and_bypass_in
         }
         let audio = catalog.for_surface(Surface::AudioTranscriptions);
         let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(ids, ["audio", "audio-image"]);
+        assert_eq!(ids, ["audio", "audio-image", "mixed-input", "mixed-output"]);
     }
     assert_eq!(
         Surface::AudioTranscriptions.path(),

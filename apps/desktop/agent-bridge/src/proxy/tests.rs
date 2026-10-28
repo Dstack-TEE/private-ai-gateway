@@ -588,7 +588,7 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
     model
         .remote
         .extra
-        .insert("output_modalities".into(), json!(["text"]));
+        .insert("output_modalities".into(), json!(["transcription"]));
     state.publish(session);
     let proxy = spawn(router(state.clone())).await;
     let client = reqwest::Client::new();
@@ -633,9 +633,10 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
     }
     // Reject a missing or incompatible modality even when the model is listed.
     for (input, output) in [
-        (Some(json!(["text"])), Some(json!(["text"]))),
+        (Some(json!(["text"])), Some(json!(["transcription"]))),
         (Some(json!(["audio", "text"])), Some(json!(["text"]))),
-        (None, Some(json!(["text"]))),
+        (Some(json!(["audio"])), Some(json!(["text"]))),
+        (None, Some(json!(["transcription"]))),
         (Some(json!(["audio"])), None),
         (Some(json!(["audio"])), Some(json!(["image"]))),
     ] {
