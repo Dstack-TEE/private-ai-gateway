@@ -43,6 +43,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
                 | "/v1/chat/completions"
                 | "/v1/systemone"
                 | IMAGES_GENERATIONS_PATH
+                | "/v1/audio/transcriptions"
         );
     }
     let Ok(agent) = Agent::from_id(agent) else {
@@ -349,8 +350,10 @@ mod tests {
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/chat/completions"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/systemone"));
         assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/images/generations"));
+        assert!(agent_allows(LOCAL_TOOLS_AGENT, "/v1/audio/transcriptions"));
         for agent in Agent::ALL {
             assert!(!agent_allows(agent.id(), "/v1/images/generations"));
+            assert!(!agent_allows(agent.id(), "/v1/audio/transcriptions"));
         }
         assert!(!agent_allows("codex", "/v1/systemone"));
         assert!(!agent_allows("claude-code", "/v1/systemone"));

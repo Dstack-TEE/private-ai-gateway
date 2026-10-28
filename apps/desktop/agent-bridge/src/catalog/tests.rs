@@ -246,6 +246,45 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
 }
 
 #[test]
+fn transcriptions_require_explicit_audio_input_and_text_output_and_bypass_inventory() {
+    let original = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["text"] },
+            { "id": "mixed", "input_modalities": ["text", "audio"], "output_modalities": ["text", "image"] },
+            { "id": "text", "input_modalities": ["text"], "output_modalities": ["text"] },
+            { "id": "image-output", "input_modalities": ["audio"], "output_modalities": ["image"] },
+            { "id": "missing-input", "output_modalities": ["text"] },
+            { "id": "missing-output", "input_modalities": ["audio"] },
+            { "id": "legacy" },
+            { "id": "empty", "input_modalities": [], "output_modalities": [] },
+            { "id": "malformed-input", "input_modalities": "audio", "output_modalities": ["text"] },
+            { "id": "malformed-output", "input_modalities": ["audio"], "output_modalities": "text" },
+            { "id": "null", "input_modalities": null, "output_modalities": null }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let inventory = EndpointInventory::bundled().unwrap();
+    for endpoint in ["https://example.com", "https://tee.redpill.ai"] {
+        let mut catalog = original.clone();
+        catalog
+            .apply_endpoint_inventory(endpoint, &inventory)
+            .unwrap();
+        for model in &mut catalog.models {
+            // Text endpoint observations never enable or disable STT.
+            model.supported_surfaces = Some(vec![]);
+        }
+        let audio = catalog.for_surface(Surface::AudioTranscriptions);
+        let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
+        assert_eq!(ids, ["audio", "mixed"]);
+    }
+    assert_eq!(
+        Surface::AudioTranscriptions.path(),
+        "/v1/audio/transcriptions"
+    );
+}
+
+#[test]
 fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
     let catalog = Catalog::from_remote(
         &json!({ "data": [

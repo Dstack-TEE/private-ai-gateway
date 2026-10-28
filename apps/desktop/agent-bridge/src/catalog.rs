@@ -35,6 +35,7 @@ pub enum Surface {
     /// System One relay surface.
     SystemOne,
     Images,
+    AudioTranscriptions,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,6 +182,7 @@ impl Surface {
             Surface::Responses => "/v1/responses",
             Surface::SystemOne => "/v1/systemone",
             Surface::Images => IMAGES_GENERATIONS_PATH,
+            Surface::AudioTranscriptions => "/v1/audio/transcriptions",
         }
     }
 
@@ -188,7 +190,10 @@ impl Surface {
         match self {
             Surface::SystemOne => "decisions",
             Surface::Images => "image",
-            Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
+            Surface::ChatCompletions
+            | Surface::Messages
+            | Surface::Responses
+            | Surface::AudioTranscriptions => "text",
         }
     }
 }
@@ -208,12 +213,21 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        self.outputs(surface.output_modality())
-            && (matches!(surface, Surface::SystemOne | Surface::Images)
-                || self
-                    .supported_surfaces
-                    .as_ref()
-                    .is_none_or(|surfaces| surfaces.contains(&surface)))
+        let modalities = if surface == Surface::AudioTranscriptions {
+            // Transcription must never be inferred from a legacy text catalog.
+            self.advertises("input_modalities", "audio")
+                && self.advertises("output_modalities", "text")
+        } else {
+            self.outputs(surface.output_modality())
+        };
+        modalities
+            && (matches!(
+                surface,
+                Surface::SystemOne | Surface::Images | Surface::AudioTranscriptions
+            ) || self
+                .supported_surfaces
+                .as_ref()
+                .is_none_or(|surfaces| surfaces.contains(&surface)))
     }
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
@@ -235,6 +249,14 @@ impl CatalogModel {
                     .as_array()
                     .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
             })
+    }
+
+    fn advertises(&self, field: &str, modality: &str) -> bool {
+        self.remote
+            .extra
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|modalities| modalities.iter().any(|value| value == modality))
     }
 
     pub fn id(&self) -> &str {
