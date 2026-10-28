@@ -558,11 +558,10 @@ fn multipart_provider(headers: &HeaderMap) -> Result<Option<Value>, String> {
     if values.next().is_some() || value.as_bytes().len() > MAX_MULTIPART_PROVIDER_BYTES {
         return Err("duplicate or oversized X-ACI-Provider".into());
     }
-    if !value.as_bytes().is_ascii() {
-        return Err("X-ACI-Provider must contain only ASCII bytes".into());
-    }
-    let provider: Value =
-        serde_json::from_slice(value.as_bytes()).map_err(|_| "invalid X-ACI-Provider JSON")?;
+    let value = value
+        .to_str()
+        .map_err(|_| "X-ACI-Provider must contain only ASCII bytes")?;
+    let provider: Value = serde_json::from_str(value).map_err(|_| "invalid X-ACI-Provider JSON")?;
     if !provider.is_object() {
         return Err("X-ACI-Provider must be an object".into());
     }

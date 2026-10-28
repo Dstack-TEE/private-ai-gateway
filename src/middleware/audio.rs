@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
@@ -39,6 +39,8 @@ pub struct AudioError {
     pub status: StatusCode,
     pub code: &'static str,
     pub param: String,
+    message: String,
+    error_type: &'static str,
 }
 impl AudioError {
     fn invalid(param: &str) -> Self {
@@ -46,6 +48,8 @@ impl AudioError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_parameter",
             param: param.into(),
+            message: format!("invalid transcription parameter: {param}"),
+            error_type: "invalid_request_error",
         }
     }
     fn capacity() -> Self {
@@ -53,6 +57,8 @@ impl AudioError {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: "rate_limit_exceeded",
             param: "body".into(),
+            message: "transcription upload byte capacity reached; retry shortly".into(),
+            error_type: "rate_limit_error",
         }
     }
     fn large() -> Self {
@@ -60,27 +66,21 @@ impl AudioError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "request_too_large",
             param: "file".into(),
+            message: "transcription upload exceeds the file or request size limit".into(),
+            error_type: "invalid_request_error",
+        }
+    }
+    fn timeout() -> Self {
+        Self {
+            status: StatusCode::REQUEST_TIMEOUT,
+            code: "upload_timeout",
+            param: "body".into(),
+            message: "transcription upload exceeded the 60-second read deadline".into(),
+            error_type: "invalid_request_error",
         }
     }
     pub fn into_response(self) -> Response {
-        let message = match self.status {
-            StatusCode::REQUEST_TIMEOUT => {
-                "transcription upload exceeded the 60-second read deadline".into()
-            }
-            StatusCode::PAYLOAD_TOO_LARGE => {
-                "transcription upload exceeds the file or request size limit".into()
-            }
-            StatusCode::TOO_MANY_REQUESTS => {
-                "transcription upload byte capacity reached; retry shortly".into()
-            }
-            _ => format!("invalid transcription parameter: {}", self.param),
-        };
-        let error_type = if self.status == StatusCode::TOO_MANY_REQUESTS {
-            "rate_limit_error"
-        } else {
-            "invalid_request_error"
-        };
-        let mut response = (self.status, Json(json!({"error":{"type":error_type, "code":self.code,"param":self.param,"message":message}}))).into_response();
+        let mut response = (self.status, Json(json!({"error":{"type":self.error_type, "code":self.code,"param":self.param,"message":self.message}}))).into_response();
         if matches!(
             self.status,
             StatusCode::PAYLOAD_TOO_LARGE | StatusCode::REQUEST_TIMEOUT
@@ -114,11 +114,7 @@ pub async fn read_upload(
     }
     tokio::time::timeout(READ_DEADLINE, collect_upload(body, UPLOAD_BYTES.clone()))
         .await
-        .map_err(|_| AudioError {
-            status: StatusCode::REQUEST_TIMEOUT,
-            code: "upload_timeout",
-            param: "body".into(),
-        })?
+        .map_err(|_| AudioError::timeout())?
 }
 
 async fn collect_upload(
@@ -242,9 +238,8 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
             && !timestamp
         {
             return Err(AudioError {
-                status: StatusCode::BAD_REQUEST,
                 code: "unknown_parameter",
-                param: name,
+                ..AudioError::invalid(&name)
             });
         }
         if field.file_name().is_some() {
@@ -432,11 +427,7 @@ fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
 /// Expose the same validated integer duration that is billed. Keep the raw
 /// provider duration in AudioUsage and the verbose response's duration field.
 fn normalize_usage(body: &mut Value, audio: &AudioUsage) {
-    let cost = body.get("usage").and_then(|v| v.get("cost")).cloned();
     body["usage"] = json!({"type":"duration","seconds":audio.seconds});
-    if let Some(cost) = cost {
-        body["usage"]["cost"] = cost;
-    }
 }
 
 /// Retain sanitized provider counters for consult/post and internal token pricing.
@@ -453,7 +444,7 @@ pub(crate) fn billing_usage(usage: Option<Value>, audio: &AudioUsage) -> Value {
 fn reduce_format(body: &mut Value, params: &Value) {
     if params.get("response_format").and_then(Value::as_str) != Some("verbose_json") {
         if let Some(object) = body.as_object_mut() {
-            object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages" | "logprobs"));
+            object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages"));
         }
     }
 }
@@ -461,6 +452,33 @@ fn reduce_format(body: &mut Value, params: &Value) {
 fn nonnegative(v: &Value) -> bool {
     v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
 }
+
+#[derive(Deserialize, Serialize)]
+struct Segment {
+    id: u64,
+    seek: u64,
+    start: f64,
+    end: f64,
+    text: String,
+    tokens: Vec<u64>,
+    temperature: f64,
+    avg_logprob: f64,
+    compression_ratio: f64,
+    no_speech_prob: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Word {
+    word: String,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Language {
+    code: String,
+}
+
 fn canonicalize(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -468,81 +486,31 @@ fn canonicalize(body: &mut Value) {
     object.retain(|k, v| match k.as_str() {
         "text" | "language" | "task" => v.is_string(),
         "duration" => nonnegative(v),
-        "segments" | "words" | "languages" | "logprobs" => v.is_array(),
-        "usage" => v.is_object(),
+        "segments" | "words" | "languages" => v.is_array(),
         _ => false,
     });
-    if let Some(languages) = object.get_mut("languages").and_then(Value::as_array_mut) {
-        languages.retain(|language| language.get("code").is_some_and(Value::is_string));
-        for language in languages {
-            if let Some(fields) = language.as_object_mut() {
-                fields.retain(|key, _| key == "code");
-            }
-        }
-    }
-    if let Some(logprobs) = object.get_mut("logprobs").and_then(Value::as_array_mut) {
-        logprobs.retain(Value::is_object);
-        for item in logprobs {
-            if let Some(fields) = item.as_object_mut() {
-                fields.retain(|key, value| match key.as_str() {
-                    "token" => value.is_string(),
-                    "logprob" => value.is_number(),
-                    "bytes" => value
-                        .as_array()
-                        .is_some_and(|a| a.iter().all(Value::is_number)),
-                    _ => false,
-                });
-            }
-        }
-    }
-    for array in ["segments", "words"] {
+    for array in ["segments", "words", "languages"] {
         if let Some(items) = object.get_mut(array).and_then(Value::as_array_mut) {
-            items.retain(Value::is_object);
-            for item in items.iter_mut() {
-                if let Some(fields) = item.as_object_mut() {
-                    fields.retain(|k, v| match k.as_str() {
-                        "text" if array == "segments" => v.is_string(),
-                        "word" if array == "words" => v.is_string(),
-                        "id" | "seek" if array == "segments" => v.is_u64(),
-                        "start" | "end" => nonnegative(v),
-                        "temperature" | "avg_logprob" | "compression_ratio" | "no_speech_prob"
-                            if array == "segments" =>
-                        {
-                            v.is_number()
-                        }
-                        "tokens" if array == "segments" => {
-                            v.as_array().is_some_and(|a| a.iter().all(Value::is_u64))
-                        }
-                        _ => false,
-                    });
-                }
-            }
-            items.retain(|item| {
-                let fields: &[&str] = if array == "segments" {
-                    &[
-                        "id",
-                        "seek",
-                        "start",
-                        "end",
-                        "text",
-                        "tokens",
-                        "temperature",
-                        "avg_logprob",
-                        "compression_ratio",
-                        "no_speech_prob",
-                    ]
-                } else {
-                    &["word", "start", "end"]
-                };
-                fields.iter().all(|key| item.get(*key).is_some())
-            });
-            if items.is_empty() {
+            *items = std::mem::take(items)
+                .into_iter()
+                .filter_map(|item| match array {
+                    "segments" => serde_json::from_value::<Segment>(item)
+                        .ok()
+                        .filter(|s| s.start >= 0.0 && s.end >= 0.0)
+                        .map(|s| json!(s)),
+                    "words" => serde_json::from_value::<Word>(item)
+                        .ok()
+                        .filter(|w| w.start >= 0.0 && w.end >= 0.0)
+                        .map(|w| json!(w)),
+                    _ => serde_json::from_value::<Language>(item)
+                        .ok()
+                        .map(|l| json!(l)),
+                })
+                .collect();
+            if array != "languages" && items.is_empty() {
                 object.remove(array);
             }
         }
-    }
-    if let Some(usage) = object.get_mut("usage") {
-        canonicalize_usage(usage);
     }
 }
 
@@ -859,6 +827,7 @@ mod tests {
             json!({"text":"hello","duration":2.965,"usage":{}}),
             json!({"text":"hello","duration":2.965,"usage":{"type":"duration","seconds":2.965}}),
             json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2}}),
+            json!({"text":"hello","duration":2.965,"usage":{"type":"duration","seconds":2.965,"cost":99}}),
         ] {
             let (verbose, audio) =
                 sanitize_response(body.clone(), &json!({"response_format":"verbose_json"}))
@@ -901,26 +870,24 @@ mod tests {
             let (body, _) = sanitize_response(json!({"text":"hello","language":language,"duration":10,"usage":{"type":"duration","seconds":2.965,"cost":0.1}}), &params).unwrap();
             assert_eq!(body["duration"], 2.965);
             assert_eq!(body["language"], expected);
-            assert_eq!(
-                body["usage"],
-                json!({"type":"duration","seconds":3,"cost":0.1})
-            );
+            assert_eq!(body["usage"], json!({"type":"duration","seconds":3}));
         }
     }
 
     #[test]
     fn timestamp_items_require_every_sdk_field_and_keep_no_private_fields() {
-        let segment = json!({"id":0,"seek":0,"start":0,"end":1,"text":"hello","tokens":[1],"temperature":0,"avg_logprob":-0.1,"compression_ratio":1,"no_speech_prob":0});
+        let segment = json!({"id":0,"seek":0,"start":0.0,"end":1.0,"text":"hello","tokens":[1],"temperature":0.0,"avg_logprob":-0.1,"compression_ratio":1.0,"no_speech_prob":0.0});
         let mut invalid = segment.clone();
         invalid["tokens"] = json!([1, "private"]);
         let mut private = segment.clone();
         private["url"] = json!("private");
-        let (body, _) = sanitize_response(json!({"text":"hello","duration":1,"segments":[private,invalid,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"}],"logprobs":[{"token":"hello","logprob":-0.1,"bytes":[104],"url":"private"},"private"]}), &json!({"response_format":"verbose_json"})).unwrap();
+        let mut negative = segment.clone();
+        negative["start"] = json!(-1);
+        let (body, _) = sanitize_response(json!({"text":"hello","duration":1,"segments":[private,invalid,negative,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}]}), &json!({"response_format":"verbose_json"})).unwrap();
         assert_eq!(body["segments"], json!([segment]));
-        assert_eq!(body["words"], json!([{"word":"hello","start":0,"end":1}]));
         assert_eq!(
-            body["logprobs"],
-            json!([{"token":"hello","logprob":-0.1,"bytes":[104]}])
+            body["words"],
+            json!([{"word":"hello","start":0.0,"end":1.0}])
         );
         assert!(!body.to_string().contains("private"));
     }

@@ -69,7 +69,9 @@ For each entry with the `chat` capability, the case:
 
 `audio_transcriptions` provider capability runs
 `cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
-committed 94,958-byte synthetic spoken WAV. It checks recognizable fixture
+committed 94,958-byte synthetic spoken WAV in both `json` and `verbose_json`
+formats. Each response is validated against the pinned `openai==3.40.0`
+`Transcription` or `TranscriptionVerbose` model. It checks recognizable fixture
 words, positive integer billable seconds, response allowlists, null chat id,
 received/returned body hashes, the serving attested session, and offline
 `pap audit`. Artifacts preserve the exact raw multipart upload for audit.
@@ -84,13 +86,6 @@ NEAR's native JSON contains only `text`, so the gateway automatically requests
 verbose output internally for NEAR audio while preserving the caller's format.
 Run on an authorized test CVM, then delete the CVM. Do not enable production
 routes until client fail-closed releases and control-plane audio ingestion ship.
-
-For local SDK conformance, start a gateway backed by local mocks and run
-`uv run --with openai==3.40.0 python scripts/probe_audio_sdk.py --base-url http://127.0.0.1:8080/v1 --model whisper`.
-The probe accepts loopback gateways only, uses strict `Transcription` and
-`TranscriptionVerbose` parsing in both formats with/without language, and checks
-negative controls that must fail validation. Repeat `--base-url` for direct and
-middleware gateways, or `--model` for additional mock response cases.
 
 ### Image generation case
 
