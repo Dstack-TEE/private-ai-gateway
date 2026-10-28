@@ -38,6 +38,7 @@ class AudioTranscriptionsTests(unittest.TestCase):
             {"usage": {"seconds": 0}},
             {"usage": {"seconds": 2.965}},
             {"usage": {"seconds": 3.0}},
+            {"usage": {"type": "tokens", "seconds": 3, "input_tokens": 1}},
             {"usage": {"seconds": float("nan")}},
             {"segments": []},
             {"languages": [{"code": 1}]},

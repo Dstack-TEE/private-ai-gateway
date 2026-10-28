@@ -196,6 +196,9 @@ segments, file size, or elapsed time. Missing `usage` is synthesized for the
 client and report; existing or synthesized `usage.seconds` is normalized to the
 same billable integer (`2.965` becomes `3`). Verbose `duration` and
 `audio.raw_duration` retain the raw value. Nested usage is sanitized before reporting.
+Client usage always has `type: "duration"`, integer `seconds`, and optional
+`cost`. Provider token counters and their usage type remain in the sanitized
+post report and internal pricing input; they are not exposed in client usage.
 
 `pricing.audioCostPerSecond` is an unsigned plain decimal **string**, at most
 18 fractional digits and at most `1000000`, like image rates. Successful cost is

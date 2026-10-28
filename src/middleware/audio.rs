@@ -387,6 +387,16 @@ pub fn sanitize_response(
     let audio = usage(&body)?;
     canonicalize(&mut body);
     normalize_usage(&mut body, &audio);
+    if params.get("response_format").and_then(Value::as_str) == Some("verbose_json") {
+        body["duration"] = json!(audio.raw_duration);
+        if !body.get("language").is_some_and(Value::is_string) {
+            body["language"] = params
+                .get("language")
+                .filter(|v| v.is_string())
+                .cloned()
+                .unwrap_or(json!(""));
+        }
+    }
     reduce_format(&mut body, params);
     Ok((body, audio))
 }
@@ -422,16 +432,28 @@ fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
 /// Expose the same validated integer duration that is billed. Keep the raw
 /// provider duration in AudioUsage and the verbose response's duration field.
 fn normalize_usage(body: &mut Value, audio: &AudioUsage) {
-    if !body.get("usage").is_some_and(Value::is_object) {
-        body["usage"] = json!({"type":"duration"});
+    let cost = body.get("usage").and_then(|v| v.get("cost")).cloned();
+    body["usage"] = json!({"type":"duration","seconds":audio.seconds});
+    if let Some(cost) = cost {
+        body["usage"]["cost"] = cost;
     }
-    body["usage"]["seconds"] = json!(audio.seconds);
+}
+
+/// Retain sanitized provider counters for consult/post and internal token pricing.
+/// Client usage always describes the gateway's duration billing unit.
+pub(crate) fn billing_usage(usage: Option<Value>, audio: &AudioUsage) -> Value {
+    let mut usage = usage
+        .filter(Value::is_object)
+        .unwrap_or(json!({"type":"duration"}));
+    canonicalize_usage(&mut usage);
+    usage["seconds"] = json!(audio.seconds);
+    usage
 }
 
 fn reduce_format(body: &mut Value, params: &Value) {
     if params.get("response_format").and_then(Value::as_str) != Some("verbose_json") {
         if let Some(object) = body.as_object_mut() {
-            object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages"));
+            object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages" | "logprobs"));
         }
     }
 }
@@ -446,7 +468,7 @@ fn canonicalize(body: &mut Value) {
     object.retain(|k, v| match k.as_str() {
         "text" | "language" | "task" => v.is_string(),
         "duration" => nonnegative(v),
-        "segments" | "words" | "languages" => v.is_array(),
+        "segments" | "words" | "languages" | "logprobs" => v.is_array(),
         "usage" => v.is_object(),
         _ => false,
     });
@@ -458,10 +480,25 @@ fn canonicalize(body: &mut Value) {
             }
         }
     }
+    if let Some(logprobs) = object.get_mut("logprobs").and_then(Value::as_array_mut) {
+        logprobs.retain(Value::is_object);
+        for item in logprobs {
+            if let Some(fields) = item.as_object_mut() {
+                fields.retain(|key, value| match key.as_str() {
+                    "token" => value.is_string(),
+                    "logprob" => value.is_number(),
+                    "bytes" => value
+                        .as_array()
+                        .is_some_and(|a| a.iter().all(Value::is_number)),
+                    _ => false,
+                });
+            }
+        }
+    }
     for array in ["segments", "words"] {
         if let Some(items) = object.get_mut(array).and_then(Value::as_array_mut) {
             items.retain(Value::is_object);
-            for item in items {
+            for item in items.iter_mut() {
                 if let Some(fields) = item.as_object_mut() {
                     fields.retain(|k, v| match k.as_str() {
                         "text" if array == "segments" => v.is_string(),
@@ -480,9 +517,37 @@ fn canonicalize(body: &mut Value) {
                     });
                 }
             }
+            items.retain(|item| {
+                let fields: &[&str] = if array == "segments" {
+                    &[
+                        "id",
+                        "seek",
+                        "start",
+                        "end",
+                        "text",
+                        "tokens",
+                        "temperature",
+                        "avg_logprob",
+                        "compression_ratio",
+                        "no_speech_prob",
+                    ]
+                } else {
+                    &["word", "start", "end"]
+                };
+                fields.iter().all(|key| item.get(*key).is_some())
+            });
+            if items.is_empty() {
+                object.remove(array);
+            }
         }
     }
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
+    if let Some(usage) = object.get_mut("usage") {
+        canonicalize_usage(usage);
+    }
+}
+
+fn canonicalize_usage(usage: &mut Value) {
+    if let Some(usage) = usage.as_object_mut() {
         usage.retain(|k, v| match k.as_str() {
             "type" => matches!(v.as_str(), Some("duration" | "tokens")),
             "seconds" | "cost" => nonnegative(v),
@@ -791,6 +856,7 @@ mod tests {
     fn sanitizer_normalizes_duration_usage_and_preserves_requested_format() {
         for body in [
             json!({"text":"hello","duration":2.965}),
+            json!({"text":"hello","duration":2.965,"usage":{}}),
             json!({"text":"hello","duration":2.965,"usage":{"type":"duration","seconds":2.965}}),
             json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2}}),
         ] {
@@ -806,18 +872,57 @@ mod tests {
             );
             assert_eq!(verbose["duration"], 2.965);
             assert_eq!(verbose["usage"]["seconds"].as_u64(), Some(3));
-            if let Some(upstream_usage) = body.get("usage") {
-                assert_eq!(verbose["usage"]["type"], upstream_usage["type"]);
-                assert_eq!(
-                    verbose["usage"]["input_tokens"],
-                    upstream_usage["input_tokens"]
-                );
-            } else {
-                assert_eq!(verbose["usage"]["type"], "duration");
-            }
+            assert_eq!(verbose["usage"], json!({"type":"duration","seconds":3}));
+            assert_eq!(verbose["language"], "");
             let (reduced, _) = sanitize_response(body, &Value::Null).unwrap();
             assert_eq!(reduced, json!({"text":"hello","usage":verbose["usage"]}));
         }
+    }
+
+    #[test]
+    fn verbose_metadata_uses_authoritative_duration_and_language_fallback() {
+        for (language, params, expected) in [
+            (
+                json!("English"),
+                json!({"response_format":"verbose_json","language":"en"}),
+                "English",
+            ),
+            (
+                Value::Null,
+                json!({"response_format":"verbose_json","language":"en"}),
+                "en",
+            ),
+            (
+                json!({"private":1}),
+                json!({"response_format":"verbose_json"}),
+                "",
+            ),
+        ] {
+            let (body, _) = sanitize_response(json!({"text":"hello","language":language,"duration":10,"usage":{"type":"duration","seconds":2.965,"cost":0.1}}), &params).unwrap();
+            assert_eq!(body["duration"], 2.965);
+            assert_eq!(body["language"], expected);
+            assert_eq!(
+                body["usage"],
+                json!({"type":"duration","seconds":3,"cost":0.1})
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_items_require_every_sdk_field_and_keep_no_private_fields() {
+        let segment = json!({"id":0,"seek":0,"start":0,"end":1,"text":"hello","tokens":[1],"temperature":0,"avg_logprob":-0.1,"compression_ratio":1,"no_speech_prob":0});
+        let mut invalid = segment.clone();
+        invalid["tokens"] = json!([1, "private"]);
+        let mut private = segment.clone();
+        private["url"] = json!("private");
+        let (body, _) = sanitize_response(json!({"text":"hello","duration":1,"segments":[private,invalid,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"}],"logprobs":[{"token":"hello","logprob":-0.1,"bytes":[104],"url":"private"},"private"]}), &json!({"response_format":"verbose_json"})).unwrap();
+        assert_eq!(body["segments"], json!([segment]));
+        assert_eq!(body["words"], json!([{"word":"hello","start":0,"end":1}]));
+        assert_eq!(
+            body["logprobs"],
+            json!([{"token":"hello","logprob":-0.1,"bytes":[104]}])
+        );
+        assert!(!body.to_string().contains("private"));
     }
 
     #[test]
@@ -827,11 +932,8 @@ mod tests {
             sanitize_response(upstream.clone(), &json!({"response_format":"verbose_json"}))
                 .unwrap();
         assert!(!body.to_string().contains("private"));
-        assert_eq!(body["segments"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            body["usage"]["input_token_details"],
-            json!({"audio_tokens":1})
-        );
+        assert!(body.get("segments").is_none());
+        assert_eq!(body["usage"], json!({"type":"duration","seconds":1}));
         assert_eq!(body["languages"], json!([{"code":"en"}]));
         let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
         assert_eq!(reduced["languages"], body["languages"]);

@@ -85,6 +85,13 @@ verbose output internally for NEAR audio while preserving the caller's format.
 Run on an authorized test CVM, then delete the CVM. Do not enable production
 routes until client fail-closed releases and control-plane audio ingestion ship.
 
+For local SDK conformance, start a gateway backed by local mocks and run
+`uv run --with openai==3.40.0 python scripts/probe_audio_sdk.py --base-url http://127.0.0.1:8080/v1 --model whisper`.
+The probe accepts loopback gateways only, uses strict `Transcription` and
+`TranscriptionVerbose` parsing in both formats with/without language, and checks
+negative controls that must fail validation. Repeat `--base-url` for direct and
+middleware gateways, or `--model` for additional mock response cases.
+
 ### Image generation case
 
 For each entry with the `images` capability, `cases/images.py` sends one

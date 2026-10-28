@@ -149,10 +149,15 @@ TEE-only host policy remains independent.
 The gateway forwards the requested response format. NEAR audio automatically
 uses verbose output internally to obtain duration while preserving the caller's
 output format. It requests word timestamps only when the caller asks. `json` returns
-`text`, `usage`, and optional `languages: [{code: string}]`; verbose output may
+`text`, `usage`, and optional well-formed `languages: [{code: string}]` and
+`logprobs`; verbose output may
 also include `language`, `duration`,
 `segments`, `words`, and `task`. Nested segment, word, usage, and token-detail
 objects are sanitized by allowlist. Upstream filenames become `audio.<ext>`.
+Verbose `duration` always contains the validated raw duration. `language` uses
+the upstream string, then the requested language, then an empty string for
+unknown. Segment and word items must contain all SDK-required fields with valid
+types; incomplete items are dropped, and empty timestamp arrays are omitted.
 Audio upstream responses have an 8 MiB cap, including error bodies (`502` on
 overflow).
 
@@ -162,9 +167,10 @@ An invalid preferred duration never falls back. Zero, negative, missing,
 nonfinite, and durations above `4294967295` seconds become `502`; the transcript
 is withheld and no audio usage is billed. The forwarded receipt is retained.
 Billable seconds round up once; see the [audio pricing contract](control-plane-contract.md#audio-transcription).
-Client-visible `usage.seconds` is always this billable integer, whether usage
-was supplied upstream or synthesized. For example, `2.965` becomes `3`; verbose
-`duration` retains the raw provider value. Receipts have null `chat_id`; fetch by
+Client-visible usage is always `{"type":"duration","seconds":3}` with optional
+gateway-priced `cost`; `seconds` is the billable integer (`2.965` becomes `3`).
+Provider token counters remain internal to pricing and post reports. Verbose
+`duration` retains the validated raw value. Receipts have null `chat_id`; fetch by
 `X-Receipt-Id`. `request.received` hashes raw client multipart bytes and
 `request.forwarded` hashes the exact gateway-encoded bytes sent upstream.
 
