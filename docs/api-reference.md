@@ -37,6 +37,7 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
+| `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header returns `400 e2ee_unsupported_endpoint` before reading the body | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` before reading the body | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
@@ -100,6 +101,62 @@ adds `usage.cost` when pricing applies, including for providers billed per image
 URLs, provider IDs, model IDs, and other fields are removed. Image
 receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Image pricing
 follows the [control-plane pricing contract](control-plane-contract.md#image-generation).
+
+### Audio transcription
+
+Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
+`model` and exactly one nonempty `file` (up to 25 MiB), with filename extension
+`flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, or `webm`.
+No audio decoding or MIME sniffing occurs. Optional fields are `language` (2–3
+lowercase ASCII letters), `prompt` (up to 4096 Unicode characters), `temperature`
+(0–1), `response_format` (`json`, the default, or `verbose_json`), and `user`
+(accepted but removed upstream). `timestamp_granularities[]` (or the spelling
+without brackets) accepts `word` and/or `segment`, once each, only with
+`verbose_json`; mixing spellings is rejected. `stream`, `provider` form fields,
+`chunking_strategy`, `include[]`, speaker fields, and all other fields return
+`400 unknown_parameter`. Duplicate scalar fields, invalid UTF-8, ambiguous
+parts, and malformed multipart return `400`.
+
+Limits: 16 parts, 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads have their
+own 16 slots and a 60-second read deadline (`408 upload_timeout`); saturation
+returns `429 upload_capacity`. A separate 16-slot transcription inference
+admission follows validation and, in middleware mode, successful control-plane
+authorization and route selection. Upload accounting remains held until that
+handoff. Response bodies and pending write buffers own inference admission until
+completion or disconnect. There are no queue or whitespace heartbeats.
+
+Multipart routing policy uses `X-ACI-Provider: {"aci_verified":true}` with the
+same object schema as JSON `provider`. Duplicate headers, values over 8192 bytes,
+malformed/non-object JSON, invalid pins, and unknown `aci_` members return `400`.
+The header is consumed; it never reaches the upstream. JSON endpoints reject
+this carrier. The attestation report advertises support as
+`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions"]`.
+Constrained clients must obtain this capability over their accepted pinned
+channel before uploading. Receipt body hashes do not commit to this header;
+clients retain their effective policy and check the cited session against it.
+TEE-only host policy remains independent.
+
+The gateway forwards the requested response format, with a provider-specific
+`audio_force_verbose_json` opt-in for providers needing verbose output to report
+duration. It requests word timestamps only when the caller asks. `json` returns
+only `text` and `usage`; verbose output may also include `language`, `duration`,
+`segments`, `words`, and `task`. Nested segment, word, usage, and token-detail
+objects are sanitized by allowlist. Upstream filenames become `audio.<ext>`.
+Audio upstream responses have an 8 MiB cap, including error bodies (`502` on
+overflow).
+
+A successful response requires string `text` and a positive numeric duration:
+`usage.seconds` with `usage.type == "duration"`, otherwise top-level `duration`.
+An invalid preferred duration never falls back. Zero, negative, missing,
+nonfinite, and durations above `4294967295` seconds become `502`; the transcript
+is withheld and no audio usage is billed. The forwarded receipt is retained.
+Billable seconds round up once; see the [audio pricing contract](control-plane-contract.md#audio-transcription).
+Absent usage is synthesized. Receipts have null `chat_id`; fetch by
+`X-Receipt-Id`. `request.received` hashes raw client multipart bytes and
+`request.forwarded` hashes the exact gateway-encoded bytes sent upstream.
+
+### Inference responses
 
 The normal provider-backed response path adds:
 

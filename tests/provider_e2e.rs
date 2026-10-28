@@ -777,6 +777,7 @@ fn runtime_options(mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
 
 fn privatemode_upstream_config(base_url: String, verifier_cache_seconds: u64) -> UpstreamConfig {
     UpstreamConfig {
+        audio_force_verbose_json: false,
         name: "privatemode-provider".to_string(),
         provider: UpstreamProvider::Privatemode,
         base_url,
@@ -990,6 +991,7 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
+            audio_force_verbose_json: false,
             name: "private-chute".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url,
@@ -1039,6 +1041,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
+            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
@@ -1177,11 +1180,11 @@ async fn privatemode_backend_forwards_buffered_and_streaming_only_with_its_bindi
     );
 
     let request = || UpstreamRequest {
-        body: PROVIDER_CHAT_REQUEST.to_vec(),
+        body: PROVIDER_CHAT_REQUEST.to_vec().into(),
         ..Default::default()
     };
     let plaintext_path_request = UpstreamRequest {
-        body: PROVIDER_CHAT_REQUEST.to_vec(),
+        body: PROVIDER_CHAT_REQUEST.to_vec().into(),
         path: Some("/v1/models".to_string()),
         ..Default::default()
     };
@@ -1283,7 +1286,7 @@ async fn privatemode_never_follows_cross_origin_redirects() {
     let verified = fixture.verified_event();
     let backend = fixture.backend();
     let request = || UpstreamRequest {
-        body: PROVIDER_CHAT_REQUEST.to_vec(),
+        body: PROVIDER_CHAT_REQUEST.to_vec().into(),
         ..Default::default()
     };
 
@@ -1555,6 +1558,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
         let result = service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
+                    audio_form: None,
                     context: GatewayRequestContext {
                         user_model: Some("public-model".to_string()),
                         ..GatewayRequestContext::default()
@@ -1569,6 +1573,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     e2ee: None,
                 },
                 vec![ForwardCandidate {
+                    audio_form: None,
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
                     path: "/v1/chat/completions",
@@ -1647,6 +1652,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     );
     manager
         .replace(vec![UpstreamConfig {
+            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
@@ -1743,6 +1749,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
         UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None)).unwrap();
     manager
         .replace(vec![UpstreamConfig {
+            audio_force_verbose_json: false,
             name: "openai-compatible-provider".to_string(),
             provider: UpstreamProvider::OpenAiCompatible,
             base_url: base_url.clone(),
@@ -1772,7 +1779,9 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
     let backend = manager.backend();
     let prepared = backend
         .prepare(UpstreamRequest {
-            body: CHAT_REQUEST.to_vec(),
+            content_type: None,
+            form: None,
+            body: CHAT_REQUEST.to_vec().into(),
             headers: Default::default(),
             path: None,
             target_route_id: None,
@@ -2371,7 +2380,7 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         .unwrap();
     let expected = router
         .prepare(UpstreamRequest {
-            body: STREAM_CHAT_REQUEST.to_vec(),
+            body: STREAM_CHAT_REQUEST.to_vec().into(),
             path: Some("/v1/chat/completions".into()),
             ..Default::default()
         })

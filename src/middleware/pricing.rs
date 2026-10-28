@@ -174,6 +174,25 @@ pub fn compute_image_cost(
     images.checked_add(tokens)?.to_f64()
 }
 
+/// Audio prices use the same bounded, unsigned decimal grammar as image prices.
+pub fn compute_audio_cost(
+    usage: Option<&Value>,
+    pricing: &Value,
+    audio: &super::audio::AudioUsage,
+) -> Option<f64> {
+    let unit = pricing
+        .get("audioCostPerSecond")
+        .map(image_rate)
+        .unwrap_or(Some(Decimal::ZERO))?;
+    let tokens = usage
+        .map(|u| token_cost(u, pricing))
+        .unwrap_or(Some(Decimal::ZERO))?;
+    Decimal::from(audio.seconds)
+        .checked_mul(unit)?
+        .checked_add(tokens)?
+        .to_f64()
+}
+
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
 /// integer-valued cost has no decimal point, otherwise the shortest round-trip
 /// form. The numeric value is identical either way.
@@ -478,5 +497,51 @@ mod image_tests {
             .unwrap();
             assert!((cost - expected - 0.08).abs() < 1e-12);
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn audio_cost_uses_canonical_seconds_exact_decimals_and_optional_tokens() {
+        let audio = super::super::audio::AudioUsage {
+            seconds: 3,
+            raw_duration: Some(2.1),
+        };
+        assert_eq!(
+            compute_audio_cost(None, &json!({"audioCostPerSecond":"0.0001"}), &audio),
+            Some(0.0003)
+        );
+        assert_eq!(
+            compute_audio_cost(
+                Some(&json!({"input_tokens":2,"output_tokens":1})),
+                &json!({"audioCostPerSecond":"0.1","inputCostPerToken":"0.01","outputCostPerToken":"0.02"}),
+                &audio
+            ),
+            Some(0.34)
+        );
+        for rate in [
+            json!(0.1),
+            json!("-1"),
+            json!("1e-3"),
+            json!("1."),
+            json!(".1"),
+            json!("1000001"),
+            json!("0.0000000000000000001"),
+        ] {
+            assert_eq!(
+                compute_audio_cost(None, &json!({"audioCostPerSecond":rate}), &audio),
+                None
+            );
+        }
+        assert!(compute_audio_cost(
+            Some(&json!({"input_tokens":2})),
+            &json!({"audioCostPerSecond":"0.1","inputCostPerToken":Decimal::MAX.to_string()}),
+            &audio
+        )
+        .is_none());
     }
 }

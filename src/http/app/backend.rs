@@ -27,7 +27,8 @@ use crate::middleware::errors::{self, normalize_upstream_error, surface_for_path
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
     pub(super) endpoint_path: &'static str,
-    pub(super) received_body: Vec<u8>,
+    pub(super) received_body: axum::body::Bytes,
+    pub(super) audio_form: Option<Arc<crate::middleware::audio::AudioForm>>,
     pub(super) forwarded_body: Option<Vec<u8>>,
     pub(super) aci_required: bool,
     pub(super) aci_session_ids: Vec<String>,
@@ -62,6 +63,7 @@ async fn forward_to_backend_inner(
     if input.stream {
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
+                audio_form: input.audio_form.clone(),
                 context: input.context,
                 endpoint_path: input.endpoint_path,
                 received_body: &input.received_body,
@@ -172,6 +174,7 @@ async fn forward_to_backend_inner(
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
+            audio_form: input.audio_form.clone(),
             context: input.context,
             endpoint_path: input.endpoint_path,
             received_body: &input.received_body,

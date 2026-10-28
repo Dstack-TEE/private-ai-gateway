@@ -399,6 +399,7 @@ fn harness_with(
     let upstream_calls = upstream.calls();
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
+        supported_multipart_constraint_endpoints: vec!["/v1/audio/transcriptions".into()],
         supported_e2ee_versions: if enable_e2ee {
             vec!["2".to_string()]
         } else {
@@ -1875,7 +1876,7 @@ async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/completions"));
-        assert_eq!(calls[0].body, request);
+        assert_eq!(calls[0].body.as_ref(), request);
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
@@ -1979,7 +1980,7 @@ async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_rece
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/systemone"));
-        assert_eq!(calls[0].body, request);
+        assert_eq!(calls[0].body.as_ref(), request);
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
@@ -4008,7 +4009,7 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
     ));
     let mut uploads = Vec::new();
     let mut started = Vec::new();
-    for _ in 0..private_ai_gateway::middleware::images::MAX_IMAGE_IN_FLIGHT {
+    for _ in 0..private_ai_gateway::middleware::admission::MAX_IN_FLIGHT {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut tx = Some(tx);
         let upload = Body::from_stream(stream::poll_fn(move |_| {
@@ -4047,4 +4048,255 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
     }
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+fn transcription_request(extra: &str) -> Vec<u8> {
+    format!("--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n{extra}--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private.wav\"\r\nContent-Type: audio/wav\r\n\r\nspoken audio\r\n--upload--\r\n").into_bytes()
+}
+
+fn transcription_http(body: Vec<u8>) -> axum::http::request::Builder {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("content-type", "multipart/form-data; boundary=upload")
+        .header("content-length", body.len())
+}
+
+#[tokio::test]
+async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_id() {
+    let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":1.2,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
+    let raw = transcription_request("");
+    let request = transcription_http(raw.clone())
+        .header("x-aci-provider", r#"{"order":["near"]}"#)
+        .body(Body::from(raw.clone()))
+        .unwrap();
+    let resp = h.requester.call(request).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":1.2}})
+    );
+    let forwarded = {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/transcriptions"));
+        assert!(!calls[0].headers.contains_key("x-aci-provider"));
+        calls[0].clone()
+    };
+    let (params, form) = private_ai_gateway::middleware::audio::parse(
+        forwarded.body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(params["model"], "aci-model");
+    assert_eq!(params["response_format"], "json");
+    assert_eq!(form.file, "spoken audio");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/audio/transcriptions");
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(&forwarded.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn audio_malformed_duration_withholds_transcript_and_keeps_forwarded_receipt() {
+    for upstream in [
+        serde_json::json!({"text":"private transcript"}),
+        serde_json::json!({"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(
+            &serde_json::to_vec(&upstream).unwrap(),
+        ));
+        let raw = transcription_request("");
+        let resp = h
+            .requester
+            .call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert!(!String::from_utf8_lossy(&resp.body).contains("private transcript"));
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        assert!(!payload_event(&receipt_payload(&receipt), "request.forwarded").is_null());
+    }
+}
+
+#[tokio::test]
+async fn audio_rejects_e2ee_and_bad_carriers_before_reading_upload() {
+    let h = harness();
+    for (name, value) in [
+        ("x-e2ee-unknown", "1"),
+        ("x-signing-algo", "1"),
+        ("x-aci-provider", "null"),
+        ("x-aci-provider", "{"),
+        ("x-aci-provider", r#"{"aci_unknown":true}"#),
+        ("x-aci-provider", r#"{"aci_session_ids":[]}"#),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header(name, value)
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(1), h.requester.call(request))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+    for request in [
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "{}")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "x".repeat(8193)),
+    ] {
+        let resp = tokio::time::timeout(
+            Duration::from_secs(1),
+            h.requester.call(
+                request
+                    .body(Body::from_stream(stream::pending::<
+                        Result<Bytes, std::io::Error>,
+                    >()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_unknown_parameters_reject_before_forwarding() {
+    let h = harness();
+    for name in [
+        "provider",
+        "stream",
+        "include[]",
+        "chunking_strategy",
+        "known_speaker_names[]",
+    ] {
+        let raw = transcription_request(&format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\ntrue\r\n"
+        ));
+        let resp = h
+            .requester
+            .call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(&resp)["error"]["code"], "unknown_parameter");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eight_mib() {
+    for advertised in [false, true] {
+        let fake_upstream = Router::new().route(
+            "/v1/audio/transcriptions",
+            axum::routing::post(move |headers: HeaderMap, body: Body| async move {
+                let bytes = to_bytes(body, 4096).await.unwrap();
+                let (params, file) = private_ai_gateway::middleware::audio::parse(
+                    bytes,
+                    headers["content-type"].to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(params["model"], "aci-model");
+                assert_eq!(file.file, "spoken audio");
+                if advertised {
+                    axum::http::Response::builder()
+                        .status(200)
+                        .header(
+                            "content-length",
+                            private_ai_gateway::middleware::audio::MAX_RESPONSE_BYTES + 1,
+                        )
+                        .body(Body::from_stream(stream::pending::<
+                            Result<Bytes, std::io::Error>,
+                        >()))
+                        .unwrap()
+                } else {
+                    let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+                    axum::http::Response::builder()
+                        .status(400)
+                        .body(Body::from_stream(stream::iter(
+                            (0..9).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+                        )))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(OpenAICompatibleBackend::new(format!("http://{address}")).unwrap()),
+                Arc::new(InMemoryReceiptStore::default()),
+                AciServiceConfig::for_test(),
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service.clone()),
+        };
+        let raw = transcription_request("");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            requester.call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            ),
+        )
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let response = result.expect("reject oversized audio response before waiting for its body");
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+        assert!(metrics.contains(
+            "private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"
+        ));
+    }
 }

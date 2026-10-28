@@ -17,8 +17,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
-    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH,
-    MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
+    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -40,6 +40,7 @@ pub enum Endpoint {
     CreateModelResponse,
     SystemOne,
     ImagesGenerations,
+    AudioTranscriptions,
 }
 
 impl Endpoint {
@@ -53,6 +54,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
+            Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
         }
     }
 
@@ -65,6 +67,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",
             Endpoint::ImagesGenerations => "imagesGenerations",
+            Endpoint::AudioTranscriptions => "audioTranscriptions",
         }
     }
 }
@@ -210,6 +213,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
+            return Ok(super::audio::upstream_fields(params));
+        }
         (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
             return Ok(super::images::upstream_body(params));
         }
@@ -291,8 +297,10 @@ pub fn build_candidates(
             );
             continue;
         }
-        if endpoint == Endpoint::ImagesGenerations
-            && !candidate.supports_endpoint(IMAGES_GENERATIONS_PATH)
+        if matches!(
+            endpoint,
+            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+        ) && !candidate.supports_endpoint(endpoint.path())
         {
             continue;
         }
@@ -804,11 +812,13 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, AudioTranscriptions)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioTranscriptions)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }

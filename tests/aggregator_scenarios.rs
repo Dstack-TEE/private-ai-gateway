@@ -141,7 +141,7 @@ impl UpstreamBackend for MockUpstream {
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(UpstreamCall {
-            body: req.body,
+            body: req.body.to_vec(),
             headers: req.headers,
             path: req.path,
         });
@@ -303,6 +303,7 @@ fn make_harness_full(
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
+        supported_multipart_constraint_endpoints: Vec::new(),
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
         ..Default::default()

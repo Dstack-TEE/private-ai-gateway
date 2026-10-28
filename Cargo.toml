@@ -61,6 +61,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
+multer = "3"
 # Serving the public entry directly (rather than via axum::serve) is what lets the
 # connection IO be wrapped with a write-idle timeout; axum 0.7 takes a concrete
 # TcpListener and offers no hook for that. Deliberately NOT hyper-util's
@@ -75,7 +76,7 @@ async-stream = "0.3"
 
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
 # validation normal without linking against system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream", "multipart"] }
 
 # Errors and logging.
 thiserror = "1"

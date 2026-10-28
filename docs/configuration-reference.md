@@ -297,6 +297,7 @@ request time.
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
 | `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
+| `audio_force_verbose_json` | boolean | `false` | Opt in per upstream only after verifying it lacks duration in JSON transcription responses. Requests verbose JSON internally while preserving the caller’s output format. No word timestamps are added. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
 | `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
@@ -475,3 +476,24 @@ configuration that contains it and keeps its previous configuration. The gateway
 also saves the configuration it receives, and an older gateway cannot start from
 a saved configuration that contains the field. Before rolling a gateway back,
 remove the field and wait until every gateway has picked up the change.
+
+### Transcription routing and launch gate
+
+Middleware audio candidates must explicitly list `/v1/audio/transcriptions` in
+`supportedEndpoints`. Runtime `path: "/v1/audio/transcriptions"` and
+`audio_force_verbose_json` are rejected for Chutes, 0G Private Computer, and
+Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
+blocked until multipart encryption/decryption is verified in the exact pinned
+v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`).
+Public source refs did not establish that support; do not add an unencrypted
+fallback. NEAR's launch model is `openai/whisper-large-v3`.
+
+Transcription limits are process constants: 25 MiB file, 64 KiB text, 16 upload
+slots (60-second read deadline), independent 16 inference slots, and 8 MiB
+upstream response. `private_ai_gateway_audio_failures_total{reason}` uses fixed
+reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
+`response_size_failure`. `private_ai_gateway_audio_provider_latency_seconds`
+measures provider attempt latency without audio, prompts, or filenames.
+
+Older gateway binaries reject the new upstream option: omit
+`audio_force_verbose_json` when rolling back.

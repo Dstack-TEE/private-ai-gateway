@@ -65,6 +65,25 @@ For each entry with the `chat` capability, the case:
    requires the entry's `binding` type, checks the evidence digest, and
    requires `tee_attested` to be asserted.
 
+### Audio transcription case
+
+`audio_transcriptions` provider capability runs
+`cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
+committed 94,958-byte synthetic spoken WAV. It checks recognizable fixture
+words, positive provider-reported duration, response allowlists, null chat id,
+received/returned body hashes, the serving attested session, and offline
+`pap audit`. Artifacts preserve the exact raw multipart upload for audit.
+The provider list includes NEAR `openai/whisper-large-v3` and a Privatemode
+`whisper-large-v3` entry explicitly marked pending pinned-proxy verification.
+Pending entries are skipped by default; select the provider explicitly for a
+diagnostic probe. The latter is intentionally blocked by the gateway's encrypted-path allowlist;
+it is not a launch-ready provider. No live provider call is part of unit tests.
+
+Before launch, test `json` duration and `verbose_json` per provider. Only set
+`audio_force_verbose_json` when a provider's JSON lacks billable duration.
+Run on an authorized test CVM, then delete the CVM. Do not enable production
+routes until client fail-closed releases and control-plane audio ingestion ship.
+
 ### Image generation case
 
 For each entry with the `images` capability, `cases/images.py` sends one

@@ -369,6 +369,8 @@ pub struct LegacySignatureResult {
 /// [`AciService::forward_chat_completion`] is a thin wrapper that
 /// forwards `requester: None`.
 pub struct ChatCompletionRequest<'a> {
+    /// Buffered audio slice shared across attempted routes; never serialized as JSON.
+    pub audio_form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
     pub context: GatewayRequestContext,
     pub endpoint_path: &'a str,
     /// Bytes the service observed after TLS / E2EE termination.
@@ -422,6 +424,8 @@ pub struct GatewayRequestContext {
 /// Candidates are tried in order until one succeeds.
 #[derive(Debug, Clone)]
 pub struct ForwardCandidate {
+    /// Buffered audio slice shared across attempted routes; never serialized as JSON.
+    pub audio_form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
     pub route_id: String,
     pub body: Vec<u8>,
     pub path: &'static str,

@@ -22,6 +22,7 @@ fn test_upstream_config(
         base_url: format!("https://{name}.example"),
         path: None,
         streaming_usage: None,
+        audio_force_verbose_json: false,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -1018,4 +1019,33 @@ fn streaming_usage_config_is_validated_and_visible_without_secrets() {
     assert!(parse_config_text(&serialized.replace("continuous", "automatic")).is_err());
     config.path = Some("/v1/messages".into());
     assert!(super::validation::validate_config(&[config]).is_err());
+}
+
+#[test]
+fn audio_transcription_config_rejects_unsupported_adapters_and_redacts_option() {
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::ZeroGPrivateComputer,
+        UpstreamProvider::Anthropic,
+    ] {
+        let mut config = test_upstream_config("audio", provider, "whisper", "whisper");
+        config.path = Some("/v1/audio/transcriptions".into());
+        assert!(validate_config(&[config.clone()]).is_err());
+        config.path = None;
+        config.audio_force_verbose_json = true;
+        assert!(validate_config(&[config]).is_err());
+    }
+    let mut config = test_upstream_config(
+        "audio",
+        UpstreamProvider::NearAi,
+        "whisper",
+        "openai/whisper-large-v3",
+    );
+    config.path = Some("/v1/audio/transcriptions".into());
+    config.audio_force_verbose_json = true;
+    validate_config(&[config.clone()]).unwrap();
+    assert_eq!(
+        serde_json::to_value(config.redacted()).unwrap()["audio_force_verbose_json"],
+        true
+    );
 }
