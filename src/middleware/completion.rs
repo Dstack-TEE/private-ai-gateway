@@ -545,10 +545,12 @@ async fn run_inner(
                 // success: it is the upstream's malformed answer, a 502.
                 // Reasoning is excluded from the upstream body before any
                 // conversion could re-express it in the client surface's shape.
+                let mut audio_billing_usage = None;
                 let converted = serde_json::from_slice::<Value>(&forward.upstream_body)
                     .map_err(|err| err.to_string())
                     .and_then(|mut upstream_json| {
                         if client_endpoint == Endpoint::AudioTranscriptions {
+                            let provider_usage = upstream_json.get("usage").cloned();
                             let (body, audio) =
                                 super::audio::sanitize_response(upstream_json, &params).map_err(
                                     |err| {
@@ -557,6 +559,8 @@ async fn run_inner(
                                     },
                                 )?;
                             upstream_json = body;
+                            audio_billing_usage =
+                                Some(super::audio::billing_usage(provider_usage, &audio));
                             meter.audio = Some(audio);
                         }
                         if client_endpoint == Endpoint::ImagesGenerations {
@@ -618,7 +622,7 @@ async fn run_inner(
                 };
                 // Raw usage (before cost or image SDK defaults) goes to the
                 // report; only the client body's usage is normalized below.
-                let raw_usage = transformed.get("usage").cloned();
+                let raw_usage = audio_billing_usage.or_else(|| transformed.get("usage").cloned());
                 meter.images = (client_endpoint == Endpoint::ImagesGenerations)
                     .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {

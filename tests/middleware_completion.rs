@@ -5893,7 +5893,7 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({"text":"hello","usage":{"type":"tokens","seconds":3,"input_tokens":2,"input_token_details":{"audio_tokens":2},"cost":0.023}})
+        json!({"text":"hello","usage":{"type":"duration","seconds":3,"cost":0.023}})
     );
     let forwarded = {
         let calls = requests.lock().unwrap();
@@ -5914,6 +5914,10 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
     assert!(receipt.chat_id.is_none());
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
     assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
+    assert_eq!(
+        report["usage"],
+        json!({"type":"tokens","seconds":3,"input_tokens":2,"input_token_details":{"audio_tokens":2}})
+    );
     assert_eq!(report["status"], 200);
     let pre = pres.lock().unwrap()[0].clone();
     assert_eq!(pre["endpoint"], "/v1/audio/transcriptions");
