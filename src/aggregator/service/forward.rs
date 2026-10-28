@@ -338,7 +338,7 @@ impl AciService {
                     .and_then(|mut body| {
                         match crate::middleware::audio::usage(&body) {
                             Ok(audio) => {
-                                crate::middleware::audio::synthesize_usage(&mut body, &audio);
+                                crate::middleware::audio::normalize_usage(&mut body, &audio);
                                 crate::middleware::audio::canonicalize(&mut body);
                                 // Metadata was consumed by encoding; the original parsed request
                                 // remains available below as backend_input_body metadata.

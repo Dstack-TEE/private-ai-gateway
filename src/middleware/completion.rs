@@ -564,7 +564,7 @@ async fn run_inner(
                                 err.to_string()
                             })?;
                             super::audio::canonicalize(&mut upstream_json);
-                            super::audio::synthesize_usage(&mut upstream_json, &audio);
+                            super::audio::normalize_usage(&mut upstream_json, &audio);
                             meter.audio = Some(audio);
                         }
                         if client_endpoint == Endpoint::ImagesGenerations {

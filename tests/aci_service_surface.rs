@@ -4074,7 +4074,7 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         json_body(&resp),
-        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":1.2}})
+        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":2}})
     );
     let forwarded = {
         let calls = h.upstream_calls.lock().unwrap();
@@ -4111,6 +4111,46 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
         payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(&resp.body)
     );
+}
+
+#[tokio::test]
+async fn audio_client_usage_matches_billable_seconds_and_preserves_verbose_duration() {
+    for with_usage in [false, true] {
+        for format in ["json", "verbose_json"] {
+            let mut upstream = serde_json::json!({"text":"hello","duration":2.965});
+            if with_usage {
+                upstream["usage"] = serde_json::json!({
+                    "type":"duration","seconds":2.965,"input_tokens":2
+                });
+            }
+            let h = harness_with_upstream(RecordingUpstream::with_response_body(
+                &serde_json::to_vec(&upstream).unwrap(),
+            ));
+            let raw = transcription_request(&format!(
+                "--upload\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\n{format}\r\n"
+            ));
+            let resp = h
+                .requester
+                .call(
+                    transcription_http(raw.clone())
+                        .body(Body::from(raw))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(resp.status, StatusCode::OK);
+            let body = json_body(&resp);
+            assert_eq!(body["usage"]["seconds"].as_u64(), Some(3));
+            assert_eq!(body["usage"]["type"], "duration");
+            if with_usage {
+                assert_eq!(body["usage"]["input_tokens"], 2);
+            }
+            if format == "verbose_json" {
+                assert_eq!(body["duration"], 2.965);
+            } else {
+                assert!(body.get("duration").is_none());
+            }
+        }
+    }
 }
 
 #[tokio::test]

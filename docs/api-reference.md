@@ -155,7 +155,9 @@ An invalid preferred duration never falls back. Zero, negative, missing,
 nonfinite, and durations above `4294967295` seconds become `502`; the transcript
 is withheld and no audio usage is billed. The forwarded receipt is retained.
 Billable seconds round up once; see the [audio pricing contract](control-plane-contract.md#audio-transcription).
-Absent usage is synthesized. Receipts have null `chat_id`; fetch by
+Client-visible `usage.seconds` is always this billable integer, whether usage
+was supplied upstream or synthesized. For example, `2.965` becomes `3`; verbose
+`duration` retains the raw provider value. Receipts have null `chat_id`; fetch by
 `X-Receipt-Id`. `request.received` hashes raw client multipart bytes and
 `request.forwarded` hashes the exact gateway-encoded bytes sent upstream.
 

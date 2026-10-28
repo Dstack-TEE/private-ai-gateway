@@ -5741,7 +5741,7 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({"text":"hello","usage":{"type":"tokens","input_tokens":2,"input_token_details":{"audio_tokens":2},"cost":0.022}})
+        json!({"text":"hello","usage":{"type":"tokens","seconds":2,"input_tokens":2,"input_token_details":{"audio_tokens":2},"cost":0.022}})
     );
     let forwarded = {
         let calls = requests.lock().unwrap();
@@ -5770,6 +5770,46 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
     assert!(!pre.contains("prompt"));
     assert!(!pre.contains("filename"));
     assert!(!pre.contains("prefixHash"));
+}
+
+#[tokio::test]
+async fn audio_client_usage_matches_billable_seconds_and_preserves_verbose_duration() {
+    for with_usage in [false, true] {
+        for format in ["json", "verbose_json"] {
+            let (url, posts) = spawn_control_capturing(
+                200,
+                json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"0.1"}}),
+            ).await;
+            let mut upstream = json!({"text":"hello","duration":2.965});
+            if with_usage {
+                upstream["usage"] = json!({"type":"duration","seconds":2.965,"input_tokens":2});
+            }
+            let (service, _) = build_recording_service(
+                200,
+                serde_json::to_vec(&upstream).unwrap(),
+                "application/json",
+            );
+            let mut input = audio_input();
+            input.params["response_format"] = json!(format);
+            let (status, _, body) =
+                response_parts(middleware(url).handle_completion(&service, input).await).await;
+            assert_eq!(status, 200);
+            assert_eq!(body["usage"]["seconds"].as_u64(), Some(3));
+            assert_eq!(body["usage"]["type"], "duration");
+            assert_eq!(body["usage"]["cost"], 0.3);
+            if with_usage {
+                assert_eq!(body["usage"]["input_tokens"], 2);
+            }
+            if format == "verbose_json" {
+                assert_eq!(body["duration"], 2.965);
+            } else {
+                assert!(body.get("duration").is_none());
+            }
+            let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
+            assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
+            assert_eq!(report["usage"]["seconds"].as_u64(), Some(3));
+        }
+    }
 }
 
 #[tokio::test]
@@ -5819,7 +5859,7 @@ async fn audio_requires_endpoint_opt_in_and_synthesizes_missing_usage() {
             assert_eq!(status, 200);
             assert_eq!(
                 body["usage"],
-                json!({"type":"duration","seconds":2.1,"cost":0.3})
+                json!({"type":"duration","seconds":3,"cost":0.3})
             );
             let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
             assert_eq!(report["audio"]["seconds"], 3);

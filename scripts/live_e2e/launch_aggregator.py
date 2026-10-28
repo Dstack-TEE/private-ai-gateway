@@ -230,6 +230,7 @@ def build_upstream_config(
         if provider.provider != "privatemode":
             item["bearer_token"] = token
         for field in (
+            "audio_force_verbose_json",
             "verification_refresh_seconds",
             "session_refresh_seconds",
             "chutes_e2ee_api_base",

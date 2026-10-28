@@ -193,7 +193,9 @@ Successful post reports add `audio: {"seconds": 3, "raw_duration": 2.1}`.
 An invalid preferred field is a terminal malformed response: 502, null usage,
 no `audio`, no automatic retranscription. Duration cannot be inferred from
 segments, file size, or elapsed time. Missing `usage` is synthesized for the
-client and report. Nested usage is sanitized before reporting.
+client and report; existing or synthesized `usage.seconds` is normalized to the
+same billable integer (`2.965` becomes `3`). Verbose `duration` and
+`audio.raw_duration` retain the raw value. Nested usage is sanitized before reporting.
 
 `pricing.audioCostPerSecond` is an unsigned plain decimal **string**, at most
 18 fractional digits and at most `1000000`, like image rates. Successful cost is

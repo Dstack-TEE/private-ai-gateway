@@ -383,11 +383,13 @@ pub fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
     })
 }
 
-pub fn synthesize_usage(body: &mut Value, audio: &AudioUsage) {
+/// Expose the same validated integer duration that is billed. Keep the raw
+/// provider duration in AudioUsage and the verbose response's duration field.
+pub fn normalize_usage(body: &mut Value, audio: &AudioUsage) {
     if !body.get("usage").is_some_and(Value::is_object) {
-        body["usage"] =
-            json!({"type":"duration","seconds":audio.raw_duration.unwrap_or(audio.seconds as f64)});
+        body["usage"] = json!({"type":"duration"});
     }
+    body["usage"]["seconds"] = json!(audio.seconds);
 }
 
 pub fn reduce_format(body: &mut Value, params: &Value) {

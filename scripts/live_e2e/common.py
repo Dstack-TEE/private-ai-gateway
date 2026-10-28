@@ -43,6 +43,7 @@ class Provider:
     privatemode_manifest_log_path: str | None
     privatemode_proxy_image_digest: str | None
     accepted_subjects: tuple[str, ...] = ()
+    audio_force_verbose_json: bool | None = None
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "Provider":
@@ -76,6 +77,7 @@ class Provider:
                 value, "privatemode_proxy_image_digest"
             ),
             accepted_subjects=tuple(value.get("accepted_subjects") or ()),
+            audio_force_verbose_json=optional_bool(value, "audio_force_verbose_json"),
         )
 
     def has_capability(self, capability: str) -> bool:
@@ -95,6 +97,15 @@ def optional_str(value: dict[str, Any], key: str) -> str | None:
         return None
     if not isinstance(item, str) or not item:
         raise ValueError(f"provider entry field {key!r} must be a non-empty string")
+    return item
+
+
+def optional_bool(value: dict[str, Any], key: str) -> bool | None:
+    item = value.get(key)
+    if item is None:
+        return None
+    if not isinstance(item, bool):
+        raise ValueError(f"provider entry field {key!r} must be a boolean")
     return item
 
 
