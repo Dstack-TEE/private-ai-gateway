@@ -385,29 +385,33 @@ fn append_delta(
 mod tests {
     use super::{response_chat_id, SseTextCollector};
 
-    #[test]
-    fn chat_request_includes_max_tokens_only_when_set() {
+    fn send_args(extra: &[&str]) -> crate::args::SendArgs {
         use crate::args::Command;
         use clap::{FromArgMatches, Subcommand};
 
         let matches = Command::augment_subcommands(clap::Command::new("pap"))
-            .try_get_matches_from(["pap", "send", "https://example.com"])
+            .try_get_matches_from(
+                ["pap", "send", "https://example.com"]
+                    .into_iter()
+                    .chain(extra.iter().copied()),
+            )
             .unwrap();
         let Command::Send(args) = Command::from_arg_matches(&matches).unwrap() else {
             panic!("expected send command");
         };
+        args
+    }
+
+    #[test]
+    fn chat_request_includes_max_tokens_only_when_set() {
+        let args = send_args(&[]);
         let original = br#"{"model":"demo-model","messages":[{"role":"user","content":"hi"}],"stream":true,"provider":{"aci_verified":true}}"#;
         assert_eq!(
             super::chat_request(&args, "demo-model", "hi", true).unwrap(),
             original
         );
 
-        let matches = Command::augment_subcommands(clap::Command::new("pap"))
-            .try_get_matches_from(["pap", "send", "https://example.com", "--max-tokens", "8"])
-            .unwrap();
-        let Command::Send(args) = Command::from_arg_matches(&matches).unwrap() else {
-            panic!("expected send command");
-        };
+        let args = send_args(&["--max-tokens", "8"]);
         let body = super::chat_request(&args, "demo-model", "hi", true).unwrap();
         let mut body: serde_json::Map<String, serde_json::Value> =
             serde_json::from_slice(&body).unwrap();
