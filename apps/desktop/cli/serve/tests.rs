@@ -3093,3 +3093,154 @@ async fn multipart_preserves_bytes_and_audits_effective_header_pins_with_local_p
         }
     }
 }
+
+#[tokio::test]
+async fn bridge_multipart_uses_managed_constraints_and_refuses_missing_capability() {
+    use agent_bridge::{
+        catalog::Catalog,
+        proxy::{self as bridge, Session},
+        tokens::{TokenSet, LOCAL_TOOLS_AGENT},
+    };
+    use ed25519_dalek::Signer;
+
+    let session_id = crate::aci::digest::sha256_bare_hex(&vector_session_bytes());
+    let body = audio_body("file");
+    let mut receipt = vector_receipt_envelope();
+    for event in receipt["event_log"].as_array_mut().unwrap() {
+        if event["type"] == "request.received" || event["type"] == "request.forwarded" {
+            event["body_hash"] = json!(BodyDigest::of(&body).sha256);
+        }
+    }
+    let signing_input = crate::aci::receipt::receipt_signing_input(&receipt).unwrap();
+    receipt["signature"] = json!(hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+            .sign(&signing_input)
+            .to_bytes()
+    ));
+
+    for capability in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new()
+            .route(
+                AUDIO_PATH,
+                post({
+                    let (calls, body, session_id) =
+                        (calls.clone(), body.clone(), session_id.clone());
+                    move |headers: HeaderMap, received: Bytes| {
+                        let (calls, body, session_id) =
+                            (calls.clone(), body.clone(), session_id.clone());
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            assert_eq!(received, body);
+                            assert_eq!(
+                                header_str(&headers, "content-type"),
+                                Some(AUDIO_CONTENT_TYPE)
+                            );
+                            assert_eq!(
+                                header_str(&headers, "authorization"),
+                                Some("Bearer test-key")
+                            );
+                            let provider: Value = serde_json::from_str(
+                                header_str(&headers, "x-aci-provider").unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                provider,
+                                json!({"aci_verified": true, "aci_session_ids": [session_id]})
+                            );
+                            ([("x-receipt-id", "rcpt-0001")], RESPONSE_BODY)
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/receipts/{id}",
+                get({
+                    let receipt = receipt.clone();
+                    move || {
+                        let receipt = receipt.clone();
+                        async move { Json(receipt) }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/sessions/{id}",
+                get(|| async {
+                    (
+                        [("content-type", "application/json")],
+                        vector_session_bytes(),
+                    )
+                }),
+            );
+        let (tx, mut outcomes) = mpsc::unbounded_channel();
+        let mut verifier = state_over(spawn_server(upstream).await, tx);
+        let inner = Arc::get_mut(&mut verifier).unwrap();
+        inner.enforce_verified = true;
+        inner.fixed_pins = vec![session_id.clone()];
+        if capability {
+            enable_multipart(&verifier);
+        }
+
+        let (events, _events) = mpsc::channel(8);
+        let local = bridge::ProxyState::new(events).unwrap();
+        let mut tokens = TokenSet::default();
+        tokens.insert("local-token".into(), LOCAL_TOOLS_AGENT.into());
+        local.set_tokens(tokens);
+        local.set_api_key(Some("test-key".into()));
+        local.publish(Session {
+            generation: 1,
+            epoch: 1,
+            session_id: Some("bridge-session".into()),
+            service: Some(verifier.clone()),
+            verified: true,
+            catalog: Some(
+                Catalog::from_remote(
+                    &json!({"data": [{
+                        "id": "m", "input_modalities": ["audio"], "output_modalities": ["text"]
+                    }]}),
+                    1,
+                )
+                .unwrap(),
+            ),
+        });
+        let base = spawn_server(bridge::router(local)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}{AUDIO_PATH}"))
+            .bearer_auth("local-token")
+            .header("content-type", AUDIO_CONTENT_TYPE)
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        if !capability {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("does not advertise multipart"));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-receipt-id"], "rcpt-0001");
+            assert_eq!(response.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let _pending = outcomes.recv().await.unwrap();
+            let audited = tokio::time::timeout(std::time::Duration::from_secs(5), outcomes.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(audited.verified, Some(true), "{}", audited.detail);
+            let context = audited.context.as_ref().unwrap();
+            assert_eq!(context.agent, LOCAL_TOOLS_AGENT);
+            assert_eq!(context.model.as_deref(), Some("m"));
+            let recorded = verifier.recorded.lock().unwrap();
+            let exchange = recorded.back().unwrap();
+            assert_eq!(exchange.pinned_sessions, vec![session_id.clone()]);
+            assert_eq!(exchange.request.sha256, BodyDigest::of(&body).sha256);
+            assert!(exchange.requires_verified);
+            assert!(exchange.local_policy_applied);
+        }
+        verifier.shutdown.cancel();
+    }
+}

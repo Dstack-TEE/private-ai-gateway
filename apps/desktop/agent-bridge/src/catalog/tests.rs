@@ -246,11 +246,12 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
 }
 
 #[test]
-fn transcriptions_require_explicit_audio_input_and_text_output_and_bypass_inventory() {
+fn transcriptions_require_audio_without_text_input_and_text_output_and_bypass_inventory() {
     let original = Catalog::from_remote(
         &json!({ "data": [
             { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["text"] },
-            { "id": "mixed", "input_modalities": ["text", "audio"], "output_modalities": ["text", "image"] },
+            { "id": "audio-image", "input_modalities": ["audio", "image"], "output_modalities": ["text"] },
+            { "id": "gemini", "input_modalities": ["text", "audio", "image", "video"], "output_modalities": ["text"] },
             { "id": "text", "input_modalities": ["text"], "output_modalities": ["text"] },
             { "id": "image-output", "input_modalities": ["audio"], "output_modalities": ["image"] },
             { "id": "missing-input", "output_modalities": ["text"] },
@@ -264,6 +265,25 @@ fn transcriptions_require_explicit_audio_input_and_text_output_and_bypass_invent
         1,
     )
     .unwrap();
+    for surface in [
+        Surface::ChatCompletions,
+        Surface::Messages,
+        Surface::Responses,
+    ] {
+        for id in ["audio", "audio-image", "missing-output"] {
+            assert!(
+                !original.get(id).unwrap().supports(surface),
+                "{id}: {surface:?}"
+            );
+            assert!(!original.get(id).unwrap().supports_agent(surface));
+        }
+        for id in ["gemini", "text", "legacy"] {
+            assert!(
+                original.get(id).unwrap().supports(surface),
+                "{id}: {surface:?}"
+            );
+        }
+    }
     let inventory = EndpointInventory::bundled().unwrap();
     for endpoint in ["https://example.com", "https://tee.redpill.ai"] {
         let mut catalog = original.clone();
@@ -276,7 +296,7 @@ fn transcriptions_require_explicit_audio_input_and_text_output_and_bypass_invent
         }
         let audio = catalog.for_surface(Surface::AudioTranscriptions);
         let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(ids, ["audio", "mixed"]);
+        assert_eq!(ids, ["audio", "audio-image"]);
     }
     assert_eq!(
         Surface::AudioTranscriptions.path(),

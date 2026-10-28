@@ -213,12 +213,16 @@ pub struct CatalogModel {
 
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
-        let modalities = if surface == Surface::AudioTranscriptions {
-            // Transcription must never be inferred from a legacy text catalog.
-            self.advertises("input_modalities", "audio")
-                && self.advertises("output_modalities", "text")
-        } else {
-            self.outputs(surface.output_modality())
+        let audio_only_input = self.advertises("input_modalities", "audio")
+            && !self.advertises("input_modalities", "text");
+        let modalities = match surface {
+            Surface::AudioTranscriptions => {
+                audio_only_input && self.advertises("output_modalities", "text")
+            }
+            Surface::ChatCompletions | Surface::Messages | Surface::Responses => {
+                !audio_only_input && self.outputs(surface.output_modality())
+            }
+            _ => self.outputs(surface.output_modality()),
         };
         modalities
             && (matches!(
