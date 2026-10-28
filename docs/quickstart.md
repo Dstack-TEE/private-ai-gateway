@@ -269,11 +269,11 @@ receipts are bound to the credential that made the request
 
 ```text
 PASS  receipt-1    document signature (JCS, minus signature member) under attested receipt key [9.3(1)]
-PASS  receipt-2    document workload_keyset_digest matches established digest [9.3(2)]
+PASS  receipt-2    document workload_keyset_digest matches established digest [9.3(2)] — payload workload_keyset_digest matches the established keyset valid at served_at
 PASS  receipt-3    request.received body_hash matches sent bytes [9.3(3)]
 PASS  receipt-4    response.returned body_hash matches received wire bytes [9.3(4)]
 PASS  upstream-1   upstream.verified result is verified and cites a session [9.3(5)]
-PASS  upstream-2   session {id}: document hashes to cited id, served_at in window, evidence digest [9.2(1-2), 9.3(6)]
+PASS  upstream-2   cited session: document hashes to the id, served_at in window, evidence digest [9.2(1-2), 9.3(6)] — session 95ad1cb4dd25445808c2e9d116caf420b05703730b506395e8fc1ca6faeae28f: document hashes to the cited id; receipt served_at inside the validity window; evidence data hashes to its digest; claims: gpu_attested=unknown, model_weights_provenance=unknown, os_known_good=unknown, serving_software_known_good=unknown, tcb_up_to_date=unknown, tee_attested=asserted(hardware_proven)
 ```
 
 `upstream-2` checks session integrity and applies any `--require-claim` policy.
