@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from openai.types.audio import Transcription, TranscriptionVerbose
 
 from ..common import Provider, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
@@ -23,10 +24,31 @@ def run_audio_transcriptions_case(
     provider: Provider,
     artifact_dir: Path,
 ) -> dict[str, Any]:
-    provider_dir = artifact_dir / provider.name / "audio_transcriptions"
+    return {
+        "provider": provider.name,
+        "formats": {
+            response_format: run_audio_format(
+                base_url=base_url,
+                provider=provider,
+                artifact_dir=artifact_dir,
+                response_format=response_format,
+            )
+            for response_format in ("json", "verbose_json")
+        },
+    }
+
+
+def run_audio_format(
+    *,
+    base_url: str,
+    provider: Provider,
+    artifact_dir: Path,
+    response_format: str,
+) -> dict[str, Any]:
+    provider_dir = artifact_dir / provider.name / "audio_transcriptions" / response_format
     prepared = requests.Request(
         "POST", f"{base_url}/v1/audio/transcriptions",
-        data={"model": provider.public_model, "response_format": "json", "language": "en"},
+        data={"model": provider.public_model, "response_format": response_format, "language": "en"},
         files={"file": ("audio.wav", FIXTURE.read_bytes(), "audio/wav")},
     ).prepare()
     request_body = prepared.body
@@ -54,7 +76,7 @@ def run_audio_transcriptions_case(
         )
     if not isinstance(parsed, dict):
         raise RuntimeError(f"{provider.name} audio_transcriptions response is not JSON")
-    assert_audio_shape(provider, parsed)
+    assert_audio_shape(provider, parsed, response_format)
     receipt_id = headers.get("x-receipt-id")
     if not receipt_id:
         raise RuntimeError(f"{provider.name} audio_transcriptions response missing x-receipt-id")
@@ -116,7 +138,9 @@ def run_audio_transcriptions_case(
     }
 
 
-def assert_audio_shape(provider: Provider, response: dict[str, Any]) -> None:
+def assert_audio_shape(
+    provider: Provider, response: dict[str, Any], response_format: str = "json",
+) -> None:
     text = response.get("text")
     if not isinstance(text, str):
         raise RuntimeError(f"{provider.name} transcription text must be a string")
@@ -129,8 +153,11 @@ def assert_audio_shape(provider: Provider, response: dict[str, Any]) -> None:
         raise RuntimeError(f"{provider.name} transcription billable seconds must be a positive integer below 30s")
     if usage.get("type") != "duration" or set(usage) - {"type", "seconds", "cost"}:
         raise RuntimeError(f"{provider.name} transcription client usage must describe duration only")
-    if set(response) - {"text", "usage", "languages", "logprobs"}:
-        raise RuntimeError(f"{provider.name} json transcription response contains extra fields")
+    allowed = {"text", "usage", "languages"}
+    if response_format == "verbose_json":
+        allowed |= {"language", "duration", "segments", "words", "task"}
+    if set(response) - allowed:
+        raise RuntimeError(f"{provider.name} {response_format} transcription response contains extra fields")
     if "languages" in response:
         languages = response["languages"]
         if not isinstance(languages, list) or any(
@@ -138,6 +165,9 @@ def assert_audio_shape(provider: Provider, response: dict[str, Any]) -> None:
             or not isinstance(item["code"], str) for item in languages
         ):
             raise RuntimeError(f"{provider.name} transcription languages must contain only string codes")
+    # The SDK's strict response path validates these same generated models.
+    model = Transcription if response_format == "json" else TranscriptionVerbose
+    model.model_validate(response)
 
 
 def assert_audio_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:

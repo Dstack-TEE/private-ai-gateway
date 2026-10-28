@@ -149,8 +149,7 @@ TEE-only host policy remains independent.
 The gateway forwards the requested response format. NEAR audio automatically
 uses verbose output internally to obtain duration while preserving the caller's
 output format. It requests word timestamps only when the caller asks. `json` returns
-`text`, `usage`, and optional well-formed `languages: [{code: string}]` and
-`logprobs`; verbose output may
+`text`, `usage`, and optional well-formed `languages: [{code: string}]`; verbose output may
 also include `language`, `duration`,
 `segments`, `words`, and `task`. Nested segment, word, usage, and token-detail
 objects are sanitized by allowlist. Upstream filenames become `audio.<ext>`.
@@ -169,7 +168,8 @@ is withheld and no audio usage is billed. The forwarded receipt is retained.
 Audio pricing is USD per second of input audio, billed per started second;
 see the [audio pricing contract](control-plane-contract.md#audio-transcription).
 Client-visible usage is always `{"type":"duration","seconds":3}` with optional
-gateway-priced `cost`; `seconds` is the billable integer (`2.965` becomes `3`).
+gateway-priced `cost`; upstream `usage.cost` is discarded. `seconds` is the
+billable integer (`2.965` becomes `3`).
 Provider token counters remain internal to pricing and post reports. Verbose
 `duration` retains the validated raw value. Receipts have null `chat_id`; fetch by
 `X-Receipt-Id`. `request.received` hashes raw client multipart bytes and

@@ -31,6 +31,11 @@ class AudioTranscriptionsTests(unittest.TestCase):
         }
         assert_audio_shape(self.provider, valid)
         assert_audio_shape(self.provider, valid | {"languages": [{"code": "en"}]})
+        assert_audio_shape(
+            self.provider,
+            valid | {"duration": 2.965, "language": "en"},
+            "verbose_json",
+        )
         for patch in [
             {"text": ""},
             {"usage": {}},
