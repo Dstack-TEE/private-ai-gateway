@@ -1054,7 +1054,8 @@ async fn proxy_inference(
             return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
         }
     };
-    let injected_policy_pins = !state.required_claims.is_empty() && prepared.policy_derived_pins;
+    let injected_policy_pins =
+        !state.required_claims.is_empty() && prepared.policy.policy_derived_pins;
     let send = |prepared: &PreparedRequest| {
         forward_headers(
             state.client.request(Method::POST, url.as_str()),
@@ -1150,12 +1151,12 @@ async fn proxy_inference(
     // Non-success responses without receipts also use this passthrough path.
     let hook_state = state.clone();
     let hook_path = path.clone();
-    let local_policy_applied = prepared.local_policy_applied;
+    let local_policy_applied = prepared.policy.local_policy_applied;
     let request_digest = BodyDigest::of(&prepared.body);
     // §9.3(6): the pinned ids ride along so the asynchronous audit enforces
     // the same membership rule as `private-ai-proxy send --session`.
-    let pinned_sessions = prepared.pinned_sessions;
-    let requires_verified = prepared.requires_verified;
+    let pinned_sessions = prepared.policy.pinned_sessions;
+    let requires_verified = prepared.policy.requires_verified;
     let audit_bearer = bearer_token(&headers);
     let hook_delivery = delivery.clone();
     let hook: CompletionHook = Box::new(move |end| {

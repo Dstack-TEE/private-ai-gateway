@@ -87,7 +87,6 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@fastify/busboy": "^3.2.4",
     "@phala/dcap-qvl": "^0.7.0",
     "undici": "7.30.1"
   }

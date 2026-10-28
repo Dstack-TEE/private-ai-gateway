@@ -545,20 +545,17 @@ reject the carrier on JSON endpoints or any endpoint not supporting it.
 The carrier is consumed in its entirety and MUST NOT be forwarded upstream.
 Deployment-level verified-serving requirements apply independently.
 
-Clients MUST intersect caller session pins with their local accepted set,
-refuse disjoint sets, and retain the resulting effective policy for receipt
-verification (§9.3). Caller constraints remain effective when local verified
-serving is disabled. Before uploading constrained multipart, clients MUST
-refuse locally unless the service advertises support for that exact path.
-When constrained, malformed or non-object JSON and other non-empty body
-media types that cannot carry constraints MUST likewise be refused locally.
-
 Receipts commit to the raw multipart **body bytes**, not the contents of
-`X-ACI-Provider`. Clients MUST retain the effective verified-serving
-requirement and session pins and check the receipt's cited session against
-them. A successful body-hash check alone does not prove that header
-constraints were honored; this also relies on the pinned channel and the
-accepted implementation's enforcement of the carrier.
+`X-ACI-Provider`. Clients MUST intersect caller session pins with their local
+accepted set, refuse disjoint sets, retain the effective verified-serving
+requirement and session pins, and check the receipt's cited session against
+them (§9.3). Caller constraints remain effective when local verified serving
+is disabled. A successful body-hash check alone does not prove that header
+constraints were honored. Before uploading constrained multipart, clients
+MUST refuse locally unless the service advertises support for that exact
+path, obtained under the capability trust rules in §4.1. When constrained,
+malformed or non-object JSON and other non-empty body media types that cannot
+carry constraints MUST likewise be refused locally.
 
 ## 6. E2EE Transport Extensions
 

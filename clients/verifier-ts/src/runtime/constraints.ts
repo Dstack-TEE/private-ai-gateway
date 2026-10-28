@@ -1,5 +1,3 @@
-import { Busboy } from '@fastify/busboy';
-
 import type { AttestationReport } from '../types.js';
 import { AciConnectionError, type ConnectAciOptions } from './types.js';
 
@@ -32,8 +30,13 @@ export function validateProviderHeaderMultiplicity(headers: HeadersInit | undefi
   }
 }
 
-function object(value: unknown): value is Record<string, unknown> {
+export function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isConstrained(options: ConnectAciOptions): boolean {
+  return options.serving?.requireVerified !== false
+    || (options.serving?.acceptedSessionIds?.length ?? 0) > 0;
 }
 
 function mergeProvider(value: unknown, options: ConnectAciOptions): EffectivePolicy {
@@ -60,7 +63,7 @@ function mergeProvider(value: unknown, options: ConnectAciOptions): EffectivePol
   if (fixed.length > 0 && supplied.length > 0 && pinnedSessions.length === 0) {
     invalid('request session ids do not intersect the connection acceptedSessionIds policy');
   }
-  const requiresVerified = options.serving?.requireVerified !== false
+  const requiresVerified = isConstrained(options)
     || provider.aci_verified === true || pinnedSessions.length > 0;
   if (pinnedSessions.length > 0) provider.aci_session_ids = pinnedSessions;
   if (requiresVerified) provider.aci_verified = true;
@@ -68,8 +71,7 @@ function mergeProvider(value: unknown, options: ConnectAciOptions): EffectivePol
 }
 
 export function constrainJsonBody(body: Uint8Array, options: ConnectAciOptions): ConstrainedBody {
-  const constrained = options.serving?.requireVerified !== false
-    || (options.serving?.acceptedSessionIds?.length ?? 0) > 0;
+  const constrained = isConstrained(options);
   const unchanged = { body, pinnedSessions: [], requiresVerified: false };
   let root: unknown;
   try {
@@ -117,8 +119,7 @@ export async function constrainRequestBody(
   if (carrier !== null && (!multipart || path !== AUDIO_TRANSCRIPTIONS_PATH)) {
     invalid('X-ACI-Provider is only valid on supported multipart endpoints');
   }
-  const constrained = options.serving?.requireVerified !== false
-    || (options.serving?.acceptedSessionIds?.length ?? 0) > 0;
+  const constrained = isConstrained(options);
   if (multipart && path === AUDIO_TRANSCRIPTIONS_PATH) {
     let provider: unknown = {};
     if (carrier !== null) {
@@ -138,7 +139,7 @@ export async function constrainRequestBody(
       && !capabilities?.supported_multipart_constraint_endpoints?.includes(path)) {
       invalid('gateway does not advertise multipart serving constraints for this endpoint');
     }
-    await scanMultipartHeaders(body, contentType);
+    await rejectMultipartProvider(body, contentType);
     if (constrained || carrier !== null) {
       const value = JSON.stringify(effective.provider);
       if (Buffer.byteLength(value) > MAX_MULTIPART_PROVIDER_BYTES) {
@@ -159,31 +160,15 @@ export async function constrainRequestBody(
   return { body, pinnedSessions: [], requiresVerified: constrained };
 }
 
-/** Scan part headers with the standard streaming parser, discarding data.
- * Treating every part as a file prevents buffering even large text fields.
- * The original bytes are retained without audio decoding or re-encoding.
- */
-async function scanMultipartHeaders(body: Uint8Array, contentType: string): Promise<void> {
+/** Validate multipart with the platform parser while retaining the wire bytes. */
+async function rejectMultipartProvider(body: Uint8Array, contentType: string): Promise<void> {
   try {
-    await new Promise<void>((resolve, reject) => {
-      const parser = new Busboy({
-        headers: { 'content-type': contentType },
-        isPartAFile: () => true,
-      });
-      parser.on('file', (name, stream) => {
-        stream.on('error', reject);
-        stream.resume();
-        if (name === 'provider') {
-          reject(new AciConnectionError(
-            'invalid_serving_constraints',
-            'multipart provider form parts are forbidden; use X-ACI-Provider',
-          ));
-        }
-      });
-      parser.on('error', reject);
-      parser.on('finish', resolve);
-      parser.end(body);
-    });
+    const form = await new Response(Buffer.from(body), {
+      headers: { 'content-type': contentType },
+    }).formData();
+    if (form.has('provider')) {
+      invalid('multipart provider form parts are forbidden; use X-ACI-Provider');
+    }
   } catch (error) {
     if (error instanceof AciConnectionError) throw error;
     invalid('malformed multipart body or boundary');

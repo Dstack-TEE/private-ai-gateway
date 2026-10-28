@@ -23,7 +23,7 @@ import {
   type VerifiedAciIdentity,
 } from './types.js';
 
-import { constrainRequestBody, validateProviderHeaderMultiplicity } from './constraints.js';
+import { constrainRequestBody, object, validateProviderHeaderMultiplicity } from './constraints.js';
 export { constrainJsonBody } from './constraints.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -688,10 +688,10 @@ async function probePinnedChannel(
   }
   try {
     const report: unknown = await response.json();
-    if (report === null || typeof report !== 'object' || Array.isArray(report)) return [];
-    const capabilities = (report as Record<string, unknown>).service_capabilities;
-    if (capabilities === null || typeof capabilities !== 'object' || Array.isArray(capabilities)) return [];
-    const endpoints = (capabilities as Record<string, unknown>).supported_multipart_constraint_endpoints;
+    if (!object(report)) return [];
+    const capabilities = report.service_capabilities;
+    if (!object(capabilities)) return [];
+    const endpoints = capabilities.supported_multipart_constraint_endpoints;
     return Array.isArray(endpoints) && endpoints.every((path): path is string => typeof path === 'string')
       ? endpoints : [];
   } catch (error) {

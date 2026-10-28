@@ -841,7 +841,7 @@ async fn local_policy_applied_only_when_constraints_are_tightened() {
             .await
             .unwrap();
             assert_eq!(
-                prepared.local_policy_applied, expected,
+                prepared.policy.local_policy_applied, expected,
                 "multipart={multipart}, provider={provider}, enforce_verified={enforce_verified}, pins={pins:?}",
             );
         }

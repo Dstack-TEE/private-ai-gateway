@@ -1,10 +1,10 @@
 //! Prepare bytes, carrier headers and the effective audit policy together.
 
-use super::dropped_headers;
 use crate::aci::types::{
     ServiceCapabilities, AUDIO_TRANSCRIPTIONS_PATH, MAX_MULTIPART_PROVIDER_BYTES,
     MULTIPART_PROVIDER_HEADER, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
+use agent_bridge::proxy::{check_carrier_headers, multipart};
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use serde_json::{json, Value};
@@ -12,18 +12,15 @@ use serde_json::{json, Value};
 pub(super) struct PreparedRequest {
     pub body: Bytes,
     pub headers: HeaderMap,
+    pub policy: EffectivePolicy,
+}
+
+#[derive(Default)]
+pub(super) struct EffectivePolicy {
     pub pinned_sessions: Vec<String>,
     pub requires_verified: bool,
     pub local_policy_applied: bool,
     pub policy_derived_pins: bool,
-}
-
-struct ProviderPolicy {
-    provider: serde_json::Map<String, Value>,
-    pinned_sessions: Vec<String>,
-    requires_verified: bool,
-    local_policy_applied: bool,
-    policy_derived_pins: bool,
 }
 
 pub(super) async fn prepare_request(
@@ -35,25 +32,12 @@ pub(super) async fn prepare_request(
     capabilities: &ServiceCapabilities,
 ) -> Result<PreparedRequest, String> {
     let mut headers = headers.clone();
-    // A Connection token must not strip the carrier or change body semantics.
-    let dropped = dropped_headers(&headers);
-    if dropped.contains(MULTIPART_PROVIDER_HEADER) || dropped.contains("content-type") {
-        return Err("serving constraint carriers cannot be hop-by-hop headers".into());
-    }
+    let content_type = check_carrier_headers(&headers)?;
     let carriers: Vec<_> = headers.get_all(MULTIPART_PROVIDER_HEADER).iter().collect();
     if carriers.len() > 1 {
         return Err("duplicate X-ACI-Provider headers".into());
     }
     let carrier = carriers.first().copied();
-    let content_types: Vec<_> = headers.get_all("content-type").iter().collect();
-    if content_types.len() > 1 {
-        return Err("duplicate Content-Type headers".into());
-    }
-    let content_type = content_types
-        .first()
-        .map(|value| value.to_str().map_err(|_| "invalid Content-Type header"))
-        .transpose()?
-        .unwrap_or("");
     let media_type = content_type.split(';').next().unwrap_or("").trim();
     let multipart = media_type.eq_ignore_ascii_case("multipart/form-data");
     let json = media_type.eq_ignore_ascii_case("application/json")
@@ -77,13 +61,7 @@ pub(super) async fn prepare_request(
             }
             None => serde_json::Map::new(),
         };
-        let ProviderPolicy {
-            provider,
-            pinned_sessions,
-            requires_verified,
-            local_policy_applied,
-            policy_derived_pins,
-        } = merge_provider(provider, enforce_verified, pins)?;
+        let (provider, policy) = merge_provider(provider, enforce_verified, pins)?;
         if (constrained || carrier.is_some())
             && !capabilities
                 .supported_multipart_constraint_endpoints
@@ -107,73 +85,58 @@ pub(super) async fn prepare_request(
         }
         return Ok(PreparedRequest {
             body,
-            local_policy_applied,
             headers,
-            pinned_sessions,
-            requires_verified,
-            policy_derived_pins,
+            policy,
         });
     }
     if !json {
         if constrained && !body.is_empty() {
             return Err("cannot apply serving constraints to this request media type".into());
         }
-        return Ok(PreparedRequest {
-            body,
-            headers,
-            pinned_sessions: Vec::new(),
-            requires_verified: enforce_verified,
-            local_policy_applied: false,
-            policy_derived_pins: false,
-        });
+        return unconstrained(body, headers, enforce_verified);
     }
     let mut parsed: Value = match serde_json::from_slice(&body) {
         Ok(parsed) => parsed,
-        Err(_) if !constrained => return unconstrained(body, headers),
+        Err(_) if !constrained => return unconstrained(body, headers, enforce_verified),
         Err(_) => return Err("JSON request body must be valid JSON".into()),
     };
     let Some(members) = parsed.as_object_mut() else {
         if !constrained {
-            return unconstrained(body, headers);
+            return unconstrained(body, headers, enforce_verified);
         }
         return Err("JSON request body must have an object top level".into());
     };
     let provider = match members.get("provider") {
         None | Some(Value::Null) => serde_json::Map::new(),
         Some(Value::Object(provider)) => provider.clone(),
-        Some(_) if !constrained => return unconstrained(body, headers),
+        Some(_) if !constrained => return unconstrained(body, headers, enforce_verified),
         Some(_) => return Err("JSON request provider must be an object or null".into()),
     };
-    let ProviderPolicy {
-        provider,
-        pinned_sessions,
-        requires_verified,
-        local_policy_applied,
-        policy_derived_pins,
-    } = merge_provider(provider, enforce_verified, pins)?;
-    if constrained || requires_verified {
+    let (provider, policy) = merge_provider(provider, enforce_verified, pins)?;
+    if policy.requires_verified {
         members.insert("provider".into(), Value::Object(provider));
         let outgoing = serde_json::to_vec(&parsed).map_err(|_| "cannot encode JSON request")?;
         return Ok(PreparedRequest {
             body: outgoing.into(),
             headers,
-            pinned_sessions,
-            requires_verified,
-            local_policy_applied,
-            policy_derived_pins,
+            policy,
         });
     }
-    unconstrained(body, headers)
+    unconstrained(body, headers, enforce_verified)
 }
 
-fn unconstrained(body: Bytes, headers: HeaderMap) -> Result<PreparedRequest, String> {
+fn unconstrained(
+    body: Bytes,
+    headers: HeaderMap,
+    enforce_verified: bool,
+) -> Result<PreparedRequest, String> {
     Ok(PreparedRequest {
         body,
         headers,
-        pinned_sessions: Vec::new(),
-        requires_verified: false,
-        local_policy_applied: false,
-        policy_derived_pins: false,
+        policy: EffectivePolicy {
+            requires_verified: enforce_verified,
+            ..Default::default()
+        },
     })
 }
 
@@ -181,7 +144,7 @@ fn merge_provider(
     mut provider: serde_json::Map<String, Value>,
     enforce_verified: bool,
     pins: &[String],
-) -> Result<ProviderPolicy, String> {
+) -> Result<(serde_json::Map<String, Value>, EffectivePolicy), String> {
     for key in provider.keys() {
         if key.starts_with("aci_")
             && key != PROVIDER_ACI_VERIFIED
@@ -252,25 +215,21 @@ fn merge_provider(
     if !pinned_sessions.is_empty() {
         provider.insert(PROVIDER_ACI_SESSION_IDS.into(), json!(pinned_sessions));
     }
-    Ok(ProviderPolicy {
+    Ok((
         provider,
-        pinned_sessions,
-        requires_verified,
-        local_policy_applied,
-        policy_derived_pins,
-    })
+        EffectivePolicy {
+            pinned_sessions,
+            requires_verified,
+            local_policy_applied,
+            policy_derived_pins,
+        },
+    ))
 }
 
 /// The standard parser scans boundaries/part headers and skips field data.
 /// No audio decoding, field collection or multipart re-encoding takes place.
 async fn scan_multipart_headers(body: Bytes, content_type: &str) -> Result<(), String> {
-    let boundary =
-        multer::parse_boundary(content_type).map_err(|_| "invalid multipart boundary")?;
-    if boundary.is_empty() || boundary.len() > 70 {
-        return Err("invalid multipart boundary".into());
-    }
-    let stream = futures_util::stream::once(async move { Ok::<_, std::convert::Infallible>(body) });
-    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut multipart = multipart(body, content_type, Default::default())?;
     while let Some(field) = multipart
         .next_field()
         .await
