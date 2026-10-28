@@ -63,7 +63,11 @@ fn build_model_router(
                     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
                     .with_path(cfg.path.clone())
                     .with_streaming_usage(cfg.streaming_usage)
-                    .with_audio_force_verbose_json(cfg.audio_force_verbose_json)
+                    // NEAR's native JSON contains only text, so audio must
+                    // request verbose duration even when the option is absent.
+                    .with_audio_force_verbose_json(
+                        cfg.audio_force_verbose_json || cfg.provider == UpstreamProvider::NearAi,
+                    )
                     .with_is_tee(Some(provider_is_tee(cfg.provider))),
                 )
                 .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;

@@ -59,6 +59,7 @@ struct MockUpstream {
 
 #[derive(Debug, Clone)]
 struct RecordedRequest {
+    headers: HashMap<String, String>,
     raw_body: bytes::Bytes,
     content_type: Option<String>,
     path: Option<String>,
@@ -92,6 +93,7 @@ impl UpstreamBackend for RecordingUpstream {
             serde_json::from_slice(&req.body).unwrap()
         };
         self.requests.lock().unwrap().push(RecordedRequest {
+            headers: req.headers.clone(),
             raw_body: req.body.clone(),
             content_type: req.content_type.clone(),
             path: req.path,
@@ -5725,6 +5727,159 @@ fn audio_input() -> CompletionInput {
         })),
         request_id: "req-audio".into(),
         ..chat_input()
+    }
+}
+
+fn audio_http_request(provider: &Value, host: &str) -> axum::http::Request<axum::body::Body> {
+    let raw = "--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-test\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private.wav\"\r\n\r\nsensitive audio\r\n--upload--\r\n";
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("host", host)
+        .header("content-type", "multipart/form-data; boundary=upload")
+        .header("x-aci-provider", provider.to_string())
+        .body(axum::body::Body::from(raw))
+        .unwrap()
+}
+
+fn audio_policy_service() -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingUpstream {
+        requests: requests.clone(),
+        status: 200,
+        body: br#"{"text":"hello","duration":2.965}"#.to_vec(),
+        content_type: "application/json",
+    });
+    let mut router = ModelRouterBackend::new("audio-policy");
+    for (route, is_tee) in [("plain:model", false), ("tee:model", true)] {
+        router
+            .add_route(
+                ModelRoute::new("gpt-test", "whisper", backend.clone(), route)
+                    .unwrap()
+                    .with_is_tee(Some(is_tee)),
+            )
+            .unwrap();
+    }
+    (build_service_with_backend(Arc::new(router)), requests)
+}
+
+#[tokio::test]
+async fn audio_http_tee_only_host_rejects_non_tee_candidate_despite_caller_opt_out() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
+    let (service, requests) = audio_policy_service();
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
+            .unwrap(),
+    );
+    let mw = new_middleware(&MiddlewareConfig {
+        control_url: url,
+        tee_only_domains: vec!["tee.example".into()],
+        control_token: None,
+        control_timeout_ms: Some(2000),
+        control_post_timeout_ms: Some(2000),
+        sse_keepalive_ms: None,
+        send_request_features: None,
+    })
+    .unwrap();
+    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service,
+        manager,
+        None,
+        Arc::new(mw),
+    );
+    let provider = json!({"aci_verified":false,"order":["plain"]});
+    let response = app
+        .oneshot(audio_http_request(&provider, "tee.example"))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let _ = response_parts(response).await;
+    assert!(requests.lock().unwrap().is_empty());
+    let pre = &pres.lock().unwrap()[0];
+    assert_eq!(pre["tee"], true);
+    assert_eq!(pre["provider"], provider);
+    assert_eq!(pre["endpoint"], "/v1/audio/transcriptions");
+}
+
+#[tokio::test]
+async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reaches_upstream() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"tee:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
+    let (service, requests) = audio_policy_service();
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
+            .unwrap(),
+    );
+    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service.clone(),
+        manager,
+        None,
+        Arc::new(middleware(url)),
+    );
+    let (status, headers, _) = response_parts(
+        app.clone()
+            .oneshot(audio_http_request(
+                &json!({"aci_verified":true}),
+                "gateway.example",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    let document = receipt.document_json().unwrap();
+    let session = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (pin, expected_status) in [(session.clone(), 200), ("ab".repeat(32), 412)] {
+        let provider = json!({"order":["tee"],"aci_session_ids":[pin]});
+        let (status, headers, _) = response_parts(
+            app.clone()
+                .oneshot(audio_http_request(&provider, "gateway.example"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected_status);
+        assert_eq!(pres.lock().unwrap().last().unwrap()["provider"], provider);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        let document = receipt.document_json().unwrap();
+        let events = document["event_log"].as_array().unwrap();
+        let verified = events
+            .iter()
+            .find(|e| e["type"] == "upstream.verified")
+            .unwrap();
+        assert_eq!(verified["required"], true);
+        if status == 200 {
+            assert_eq!(verified["session_id"], session);
+        } else {
+            assert!(!events.iter().any(|e| e["type"] == "request.forwarded"));
+        }
+    }
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert!(!request
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("x-aci-provider")));
+        assert!(request.body.get("provider").is_none());
     }
 }
 

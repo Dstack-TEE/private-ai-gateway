@@ -1049,3 +1049,48 @@ fn audio_transcription_config_rejects_unsupported_adapters_and_redacts_option() 
         true
     );
 }
+
+#[test]
+fn near_audio_always_requests_verbose_duration_without_affecting_json_requests() {
+    use crate::aci::upstream::UpstreamRequest;
+    use bytes::Bytes;
+
+    for path in [None, Some("/v1/audio/transcriptions".into())] {
+        for verbose_option in [false, true] {
+            let mut config = test_upstream_config(
+                "near",
+                UpstreamProvider::NearAi,
+                "whisper",
+                "openai/whisper-large-v3",
+            );
+            config.path = path.clone();
+            config.audio_force_verbose_json = verbose_option;
+            let state =
+                build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
+            for audio in [false, true] {
+                let prepared = state
+                    .backend
+                    .prepare(UpstreamRequest {
+                        body: Bytes::from_static(
+                            br#"{"model":"whisper","response_format":"json"}"#,
+                        ),
+                        path: Some("/v1/audio/transcriptions".into()),
+                        form: audio.then(|| {
+                            Arc::new(crate::middleware::audio::AudioForm {
+                                file: Bytes::from_static(b"audio"),
+                                extension: "wav".into(),
+                            })
+                        }),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let fields: serde_json::Value =
+                    serde_json::from_slice(&prepared.request.body).unwrap();
+                assert_eq!(
+                    fields["response_format"],
+                    if audio { "verbose_json" } else { "json" }
+                );
+            }
+        }
+    }
+}

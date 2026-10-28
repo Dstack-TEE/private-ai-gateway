@@ -37,8 +37,8 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
-| `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header returns `400 e2ee_unsupported_endpoint` before reading the body | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
-| `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` before reading the body | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
+| `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
+| `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
@@ -142,7 +142,8 @@ TEE-only host policy remains independent.
 
 The gateway forwards the requested response format, with a provider-specific
 `audio_force_verbose_json` opt-in for providers needing verbose output to report
-duration. It requests word timestamps only when the caller asks. `json` returns
+duration. NEAR audio always uses verbose output internally, even if that option
+is absent or false. It requests word timestamps only when the caller asks. `json` returns
 only `text` and `usage`; verbose output may also include `language`, `duration`,
 `segments`, `words`, and `task`. Nested segment, word, usage, and token-detail
 objects are sanitized by allowlist. Upstream filenames become `audio.<ext>`.
@@ -160,6 +161,14 @@ was supplied upstream or synthesized. For example, `2.965` becomes `3`; verbose
 `duration` retains the raw provider value. Receipts have null `chat_id`; fetch by
 `X-Receipt-Id`. `request.received` hashes raw client multipart bytes and
 `request.forwarded` hashes the exact gateway-encoded bytes sent upstream.
+
+For audio/image header rejections, the refusal is decided before parsing or
+admission. The gateway then discards unread bytes without buffering, up to the
+endpoint body limit, with a 5-second total deadline, 1-second idle deadline,
+and 32 separate discard slots. This preserves the 400 JSON through streaming
+reverse proxies for uploads within those bounds. Exhausted slots, excess bytes,
+transport errors, or a deadline cause immediate connection closure; upload
+capacity and inference permits are never held by the discard.
 
 ### Inference responses
 

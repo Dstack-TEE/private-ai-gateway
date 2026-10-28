@@ -37,6 +37,7 @@ use super::error_responses::{
     internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
     unsupported_e2ee_response, upstream_config_error_response,
 };
+use super::rejected_body::discard_before_reply;
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
     request_host_domain,
@@ -504,17 +505,23 @@ pub(super) async fn images_generations(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // Refuse before reading any body, including incomplete E2EE headers.
+    // Decide from headers before parsing or admission, including incomplete
+    // E2EE headers. Bounded transport discard preserves the JSON refusal.
     if has_e2ee_headers(&headers)
         || headers
             .keys()
             .any(|key| key.as_str().starts_with("x-e2ee-"))
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_unsupported_endpoint",
-            "E2EE is not supported on /v1/images/generations",
-        );
+        return discard_before_reply(
+            body,
+            super::MAX_REQUEST_BODY_BYTES,
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "e2ee_unsupported_endpoint",
+                "E2EE is not supported on /v1/images/generations",
+            ),
+        )
+        .await;
     }
     openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
 }
@@ -529,11 +536,16 @@ pub(super) async fn audio_transcriptions(
             .keys()
             .any(|key| key.as_str().starts_with("x-e2ee-"))
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_unsupported_endpoint",
-            "E2EE is not supported on /v1/audio/transcriptions",
-        );
+        return discard_before_reply(
+            body,
+            crate::middleware::audio::MAX_BODY_BYTES,
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "e2ee_unsupported_endpoint",
+                "E2EE is not supported on /v1/audio/transcriptions",
+            ),
+        )
+        .await;
     }
     openai_completion_endpoint(state, headers, body, AUDIO_TRANSCRIPTIONS_PATH, true).await
 }
@@ -696,17 +708,27 @@ pub(super) async fn openai_completion_endpoint(
     };
     let is_audio = endpoint_path == AUDIO_TRANSCRIPTIONS_PATH;
     if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "X-ACI-Provider is only supported on multipart transcription requests",
-        );
+        return discard_before_reply(
+            body,
+            super::MAX_REQUEST_BODY_BYTES,
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "X-ACI-Provider is only supported on multipart transcription requests",
+            ),
+        )
+        .await;
     }
     let provider_header = if is_audio {
         match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
-                return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
+                return discard_before_reply(
+                    body,
+                    crate::middleware::audio::MAX_BODY_BYTES,
+                    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
+                )
+                .await;
             }
         }
     } else {

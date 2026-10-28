@@ -8,5 +8,6 @@ The control plane must explicitly list `/v1/audio/transcriptions` in the
 candidate's `supportedEndpoints` and supply a verified `audioCostPerSecond`.
 NEAR's native JSON contains only `text`; the example enables
 `audio_force_verbose_json` to obtain duration while preserving the caller's
-output format. NEAR's rate still requires verification. Privatemode is pending
+output format. The gateway enforces this behavior for NEAR audio even if the
+option is omitted. NEAR's rate still requires verification. Privatemode is pending
 verification and remains blocked.

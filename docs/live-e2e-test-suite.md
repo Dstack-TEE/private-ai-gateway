@@ -82,7 +82,8 @@ it is not a launch-ready provider. No live provider call is part of unit tests.
 Before launch, test `json` duration and `verbose_json` per provider. Only set
 `audio_force_verbose_json` when a provider's JSON lacks billable duration.
 NEAR's native JSON contains only `text`, so its audio entry sets this option
-and the runner passes it into the gateway's upstream configuration.
+and the runner passes it into the gateway's upstream configuration. The gateway
+also forces this behavior for NEAR audio when the option is absent or false.
 Run on an authorized test CVM, then delete the CVM. Do not enable production
 routes until client fail-closed releases and control-plane audio ingestion ship.
 
