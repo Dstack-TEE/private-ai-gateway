@@ -10,6 +10,7 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(responses_compact))
         .route("/v1/systemone", post(systemone))
+        .route(Surface::Images.path(), post(images))
         .fallback(not_found)
         .with_state(state)
 }
@@ -150,13 +151,31 @@ async fn systemone(
     .await
 }
 
+async fn images(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        uri,
+        body,
+        Surface::Images,
+        Surface::Images.path(),
+    )
+    .await
+}
+
 async fn not_found() -> Response {
     error_response(
         Surface::ChatCompletions,
         StatusCode::NOT_FOUND,
         "not_found",
         &format!(
-            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/responses, and /v1/systemone"
+            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, and {}",
+            Surface::Images.path()
         ),
     )
 }

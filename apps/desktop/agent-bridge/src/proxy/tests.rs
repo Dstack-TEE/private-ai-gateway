@@ -88,6 +88,7 @@ async fn mock_upstream() -> String {
         .route("/v1/responses", post(echo))
         .route("/v1/messages/count_tokens", post(echo))
         .route("/v1/systemone", post(echo))
+        .route("/v1/images/generations", post(echo))
         .route(
             "/v1/models",
             get(|| async {
@@ -482,6 +483,151 @@ async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
 }
 
 #[tokio::test]
+async fn images_are_local_tools_only_and_require_advertised_image_output() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let mut session = state.session();
+    let model = &mut session.catalog.as_mut().unwrap().models[0];
+    model.supported_surfaces = Some(vec![Surface::Responses]);
+    model
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["image"]));
+    state.publish(session);
+
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let body =
+        r#"{"model":"openai/gpt-oss-20b", "prompt":"A quiet lake", "response_format":"b64_json"}"#;
+    let response = client
+        .post(format!("{proxy}/v1/images/generations?trace=true"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-receipt-id"], "rcpt-1");
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["authorization"], "Bearer sk-real");
+    assert_eq!(forwarded["path"], "/v1/images/generations?trace=true");
+    assert_eq!(forwarded["body"], body);
+    let initial = events.recv().await.unwrap();
+    let usage = events.recv().await.unwrap();
+    assert_eq!(usage.request_id, initial.request_id);
+    assert_eq!(usage.input_tokens, None);
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.cost_usd, None);
+
+    for token in ["codex-token", "claude-token", "opencode-token"] {
+        let response = client
+            .post(format!("{proxy}/v1/images/generations"))
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "forbidden");
+    }
+    for modalities in [Some(json!(["text"])), None] {
+        let mut session = state.session();
+        let extra = &mut session.catalog.as_mut().unwrap().models[0].remote.extra;
+        if let Some(modalities) = modalities {
+            extra.insert("output_modalities".into(), modalities);
+        } else {
+            extra.remove("output_modalities");
+        }
+        state.publish(session);
+        let response = client
+            .post(format!("{proxy}/v1/images/generations"))
+            .bearer_auth("local-tools-token")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+    }
+    let unknown = client
+        .post(format!("{proxy}/v1/images/generations"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"unknown/model", "prompt":"A quiet lake"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let error: Value = unknown.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_not_found");
+}
+
+#[tokio::test]
+async fn large_image_responses_pass_through_and_record_usage() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let payload = Bytes::from(format!(
+        r#"{{"created":1,"data":[{{"b64_json":"{}"}}],"usage":{{"input_tokens":12,"output_tokens":34,"cost":"0.02"}}}}"#,
+        "A".repeat(MAX_USAGE_CAPTURE_BYTES + 1024)
+    ));
+    let expected = payload.clone();
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/images/generations",
+                post(move || {
+                    let payload = payload.clone();
+                    async move {
+                        Response::builder()
+                            .status(StatusCode::CREATED)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header("x-receipt-id", "image-receipt")
+                            .body(Body::from(payload))
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data":[{"id":"image-model", "output_modalities":["image"]}]}))
+                }),
+            ),
+    )
+    .await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let proxy = spawn(router(state)).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/images/generations"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"image-model", "prompt":"A quiet lake"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    assert_eq!(response.headers()["x-receipt-id"], "image-receipt");
+    assert_eq!(response.bytes().await.unwrap(), expected);
+    let initial = events.recv().await.unwrap();
+    let usage = events.recv().await.unwrap();
+    assert_eq!(usage.request_id, initial.request_id);
+    assert_eq!(usage.path, "/v1/images/generations");
+    assert_eq!(usage.agent.as_deref(), Some(LOCAL_TOOLS_AGENT));
+    assert_eq!(usage.receipt_id.as_deref(), Some("image-receipt"));
+    assert!(!usage.streamed);
+    assert!(usage.left_device);
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(34));
+    assert_eq!(usage.cost_usd, Some(0.02));
+}
+
+#[tokio::test]
 async fn send_failures_are_not_reported_as_local_rejections() {
     let (state, mut events) = state();
     state.set_tokens(tokens());
@@ -657,7 +803,7 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
 
 #[test]
 fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     stream.push(b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,");
     stream.push(
         b"\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":3},\"cost\":\"0.004\"}}}\n\n",
@@ -668,7 +814,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
     assert_eq!(usage.cache_read_tokens, Some(3));
     assert_eq!(usage.cost_usd, Some(0.004));
 
-    let mut json = UsageCapture::new(false);
+    let mut json = UsageCapture::new(false, Surface::ChatCompletions);
     json.push(br#"{"usage":{"prompt_tokens":21,"completion_tokens":8,"cache_creation_input_tokens":4,"prompt_tokens_details":{"cached_tokens":7},"cost":-1}}"#);
     let usage = json.finish();
     assert_eq!(usage.input_tokens, Some(21));
@@ -677,7 +823,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
     assert_eq!(usage.cache_write_tokens, Some(4));
     assert_eq!(usage.cost_usd, None);
 
-    let mut messages = UsageCapture::new(true);
+    let mut messages = UsageCapture::new(true, Surface::Messages);
     messages.push(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":144,\"cache_read_input_tokens\":32,\"cache_creation_input_tokens\":8}}}\n\n");
     messages.push(b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":21}}\n\n");
     let usage = messages.finish();
@@ -689,7 +835,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
 
 #[test]
 fn oversized_usage_body_stays_unknown() {
-    let mut capture = UsageCapture::new(false);
+    let mut capture = UsageCapture::new(false, Surface::Responses);
     capture.push(&vec![b'x'; MAX_USAGE_CAPTURE_BYTES + 1]);
     let usage = capture.finish();
     assert_eq!(usage.input_tokens, None);
@@ -698,8 +844,34 @@ fn oversized_usage_body_stays_unknown() {
 }
 
 #[test]
+fn image_usage_capture_accepts_the_response_limit_and_discards_overflow() {
+    let prefix = br#"{"data":[{"b64_json":""#;
+    let suffix = br#""}],"usage":{"cost":"0.03"}}"#;
+    let chunk = [b'A'; 64 * 1024];
+    for overflow in [false, true] {
+        let mut capture = UsageCapture::new(false, Surface::Images);
+        capture.push(prefix);
+        let mut remaining = MAX_IMAGE_USAGE_CAPTURE_BYTES - prefix.len() - suffix.len();
+        while remaining > 0 {
+            let len = remaining.min(chunk.len());
+            capture.push(&chunk[..len]);
+            remaining -= len;
+        }
+        capture.push(suffix);
+        if overflow {
+            capture.push(b" ");
+            assert_eq!(capture.body.capacity(), 0);
+        }
+        let usage = capture.finish();
+        assert_eq!(usage.cost_usd, if overflow { None } else { Some(0.03) });
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+}
+
+#[test]
 fn large_responses_preserve_usage_without_reading_output_as_usage() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     let event = format!(
         "data: {}\n\n",
         json!({
@@ -714,7 +886,7 @@ fn large_responses_preserve_usage_without_reading_output_as_usage() {
     assert_eq!(usage.input_tokens, Some(1200));
     assert_eq!(usage.output_tokens, Some(450));
 
-    let mut body = UsageCapture::new(false);
+    let mut body = UsageCapture::new(false, Surface::Responses);
     body.push(
         json!({"output": "x".repeat(2 * 1024 * 1024),
         "usage": {"input_tokens": 800, "output_tokens": 400}})
@@ -727,7 +899,7 @@ fn large_responses_preserve_usage_without_reading_output_as_usage() {
 
 #[test]
 fn oversized_sse_lines_are_discarded_before_the_next_event() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     stream.push(b"data: {\"usage\":{\"input_tokens\":999}}");
     stream.push(&vec![b' '; desktop_core::sse::MAX_LINE_BYTES]);
     stream.push(b"invalid\n\n");

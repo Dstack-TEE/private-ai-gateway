@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
+pub(crate) const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteModel {
@@ -33,6 +34,7 @@ pub enum Surface {
     Responses,
     /// System One relay surface.
     SystemOne,
+    Images,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -178,12 +180,14 @@ impl Surface {
             Surface::Messages => "/v1/messages",
             Surface::Responses => "/v1/responses",
             Surface::SystemOne => "/v1/systemone",
+            Surface::Images => IMAGES_GENERATIONS_PATH,
         }
     }
 
     fn output_modality(self) -> &'static str {
         match self {
             Surface::SystemOne => "decisions",
+            Surface::Images => "image",
             Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
         }
     }
@@ -205,7 +209,7 @@ pub struct CatalogModel {
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
         self.outputs(surface.output_modality())
-            && (surface == Surface::SystemOne
+            && (matches!(surface, Surface::SystemOne | Surface::Images)
                 || self
                     .supported_surfaces
                     .as_ref()
@@ -224,7 +228,9 @@ impl CatalogModel {
         self.remote
             .extra
             .get("output_modalities")
-            .is_none_or(|modalities| {
+            // Existing surfaces accept legacy catalogs without modality metadata;
+            // image generation requires an explicit advertisement.
+            .map_or(modality != "image", |modalities| {
                 modalities
                     .as_array()
                     .is_some_and(|modalities| modalities.iter().any(|value| value == modality))

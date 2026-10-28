@@ -64,9 +64,16 @@ proof details and printed by [`pap usage show <id> --receipt`](docs/cli.md#cover
 
 The Local API exposes `GET /v1/models`, plus `POST /v1/chat/completions`,
 `POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`,
-`POST /v1/responses/compact`, and `POST /v1/systemone`. The System One route
-accepts native buffered JSON and is available to the local-tools token; all
-inference routes require a verified session and a model from its catalog.
+`POST /v1/responses/compact`, `POST /v1/systemone`, and
+`POST /v1/images/generations`. The System One and image-generation routes
+accept native buffered JSON and are available only to the local-tools token;
+all inference routes require a verified session and a model from its catalog.
+Image generation additionally requires the model to advertise `image` in
+`output_modalities` and the remote gateway to support the endpoint. Image
+responses pass through unchanged, including `data[].b64_json`; usage and cost
+are captured when reported by the service, with a 64 MiB capture limit for
+image responses. Missing usage is not estimated. The request body limit is
+32 MiB and the upstream call timeout is 660 seconds.
 
 Only agents that are both linked and currently protected are authorized on the
 Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset

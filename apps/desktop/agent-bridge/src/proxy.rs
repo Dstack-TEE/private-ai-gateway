@@ -72,6 +72,8 @@ const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = desktop_core::sse::MAX_LINE_BYTES;
+// Image JSON includes base64 output; match the gateway's buffered response cap.
+const MAX_IMAGE_USAGE_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const HOP_BY_HOP: [&str; 9] = [
     "connection",
     "proxy-connection",
@@ -777,7 +779,7 @@ async fn forward(
     let event_receipt_id = receipt_id;
     let body = async_stream::stream! {
         let mut report = UsageReport {
-            capture: Some(UsageCapture::new(streamed)),
+            capture: Some(UsageCapture::new(streamed, surface)),
             state: event_state,
             event: ProxyEvent {
                 generation,
