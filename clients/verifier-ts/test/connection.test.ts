@@ -409,6 +409,10 @@ test('invalid bodies and multipart carriers cause zero inference sends', async (
       ]) }],
       [audioPath, { ...request(), body: 'broken multipart' }],
       [audioPath, { ...request(), headers: [['content-type', multipartType], ['x-aci-provider', '{}'], ['x-aci-provider', '{}']] }],
+      // These fragments form valid JSON after Fetch joins them with ", ".
+      [audioPath, { ...request(), headers: [['content-type', multipartType], ['X-ACI-Provider', '{"order":["a"'], ['x-aci-provider', '"b"]}']] }],
+      [audioPath, { ...request(), headers: { 'content-type': multipartType, 'X-ACI-Provider': '{"order":["a"', 'x-aci-provider': '"b"]}' } }],
+      [audioPath, { ...request(), headers: new Headers([['content-type', multipartType], ['X-ACI-Provider', '{}'], ['x-aci-provider', '{}']]) }],
       [audioPath, { ...request(), headers: { 'content-type': multipartType, connection: 'x-aci-provider' } }],
       ['/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', 'x-aci-provider': '{}' }, body: '{}' }],
     ];
@@ -468,7 +472,7 @@ test('multipart preserves wire bytes and audits the effective header pins with l
             sends++;
             assert.deepEqual(new Uint8Array(await input.clone().arrayBuffer()), new Uint8Array(body));
             assert.deepEqual(JSON.parse(input.headers.get('x-aci-provider') ?? ''), {
-              order: ['upstream'], aci_session_ids: [accepted], aci_verified: true,
+              order: ['upstream, primary', 'backup'], aci_session_ids: [accepted], aci_verified: true,
             });
           }
           return transport.fetch(input, init);
@@ -483,7 +487,7 @@ test('multipart preserves wire bytes and audits the effective header pins with l
           method: 'POST',
           headers: {
             'content-type': multipartType,
-            'x-aci-provider': JSON.stringify({ order: ['upstream'], aci_session_ids: requireVerified ? [accepted, 'c'.repeat(64)] : [accepted] }),
+            'x-aci-provider': JSON.stringify({ order: ['upstream, primary', 'backup'], aci_session_ids: requireVerified ? [accepted, 'c'.repeat(64)] : [accepted] }),
           },
           body: Buffer.from(body),
         })).text();

@@ -17,11 +17,19 @@ interface ConstrainedBody {
   body: Uint8Array;
   pinnedSessions: string[];
   requiresVerified: boolean;
-  localPolicyApplied: boolean;
 }
 
 function invalid(message: string): never {
   throw new AciConnectionError('invalid_serving_constraints', message);
+}
+
+/** Check raw sources before Fetch combines case-insensitive duplicate names. */
+export function validateProviderHeaderMultiplicity(headers: HeadersInit | undefined): void {
+  if (headers === undefined || headers instanceof Headers) return;
+  const names = Array.isArray(headers) ? headers.map(([name]) => name) : Object.keys(headers);
+  if (names.filter((name) => name.toLowerCase() === MULTIPART_PROVIDER_HEADER).length > 1) {
+    invalid('duplicate X-ACI-Provider headers');
+  }
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -62,7 +70,7 @@ function mergeProvider(value: unknown, options: ConnectAciOptions): EffectivePol
 export function constrainJsonBody(body: Uint8Array, options: ConnectAciOptions): ConstrainedBody {
   const constrained = options.serving?.requireVerified !== false
     || (options.serving?.acceptedSessionIds?.length ?? 0) > 0;
-  const unchanged = { body, pinnedSessions: [], requiresVerified: false, localPolicyApplied: false };
+  const unchanged = { body, pinnedSessions: [], requiresVerified: false };
   let root: unknown;
   try {
     root = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
@@ -86,7 +94,6 @@ export function constrainJsonBody(body: Uint8Array, options: ConnectAciOptions):
     body: outgoing,
     pinnedSessions: effective.pinnedSessions,
     requiresVerified: effective.requiresVerified,
-    localPolicyApplied: !Buffer.from(outgoing).equals(body),
   };
 }
 
@@ -119,8 +126,8 @@ export async function constrainRequestBody(
         invalid('X-ACI-Provider exceeds 8192 bytes');
       }
       try {
-        // Fetch coalesces duplicate header values with a comma; JSON.parse
-        // rejects that combined value as well as malformed single carriers.
+        // Headers/Request inputs have already lost header multiplicity.
+        // JSON.parse still rejects coalesced complete objects and malformed carriers.
         provider = JSON.parse(carrier);
       } catch {
         invalid('X-ACI-Provider must contain a single JSON object');
@@ -143,14 +150,13 @@ export async function constrainRequestBody(
       body,
       pinnedSessions: effective.pinnedSessions,
       requiresVerified: effective.requiresVerified,
-      localPolicyApplied: constrained,
     };
   }
   if (json) return constrainJsonBody(body, options);
   if (constrained && body.length > 0) {
     invalid('cannot apply serving constraints to this request media type');
   }
-  return { body, pinnedSessions: [], requiresVerified: constrained, localPolicyApplied: false };
+  return { body, pinnedSessions: [], requiresVerified: constrained };
 }
 
 /** Scan part headers with the standard streaming parser, discarding data.

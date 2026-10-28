@@ -22,6 +22,7 @@ struct ProviderPolicy {
     provider: serde_json::Map<String, Value>,
     pinned_sessions: Vec<String>,
     requires_verified: bool,
+    local_policy_applied: bool,
     policy_derived_pins: bool,
 }
 
@@ -80,6 +81,7 @@ pub(super) async fn prepare_request(
             provider,
             pinned_sessions,
             requires_verified,
+            local_policy_applied,
             policy_derived_pins,
         } = merge_provider(provider, enforce_verified, pins)?;
         if (constrained || carrier.is_some())
@@ -105,7 +107,7 @@ pub(super) async fn prepare_request(
         }
         return Ok(PreparedRequest {
             body,
-            local_policy_applied: constrained,
+            local_policy_applied,
             headers,
             pinned_sessions,
             requires_verified,
@@ -146,12 +148,12 @@ pub(super) async fn prepare_request(
         provider,
         pinned_sessions,
         requires_verified,
+        local_policy_applied,
         policy_derived_pins,
     } = merge_provider(provider, enforce_verified, pins)?;
     if constrained || requires_verified {
         members.insert("provider".into(), Value::Object(provider));
         let outgoing = serde_json::to_vec(&parsed).map_err(|_| "cannot encode JSON request")?;
-        let local_policy_applied = outgoing.as_slice() != body.as_ref();
         return Ok(PreparedRequest {
             body: outgoing.into(),
             headers,
@@ -241,6 +243,9 @@ fn merge_provider(
     }
     let requires_verified =
         enforce_verified || verified == Some(true) || !pinned_sessions.is_empty();
+    let caller_requires_verified = verified == Some(true) || !supplied.is_empty();
+    let local_policy_applied =
+        (requires_verified && !caller_requires_verified) || pinned_sessions != supplied;
     if requires_verified {
         provider.insert(PROVIDER_ACI_VERIFIED.into(), Value::Bool(true));
     }
@@ -251,6 +256,7 @@ fn merge_provider(
         provider,
         pinned_sessions,
         requires_verified,
+        local_policy_applied,
         policy_derived_pins,
     })
 }

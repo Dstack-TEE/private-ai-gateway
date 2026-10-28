@@ -41,3 +41,9 @@ constrained malformed JSON, and unsupported constrained media types return
 Receipts hash the body, so the client separately retains and audits the
 effective header policy. These client protections must be released before
 a gateway enables transcription uploads.
+
+Compatibility change: constrained JSON requests must set
+`Content-Type: application/json` (or `application/*+json`). JSON bytes with a
+missing or different content type are now refused. For example, a `fetch`
+string body defaults to `text/plain`, and `curl -d` defaults to
+`application/x-www-form-urlencoded`; both need an explicit JSON content type.

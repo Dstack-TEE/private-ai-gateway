@@ -178,6 +178,13 @@ unchanged; receipt audits retain the effective header policy because body
 hashes do not commit to headers. Release these client protections before a
 gateway enables transcription uploads.
 
+Compatibility change: constrained JSON requests must set
+`Content-Type: application/json` (or `application/*+json`). JSON bytes with a
+missing or different content type are now refused. In particular, passing
+`JSON.stringify(...)` as a `fetch` string body defaults to `text/plain`;
+`curl -d` defaults to `application/x-www-form-urlencoded`. Set the JSON content
+type explicitly when calling `aci.fetch` or the local proxy.
+
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`. Take the hash from authenticated release
 metadata, never from the endpoint you are verifying: a hash copied from the

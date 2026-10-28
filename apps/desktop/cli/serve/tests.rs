@@ -778,6 +778,77 @@ async fn apply_constraints_tightens_plaintext_body() {
 }
 
 #[tokio::test]
+async fn local_policy_applied_only_when_constraints_are_tightened() {
+    let accepted = "a".repeat(64);
+    let other = "b".repeat(64);
+    for (provider, enforce_verified, pins, expected) in [
+        // Caller pins already imply verification; normalization is not local policy.
+        (
+            json!({"aci_session_ids": [accepted, accepted]}),
+            false,
+            vec![],
+            false,
+        ),
+        (
+            json!({"aci_session_ids": [accepted]}),
+            true,
+            vec![accepted.clone(), other.clone()],
+            false,
+        ),
+        (json!({"aci_verified": true}), true, vec![], false),
+        // Local policy adds verification, adds pins, or narrows the caller's pins.
+        (json!({}), true, vec![], true),
+        (json!({"aci_verified": false}), true, vec![], true),
+        (
+            json!({"aci_verified": true}),
+            false,
+            vec![accepted.clone()],
+            true,
+        ),
+        (
+            json!({"aci_session_ids": [accepted, other]}),
+            true,
+            vec![accepted.clone()],
+            true,
+        ),
+    ] {
+        for multipart in [false, true] {
+            let mut headers = HeaderMap::new();
+            let (path, body) = if multipart {
+                headers.insert("content-type", AUDIO_CONTENT_TYPE.parse().unwrap());
+                headers.insert("x-aci-provider", provider.to_string().parse().unwrap());
+                (AUDIO_PATH, audio_body("file"))
+            } else {
+                headers.insert("content-type", "application/json".parse().unwrap());
+                (
+                    "/v1/chat/completions",
+                    serde_json::to_vec_pretty(&json!({"provider": provider}))
+                        .unwrap()
+                        .into(),
+                )
+            };
+            let prepared = prepare_request(
+                body,
+                &headers,
+                path,
+                enforce_verified,
+                &pins,
+                &crate::aci::types::ServiceCapabilities {
+                    supported_multipart_constraint_endpoints: vec![AUDIO_PATH.into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                prepared.local_policy_applied, expected,
+                "multipart={multipart}, provider={provider}, enforce_verified={enforce_verified}, pins={pins:?}",
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn malformed_constraint_shapes_return_the_reason_without_an_upstream_call() {
     let calls = Arc::new(AtomicUsize::new(0));
     let upstream = Router::new().fallback({

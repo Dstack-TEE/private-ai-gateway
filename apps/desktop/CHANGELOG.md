@@ -6,6 +6,10 @@
 
 * **cli:** Refuse constrained malformed JSON and unsupported request bodies before inference leaves the device. Carry multipart transcription constraints in `X-ACI-Provider` only when the verified gateway advertises support; preserve effective session pins through 412 recovery and receipt audits. Release this client protection before enabling gateway transcription uploads.
 
+### Compatibility
+
+* **cli:** `pap serve` now refuses constrained JSON requests without a JSON content type. Set `Content-Type: application/json` (or `application/*+json`); a `fetch` string body defaults to `text/plain`, and `curl -d` defaults to `application/x-www-form-urlencoded`, even when their bytes contain JSON.
+
 ## [0.7.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.7.0-beta.1...desktop-v0.7.0) (2026-10-28)
 
 Changes since stable 0.6.2, including both intervening betas and the reviewed #510 cleanup.

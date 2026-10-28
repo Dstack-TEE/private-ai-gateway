@@ -23,7 +23,7 @@ import {
   type VerifiedAciIdentity,
 } from './types.js';
 
-import { constrainRequestBody } from './constraints.js';
+import { constrainRequestBody, validateProviderHeaderMultiplicity } from './constraints.js';
 export { constrainJsonBody } from './constraints.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -431,7 +431,6 @@ interface PreparedRequest {
   pinnedSessions: string[];
   requiresVerified: boolean;
   authorization?: string;
-  localPolicyApplied: boolean;
 }
 
 /** @internal Exported for transport-policy conformance tests. */
@@ -441,6 +440,7 @@ export async function prepareRequest(
   options: ConnectAciOptions,
   capabilities?: AttestationReport['service_capabilities'],
 ): Promise<PreparedRequest> {
+  validateProviderHeaderMultiplicity(init?.headers);
   const original = new Request(input, init);
   const authorization = original.headers.get('authorization')?.trim() || undefined;
   if (original.method !== 'POST') {
@@ -449,7 +449,6 @@ export async function prepareRequest(
       bodyDigest: await digestRequest(original),
       pinnedSessions: [],
       requiresVerified: false,
-      localPolicyApplied: false,
       ...(authorization ? { authorization } : {}),
     };
   }
@@ -465,7 +464,6 @@ export async function prepareRequest(
     bodyDigest: digestBytes(constrained.body),
     pinnedSessions: constrained.pinnedSessions,
     requiresVerified: constrained.requiresVerified,
-    localPolicyApplied: constrained.localPolicyApplied,
     ...(authorization ? { authorization } : {}),
   };
 }

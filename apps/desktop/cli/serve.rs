@@ -101,9 +101,8 @@ pub struct RequestOutcome {
     /// Whether the receipt records a service-side rewrite of the request
     /// (§9.3 note); known only once the receipt was checked.
     pub rewritten: Option<bool>,
-    /// Whether this proxy applied local serving constraints before forwarding (ACI
-    /// policy: `provider.aci_verified` / pinned sessions, re-serialized).
-    /// True when local verification policy was applied to the outgoing request.
+    /// Whether local policy tightened the caller's serving constraints.
+    /// Caller-only normalization or re-serialization does not count.
     pub local_policy_applied: bool,
 }
 
@@ -182,7 +181,7 @@ pub struct RecordedExchange {
     /// Verdict of the last verification, when one reached a verdict.
     pub verified: Option<bool>,
     pub context: Option<ForwardContext>,
-    /// Whether local policy changed the body or applied multipart constraints.
+    /// Whether local policy tightened the caller's serving constraints.
     pub local_policy_applied: bool,
 }
 
