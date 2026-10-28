@@ -80,13 +80,11 @@ pub(super) async fn prepare_request(
             let json =
                 serde_json::to_string(&provider).map_err(|_| "cannot encode X-ACI-Provider")?;
             let mut value = String::with_capacity(json.len());
-            for character in json.chars() {
-                if character.is_ascii() {
-                    value.push(character);
+            for unit in json.encode_utf16() {
+                if unit < 128 {
+                    value.push(unit as u8 as char);
                 } else {
-                    for unit in character.encode_utf16(&mut [0; 2]) {
-                        value.push_str(&format!("\\u{unit:04x}"));
-                    }
+                    value.push_str(&format!("\\u{unit:04x}"));
                 }
             }
             if value.len() > MAX_MULTIPART_PROVIDER_BYTES {

@@ -164,21 +164,10 @@ The SDK adds it to the inference request; `aci.fetch` retains that request's
 authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.
 
-Serving constraints apply to JSON objects and multipart
-`POST /v1/audio/transcriptions` requests (including `FormData`). Before any
-constrained upload, the pinned attestation channel must advertise that path
-in `service_capabilities.supported_multipart_constraint_endpoints`.
-Multipart constraints use a single `X-ACI-Provider` JSON object with the same
-schema as JSON `provider`. Caller pins are intersected with locally accepted
-pins. The carrier must be US-ASCII; encode non-ASCII string values with JSON
-`\uXXXX` escapes. Caller constraints are enforced even with
-`requireVerified: false`. Invalid carriers,
-disjoint pins, a multipart `provider` part, constrained malformed/non-object
-JSON, and unsupported constrained media types throw
-`invalid_serving_constraints` before sending inference. Multipart bytes stay
-unchanged; receipt audits retain the effective header policy because body
-hashes do not commit to headers. Release these client protections before a
-gateway enables transcription uploads.
+Serving constraints support multipart `POST /v1/audio/transcriptions`
+requests (including `FormData`); see [ACI §5.3](../../spec/aci.md#53-serving-constraints-aggregators).
+The `X-ACI-Provider` carrier must be US-ASCII; use JSON `\uXXXX` escapes for
+non-ASCII string values.
 
 Compatibility change: constrained JSON requests must set
 `Content-Type: application/json` (or `application/*+json`). JSON bytes with a

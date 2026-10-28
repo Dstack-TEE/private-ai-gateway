@@ -458,7 +458,7 @@ one for the hostname it actually uses.
 ## 5. Inference Endpoints
 
 ACI v1 covers inference endpoints, including OpenAI-compatible completions,
-embeddings, audio transcriptions, and formats such as Anthropic messages.
+audio transcriptions, and formats such as Anthropic messages.
 Requests and responses follow the underlying API unless a separately
 specified transport extension says otherwise. ACI adds headers and artifacts.
 
@@ -540,8 +540,7 @@ For `multipart/form-data`, the carrier is a single HTTP header
 same schema and semantics as the JSON `provider` field above, including
 non-empty session lists, boolean `aci_verified`, and rejection of unknown
 `aci_` members. The v1 multipart path is `POST /v1/audio/transcriptions`.
-The name follows the shipped `X-ACI-*` header family and reuses the JSON
-`provider` schema. The field value MUST contain only US-ASCII bytes for HTTP
+The field value MUST contain only US-ASCII bytes for HTTP
 field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
 surrogate pairs where needed, for non-ASCII characters in strings.
 The service MUST reject duplicate carrier headers, malformed JSON or a

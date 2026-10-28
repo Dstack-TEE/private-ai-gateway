@@ -170,6 +170,7 @@ async function rejectMultipartProvider(body: Uint8Array, contentType: string): P
     const form = await new Response(Buffer.from(body), {
       headers: { 'content-type': contentType },
     }).formData();
+    // Bun can return empty FormData for LF-only framing, hiding a provider part.
     if (!form.has('model')) invalid('multipart body must contain a model part');
     if (form.has('provider')) {
       invalid('multipart provider form parts are forbidden; use X-ACI-Provider');
