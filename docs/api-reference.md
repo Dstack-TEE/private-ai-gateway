@@ -57,8 +57,9 @@ count. `n` is forwarded unchanged without retries to fill the count. `size`, `qu
 `background`, `output_format`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
 for the string options are validated upstream. `response_format` must be absent
-or `"b64_json"`; the gateway always forwards `"b64_json"`. `user` and `style`
-are accepted as strings and removed before forwarding. `provider` uses the
+or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
+`safety_identifier`, and `style` are accepted as strings and removed before
+forwarding; user identifiers stay private to the gateway. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
 `error.code: "unknown_parameter"` and `error.param` naming that field. `seed`
 is not supported. Non-integer and out-of-range `n` values return
@@ -81,14 +82,21 @@ The image response schema contains only top-level `created`, `data`, `usage`,
 `size`, `quality`, `output_format`, and `background`; each item retains only
 `b64_json` and `revised_prompt`. Usage retains `input_tokens`, `output_tokens`,
 `total_tokens`, `input_tokens_details`, `output_tokens_details`, and the gateway
-`cost`. `created` is an integer, dimensions and format fields are strings,
-and `revised_prompt` is a string or null. Token counts are non-negative
+`cost`. `created` is a required integer; a missing or invalid upstream value
+is replaced with the current Unix time in seconds. Dimensions and format
+fields are strings, and `revised_prompt` is a string or null. Token counts are non-negative
 integers; token detail objects retain only non-negative integer `text_tokens`,
 `image_tokens`, and `cached_tokens`. `cost` is numeric. Malformed optional
-fields are dropped, including structured values under allowed names.
+fields are dropped, including structured values under allowed names. Every
+successful response has a complete `usage` object with integer `input_tokens`,
+`output_tokens`, and `total_tokens`, plus `input_tokens_details` containing
+integer `text_tokens` and `image_tokens`. Missing or invalid required counters
+are filled with `0`. When the provider reports no token usage, all five
+counters are `0`; image charges still use the returned image count. Middleware
+adds `usage.cost` when pricing applies, including for providers billed per image.
 URLs, provider IDs, model IDs, and other fields are removed. Image
-receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Middleware
-adds image cost using the [control-plane pricing contract](control-plane-contract.md#image-generation).
+receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Image pricing
+follows the [control-plane pricing contract](control-plane-contract.md#image-generation).
 
 The normal provider-backed response path adds:
 

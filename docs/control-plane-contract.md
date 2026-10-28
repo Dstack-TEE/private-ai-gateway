@@ -171,9 +171,10 @@ omits the client's `usage.cost`, preserving other upstream usage fields and
 the post report. Token rates are not capped by this contract. The control
 plane computes billing independently from its pricing snapshot and reported
 usage; the gateway's `usage.cost` is informational. On a successful image
-response with representable pricing, the gateway adds `usage.cost`, creating
-`usage: {"cost": ...}` when the provider
-returned no usage. It reports raw usage separately and never bills image
+response with representable pricing, the gateway adds `usage.cost`. Client
+image responses always contain the SDK-required token usage fields, filled
+with zero when the provider reports none. The post report preserves raw
+provider usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
 

@@ -3823,7 +3823,7 @@ async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
 }
 
 const IMAGE_REQUEST: &[u8] =
-    br#"{"model":"aci-model","prompt":"a blue circle","n":1,"user":"alice","style":"vivid"}"#;
+    br#"{"model":"aci-model","prompt":"a blue circle","n":1,"user":"alice","safety_identifier":"hashed-user","style":"vivid"}"#;
 
 #[tokio::test]
 async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
@@ -3837,7 +3837,7 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         json_body(&resp),
-        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens_details":{"text_tokens":1}}})
+        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}})
     );
     {
         let calls = h.upstream_calls.lock().unwrap();
@@ -3951,6 +3951,11 @@ async fn images_forward_requested_maximum_and_accept_fewer_without_fill() {
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(json_body(&resp)["data"].as_array().unwrap().len(), returned);
+        assert!(json_body(&resp)["created"].as_u64().unwrap() > 0);
+        assert_eq!(
+            json_body(&resp)["usage"],
+            serde_json::json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}})
+        );
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(
