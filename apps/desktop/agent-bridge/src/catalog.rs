@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
+pub(crate) const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteModel {
@@ -179,7 +180,7 @@ impl Surface {
             Surface::Messages => "/v1/messages",
             Surface::Responses => "/v1/responses",
             Surface::SystemOne => "/v1/systemone",
-            Surface::Images => "/v1/images/generations",
+            Surface::Images => IMAGES_GENERATIONS_PATH,
         }
     }
 

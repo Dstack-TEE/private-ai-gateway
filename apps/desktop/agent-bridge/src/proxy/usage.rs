@@ -84,7 +84,7 @@ impl UsageCapture {
             if self.body.len().saturating_add(bytes.len()) <= self.max_body_bytes {
                 self.body.extend_from_slice(bytes);
             } else {
-                self.body.clear();
+                self.body = Vec::new();
                 self.body_overflow = true;
             }
         }

@@ -860,6 +860,7 @@ fn image_usage_capture_accepts_the_response_limit_and_discards_overflow() {
         capture.push(suffix);
         if overflow {
             capture.push(b" ");
+            assert_eq!(capture.body.capacity(), 0);
         }
         let usage = capture.finish();
         assert_eq!(usage.cost_usd, if overflow { None } else { Some(0.03) });

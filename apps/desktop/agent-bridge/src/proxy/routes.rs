@@ -10,7 +10,7 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(responses_compact))
         .route("/v1/systemone", post(systemone))
-        .route("/v1/images/generations", post(images))
+        .route(Surface::Images.path(), post(images))
         .fallback(not_found)
         .with_state(state)
 }
@@ -163,7 +163,7 @@ async fn images(
         uri,
         body,
         Surface::Images,
-        "/v1/images/generations",
+        Surface::Images.path(),
     )
     .await
 }
@@ -174,7 +174,8 @@ async fn not_found() -> Response {
         StatusCode::NOT_FOUND,
         "not_found",
         &format!(
-            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, and /v1/images/generations"
+            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, and {}",
+            Surface::Images.path()
         ),
     )
 }
