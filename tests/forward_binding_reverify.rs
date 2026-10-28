@@ -106,6 +106,7 @@ impl UpstreamVerifier for RotatingVerifier {
 /// `usize::MAX` means "always mismatch". The same counter governs the buffered
 /// and streaming verified-forward entry points.
 struct MismatchingBackend {
+    requests: std::sync::Mutex<Vec<UpstreamRequest>>,
     calls: AtomicUsize,
     mismatches_remaining: AtomicUsize,
 }
@@ -113,6 +114,7 @@ struct MismatchingBackend {
 impl MismatchingBackend {
     fn always_mismatch() -> Self {
         Self {
+            requests: std::sync::Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             mismatches_remaining: AtomicUsize::new(usize::MAX),
         }
@@ -120,6 +122,7 @@ impl MismatchingBackend {
 
     fn mismatch_times(n: usize) -> Self {
         Self {
+            requests: std::sync::Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
             mismatches_remaining: AtomicUsize::new(n),
         }
@@ -202,9 +205,10 @@ impl UpstreamBackend for MismatchingBackend {
 
     async fn forward_verified_prepared(
         &self,
-        _req: PreparedUpstreamRequest,
+        req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        self.requests.lock().unwrap().push(req.request);
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.take_mismatch() {
             return Err(UpstreamError::ChannelBindingMismatch(
@@ -269,6 +273,7 @@ fn forward_request(
     upstream_verification_event: Option<UpstreamVerifiedEvent>,
 ) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
+        audio_form: None,
         context: GatewayRequestContext::default(),
         endpoint_path: "/v1/chat/completions",
         received_body: CHAT_BODY,
@@ -367,6 +372,7 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
     let service = build_service(backend, verifier.clone());
 
     let candidates = vec![ForwardCandidate {
+        audio_form: None,
         route_id: "route-a".to_string(),
         path: "/v1/chat/completions",
         body: CHAT_BODY.to_vec(),
@@ -574,4 +580,37 @@ async fn reverify_accepts_a_replacement_group_only_with_its_explicit_id() {
         4,
         "two seeds plus both admitted retry attempts"
     );
+}
+
+#[tokio::test]
+async fn audio_binding_retry_reuses_exact_encoded_bytes_and_boundary() {
+    let backend = Arc::new(MismatchingBackend::mismatch_times(1));
+    let verifier = Arc::new(RecordingVerifier::default());
+    let service = build_service(backend.clone(), verifier.clone());
+    let mut request = forward_request(None);
+    request.endpoint_path = "/v1/audio/transcriptions";
+    request.received_body = b"raw multipart bytes";
+    request.forwarded_body = Some(br#"{"model":"model-a","response_format":"json"}"#.to_vec());
+    request.audio_form = Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+        file: bytes::Bytes::from_static(b"spoken audio"),
+        extension: "wav".into(),
+    }));
+    // The mock returns a chat-shaped body, so the audio response becomes a
+    // receipted 502 after a successful binding retry; the send invariants hold.
+    let response = service
+        .forward_chat_completion_request(request)
+        .await
+        .unwrap();
+    assert_eq!(response.upstream_status, 502);
+    let requests = backend.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body, requests[1].body);
+    assert_eq!(requests[0].body.as_ptr(), requests[1].body.as_ptr());
+    assert_eq!(requests[0].content_type, requests[1].content_type);
+    assert!(requests[0]
+        .content_type
+        .as_deref()
+        .unwrap()
+        .starts_with("multipart/form-data; boundary="));
+    assert_eq!(verifier.verify_calls(), 2);
 }

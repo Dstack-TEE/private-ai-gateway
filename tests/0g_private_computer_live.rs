@@ -39,7 +39,7 @@ fn prepared(stream: bool) -> PreparedUpstreamRequest {
 fn prepared_body(body: Value) -> PreparedUpstreamRequest {
     PreparedUpstreamRequest {
         request: UpstreamRequest {
-            body: serde_json::to_vec(&body).unwrap(),
+            body: serde_json::to_vec(&body).unwrap().into(),
             path: Some("/v1/chat/completions".to_string()),
             ..Default::default()
         },

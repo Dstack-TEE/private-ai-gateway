@@ -225,6 +225,8 @@ impl UpstreamBackend for OpenAICompatibleBackend {
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        let is_audio =
+            req.path.as_deref() == Some(crate::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH);
         let resp = self
             .request_builder(&self.client, &req, "application/json")
             .body(req.body)
@@ -233,7 +235,11 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
+        let body = if is_audio {
+            super::body::read_audio_response(resp).await?
+        } else {
+            read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?
+        };
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -275,6 +281,8 @@ impl UpstreamBackend for OpenAICompatibleBackend {
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let client = self.client_for_event(event)?;
+        let is_audio = req.request.path.as_deref()
+            == Some(crate::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH);
         let resp = self
             .request_builder(&client, &req.request, "application/json")
             .body(req.request.body)
@@ -283,7 +291,11 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
+        let body = if is_audio {
+            super::body::read_audio_response(resp).await?
+        } else {
+            read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?
+        };
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -405,7 +417,10 @@ impl OpenAICompatibleBackend {
         let url = format!("{}{}", self.base_url, path);
         let mut builder = client
             .post(&url)
-            .header("content-type", "application/json")
+            .header(
+                "content-type",
+                req.content_type.as_deref().unwrap_or("application/json"),
+            )
             .header("accept", accept);
         for (k, v) in req.headers.iter() {
             builder = builder.header(k, v);

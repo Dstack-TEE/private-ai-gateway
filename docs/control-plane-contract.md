@@ -117,7 +117,7 @@ An allow response:
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
-| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
@@ -177,6 +177,34 @@ with zero when the provider reports none. The post report preserves raw
 provider usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
+
+### Audio transcription
+
+`/v1/audio/transcriptions` is default-off: candidates must list that exact path
+in `supportedEndpoints`. No chat conversion occurs. Pre-consult carries the
+endpoint and normal model/auth/routing metadata; it carries no audio bytes,
+prompt, filename, duration estimate, or audio fingerprint. The multipart
+`X-ACI-Provider` object becomes the normal `provider` routing block.
+
+Successful post reports add `audio: {"seconds": 3, "raw_duration": 2.1}`.
+`seconds` is the positive validated **ceil integer**, the only billable duration;
+`raw_duration` preserves provider duration separately. Prefer
+`usage: {"type":"duration","seconds":...}`, otherwise top-level `duration`.
+An invalid preferred field is a terminal malformed response: 502, null usage,
+no `audio`, no automatic retranscription. Duration cannot be inferred from
+segments, file size, or elapsed time. Missing `usage` is synthesized for the
+client and report. Nested usage is sanitized before reporting.
+
+`pricing.audioCostPerSecond` is an unsigned plain decimal **string**, at most
+18 fractional digits and at most `1000000`, like image rates. Successful cost is
+`audio.seconds × audioCostPerSecond + token cost`, using checked decimal
+arithmetic. Missing audio rate contributes zero; malformed configured rates or
+arithmetic overflow omit `usage.cost` rather than displaying a fabricated
+price. Token cost applies only when token usage and token rates exist. Failed
+reports never carry billable audio usage. Control-plane production enablement
+requires idempotent ingestion by request/attempt, the same rounding and price
+validation, and success-only billing. Gateway support alone does not enable a
+production model; that cross-repository billing work is a separate launch gate.
 
 ### Reasoning format
 
@@ -346,6 +374,7 @@ The stable fields are:
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
 | `usage` | Always, nullable | Raw provider usage before client cost injection. |
+| `audio` | Successful transcription only | `{seconds, raw_duration?}`; `seconds` is a positive ceil integer. See [Audio transcription](#audio-transcription). |
 | `images` | Successful image generation only | `{count, size, quality}`: upstream image count before canonicalization; size and quality resolved from response, then request, then `"auto"`. Used with `imageCostPerImage` as described above. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
 | `ttftMs` | Optional | Time to first token for a streaming attempt. |

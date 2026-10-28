@@ -2,11 +2,11 @@
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-10-27.
+Last reviewed: 2026-10-28.
 
 ## Implemented
 
-- OpenAI chat, completions, embeddings, Responses, buffered image generation, and native System One endpoints, and Anthropic Messages.
+- OpenAI chat, completions, embeddings, Responses, buffered image generation, multipart audio transcription, and native System One endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
 - Runtime upstream replacement: validated, redacted, atomically persisted, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
@@ -25,6 +25,17 @@ modes with inline base64 output, per-image pricing, and receipts. Middleware
 routes require explicit endpoint opt-in; merging support does not launch a
 model. Streaming, edits, image E2EE, and public-launch compliance controls remain
 outside this endpoint's current scope.
+
+Audio transcription (`/v1/audio/transcriptions`) supports buffered multipart,
+JSON/verbose JSON, strict duration accounting, receipts, and per-second pricing
+in direct and middleware modes. Clients must ship multipart fail-closed policy
+and capability negotiation before this gateway endpoint is enabled. Launch
+requires NEAR `openai/whisper-large-v3` live verification and control-plane
+idempotent audio ingestion, matching rounding, and validated pricing.
+Privatemode `whisper-large-v3` remains blocked pending pinned-proxy multipart
+verification. Qwen3-ASR self-hosting on the planned shared Phala H200 is a
+separate task; translations, streaming, text/subtitle responses, and audio E2EE
+are outside v1.
 
 ## Known limitations
 

@@ -8,6 +8,21 @@ use super::{transport_error, UpstreamBodyStream, UpstreamError};
 /// Chutes responses. Streaming responses are not collected under this limit.
 pub const MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) async fn read_audio_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, UpstreamError> {
+    let content_length = response.content_length();
+    let body = response
+        .bytes_stream()
+        .map(|chunk| chunk.map_err(transport_error));
+    collect_buffered_upstream_body_with_limit(
+        Box::pin(body),
+        content_length,
+        crate::middleware::audio::MAX_RESPONSE_BYTES,
+    )
+    .await
+}
+
 pub(crate) async fn read_buffered_upstream_response(
     response: reqwest::Response,
     limit: usize,
@@ -20,6 +35,19 @@ pub(crate) async fn read_buffered_upstream_response(
 }
 
 pub(crate) async fn collect_buffered_upstream_body(
+    body: UpstreamBodyStream,
+    content_length: Option<u64>,
+    limit: usize,
+) -> Result<Vec<u8>, UpstreamError> {
+    collect_buffered_upstream_body_with_limit(
+        body,
+        content_length,
+        limit,
+    )
+    .await
+}
+
+pub(crate) async fn collect_buffered_upstream_body_with_limit(
     mut body: UpstreamBodyStream,
     content_length: Option<u64>,
     limit: usize,

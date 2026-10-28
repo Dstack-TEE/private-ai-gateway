@@ -192,6 +192,22 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if (upstream
+            .path
+            .as_deref()
+            .is_some_and(|path| path.trim_start_matches('/') == "v1/audio/transcriptions")
+            || upstream.audio_force_verbose_json)
+            && matches!(
+                upstream.provider,
+                UpstreamProvider::Chutes
+                    | UpstreamProvider::ZeroGPrivateComputer
+                    | UpstreamProvider::Anthropic
+            )
+        {
+            return Err(UpstreamConfigError::InvalidConfig(
+                "this provider does not support audio transcriptions".into(),
+            ));
+        }
         if upstream.streaming_usage.is_some()
             && upstream
                 .path

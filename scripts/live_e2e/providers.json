@@ -7,7 +7,13 @@
     "upstream_model": "kimi-k2-6",
     "api_key_env": "TINFOIL_API_KEY",
     "binding": "tls_spki_sha256",
-    "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
+    "capabilities": [
+      "chat",
+      "streaming",
+      "tools",
+      "structured_outputs",
+      "context"
+    ],
     "structured_output_max_tokens": 2048
   },
   {
@@ -18,8 +24,15 @@
     "upstream_model": "google/gemma-4-31B-it",
     "api_key_env": "NEARAI_API_KEY",
     "binding": "tls_spki_sha256",
-    "requires": ["DSTACK_VERIFIER_URL"],
-    "capabilities": ["chat", "streaming", "structured_outputs", "context"]
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "chat",
+      "streaming",
+      "structured_outputs",
+      "context"
+    ]
   },
   {
     "name": "chutes-live",
@@ -29,7 +42,11 @@
     "upstream_model": "moonshotai/Kimi-K2.5-TEE",
     "api_key_env": "CHUTES_API_KEY",
     "binding": "e2ee_public_key_sha256",
-    "capabilities": ["chat", "streaming", "context"],
+    "capabilities": [
+      "chat",
+      "streaming",
+      "context"
+    ],
     "session_refresh_seconds": 45,
     "chutes_e2ee_discovery_rounds": 3
   },
@@ -41,7 +58,9 @@
     "upstream_model": "Qwen/Qwen3-Embedding-8B-TEE",
     "api_key_env": "CHUTES_API_KEY",
     "binding": "e2ee_public_key_sha256",
-    "capabilities": ["embeddings"],
+    "capabilities": [
+      "embeddings"
+    ],
     "session_refresh_seconds": 45,
     "chutes_e2ee_discovery_rounds": 3,
     "chutes_chute_ids": {
@@ -56,7 +75,41 @@
     "upstream_model": "black-forest-labs/FLUX.2-klein-4B",
     "api_key_env": "NEARAI_API_KEY",
     "binding": "tls_spki_sha256",
-    "requires": ["DSTACK_VERIFIER_URL"],
-    "capabilities": ["images"]
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "images"
+    ]
+  },
+  {
+    "name": "near-ai-live-audio",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-audio",
+    "upstream_model": "openai/whisper-large-v3",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "audio_transcriptions"
+    ]
+  },
+  {
+    "name": "privatemode-live-audio-pending",
+    "provider": "privatemode",
+    "base_url": "http://127.0.0.1:8080",
+    "public_model": "live-privatemode-audio",
+    "upstream_model": "whisper-large-v3",
+    "api_key_env": "PRIVATEMODE_API_KEY",
+    "binding": "proxy_image_sha256",
+    "capabilities": [
+      "audio_transcriptions"
+    ],
+    "privatemode_manifest_log_path": "/run/privatemode/manifests.jsonl",
+    "privatemode_proxy_image_digest": "sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
+    "pending_verification": "Pinned v1.59.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
   }
 ]

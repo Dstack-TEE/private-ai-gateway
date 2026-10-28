@@ -59,6 +59,8 @@ pub struct UpstreamConfig {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_usage: Option<StreamingUsage>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_force_verbose_json: bool,
     pub models: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
@@ -110,6 +112,8 @@ pub struct PublicUpstreamConfig {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub streaming_usage: Option<StreamingUsage>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio_force_verbose_json: bool,
     pub models: BTreeMap<String, String>,
     pub bearer_token_configured: bool,
     pub basic_auth: bool,
@@ -151,6 +155,7 @@ impl UpstreamConfig {
             base_url: self.base_url.clone(),
             path: self.path.clone(),
             streaming_usage: self.streaming_usage,
+            audio_force_verbose_json: self.audio_force_verbose_json,
             models: self.models.clone(),
             bearer_token_configured: self.bearer_token.is_some(),
             basic_auth: self.basic_auth,
@@ -497,7 +502,9 @@ impl UpstreamConfigManager {
                     return Vec::new();
                 };
                 let Ok(prepared) = state.backend.prepare(UpstreamRequest {
-                    body,
+                    form: None,
+                    content_type: None,
+                    body: body.into(),
                     path: None,
                     target_route_id: None,
                     headers: HashMap::new(),
