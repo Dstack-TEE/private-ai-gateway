@@ -28,7 +28,7 @@
     "oxfmt": "^0.74.0",
     "oxlint": "^1.89.0",
     "publint": "^0.3.25",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=22.19.0",
