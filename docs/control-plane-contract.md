@@ -211,6 +211,10 @@ requires idempotent ingestion by request/attempt, the same rounding and price
 validation, and success-only billing. Gateway support alone does not enable a
 production model; that cross-repository billing work is a separate launch gate.
 
+**Known follow-up:** Token-billed ASR models such as `gpt-4o-transcribe`, with
+`usage: {"type":"tokens"}`, need a contract extension before support. Whisper
+continues to use duration billing.
+
 ### Reasoning format
 
 Declaring `reasoningFormat` on an `openai` candidate also lets the gateway read
