@@ -6,5 +6,7 @@ capability negotiation and receipt policy checks.
 
 The control plane must explicitly list `/v1/audio/transcriptions` in the
 candidate's `supportedEndpoints` and supply a verified `audioCostPerSecond`.
-NEAR's rate, JSON duration behavior, and both JSON response formats require live
-verification. Privatemode is pending verification and remains blocked.
+NEAR's native JSON contains only `text`; the example enables
+`audio_force_verbose_json` to obtain duration while preserving the caller's
+output format. NEAR's rate still requires verification. Privatemode is pending
+verification and remains blocked.

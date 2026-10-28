@@ -125,8 +125,8 @@ def assert_audio_shape(provider: Provider, response: dict[str, Any]) -> None:
         raise RuntimeError(f"{provider.name} transcript does not match spoken fixture")
     usage = response.get("usage")
     seconds = usage.get("seconds") if isinstance(usage, dict) else None
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 < seconds < 30:
-        raise RuntimeError(f"{provider.name} transcription duration must be positive and below 30s")
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or not 0 < seconds < 30:
+        raise RuntimeError(f"{provider.name} transcription billable seconds must be a positive integer below 30s")
     if set(response) - {"text", "usage"}:
         raise RuntimeError(f"{provider.name} json transcription response contains extra fields")
 

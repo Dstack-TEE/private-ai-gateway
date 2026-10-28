@@ -70,7 +70,7 @@ For each entry with the `chat` capability, the case:
 `audio_transcriptions` provider capability runs
 `cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
 committed 94,958-byte synthetic spoken WAV. It checks recognizable fixture
-words, positive provider-reported duration, response allowlists, null chat id,
+words, positive integer billable seconds, response allowlists, null chat id,
 received/returned body hashes, the serving attested session, and offline
 `pap audit`. Artifacts preserve the exact raw multipart upload for audit.
 The provider list includes NEAR `openai/whisper-large-v3` and a Privatemode
@@ -81,6 +81,8 @@ it is not a launch-ready provider. No live provider call is part of unit tests.
 
 Before launch, test `json` duration and `verbose_json` per provider. Only set
 `audio_force_verbose_json` when a provider's JSON lacks billable duration.
+NEAR's native JSON contains only `text`, so its audio entry sets this option
+and the runner passes it into the gateway's upstream configuration.
 Run on an authorized test CVM, then delete the CVM. Do not enable production
 routes until client fail-closed releases and control-plane audio ingestion ship.
 
@@ -284,11 +286,12 @@ Optional fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
+| `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, `audio_transcriptions`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
 | `requires` | Additional environment variables preflight must find. |
 | `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |
 | `session_refresh_seconds` | Provider session refresh interval. |
+| `audio_force_verbose_json` | Pass the per-upstream duration compatibility option to the gateway; enabled for NEAR audio because its native JSON omits duration. |
 | `chutes_e2ee_api_base` | Alternate Chutes E2EE discovery origin. |
 | `chutes_chute_ids` | Map from upstream model to known chute identifier. |
 | `chutes_e2ee_discovery_rounds` | Number of Chutes discovery passes. |

@@ -486,7 +486,11 @@ Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
 blocked until multipart encryption/decryption is verified in the exact pinned
 v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`).
 Public source refs did not establish that support; do not add an unencrypted
-fallback. NEAR's launch model is `openai/whisper-large-v3`.
+fallback. NEAR's launch model is `openai/whisper-large-v3`. Set
+`audio_force_verbose_json: true` for NEAR transcription routes: its native
+`json` response contains only `text`, without the duration needed for billing.
+The gateway requests `verbose_json` internally and preserves the caller's
+requested output format.
 
 Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
 402 MiB upload byte budget (60-second read deadline), independent 16 inference
