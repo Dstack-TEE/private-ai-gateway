@@ -5489,7 +5489,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         if with_usage {
             assert_eq!(
                 body["usage"],
-                json!({"input_tokens":2,"output_tokens":3,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0},"output_tokens_details":{"image_tokens":3},"cost":0.28})
+                json!({"input_tokens":2,"output_tokens":3,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0},"output_tokens_details":{"text_tokens":0,"image_tokens":3},"cost":0.28})
             );
             assert_eq!(body["created"], 1);
         } else {
@@ -5536,6 +5536,54 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
                 Value::Null
             }
         );
+    }
+}
+
+#[tokio::test]
+async fn images_complete_optional_output_token_details_without_changing_post_usage() {
+    for (details, expected) in [
+        (None, None),
+        (
+            Some(json!({"image_tokens":7})),
+            Some(json!({"text_tokens":0,"image_tokens":7})),
+        ),
+        (
+            Some(json!({})),
+            Some(json!({"text_tokens":0,"image_tokens":0})),
+        ),
+        (
+            Some(json!({"text_tokens":-1,"image_tokens":"7"})),
+            Some(json!({"text_tokens":0,"image_tokens":0})),
+        ),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],"pricing":{"imageCostPerImage":"0.1"}})).await;
+        let mut upstream_usage = json!({});
+        if let Some(details) = details {
+            upstream_usage["output_tokens_details"] = details;
+        }
+        let (service, _) = build_recording_service(
+            200,
+            serde_json::to_vec(
+                &json!({"created":1,"data":[{"b64_json":"ok"}],"usage":upstream_usage}),
+            )
+            .unwrap(),
+            "application/json",
+        );
+        let (status, _, body) = response_parts(
+            middleware(url)
+                .handle_completion(&service, images_input())
+                .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let mut usage = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1});
+        if let Some(expected) = expected {
+            usage["output_tokens_details"] = expected;
+        }
+        assert_eq!(body["usage"], usage);
+        let report = wait_for_post(&posts, |post| post["requestId"] == "req-images").await;
+        assert_eq!(report["usage"], upstream_usage);
+        assert_eq!(report["images"]["count"], 1);
     }
 }
 

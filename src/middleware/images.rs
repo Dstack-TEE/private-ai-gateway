@@ -348,12 +348,14 @@ pub fn canonicalize(body: &mut Value) {
         for key in ["input_tokens", "output_tokens", "total_tokens"] {
             usage.entry(key).or_insert(json!(0));
         }
-        let details = usage
+        usage
             .entry("input_tokens_details")
             .or_insert_with(|| json!({}));
-        if let Some(details) = details.as_object_mut() {
-            for key in ["text_tokens", "image_tokens"] {
-                details.entry(key).or_insert(json!(0));
+        for key in ["input_tokens_details", "output_tokens_details"] {
+            if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
+                for key in ["text_tokens", "image_tokens"] {
+                    details.entry(key).or_insert(json!(0));
+                }
             }
         }
     }
@@ -491,7 +493,7 @@ mod tests {
             body,
             json!({
                 "data":[{"b64_json":"ok"}],
-                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{}}
+                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":0}}
             })
         );
         for invalid_usage in [json!([]), json!("private"), Value::Null] {
@@ -525,7 +527,7 @@ mod tests {
     #[test]
     fn sdk_required_fields_are_complete_for_absent_partial_and_full_usage() {
         let empty_usage = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}});
-        let full_usage = json!({"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"image_tokens":3},"cost":0.1});
+        let full_usage = json!({"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":3},"cost":0.1});
         for (usage, expected) in [
             (None, empty_usage.clone()),
             (
@@ -567,6 +569,37 @@ mod tests {
                 .as_secs();
             assert!((before..=after).contains(&body["created"].as_u64().unwrap()));
             assert_eq!(body["usage"], empty_usage);
+        }
+    }
+
+    #[test]
+    fn optional_output_details_are_complete_only_when_present() {
+        for (details, expected) in [
+            (None, None),
+            (
+                Some(json!({"image_tokens":7})),
+                Some(json!({"text_tokens":0,"image_tokens":7})),
+            ),
+            (
+                Some(json!({})),
+                Some(json!({"text_tokens":0,"image_tokens":0})),
+            ),
+            (
+                Some(
+                    json!({"text_tokens":-1,"image_tokens":"7","cached_tokens":2,"url":"private"}),
+                ),
+                Some(json!({"text_tokens":0,"image_tokens":0,"cached_tokens":2})),
+            ),
+        ] {
+            let mut body = json!({"data":[{"b64_json":"ok"}],"usage":{}});
+            if let Some(details) = details {
+                body["usage"]["output_tokens_details"] = details;
+            }
+            canonicalize(&mut body);
+            assert_eq!(
+                body["usage"].get("output_tokens_details"),
+                expected.as_ref()
+            );
         }
     }
 
