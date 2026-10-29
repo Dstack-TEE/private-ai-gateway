@@ -383,7 +383,7 @@ The stable fields are:
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
-| `usage` | Always, nullable | Raw provider usage before client cost injection. |
+| `usage` | Always, nullable | Raw provider usage before client cost injection, except audio transcription uses duration-only usage with no provider token counters or cost. |
 | `audio` | Successful transcription only | `{seconds, raw_duration?}`; `seconds` is a positive ceil integer. See [Audio transcription](#audio-transcription). |
 | `images` | Successful image generation only | `{count, size, quality}`: upstream image count before canonicalization; size and quality resolved from response, then request, then `"auto"`. Used with `imageCostPerImage` as described above. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |

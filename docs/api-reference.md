@@ -121,7 +121,7 @@ removed; `stream=true` or any other value returns `400`. `provider` form fields,
 `400 unknown_parameter`. Duplicate scalar fields, invalid UTF-8, ambiguous
 parts, and malformed multipart return `400`.
 
-Limits: 16 parts, 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
+Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
 255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
 402 MiB byte budget (16 times the whole-body limit) and a 60-second read deadline
 (`408 upload_timeout`). Each received chunk reserves only its actual bytes;
@@ -151,7 +151,7 @@ uses verbose output internally to obtain duration while preserving the caller's
 output format. It requests word timestamps only when the caller asks. `json` returns
 `text`, `usage`, and optional well-formed `languages: [{code: string}]`; verbose output may
 also include `language`, `duration`,
-`segments`, `words`, and `task`. Nested segment, word, usage, and token-detail
+`segments`, `words`, and `task`. Nested segment, word, and usage
 objects are sanitized by allowlist. Upstream filenames become `audio.<ext>`.
 Verbose `duration` always contains the validated raw duration. `language` uses
 the upstream string, then the requested language, then an empty string for
