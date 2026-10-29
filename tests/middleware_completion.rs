@@ -5463,6 +5463,12 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             serde_json::to_vec(&upstream).unwrap(),
             "application/json",
         );
+        let original_digest = service.workload_keyset_digest();
+        assert_eq!(
+            service.renew_keyset_if_due(600_000_000).unwrap(),
+            Some(2_300_000_000)
+        );
+        assert_ne!(service.workload_keyset_digest(), original_digest);
         let mut input = images_input();
         if let Some(n) = requested {
             input.params["n"] = json!(n);
@@ -5504,6 +5510,14 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
             .unwrap();
         assert!(receipt.chat_id.is_none());
+        assert_eq!(
+            receipt.document_json().unwrap()["workload_keyset_digest"],
+            headers["x-aci-keyset-digest"].to_str().unwrap()
+        );
+        assert_eq!(
+            headers["x-aci-keyset-digest"],
+            service.workload_keyset_digest()
+        );
         {
             let requests = requests.lock().unwrap();
             assert_eq!(requests.len(), 1);

@@ -451,6 +451,7 @@ fn harness_for_sessions(
     (harness, request)
 }
 
+
 fn harness_with_streaming_upstream_error() -> Harness {
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "application/json".to_string());
@@ -3830,6 +3831,12 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     let h = harness_with_upstream(RecordingUpstream::with_response_body(
         br#"{"created":1,"id":"upstream-id","model":"private","size":{"url":"https://private"},"data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"}}],"usage":{"input_tokens":-1,"input_tokens_details":{"text_tokens":1,"url":"https://private/image"},"output_tokens_details":[],"cost":{"provider":"private"}}}"#,
     ));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
     let resp = h
         .requester
         .post("/v1/images/generations", IMAGE_REQUEST, &[])
@@ -3854,6 +3861,14 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     assert!(receipt.chat_id.is_none());
     let payload = receipt_payload(&receipt);
     assert_eq!(payload["endpoint"], "/v1/images/generations");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
     assert_eq!(
         payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(&resp.body)
