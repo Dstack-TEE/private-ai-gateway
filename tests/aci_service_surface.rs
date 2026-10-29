@@ -406,7 +406,6 @@ fn harness_with(
             vec![]
         },
         serving: "aggregator".to_string(),
-        ..Default::default()
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {
@@ -451,6 +450,7 @@ fn harness_for_sessions(
         .remove(0);
     (harness, request)
 }
+
 
 fn harness_with_streaming_upstream_error() -> Harness {
     let mut headers = HashMap::new();
@@ -4065,6 +4065,12 @@ fn transcription_http(body: Vec<u8>) -> axum::http::request::Builder {
 #[tokio::test]
 async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_id() {
     let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":2.965,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
     let raw = transcription_request("");
     let request = transcription_http(raw.clone())
         .header("x-aci-provider", r#"{"order":["near"]}"#)
@@ -4099,6 +4105,14 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
     assert!(receipt.chat_id.is_none());
     let payload = receipt_payload(&receipt);
     assert_eq!(payload["endpoint"], "/v1/audio/transcriptions");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
     assert_eq!(
         payload_event(&payload, "request.received")["body_hash"],
         sha256_hex(&raw)
