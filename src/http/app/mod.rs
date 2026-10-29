@@ -90,6 +90,7 @@ use crate::middleware::Middleware;
 mod backend;
 mod error_responses;
 mod handlers;
+mod rejected_body;
 mod util;
 mod write_idle_timeout;
 
@@ -312,7 +313,14 @@ async fn inbound_auth_middleware(
                 axum::http::header::WWW_AUTHENTICATE,
                 HeaderValue::from_static("Bearer"),
             );
-            return response;
+            let (parts, body) = req.into_parts();
+            return rejected_body::discard_before_reply(
+                &parts.headers,
+                body,
+                MAX_REQUEST_BODY_BYTES,
+                response,
+            )
+            .await;
         }
     }
     next.run(req).await

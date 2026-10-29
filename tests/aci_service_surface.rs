@@ -472,6 +472,91 @@ fn harness_with_inbound_auth() -> Harness {
 }
 
 #[tokio::test]
+async fn inbound_auth_refusals_complete_over_tcp_without_reset_or_continue() {
+    assert_inbound_auth_upload_refusal("/v1/chat/completions").await;
+}
+
+async fn assert_inbound_auth_upload_refusal(path: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let upstream = RecordingUpstream::default();
+    let calls = upstream.calls();
+    let mut config = AciServiceConfig::for_test();
+    config.service_capabilities.serving = "direct".into();
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(upstream),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let app = build_router_with_auth(
+        service,
+        common::session_config(serde_json::json!([])),
+        None,
+        Some("inference-secret".into()),
+        None,
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server =
+        tokio::spawn(private_ai_gateway::http::app::serve_with_write_idle_timeout(listener, app));
+    let mut body = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
+    body.extend(vec![b'x'; 96 * 1024]);
+    body.extend_from_slice(b"\r\n--upload--\r\n");
+    for (chunked, expect) in [(false, false), (true, false), (false, true)] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let framing = if chunked {
+                "Transfer-Encoding: chunked\r\n".to_string()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=upload\r\n{framing}Connection: close\r\n{expect_header}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                for chunk in body.chunks(1024) {
+                    if chunked {
+                        socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    }
+                    socket.write_all(chunk).await.expect("401 must not reset an in-progress upload");
+                    if chunked {
+                        socket.write_all(b"\r\n").await.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                if chunked {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("401 must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("www-authenticate: bearer"), "{headers}");
+        assert!(
+            headers.contains("content-type: application/json"),
+            "{headers}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap()["error"]["type"],
+            "unauthorized"
+        );
+    }
+    assert!(calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
 async fn inbound_auth_protects_every_inference_route_before_forwarding() {
     let harness = harness_with_inbound_auth();
     for path in [

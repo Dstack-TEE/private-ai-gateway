@@ -109,6 +109,13 @@ compared in constant time. CORS preflights, health, model discovery, canonical
 attestation, and legacy reports remain public. Receipt and session routes keep
 their existing access rules, including ownership checks on receipts.
 
+Rejected uploads are discarded without buffering before sending the `401`, so
+streaming reverse proxies can receive the JSON error without a mid-upload reset.
+The discard has independent limits: 32 connections, 32 MiB per body, 1 second idle,
+and 5 seconds total. If a limit is reached, the gateway closes the connection.
+With `Expect: 100-continue`, it sends the final `401` and closes without polling
+the body or sending `100 Continue`.
+
 Resolution order is `PRIVATE_AI_GATEWAY_INBOUND_TOKEN`, then the file named by
 `PRIVATE_AI_GATEWAY_INBOUND_TOKEN_FILE`, then static `inbound_token`. Blank
 environment variables are treated as unset; file contents are trimmed, and
