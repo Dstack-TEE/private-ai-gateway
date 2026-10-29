@@ -430,17 +430,6 @@ fn normalize_usage(body: &mut Value, audio: &AudioUsage) {
     body["usage"] = json!({"type":"duration","seconds":audio.seconds});
 }
 
-/// Retain sanitized provider counters for consult/post and internal token pricing.
-/// Client usage always describes the gateway's duration billing unit.
-pub(crate) fn billing_usage(usage: Option<Value>, audio: &AudioUsage) -> Value {
-    let mut usage = usage
-        .filter(Value::is_object)
-        .unwrap_or(json!({"type":"duration"}));
-    canonicalize_usage(&mut usage);
-    usage["seconds"] = json!(audio.seconds);
-    usage
-}
-
 fn reduce_format(body: &mut Value, params: &Value) {
     if params.get("response_format").and_then(Value::as_str) != Some("verbose_json") {
         if let Some(object) = body.as_object_mut() {
@@ -510,26 +499,6 @@ fn canonicalize(body: &mut Value) {
             if array != "languages" && items.is_empty() {
                 object.remove(array);
             }
-        }
-    }
-}
-
-fn canonicalize_usage(usage: &mut Value) {
-    if let Some(usage) = usage.as_object_mut() {
-        usage.retain(|k, v| match k.as_str() {
-            "type" => matches!(v.as_str(), Some("duration" | "tokens")),
-            "seconds" | "cost" => nonnegative(v),
-            "input_tokens" | "output_tokens" | "total_tokens" => v.is_u64(),
-            "input_token_details" => v.is_object(),
-            _ => false,
-        });
-        if let Some(details) = usage
-            .get_mut("input_token_details")
-            .and_then(Value::as_object_mut)
-        {
-            details.retain(|k, v| {
-                matches!(k.as_str(), "audio_tokens" | "text_tokens" | "cached_tokens") && v.is_u64()
-            });
         }
     }
 }

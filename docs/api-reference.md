@@ -170,8 +170,9 @@ see the [audio pricing contract](control-plane-contract.md#audio-transcription).
 Client-visible usage is always `{"type":"duration","seconds":3}` with optional
 gateway-priced `cost`; upstream `usage.cost` is discarded. `seconds` is the
 billable integer (`2.965` becomes `3`).
-Provider token counters remain internal to pricing and post reports. Verbose
-`duration` retains the validated raw value. Receipts have null `chat_id`; fetch by
+Provider token counters are discarded; audio pricing and post reports use
+duration only. Verbose `duration` retains the validated raw value.
+Receipts have null `chat_id`; fetch by
 `X-Receipt-Id`. `request.received` hashes raw client multipart bytes and
 `request.forwarded` hashes the exact gateway-encoded bytes sent upstream.
 
