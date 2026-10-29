@@ -149,6 +149,7 @@ fn make_service_raw_with_verifier(
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     let svc = match verifier {
         Some(verifier) => AciService::new_with_upstream_verifier(
@@ -718,6 +719,7 @@ fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec!["2".to_string()],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
 
     AciService::new(

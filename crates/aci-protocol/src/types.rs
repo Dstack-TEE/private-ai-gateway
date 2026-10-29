@@ -16,6 +16,10 @@ use serde_json::Value;
 /// implementations use these published wire names.
 pub const PROVIDER_ACI_VERIFIED: &str = "aci_verified";
 pub const PROVIDER_ACI_SESSION_IDS: &str = "aci_session_ids";
+/// Multipart serving-constraint carrier (§5.3); consumed by the aggregator.
+pub const MULTIPART_PROVIDER_HEADER: &str = "x-aci-provider";
+pub const MAX_MULTIPART_PROVIDER_BYTES: usize = 8 * 1024;
+pub const AUDIO_TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
 
 // ---------- §3.1 Workload keyset ----------
 
@@ -110,6 +114,10 @@ pub struct ServiceCapabilities {
     /// Client-facing E2EE extension versions the service terminates (ACI §4.1).
     /// Only services that actually wired E2EE termination should populate this.
     pub supported_e2ee_versions: Vec<String>,
+    /// Multipart endpoints accepting the §5.3 `X-ACI-Provider` carrier.
+    /// Absence means unsupported; never infer support from a version number.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_multipart_constraint_endpoints: Vec<String>,
     /// `"direct"` when inference runs inside this attested workload, so there
     /// is no upstream hop: receipts carry no `upstream.verified` event and no
     /// attested sessions exist. `"aggregator"` for an aggregator (§1.2).
@@ -125,6 +133,7 @@ impl Default for ServiceCapabilities {
     fn default() -> Self {
         Self {
             supported_e2ee_versions: Vec::new(),
+            supported_multipart_constraint_endpoints: Vec::new(),
             serving: default_serving(),
         }
     }

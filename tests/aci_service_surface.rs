@@ -404,6 +404,7 @@ fn harness_with(
             vec![]
         },
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {

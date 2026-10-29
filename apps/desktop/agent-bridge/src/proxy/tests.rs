@@ -78,8 +78,11 @@ async fn mock_upstream() -> String {
                 "anthropic-beta": header("anthropic-beta"),
                 "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
+                "content-type": header("content-type"),
+                "x-aci-provider": header("x-aci-provider"),
                 "path": uri.to_string(),
                 "body": String::from_utf8_lossy(&body),
+                "body_bytes": body.as_ref(),
             })),
         )
     };
@@ -89,6 +92,7 @@ async fn mock_upstream() -> String {
         .route("/v1/messages/count_tokens", post(echo))
         .route("/v1/systemone", post(echo))
         .route("/v1/images/generations", post(echo))
+        .route("/v1/audio/transcriptions", post(echo))
         .route(
             "/v1/models",
             get(|| async {
@@ -565,6 +569,96 @@ async fn images_are_local_tools_only_and_require_advertised_image_output() {
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     let error: Value = unknown.json().await.unwrap();
     assert_eq!(error["error"]["code"], "model_not_found");
+}
+
+#[tokio::test]
+async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_carrier() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let mut session = state.session();
+    let model = &mut session.catalog.as_mut().unwrap().models[0];
+    model.supported_surfaces = Some(vec![]);
+    model
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["transcription"]));
+    state.publish(session);
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    // Put the binary file first to exercise draining before model extraction.
+    let mut body = b"--audio-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF\x00\xff\x80\r\n".to_vec();
+    body.extend_from_slice(b"--audio-boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nopenai/gpt-oss-20b\r\n--audio-boundary--\r\n");
+    let content_type = "multipart/form-data; boundary=\"audio-boundary\"";
+    let carrier = r#"{"aci_verified":true,"aci_session_ids":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions?trace=true"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", content_type)
+        .header("x-aci-provider", carrier)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-receipt-id"], "rcpt-1");
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["path"], "/v1/audio/transcriptions?trace=true");
+    assert_eq!(forwarded["authorization"], "Bearer sk-real");
+    assert_eq!(forwarded["content-type"], content_type);
+    assert_eq!(forwarded["x-aci-provider"], carrier);
+    assert_eq!(forwarded["body_bytes"], json!(body));
+    let initial = events.recv().await.unwrap();
+    assert_eq!(initial.model.as_deref(), Some("openai/gpt-oss-20b"));
+    assert!(initial.left_device);
+    let _usage = events.recv().await.unwrap();
+
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("codex-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!events.recv().await.unwrap().left_device);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["text"]));
+    state.publish(session);
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+    assert!(!events.recv().await.unwrap().left_device);
+
+    for connection in ["X-ACI-Provider", "Content-Type"] {
+        let response = client
+            .post(format!("{proxy}/v1/audio/transcriptions"))
+            .bearer_auth("local-tools-token")
+            .header("content-type", content_type)
+            .header("x-aci-provider", carrier)
+            .header("connection", connection)
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!events.recv().await.unwrap().left_device);
+    }
 }
 
 #[tokio::test]

@@ -398,6 +398,7 @@ other freshness metadata.
   },
   "service_capabilities": {
     "supported_e2ee_versions": ["2"],
+    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions"],
     "serving": "direct"
   }
 }
@@ -430,6 +431,12 @@ per-field bindings below (Appendix A). Field rules:
   this attested workload and `"aggregator"` when the service forwards to
   upstreams (§1.2). A direct service has no upstream hop, so it publishes no
   attested sessions and its receipts carry no `upstream.verified` event.
+- `service_capabilities.supported_multipart_constraint_endpoints` lists paths
+  implementing the §5.3 multipart constraint carrier. Absent or empty means
+  unsupported. Clients MUST obtain this capability over the attested,
+  SPKI-pinned channel and accept the workload's code provenance; it is not
+  independently committed by the hardware quote. A service MUST advertise a
+  path only when it implements all carrier validation and enforcement rules.
 
 ### 4.2 Evidence
 
@@ -450,16 +457,17 @@ one for the hostname it actually uses.
 
 ## 5. Inference Endpoints
 
-ACI v1 covers prompt endpoints: OpenAI-compatible completions and similar
-formats such as Anthropic messages. Requests and responses follow the
-underlying API unless a separately specified transport extension says
-otherwise. ACI adds headers and artifacts.
+ACI v1 covers inference endpoints, including OpenAI-compatible completions,
+audio transcriptions, and formats such as Anthropic messages.
+Requests and responses follow the underlying API unless a separately
+specified transport extension says otherwise. ACI adds headers and artifacts.
 
 | Endpoint | Status |
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
+| `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
 
@@ -471,6 +479,7 @@ MUST NOT infer trust from `/v1/models` entries.
 | Header | When | Meaning |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | inherited | Service authentication. Also binds the receipt to this credential (§7.6). |
+| `X-ACI-Provider: <JSON>` | multipart endpoints listed in `service_capabilities.supported_multipart_constraint_endpoints` | Serving constraints with the JSON `provider` schema (§5.3). |
 
 ### 5.2 Response headers
 
@@ -525,6 +534,34 @@ constraints:
   never ignored. The rest of `provider` is outside this specification.
 - A transport extension defines how its protected request carries serving
   constraints and which restored bytes the `request.received` hash commits to.
+
+For `multipart/form-data`, the carrier is a single HTTP header
+`X-ACI-Provider: <JSON>`. Its value MUST be a JSON object using exactly the
+same schema and semantics as the JSON `provider` field above, including
+non-empty session lists, boolean `aci_verified`, and rejection of unknown
+`aci_` members. The v1 multipart path is `POST /v1/audio/transcriptions`.
+The field value MUST contain only US-ASCII bytes for HTTP
+field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
+surrogate pairs where needed, for non-ASCII characters in strings.
+The service MUST reject duplicate carrier headers, malformed JSON or a
+non-object value, non-ASCII bytes, values larger than 8192 bytes, and any
+multipart form part named `provider`, with HTTP 400 (`invalid_request_error`).
+It MUST also reject the carrier on JSON endpoints or any endpoint not
+supporting it.
+The carrier is consumed in its entirety and MUST NOT be forwarded upstream.
+Deployment-level verified-serving requirements apply independently.
+
+Receipts commit to the raw multipart **body bytes**, not the contents of
+`X-ACI-Provider`. Clients MUST intersect caller session pins with their local
+accepted set, refuse disjoint sets, retain the effective verified-serving
+requirement and session pins, and check the receipt's cited session against
+them (§9.3). Caller constraints remain effective when local verified serving
+is disabled. A successful body-hash check alone does not prove that header
+constraints were honored. Before uploading constrained multipart, clients
+MUST refuse locally unless the service advertises support for that exact
+path, obtained under the capability trust rules in §4.1. When constrained,
+malformed or non-object JSON and other non-empty body media types that cannot
+carry constraints MUST likewise be refused locally.
 
 ## 6. E2EE Transport Extensions
 
@@ -1014,6 +1051,7 @@ Limits that remain after every §9 check passes:
 
 Normative for the wire formats in this document:
 
+- RFC 9110 — HTTP semantics and field values.
 - RFC 8032 — Ed25519 signatures.
 - RFC 4648 — base64 encoding.
 - RFC 8785 — JSON Canonicalization Scheme (JCS): the form the keyset,

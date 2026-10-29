@@ -28,3 +28,14 @@ and checks only a relying party can run, are recorded in
 against a live deployment.
 
 A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
+
+`pap serve` supports serving constraints on multipart
+`POST /v1/audio/transcriptions` requests; see [ACI §5.3](../../../spec/aci.md#53-serving-constraints-aggregators).
+The `X-ACI-Provider` carrier must be US-ASCII; use JSON `\uXXXX` escapes for
+non-ASCII string values.
+
+Compatibility change: constrained JSON requests must set
+`Content-Type: application/json` (or `application/*+json`). JSON bytes with a
+missing or different content type are now refused. For example, a `fetch`
+string body defaults to `text/plain`, and `curl -d` defaults to
+`application/x-www-form-urlencoded`; both need an explicit JSON content type.

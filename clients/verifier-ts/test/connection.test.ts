@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { computeKeysetDigest } from '../src/index.js';
+import { computeKeysetDigest, hashBody } from '../src/index.js';
 import { connectAciWithTransport } from '../src/runtime/connection.js';
 import { AciConnectionError, type VerifiedAciIdentity } from '../src/runtime/types.js';
 import type { PinnedTransport, PinnedTransportFactory } from '../src/runtime/transport.js';
 import type { AttestationReport, ReceiptEnvelope, WorkloadKeyset } from '../src/types.js';
 import * as fx from './fixtures.js';
+
+const audioPath = '/v1/audio/transcriptions';
+const multipartType = 'multipart/form-data; boundary=audio-test';
+function multipartBody(part = 'file'): Uint8Array {
+  return Buffer.concat([
+    Buffer.from(`--audio-test\r\nContent-Disposition: form-data; name="model"\r\n\r\nm\r\n--audio-test\r\nContent-Disposition: form-data; name="${part}"; filename="provider.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+    Buffer.from([0, 255, 13, 10]),
+    Buffer.from('--audio-test--\r\n'),
+  ]);
+}
 
 function identity(report: AttestationReport, keyset: WorkloadKeyset, digest: string): VerifiedAciIdentity {
   return {
@@ -344,7 +354,7 @@ test('an unestablished digest hint reports re-verification failure without claim
   );
   try {
     await (await connection.fetch('https://api.example.com/v1/chat/completions', {
-      method: 'POST', body: fx.REQUEST_BODY,
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: fx.REQUEST_BODY,
     })).text();
     await assert.rejects(connection.fetch('https://api.example.com/v1/models'), (error: unknown) =>
       error instanceof AciConnectionError && error.code === 'attestation_verification'
@@ -352,5 +362,149 @@ test('an unestablished digest hint reports re-verification failure without claim
     assert.equal(connection.receipts().length, 1);
   } finally {
     await connection.close();
+  }
+});
+
+test('invalid bodies and multipart carriers cause zero inference sends', async () => {
+  let sends = 0;
+  const initial = identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST);
+  const factory: PinnedTransportFactory = () => ({
+    fetch: async (input) => {
+      if (new URL(input instanceof Request ? input.url : input.toString()).pathname.endsWith('/attestation')) {
+        return Response.json({ service_capabilities: { supported_multipart_constraint_endpoints: [audioPath] } });
+      }
+      sends++;
+      return new Response(null, { status: 204 });
+    },
+    observedSpkiSha256: () => 'c0'.repeat(32),
+    close: async () => {},
+  });
+  const connection = await connectAciWithTransport({
+    baseURL: 'https://api.example.com/v1',
+    serving: { acceptedSessionIds: ['a'.repeat(64)] },
+  }, factory, async () => initial);
+  const request = (carrier?: string): RequestInit => ({
+    method: 'POST',
+    headers: { 'content-type': multipartType, ...(carrier === undefined ? {} : { 'x-aci-provider': carrier }) },
+    body: Buffer.from(multipartBody()),
+  });
+  try {
+    const cases: [string, RequestInit][] = [
+      ...['not json', '[]'].map((body): [string, RequestInit] => [
+        audioPath, { method: 'POST', headers: { 'content-type': 'application/json' }, body },
+      ]),
+      [audioPath, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }],
+      [audioPath, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.from([0, 255]) }],
+      ['/v1/chat/completions', request()],
+      ...['{', 'null', '[]', '{} , {}', '{"order":["café"]}', '{"aci_future":true}', '{"aci_verified":"yes"}',
+        '{"aci_session_ids":[]}', '{"aci_session_ids":["bad"]}',
+        JSON.stringify({ aci_session_ids: ['b'.repeat(64)] }),
+        JSON.stringify({ aci_verified: false, aci_session_ids: ['a'.repeat(64)] }),
+        JSON.stringify({ padding: 'a'.repeat(8192) }),
+      ].map((carrier): [string, RequestInit] => [audioPath, request(carrier)]),
+      [audioPath, { ...request(), body: Buffer.from(multipartBody('provider')) }],
+      [audioPath, { ...request(), body: Buffer.concat([
+        Buffer.from(multipartBody()).subarray(0, -Buffer.byteLength('--audio-test--\r\n')),
+        Buffer.from('--audio-test\r\nContent-Disposition: form-data; name="provider"\r\n\r\n{}\r\n--audio-test--\r\n'),
+      ]) }],
+      [audioPath, { ...request(), body: 'broken multipart' }],
+      [audioPath, { ...request(), body: '--audio-test--\r\n' }],
+      [audioPath, { ...request(), body: '--audio-test\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\n\r\ndata\r\n--audio-test--\r\n' }],
+      // Bun can parse LF-only framing as empty FormData, hiding the provider part.
+      [audioPath, { ...request(), body: '--audio-test\nContent-Disposition: form-data; name="model"\n\nm\n--audio-test\nContent-Disposition: form-data; name="provider"\n\n{}\n--audio-test--\n' }],
+      [audioPath, { ...request(), headers: [['content-type', multipartType], ['x-aci-provider', '{}'], ['x-aci-provider', '{}']] }],
+      // These fragments form valid JSON after Fetch joins them with ", ".
+      [audioPath, { ...request(), headers: [['content-type', multipartType], ['X-ACI-Provider', '{"order":["a"'], ['x-aci-provider', '"b"]}']] }],
+      [audioPath, { ...request(), headers: { 'content-type': multipartType, 'X-ACI-Provider': '{"order":["a"', 'x-aci-provider': '"b"]}' } }],
+      [audioPath, { ...request(), headers: new Headers([['content-type', multipartType], ['X-ACI-Provider', '{}'], ['x-aci-provider', '{}']]) }],
+      [audioPath, { ...request(), headers: { 'content-type': multipartType, connection: 'x-aci-provider' } }],
+      ['/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', 'x-aci-provider': '{}' }, body: '{}' }],
+    ];
+    for (const [path, init] of cases) {
+      await assert.rejects(connection.fetch(`https://api.example.com${path}`, init), (error: unknown) =>
+        error instanceof AciConnectionError && error.code === 'invalid_serving_constraints');
+      assert.equal(sends, 0, `no upload allowed for ${path}`);
+    }
+  } finally {
+    await connection.close();
+  }
+});
+
+test('multipart support must be learned over the pinned channel before any upload', async () => {
+  let sends = 0;
+  const bootstrap = structuredClone(fx.REPORT);
+  bootstrap.service_capabilities = { supported_multipart_constraint_endpoints: [audioPath] };
+  const { factory: baseFactory } = fakeTransportFactory(fx.ENVELOPE, fx.KEYSET_DIGEST);
+  const factory: PinnedTransportFactory = (options) => {
+    const transport = baseFactory(options);
+    return { ...transport, fetch: async (input, init) => {
+      if (input instanceof Request && input.method === 'POST') sends++;
+      return transport.fetch(input, init);
+    } };
+  };
+  const connection = await connectAciWithTransport({ baseURL: 'https://api.example.com/v1' }, factory,
+    async () => identity(bootstrap, fx.KEYSET, fx.KEYSET_DIGEST));
+  try {
+    await assert.rejects(connection.fetch(`https://api.example.com${audioPath}`, {
+      method: 'POST', headers: { 'content-type': multipartType }, body: Buffer.from(multipartBody()),
+    }), /does not advertise multipart/);
+    assert.equal(sends, 0);
+  } finally {
+    await connection.close();
+  }
+});
+
+test('multipart preserves wire bytes and audits the effective header pins with local enforcement on or off', async () => {
+  const body = multipartBody();
+  const bodyHash = await hashBody(body);
+  const receipt = await fx.makeDocument({
+    ...fx.RECEIPT_PAYLOAD,
+    event_log: fx.RECEIPT_PAYLOAD.event_log.map((event) =>
+      event.type === 'request.received' || event.type === 'request.forwarded' ? { ...event, body_hash: bodyHash } : event),
+  });
+  for (const requireVerified of [true, false]) {
+    for (const accepted of [fx.SESSION_ID, 'b'.repeat(64)]) {
+      let sends = 0;
+      const { factory: baseFactory } = fakeTransportFactory(receipt, fx.KEYSET_DIGEST);
+      const factory: PinnedTransportFactory = (options) => {
+        const transport = baseFactory(options);
+        return { ...transport, fetch: async (input, init) => {
+          if (new URL(input instanceof Request ? input.url : input.toString()).pathname.endsWith('/attestation')) {
+            return Response.json({ service_capabilities: { supported_multipart_constraint_endpoints: [audioPath] } });
+          }
+          if (input instanceof Request && input.method === 'POST') {
+            sends++;
+            assert.deepEqual(new Uint8Array(await input.clone().arrayBuffer()), new Uint8Array(body));
+            const carrier = input.headers.get('x-aci-provider') ?? '';
+            assert.doesNotMatch(carrier, /[\u0080-\uffff]/);
+            assert.deepEqual(JSON.parse(carrier), {
+              order: ['upstream, primary', 'café 🎙'], aci_session_ids: [accepted], aci_verified: true,
+            });
+          }
+          return transport.fetch(input, init);
+        } };
+      };
+      const connection = await connectAciWithTransport({
+        baseURL: 'https://api.example.com/v1',
+        serving: requireVerified ? { acceptedSessionIds: [accepted] } : { requireVerified: false },
+      }, factory, async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST));
+      try {
+        await (await connection.fetch(`https://api.example.com${audioPath}`, {
+          method: 'POST',
+          headers: {
+            'content-type': multipartType,
+            'x-aci-provider': JSON.stringify({ order: ['upstream, primary', 'café 🎙'], aci_session_ids: requireVerified ? [accepted, 'c'.repeat(64)] : [accepted] }).replace('café 🎙', String.raw`caf\u00e9 \ud83c\udf99`),
+          },
+          body: Buffer.from(body),
+        })).text();
+        const audit = await connection.verifyReceipt();
+        assert.equal(sends, 1);
+        assert.equal(audit.transcript.lines.find((line) => line.id === 'receipt-3')?.status, 'pass');
+        assert.equal(audit.transcript.lines.find((line) => line.id === 'upstream-2')?.status,
+          accepted === fx.SESSION_ID ? 'pass' : 'fail');
+      } finally {
+        await connection.close();
+      }
+    }
   }
 });

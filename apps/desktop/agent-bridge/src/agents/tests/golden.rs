@@ -548,7 +548,7 @@ fn rich_catalog(completion: &str) -> Catalog {
             {"id": "gpt-5.4", "name": "GPT 5.4", "context_length": 400000},
             {"id": "phala/qwen", "input_modalities": ["text"]},
             {"id": "vendor/audio", "context_length": 0, "max_output_length": 0,
-             "input_modalities": ["audio"]}
+             "input_modalities": ["audio"], "output_modalities": ["transcription"]}
         ]}),
         1,
     )

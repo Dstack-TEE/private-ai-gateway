@@ -580,6 +580,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         keyset_not_after,
         subject: gateway_config.subject.clone(),
         service_capabilities: ServiceCapabilities {
+            supported_multipart_constraint_endpoints: Vec::new(),
             supported_e2ee_versions: if gateway_config.enable_e2ee {
                 vec!["2".to_string()]
             } else {

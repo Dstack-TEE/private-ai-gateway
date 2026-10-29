@@ -124,7 +124,7 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
   serving: {
-    // Every successful JSON POST must carry a receipt and cite verified serving.
+    // Every successful POST must carry a receipt and cite verified serving.
     requireVerified: true,
     requireReceipt: true,
   },
@@ -163,6 +163,18 @@ selects the matching pinned transport. Set `ACI_API_KEY` to the RedPill key.
 The SDK adds it to the inference request; `aci.fetch` retains that request's
 authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.
+
+Serving constraints support multipart `POST /v1/audio/transcriptions`
+requests (including `FormData`); see [ACI §5.3](../../spec/aci.md#53-serving-constraints-aggregators).
+The `X-ACI-Provider` carrier must be US-ASCII; use JSON `\uXXXX` escapes for
+non-ASCII string values.
+
+Compatibility change: constrained JSON requests must set
+`Content-Type: application/json` (or `application/*+json`). JSON bytes with a
+missing or different content type are now refused. In particular, passing
+`JSON.stringify(...)` as a `fetch` string body defaults to `text/plain`;
+`curl -d` defaults to `application/x-www-form-urlencoded`. Set the JSON content
+type explicitly when calling `aci.fetch` or the local proxy.
 
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`. Take the hash from authenticated release

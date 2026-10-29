@@ -305,6 +305,7 @@ fn make_harness_full(
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(

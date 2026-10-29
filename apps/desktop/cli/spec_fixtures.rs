@@ -65,6 +65,7 @@ pub fn vector_report() -> AttestationReport {
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],
             serving: "aggregator".to_string(),
+            ..Default::default()
         },
     }
 }

@@ -12,6 +12,7 @@ use std::collections::HashSet;
 
 const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
 pub(crate) const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
+pub(crate) const AUDIO_TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteModel {
@@ -35,6 +36,7 @@ pub enum Surface {
     /// System One relay surface.
     SystemOne,
     Images,
+    AudioTranscriptions,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,6 +183,7 @@ impl Surface {
             Surface::Responses => "/v1/responses",
             Surface::SystemOne => "/v1/systemone",
             Surface::Images => IMAGES_GENERATIONS_PATH,
+            Surface::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
         }
     }
 
@@ -188,6 +191,7 @@ impl Surface {
         match self {
             Surface::SystemOne => "decisions",
             Surface::Images => "image",
+            Surface::AudioTranscriptions => "transcription",
             Surface::ChatCompletions | Surface::Messages | Surface::Responses => "text",
         }
     }
@@ -209,11 +213,17 @@ pub struct CatalogModel {
 impl CatalogModel {
     pub fn supports(&self, surface: Surface) -> bool {
         self.outputs(surface.output_modality())
-            && (matches!(surface, Surface::SystemOne | Surface::Images)
-                || self
-                    .supported_surfaces
-                    .as_ref()
-                    .is_none_or(|surfaces| surfaces.contains(&surface)))
+            && !(matches!(
+                surface,
+                Surface::ChatCompletions | Surface::Messages | Surface::Responses
+            ) && self.outputs("transcription"))
+            && (matches!(
+                surface,
+                Surface::SystemOne | Surface::Images | Surface::AudioTranscriptions
+            ) || self
+                .supported_surfaces
+                .as_ref()
+                .is_none_or(|surfaces| surfaces.contains(&surface)))
     }
 
     pub fn supports_agent(&self, surface: Surface) -> bool {
@@ -228,9 +238,9 @@ impl CatalogModel {
         self.remote
             .extra
             .get("output_modalities")
-            // Existing surfaces accept legacy catalogs without modality metadata;
-            // image generation requires an explicit advertisement.
-            .map_or(modality != "image", |modalities| {
+            // Text and decisions accept legacy catalogs without modality metadata;
+            // images and transcription require an explicit advertisement.
+            .map_or(matches!(modality, "text" | "decisions"), |modalities| {
                 modalities
                     .as_array()
                     .is_some_and(|modalities| modalities.iter().any(|value| value == modality))

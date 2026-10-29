@@ -10,6 +10,9 @@
 //! read, right before anything leaves the process. Request attribution is
 //! passed directly to the verifier and never appears on an HTTP hop.
 
+mod request;
+use request::model_of;
+pub use request::{check_carrier_headers, multipart};
 mod routes;
 #[cfg(test)]
 use routes::models;
@@ -507,7 +510,12 @@ async fn relay(
             return reject(&state, Some(agent), "POST", path, None, surface, rejection);
         }
     };
-    let model = model_of(&bytes);
+    let model = match model_of(&headers, &bytes, surface).await {
+        Ok(model) => model,
+        Err(rejection) => {
+            return reject(&state, Some(agent), "POST", path, None, surface, rejection)
+        }
+    };
     if let Err(rejection) = check_catalog(&state, model.as_deref(), surface) {
         return reject(&state, Some(agent), "POST", path, model, surface, rejection);
     }
@@ -566,7 +574,7 @@ fn check_catalog(
         Rejection::new(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "The request body must be a JSON object with a string `model`",
+            "The request body must contain a string `model`",
         )
     })?;
     let session = read(&state.session);
@@ -992,14 +1000,6 @@ fn presented_token(headers: &HeaderMap) -> Option<String> {
         .or(api_key)
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .map(str::to_string)
-}
-
-fn model_of(bytes: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(bytes)
-        .ok()?
-        .get("model")?
-        .as_str()
         .map(str::to_string)
 }
 

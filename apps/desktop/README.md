@@ -64,16 +64,33 @@ proof details and printed by [`pap usage show <id> --receipt`](docs/cli.md#cover
 
 The Local API exposes `GET /v1/models`, plus `POST /v1/chat/completions`,
 `POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`,
-`POST /v1/responses/compact`, `POST /v1/systemone`, and
-`POST /v1/images/generations`. The System One and image-generation routes
-accept native buffered JSON and are available only to the local-tools token;
-all inference routes require a verified session and a model from its catalog.
+`POST /v1/responses/compact`, `POST /v1/systemone`,
+`POST /v1/images/generations`, and `POST /v1/audio/transcriptions`. System One,
+image generation, and audio transcription are available only to the local-tools
+token; all inference routes require a verified session and a model from its catalog.
+System One and image generation accept native buffered JSON.
 Image generation additionally requires the model to advertise `image` in
 `output_modalities` and the remote gateway to support the endpoint. Image
 responses pass through unchanged, including `data[].b64_json`; usage and cost
 are captured when reported by the service, with a 64 MiB capture limit for
 image responses. Missing usage is not estimated. The request body limit is
 32 MiB and the upstream call timeout is 660 seconds.
+
+Audio transcription accepts multipart/form-data with a unique UTF-8 `model`
+text part. The catalog must explicitly advertise `transcription` in
+`output_modalities`; eligibility does not depend on `input_modalities`.
+Models advertising `transcription` output are excluded from
+chat, Messages, and Responses. Models such as Gemini that accept audio and text
+and advertise only `text` output keep their chat endpoints.
+Like System One and images, this route bypasses the text endpoint compatibility
+inventory. Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
+text within the existing 32 MiB body limit. File parts are drained without
+collecting another file buffer. Other Local API routes reject multipart.
+
+Multipart bytes, Content-Type, and the `X-ACI-Provider` serving constraints are
+preserved for verification. All Local API inference routes, including JSON
+routes, reject duplicate or invalid Content-Type headers and Connection
+nominations of Content-Type or X-ACI-Provider.
 
 Only agents that are both linked and currently protected are authorized on the
 Local API. Stopping protection, Stop All and Quit, `pap service stop`, Reset

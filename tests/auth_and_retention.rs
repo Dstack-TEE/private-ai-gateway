@@ -101,6 +101,7 @@ fn harness_with_ttl(receipt_ttl_seconds: u64) -> Harness {
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     cfg.receipt_ttl_seconds = receipt_ttl_seconds;
     // The preverified event carries no enforceable binding; this suite covers

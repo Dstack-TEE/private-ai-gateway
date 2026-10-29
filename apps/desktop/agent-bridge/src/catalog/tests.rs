@@ -246,6 +246,49 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
 }
 
 #[test]
+fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
+    let original = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["transcription"] },
+            { "id": "mixed-output", "output_modalities": ["text", "transcription"] },
+            { "id": "gemini", "input_modalities": ["text", "audio", "image", "video"], "output_modalities": ["text"] },
+            { "id": "missing-output", "input_modalities": ["audio"] },
+            { "id": "legacy" },
+            { "id": "malformed-output", "output_modalities": "transcription" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    for surface in [
+        Surface::ChatCompletions,
+        Surface::Messages,
+        Surface::Responses,
+    ] {
+        for id in ["audio", "mixed-output", "malformed-output"] {
+            assert!(
+                !original.get(id).unwrap().supports(surface),
+                "{id}: {surface:?}"
+            );
+            assert!(!original.get(id).unwrap().supports_agent(surface));
+        }
+        for id in ["gemini", "missing-output", "legacy"] {
+            assert!(
+                original.get(id).unwrap().supports(surface),
+                "{id}: {surface:?}"
+            );
+        }
+    }
+    let mut catalog = original;
+    for model in &mut catalog.models {
+        // Text endpoint observations never enable or disable STT.
+        model.supported_surfaces = Some(vec![]);
+    }
+    let audio = catalog.for_surface(Surface::AudioTranscriptions);
+    let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
+    assert_eq!(ids, ["audio", "mixed-output"]);
+}
+
+#[test]
 fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
     let catalog = Catalog::from_remote(
         &json!({ "data": [
