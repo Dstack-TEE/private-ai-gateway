@@ -4,8 +4,6 @@ version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
   "requests>=2.32.5",
-  # Pin the SDK response models used by the audio live-e2e conformance checks.
-  "openai==3.40.0",
   # Runtime deps of the vendored `scripts/confidential_verifier` package, so the
   # provider-verifier bridge runs entirely from the gateway's own uv environment
   # (no sibling private-ai-verifier checkout required). See

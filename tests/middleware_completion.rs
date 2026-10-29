@@ -5871,6 +5871,7 @@ async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reache
     }
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["model"], "whisper");
     for request in requests.iter() {
         assert!(!request
             .headers

@@ -751,14 +751,11 @@ impl AciService {
         loop {
             // The future owns its inputs; the admission keeps its leases until
             // the attempt returns or is cancelled.
-            let started = std::time::Instant::now();
             let result = forward(prepared.clone(), admission.event.clone()).await;
-            if prepared.request.path.as_deref() == Some(super::AUDIO_TRANSCRIPTIONS_PATH) {
-                self.metrics
-                    .record_audio_latency(&prepared.upstream_name, started.elapsed().as_secs_f64());
-                if matches!(result, Err(UpstreamError::ResponseTooLarge)) {
-                    self.metrics.record_audio_failure("response_size_failure");
-                }
+            if prepared.request.path.as_deref() == Some(super::AUDIO_TRANSCRIPTIONS_PATH)
+                && matches!(result, Err(UpstreamError::ResponseTooLarge))
+            {
+                self.metrics.record_audio_failure("response_size_failure");
             }
             match result {
                 Ok(response) => return ReverifyOutcome::Forwarded(response, Box::new(admission)),

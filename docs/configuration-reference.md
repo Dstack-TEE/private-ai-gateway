@@ -506,5 +506,4 @@ failures and read timeouts also close the connection; byte-budget exhaustion
 returns `429 rate_limit_exceeded` with `Retry-After: 1`.
 `private_ai_gateway_audio_failures_total{reason}` uses fixed
 reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
-`response_size_failure`. `private_ai_gateway_audio_provider_latency_seconds`
-measures provider attempt latency without audio, prompts, or filenames.
+`response_size_failure`, without audio, prompts, or filenames.
