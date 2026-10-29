@@ -195,20 +195,20 @@ no `audio`, no automatic retranscription. Duration cannot be inferred from
 segments, file size, or elapsed time. Missing `usage` is synthesized for the
 client and report; existing or synthesized `usage.seconds` is normalized to the
 same billable integer (`2.965` becomes `3`). Verbose `duration` and
-`audio.raw_duration` retain the raw value. Nested usage is sanitized before reporting.
+`audio.raw_duration` retain the raw value. Post-report `usage` is always
+`{"type":"duration","seconds":3}`, with no token counters, token details, or
+upstream cost. Audio is billed only by duration, even if the upstream returns
+token usage or the pricing snapshot includes token rates.
 Client usage always has `type: "duration"`, integer `seconds`, and optional
 gateway-priced `cost`; upstream `usage.cost` is never exposed to clients.
-Provider token counters and their usage type remain in the sanitized
-post report and internal pricing input; they are not exposed in client usage.
 
 `pricing.audioCostPerSecond` is an unsigned plain decimal **string**, at most
 18 fractional digits and at most `1000000`, like image rates. Successful cost is
-`audio.seconds × audioCostPerSecond + token cost`, using checked decimal
+`audio.seconds × audioCostPerSecond`, using checked decimal
 arithmetic. Missing audio rate contributes zero; malformed configured rates or
 arithmetic overflow omit `usage.cost` rather than displaying a fabricated
-price. Token cost applies only when token usage and token rates exist. Failed
-reports never carry billable audio usage. Control-plane production enablement
-requires idempotent ingestion by request/attempt, the same rounding and price
+price. Failed reports never carry billable audio usage. Control-plane production
+enablement requires idempotent ingestion by request/attempt, the same rounding and price
 validation, and success-only billing. Gateway support alone does not enable a
 production model; that cross-repository billing work is a separate launch gate.
 

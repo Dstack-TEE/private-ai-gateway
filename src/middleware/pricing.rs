@@ -175,22 +175,12 @@ pub fn compute_image_cost(
 }
 
 /// Audio prices use the same bounded, unsigned decimal grammar as image prices.
-pub fn compute_audio_cost(
-    usage: Option<&Value>,
-    pricing: &Value,
-    audio: &super::audio::AudioUsage,
-) -> Option<f64> {
+pub fn compute_audio_cost(pricing: &Value, audio: &super::audio::AudioUsage) -> Option<f64> {
     let unit = pricing
         .get("audioCostPerSecond")
         .map(image_rate)
         .unwrap_or(Some(Decimal::ZERO))?;
-    let tokens = usage
-        .map(|u| token_cost(u, pricing))
-        .unwrap_or(Some(Decimal::ZERO))?;
-    Decimal::from(audio.seconds)
-        .checked_mul(unit)?
-        .checked_add(tokens)?
-        .to_f64()
+    Decimal::from(audio.seconds).checked_mul(unit)?.to_f64()
 }
 
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
