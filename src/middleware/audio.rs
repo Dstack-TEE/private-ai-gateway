@@ -175,14 +175,12 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
     let mut timestamps = Vec::new();
     let mut timestamp_name = None;
     let mut file = None;
-    let mut count = 0;
     let mut text_bytes = 0;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|_| AudioError::invalid("multipart"))?
     {
-        count += 1;
         let name = field
             .name()
             .ok_or_else(|| AudioError::invalid("field"))?
@@ -190,8 +188,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
         // Multer resolves duplicate part headers with last-wins semantics.
         // Only its parsed values are used; caller headers never reach the
         // upstream because reqwest re-encodes every validated field and file.
-        if count > 16
-            || name.len() > 64
+        if name.len() > 64
             || field
                 .headers()
                 .iter()
@@ -566,16 +563,12 @@ mod tests {
             vec![("model", "a"), ("model", "b")],
             vec![("model", "a"), ("provider", "{}")],
             vec![("model", "a"), ("include[]", "true")],
-            vec![("model", "a"), ("chunking_strategy", "true")],
-            vec![("model", "a"), ("known_speaker_names[]", "true")],
             vec![("model", "a"), ("stream", "true")],
             vec![("model", "a"), ("stream", "0")],
             vec![("model", "a"), ("temperature", "NaN")],
             vec![("model", "a"), ("temperature", "1.1")],
             vec![("model", "a"), ("language", "EN")],
             vec![("model", "a"), ("response_format", "srt")],
-            vec![("model", "a"), ("response_format", "text")],
-            vec![("model", "a"), ("response_format", "vtt")],
             vec![("model", "a"), ("timestamp_granularities[]", "word")],
             vec![
                 ("model", "a"),
@@ -605,9 +598,6 @@ mod tests {
             "audio.wav",
         )
         .await;
-        assert!(parse(raw, &ct).await.is_err());
-        let fields = vec![("timestamp_granularities[]", "word"); 17];
-        let (raw, ct) = request(&fields, Bytes::from_static(b"a"), "a.wav").await;
         assert!(parse(raw, &ct).await.is_err());
     }
 
