@@ -70,8 +70,7 @@ For each entry with the `chat` capability, the case:
 `audio_transcriptions` provider capability runs
 `cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
 committed 94,958-byte synthetic spoken WAV in both `json` and `verbose_json`
-formats. Each response is validated against the pinned `openai==3.40.0`
-`Transcription` or `TranscriptionVerbose` model. It checks recognizable fixture
+formats. It checks required field types, recognizable fixture
 words, positive integer billable seconds, response allowlists, null chat id,
 received/returned body hashes, the serving attested session, and offline
 `pap audit`. Artifacts preserve the exact raw multipart upload for audit.

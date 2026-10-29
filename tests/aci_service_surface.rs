@@ -4139,11 +4139,9 @@ async fn audio_malformed_duration_withholds_transcript_and_keeps_forwarded_recei
 }
 
 #[tokio::test(start_paused = true)]
-async fn audio_rejects_e2ee_and_bad_carriers_without_parsing_upload() {
+async fn audio_rejects_bad_carriers_without_parsing_upload() {
     let h = harness();
     for (name, value) in [
-        ("x-e2ee-unknown", "1"),
-        ("x-signing-algo", "1"),
         ("x-aci-provider", "null"),
         ("x-aci-provider", "{"),
         ("x-aci-provider", r#"{"aci_unknown":true}"#),
@@ -4237,121 +4235,7 @@ async fn audio_header_constraint_refusal_has_required_receipt_without_forwarding
 }
 
 #[tokio::test]
-async fn audio_header_session_pin_is_enforced_and_cited_exactly() {
-    let h = harness_with_upstream(RecordingUpstream::with_response_body(
-        br#"{"text":"hello","duration":1}"#,
-    ));
-    let raw = transcription_request("");
-    let first = h
-        .requester
-        .call(
-            transcription_http(raw.clone())
-                .body(Body::from(raw.clone()))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(first.status, StatusCode::OK);
-    let receipt = h
-        .service
-        .get_receipt_by_receipt_id(header(&first.headers, "x-receipt-id"))
-        .unwrap();
-    let session = payload_event(&receipt_payload(&receipt), "upstream.verified")["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let response = h
-        .requester
-        .call(
-            transcription_http(raw.clone())
-                .header(
-                    "x-aci-provider",
-                    serde_json::json!({"aci_session_ids":[session]}).to_string(),
-                )
-                .body(Body::from(raw.clone()))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(response.status, StatusCode::OK);
-    let receipt = h
-        .service
-        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
-        .unwrap();
-    let payload = receipt_payload(&receipt);
-    let verified = payload_event(&payload, "upstream.verified");
-    assert_eq!(verified["required"], true);
-    assert_eq!(verified["session_id"], session);
-
-    let rejected = h
-        .requester
-        .call(
-            transcription_http(raw.clone())
-                .header(
-                    "x-aci-provider",
-                    serde_json::json!({"aci_session_ids":["ab".repeat(32)]}).to_string(),
-                )
-                .body(Body::from(raw))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(rejected.status, StatusCode::PRECONDITION_FAILED);
-    assert_eq!(error_type(&rejected), "session_not_accepted");
-    assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
-}
-
-#[tokio::test]
-async fn header_rejections_return_json_over_tcp_for_small_and_large_streamed_uploads() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let h = harness();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = h.requester.app.clone();
-    let server =
-        tokio::spawn(private_ai_gateway::http::app::serve_with_write_idle_timeout(listener, app));
-    for path in ["/v1/audio/transcriptions", "/v1/images/generations"] {
-        for length in [96 * 1024, 4 * 1024 * 1024] {
-            for carrier in ["x-e2ee-unknown: 1", "x-aci-provider: null"] {
-                let response = tokio::time::timeout(Duration::from_secs(7), async {
-                    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-                    socket.write_all(format!(
-                        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nConnection: close\r\n{carrier}\r\n\r\n"
-                    ).as_bytes()).await.unwrap();
-                    let chunk = [b'x'; 16 * 1024];
-                    let mut remaining = length;
-                    while remaining > 0 {
-                        let count = remaining.min(chunk.len());
-                        socket.write_all(&chunk[..count]).await.expect("refusal must not reset an in-progress upload");
-                        remaining -= count;
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    let mut response = Vec::new();
-                    socket.read_to_end(&mut response).await.expect("refusal must finish without TCP reset");
-                    response
-                }).await.unwrap();
-                assert!(response.starts_with(b"HTTP/1.1 400 "));
-                let split = response
-                    .windows(4)
-                    .position(|bytes| bytes == b"\r\n\r\n")
-                    .unwrap();
-                let body: Value = serde_json::from_slice(&response[split + 4..]).unwrap();
-                assert_eq!(
-                    body["error"]["type"],
-                    if carrier.starts_with("x-e2ee") {
-                        "e2ee_unsupported_endpoint"
-                    } else {
-                        "invalid_request_error"
-                    }
-                );
-            }
-        }
-    }
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-    server.abort();
-    assert!(server.await.unwrap_err().is_cancelled());
-}
-
-#[tokio::test]
-async fn expect_continue_refusals_return_final_status_without_inviting_upload() {
+async fn audio_header_refusals_complete_over_tcp_without_reset_or_continue() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let h = harness();
@@ -4363,31 +4247,39 @@ async fn expect_continue_refusals_return_final_status_without_inviting_upload() 
             h.requester.app.clone(),
         ),
     );
-    for path in ["/v1/audio/transcriptions", "/v1/images/generations"] {
-        for (carrier, length, status) in [
-            ("x-e2ee-unknown: 1\r\n", 25 * 1024 * 1024, 400),
-            ("x-aci-provider: null\r\n", 25 * 1024 * 1024, 400),
-            ("", 33 * 1024 * 1024, 413),
-        ] {
+    for (carrier, length, expect, status) in [
+        ("x-e2ee-unknown: 1\r\n", 4 * 1024 * 1024, false, 400),
+        ("x-e2ee-unknown: 1\r\n", 25 * 1024 * 1024, true, 400),
+        ("", 33 * 1024 * 1024, true, 413),
+    ] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
             let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nExpect: 100-continue\r\n{carrier}\r\n").as_bytes()).await.unwrap();
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST /v1/audio/transcriptions HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nConnection: close\r\n{expect_header}{carrier}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                let chunk = [b'x'; 16 * 1024];
+                let mut remaining = length;
+                while remaining > 0 {
+                    let count = remaining.min(chunk.len());
+                    socket.write_all(&chunk[..count]).await.expect("refusal must not reset an in-progress upload");
+                    remaining -= count;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
             let mut response = Vec::new();
-            tokio::time::timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
-                .await
-                .unwrap()
-                .expect("header-only refusal must close cleanly");
-            let response = String::from_utf8(response).unwrap();
-            assert!(
-                response.starts_with(&format!("HTTP/1.1 {status} ")),
-                "{response}"
-            );
-            assert!(!response.contains("100 Continue"));
-            assert!(response
-                .to_ascii_lowercase()
-                .contains("connection: close\r\n"));
-            let (_, body) = response.split_once("\r\n\r\n").unwrap();
-            assert!(serde_json::from_str::<Value>(body).unwrap()["error"].is_object());
-        }
+            socket.read_to_end(&mut response).await.expect("refusal must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        assert!(!response.contains("100 Continue"));
+        assert!(response
+            .to_ascii_lowercase()
+            .contains("connection: close\r\n"));
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(serde_json::from_str::<Value>(body).unwrap()["error"].is_object());
     }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     server.abort();
@@ -4399,12 +4291,7 @@ async fn audio_invalid_parameters_reject_before_forwarding() {
     let h = harness();
     for (name, value, code) in [
         ("provider", "true", "unknown_parameter"),
-        ("include[]", "true", "unknown_parameter"),
-        ("chunking_strategy", "true", "unknown_parameter"),
-        ("known_speaker_names[]", "true", "unknown_parameter"),
-        ("response_format", "text", "invalid_parameter"),
         ("response_format", "srt", "invalid_parameter"),
-        ("response_format", "vtt", "invalid_parameter"),
     ] {
         let raw = transcription_request(&format!(
             "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"

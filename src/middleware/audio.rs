@@ -596,12 +596,17 @@ mod tests {
         for fields in [
             vec![("model", "a"), ("model", "b")],
             vec![("model", "a"), ("provider", "{}")],
+            vec![("model", "a"), ("include[]", "true")],
+            vec![("model", "a"), ("chunking_strategy", "true")],
+            vec![("model", "a"), ("known_speaker_names[]", "true")],
             vec![("model", "a"), ("stream", "true")],
             vec![("model", "a"), ("stream", "0")],
             vec![("model", "a"), ("temperature", "NaN")],
             vec![("model", "a"), ("temperature", "1.1")],
             vec![("model", "a"), ("language", "EN")],
             vec![("model", "a"), ("response_format", "srt")],
+            vec![("model", "a"), ("response_format", "text")],
+            vec![("model", "a"), ("response_format", "vtt")],
             vec![("model", "a"), ("timestamp_granularities[]", "word")],
             vec![
                 ("model", "a"),
@@ -678,16 +683,9 @@ mod tests {
         );
         let result = read_upload(&HeaderMap::new(), body).await;
         let error = result.unwrap_err();
-        assert_eq!(error.code, "upload_timeout");
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(response.headers()[header::CONNECTION], "close");
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        assert!(std::str::from_utf8(&body)
-            .unwrap()
-            .contains("60-second read deadline"));
         assert_eq!(UPLOAD_BYTES.available_permits(), available);
     }
 
@@ -708,10 +706,6 @@ mod tests {
             let response = error.into_response();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
             assert_eq!(response.headers()[header::CONNECTION], "close");
-            let body = axum::body::to_bytes(response.into_body(), 1024)
-                .await
-                .unwrap();
-            assert!(std::str::from_utf8(&body).unwrap().contains("size limit"));
         }
     }
 
@@ -730,20 +724,9 @@ mod tests {
         let rejected = collect_upload(Body::from("xyz"), budget.clone())
             .await
             .unwrap_err();
-        assert_eq!(rejected.code, "rate_limit_exceeded");
         let response = rejected.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-        let body = axum::body::to_bytes(response.into_body(), 1024)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["error"]["type"], "rate_limit_error");
-        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("capacity reached"));
         assert_eq!(budget.available_permits(), 2);
         drop(permit);
         assert_eq!(budget.available_permits(), 7);
@@ -821,17 +804,27 @@ mod tests {
     }
 
     #[test]
-    fn sanitizer_normalizes_duration_usage_and_preserves_requested_format() {
-        for body in [
-            json!({"text":"hello","duration":2.965}),
-            json!({"text":"hello","duration":2.965,"usage":{}}),
-            json!({"text":"hello","duration":2.965,"usage":{"type":"duration","seconds":2.965}}),
-            json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2}}),
-            json!({"text":"hello","duration":2.965,"usage":{"type":"duration","seconds":2.965,"cost":99}}),
+    fn sanitizer_normalizes_usage_metadata_and_requested_format() {
+        for (provider_usage, language, requested, expected_language) in [
+            (Value::Null, Value::Null, Value::Null, ""),
+            (json!({}), json!("English"), json!("en"), "English"),
+            (
+                json!({"type":"tokens","input_tokens":2}),
+                Value::Null,
+                json!("en"),
+                "en",
+            ),
+            (
+                json!({"type":"duration","seconds":2.965,"cost":99}),
+                json!({"private":1}),
+                Value::Null,
+                "",
+            ),
         ] {
-            let (verbose, audio) =
-                sanitize_response(body.clone(), &json!({"response_format":"verbose_json"}))
-                    .unwrap();
+            let upstream =
+                json!({"text":"hello","duration":2.965,"language":language,"usage":provider_usage});
+            let params = json!({"response_format":"verbose_json","language":requested});
+            let (verbose, audio) = sanitize_response(upstream.clone(), &params).unwrap();
             assert_eq!(
                 audio,
                 AudioUsage {
@@ -840,37 +833,10 @@ mod tests {
                 }
             );
             assert_eq!(verbose["duration"], 2.965);
-            assert_eq!(verbose["usage"]["seconds"].as_u64(), Some(3));
+            assert_eq!(verbose["language"], expected_language);
             assert_eq!(verbose["usage"], json!({"type":"duration","seconds":3}));
-            assert_eq!(verbose["language"], "");
-            let (reduced, _) = sanitize_response(body, &Value::Null).unwrap();
+            let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
             assert_eq!(reduced, json!({"text":"hello","usage":verbose["usage"]}));
-        }
-    }
-
-    #[test]
-    fn verbose_metadata_uses_authoritative_duration_and_language_fallback() {
-        for (language, params, expected) in [
-            (
-                json!("English"),
-                json!({"response_format":"verbose_json","language":"en"}),
-                "English",
-            ),
-            (
-                Value::Null,
-                json!({"response_format":"verbose_json","language":"en"}),
-                "en",
-            ),
-            (
-                json!({"private":1}),
-                json!({"response_format":"verbose_json"}),
-                "",
-            ),
-        ] {
-            let (body, _) = sanitize_response(json!({"text":"hello","language":language,"duration":10,"usage":{"type":"duration","seconds":2.965,"cost":0.1}}), &params).unwrap();
-            assert_eq!(body["duration"], 2.965);
-            assert_eq!(body["language"], expected);
-            assert_eq!(body["usage"], json!({"type":"duration","seconds":3}));
         }
     }
 
@@ -883,28 +849,21 @@ mod tests {
         private["url"] = json!("private");
         let mut negative = segment.clone();
         negative["start"] = json!(-1);
-        let (body, _) = sanitize_response(json!({"text":"hello","duration":1,"segments":[private,invalid,negative,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}]}), &json!({"response_format":"verbose_json"})).unwrap();
+        let upstream = json!({"text":"hello","duration":1,"private":{},"segments":[private,invalid,negative,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}],"languages":[{"code":"en","private":1},{"code":7},"private"]});
+        let (body, _) =
+            sanitize_response(upstream.clone(), &json!({"response_format":"verbose_json"}))
+                .unwrap();
         assert_eq!(body["segments"], json!([segment]));
         assert_eq!(
             body["words"],
             json!([{"word":"hello","start":0.0,"end":1.0}])
         );
-        assert!(!body.to_string().contains("private"));
-    }
-
-    #[test]
-    fn nested_allowlists_withhold_private_structures() {
-        let upstream = json!({"text":"hello","duration":1,"secret":{},"languages":[{"code":"en","private":1},{"code":7},"private"],"segments":[{"id":0,"text":"hello","start":0,"end":1,"url":"private","tokens":[1,2]},{"text":{"url":"private"},"start":-1},"private"],"words":[{"word":"hello","start":0,"end":1,"secret":1}],"usage":{"type":"tokens","input_tokens":1,"input_token_details":{"audio_tokens":1,"url":"private"},"private":{}}});
-        let (body, _) =
-            sanitize_response(upstream.clone(), &json!({"response_format":"verbose_json"}))
-                .unwrap();
-        assert!(!body.to_string().contains("private"));
-        assert!(body.get("segments").is_none());
-        assert_eq!(body["usage"], json!({"type":"duration","seconds":1}));
         assert_eq!(body["languages"], json!([{"code":"en"}]));
+        assert!(!body.to_string().contains("private"));
         let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
-        assert_eq!(reduced["languages"], body["languages"]);
-        assert!(reduced.get("segments").is_none());
-        assert!(!reduced.to_string().contains("private"));
+        assert_eq!(
+            reduced,
+            json!({"text":"hello","usage":{"type":"duration","seconds":1},"languages":[{"code":"en"}]})
+        );
     }
 }

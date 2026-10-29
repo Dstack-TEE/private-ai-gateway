@@ -3,9 +3,7 @@
 //! These counters describe work performed by this ACI service. They do
 //! not proxy or copy upstream-provider metrics.
 
-use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
-};
+use prometheus::{Encoder, IntCounterVec, Opts, Registry, TextEncoder};
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
@@ -13,7 +11,6 @@ use crate::aci::receipt::UpstreamVerifiedEvent;
 pub struct ServiceMetrics {
     registry: Registry,
     audio_failures_total: IntCounterVec,
-    audio_provider_latency_seconds: HistogramVec,
     requests_total: IntCounterVec,
     upstream_verifications_total: IntCounterVec,
     upstream_responses_total: IntCounterVec,
@@ -78,18 +75,9 @@ impl ServiceMetrics {
             ),
             &["reason"],
         )?;
-        let audio_provider_latency_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "private_ai_gateway_audio_provider_latency_seconds",
-                "Transcription upstream attempt latency.",
-            ),
-            &["provider"],
-        )?;
         registry.register(Box::new(audio_failures_total.clone()))?;
-        registry.register(Box::new(audio_provider_latency_seconds.clone()))?;
         Ok(Self {
             audio_failures_total,
-            audio_provider_latency_seconds,
             registry,
             requests_total,
             upstream_verifications_total,
@@ -101,11 +89,6 @@ impl ServiceMetrics {
 
     pub fn record_audio_failure(&self, reason: &str) {
         self.audio_failures_total.with_label_values(&[reason]).inc();
-    }
-    pub fn record_audio_latency(&self, provider: &str, seconds: f64) {
-        self.audio_provider_latency_seconds
-            .with_label_values(&[provider])
-            .observe(seconds);
     }
 
     pub fn render(&self) -> Result<MetricsSnapshot, prometheus::Error> {

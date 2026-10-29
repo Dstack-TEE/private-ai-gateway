@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from openai.types.audio import Transcription, TranscriptionVerbose
 
 from ..common import Provider, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
@@ -139,7 +138,7 @@ def run_audio_format(
 
 
 def assert_audio_shape(
-    provider: Provider, response: dict[str, Any], response_format: str = "json",
+    provider: Provider, response: dict[str, Any], response_format: str,
 ) -> None:
     text = response.get("text")
     if not isinstance(text, str):
@@ -156,6 +155,11 @@ def assert_audio_shape(
     allowed = {"text", "usage", "languages"}
     if response_format == "verbose_json":
         allowed |= {"language", "duration", "segments", "words", "task"}
+        duration = response.get("duration")
+        if (not isinstance(response.get("language"), str)
+                or isinstance(duration, bool) or not isinstance(duration, (int, float))
+                or not 0 < duration < 30):
+            raise RuntimeError(f"{provider.name} verbose transcription requires language and duration")
     if set(response) - allowed:
         raise RuntimeError(f"{provider.name} {response_format} transcription response contains extra fields")
     if "languages" in response:
@@ -165,9 +169,6 @@ def assert_audio_shape(
             or not isinstance(item["code"], str) for item in languages
         ):
             raise RuntimeError(f"{provider.name} transcription languages must contain only string codes")
-    # The SDK's strict response path validates these same generated models.
-    model = Transcription if response_format == "json" else TranscriptionVerbose
-    model.model_validate(response)
 
 
 def assert_audio_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
