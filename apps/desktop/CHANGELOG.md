@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.7.0...desktop-v0.8.0-beta.1) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desktop:** pap serve and @phala/aci-verifier refuse constrained JSON requests without a JSON content type (curl -d / fetch string bodies must set Content-Type: application/json).
+
+### Features
+
+* **desktop:** fail closed on non-JSON constrained bodies and relay audio transcription ([#517](https://github.com/Dstack-TEE/private-ai-gateway/issues/517)) ([673efd0](https://github.com/Dstack-TEE/private-ai-gateway/commit/673efd09c2571f08049d180fa39f5e6b59462ba2))
+* **desktop:** relay image generation through the Local API ([#493](https://github.com/Dstack-TEE/private-ai-gateway/issues/493)) ([dd333b2](https://github.com/Dstack-TEE/private-ai-gateway/commit/dd333b24324a96468bc19137fbcf6c45aeecc366))
+
 ## [0.7.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.7.0-beta.1...desktop-v0.7.0) (2026-10-28)
 
 Changes since stable 0.6.2, including both intervening betas and the reviewed #510 cleanup.
