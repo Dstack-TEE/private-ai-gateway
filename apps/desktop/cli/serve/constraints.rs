@@ -38,11 +38,15 @@ pub(super) async fn prepare_request(
         return Err("duplicate X-ACI-Provider headers".into());
     }
     let carrier = carriers.first().copied();
-    let media_type = content_type.split(';').next().unwrap_or("").trim();
-    let multipart = media_type.eq_ignore_ascii_case("multipart/form-data");
-    let json = media_type.eq_ignore_ascii_case("application/json")
-        || (media_type.to_ascii_lowercase().starts_with("application/")
-            && media_type.to_ascii_lowercase().ends_with("+json"));
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let multipart = media_type == "multipart/form-data";
+    let json = media_type == "application/json"
+        || (media_type.starts_with("application/") && media_type.ends_with("+json"));
     if carrier.is_some() && (!multipart || path != AUDIO_TRANSCRIPTIONS_PATH) {
         return Err("X-ACI-Provider is only valid on supported multipart endpoints".into());
     }
@@ -79,14 +83,16 @@ pub(super) async fn prepare_request(
         if constrained || carrier.is_some() {
             let json =
                 serde_json::to_string(&provider).map_err(|_| "cannot encode X-ACI-Provider")?;
-            let mut value = String::with_capacity(json.len());
-            for unit in json.encode_utf16() {
-                if unit < 128 {
-                    value.push(unit as u8 as char);
-                } else {
-                    value.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
+            let value: String = json
+                .encode_utf16()
+                .map(|unit| {
+                    if unit < 0x80 {
+                        char::from(unit as u8).to_string()
+                    } else {
+                        format!("\\u{unit:04x}")
+                    }
+                })
+                .collect();
             if value.len() > MAX_MULTIPART_PROVIDER_BYTES {
                 return Err("effective X-ACI-Provider exceeds 8192 bytes".into());
             }

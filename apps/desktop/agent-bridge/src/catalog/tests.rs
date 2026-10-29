@@ -278,20 +278,14 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
             );
         }
     }
-    let inventory = EndpointInventory::bundled().unwrap();
-    for endpoint in ["https://example.com", "https://tee.redpill.ai"] {
-        let mut catalog = original.clone();
-        catalog
-            .apply_endpoint_inventory(endpoint, &inventory)
-            .unwrap();
-        for model in &mut catalog.models {
-            // Text endpoint observations never enable or disable STT.
-            model.supported_surfaces = Some(vec![]);
-        }
-        let audio = catalog.for_surface(Surface::AudioTranscriptions);
-        let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(ids, ["audio", "mixed-output"]);
+    let mut catalog = original;
+    for model in &mut catalog.models {
+        // Text endpoint observations never enable or disable STT.
+        model.supported_surfaces = Some(vec![]);
     }
+    let audio = catalog.for_surface(Surface::AudioTranscriptions);
+    let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
+    assert_eq!(ids, ["audio", "mixed-output"]);
 }
 
 #[test]

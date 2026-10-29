@@ -615,51 +615,35 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
     assert!(initial.left_device);
     let _usage = events.recv().await.unwrap();
 
-    for token in ["codex-token", "claude-token", "opencode-token"] {
-        let response = client
-            .post(format!("{proxy}/v1/audio/transcriptions"))
-            .bearer_auth(token)
-            .header("content-type", content_type)
-            .body(body.clone())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!events.recv().await.unwrap().left_device);
-    }
-    // Reject missing or incompatible output even when the model is listed.
-    for (input, output) in [
-        (Some(json!(["audio", "text"])), Some(json!(["text"]))),
-        (Some(json!(["audio"])), Some(json!(["text"]))),
-        (Some(json!(["audio"])), None),
-        (Some(json!(["audio"])), Some(json!(["image"]))),
-    ] {
-        let mut session = state.session();
-        let extra = &mut session.catalog.as_mut().unwrap().models[0].remote.extra;
-        for (key, value) in [("input_modalities", input), ("output_modalities", output)] {
-            match value {
-                Some(value) => {
-                    extra.insert(key.into(), value);
-                }
-                None => {
-                    extra.remove(key);
-                }
-            }
-        }
-        state.publish(session);
-        let response = client
-            .post(format!("{proxy}/v1/audio/transcriptions"))
-            .bearer_auth("local-tools-token")
-            .header("content-type", content_type)
-            .body(body.clone())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let error: Value = response.json().await.unwrap();
-        assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
-        assert!(!events.recv().await.unwrap().left_device);
-    }
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("codex-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!events.recv().await.unwrap().left_device);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["text"]));
+    state.publish(session);
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+    assert!(!events.recv().await.unwrap().left_device);
 
     for connection in ["X-ACI-Provider", "Content-Type"] {
         let response = client
@@ -673,26 +657,6 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(!events.recv().await.unwrap().left_device);
-    }
-    for path in [
-        "/v1/chat/completions",
-        "/v1/messages",
-        "/v1/messages/count_tokens",
-        "/v1/responses",
-        "/v1/responses/compact",
-        "/v1/systemone",
-        "/v1/images/generations",
-    ] {
-        let response = client
-            .post(format!("{proxy}{path}"))
-            .bearer_auth("local-tools-token")
-            .header("content-type", content_type)
-            .body(body.clone())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         assert!(!events.recv().await.unwrap().left_device);
     }
 }

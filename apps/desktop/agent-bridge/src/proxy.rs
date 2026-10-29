@@ -10,9 +10,8 @@
 //! read, right before anything leaves the process. Request attribution is
 //! passed directly to the verifier and never appears on an HTTP hop.
 
-mod model;
-use model::model_of;
 mod request;
+use request::model_of;
 pub use request::{check_carrier_headers, multipart};
 mod routes;
 #[cfg(test)]

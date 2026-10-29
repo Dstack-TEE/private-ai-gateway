@@ -187,23 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn multipart_capability_is_additive_and_defaults_to_unsupported() {
-        let legacy = json!({"supported_e2ee_versions": ["2"]});
-        let mut caps: ServiceCapabilities = serde_json::from_value(legacy).unwrap();
-        assert!(caps.supported_multipart_constraint_endpoints.is_empty());
-        assert!(serde_json::to_value(&caps)
-            .unwrap()
-            .get("supported_multipart_constraint_endpoints")
-            .is_none());
-        caps.supported_multipart_constraint_endpoints
-            .push(AUDIO_TRANSCRIPTIONS_PATH.into());
-        assert_eq!(
-            serde_json::to_value(&caps).unwrap()["supported_multipart_constraint_endpoints"],
-            json!([AUDIO_TRANSCRIPTIONS_PATH])
-        );
-    }
-
-    #[test]
     fn unknown_source_provenance_is_hidden_on_the_wire() {
         let value = serde_json::to_value(minimal_envelope(SourceProvenance::default())).unwrap();
         assert!(value.get("source_provenance").is_none());

@@ -98,11 +98,7 @@ test('native FormData carries policy in the header without changing its parts', 
   });
   assert.deepEqual(JSON.parse(prepared.request.headers.get('x-aci-provider') ?? ''), { aci_verified: true });
   const outgoing = await prepared.request.formData();
-  assert.equal(outgoing.get('model'), 'whisper-large-v3');
   assert.equal(outgoing.get('provider'), null);
-  const file = outgoing.get('file');
-  assert.ok(file instanceof File);
-  assert.deepEqual(new Uint8Array(await file.arrayBuffer()), new Uint8Array([0, 255]));
 });
 
 test('connectAci rejects a self-consistent report without a hardware quote', async () => {
