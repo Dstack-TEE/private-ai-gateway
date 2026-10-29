@@ -264,7 +264,6 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     };
     cfg.keyset_not_after = u64::MAX;
     cfg.service_capabilities = ServiceCapabilities {
-        supported_multipart_constraint_endpoints: Vec::new(),
         supported_e2ee_versions: vec!["2".to_string()],
         serving: "aggregator".to_string(),
         ..Default::default()

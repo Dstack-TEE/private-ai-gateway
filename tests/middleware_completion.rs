@@ -5885,6 +5885,12 @@ async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reache
 async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output() {
     let (url,pres,posts)=spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"0.001","inputCostPerToken":"0.01"}})).await;
     let (service,requests)=build_recording_service(200,serde_json::to_vec(&json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2,"output_tokens":1,"total_tokens":3,"input_token_details":{"audio_tokens":2,"private":"secret"}},"segments":[{"text":"hello","url":"secret"}]})).unwrap(),"application/json");
+    let original_digest = service.workload_keyset_digest();
+    assert_eq!(
+        service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(service.workload_keyset_digest(), original_digest);
     let (status, headers, body) = response_parts(
         middleware(url)
             .handle_completion(&service, audio_input())
@@ -5913,6 +5919,14 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
         .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
         .unwrap();
     assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        receipt.document_json().unwrap()["workload_keyset_digest"],
+        headers["x-aci-keyset-digest"].to_str().unwrap()
+    );
+    assert_eq!(
+        headers["x-aci-keyset-digest"],
+        service.workload_keyset_digest()
+    );
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
     assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
     assert_eq!(report["usage"], json!({"type":"duration","seconds":3}));

@@ -147,7 +147,6 @@ fn make_service_raw_with_verifier(
     let mut cfg = AciServiceConfig::for_test();
     // Do not advertise unwired E2EE.
     cfg.service_capabilities = ServiceCapabilities {
-        supported_multipart_constraint_endpoints: Vec::new(),
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
         ..Default::default()
@@ -718,7 +717,6 @@ fn service_init_accepts_secp256k1_as_the_only_e2ee_v2_suite() {
     let store = Arc::new(InMemoryReceiptStore::default());
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
-        supported_multipart_constraint_endpoints: Vec::new(),
         supported_e2ee_versions: vec!["2".to_string()],
         serving: "aggregator".to_string(),
         ..Default::default()
