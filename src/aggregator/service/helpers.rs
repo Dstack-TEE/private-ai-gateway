@@ -10,12 +10,13 @@ use crate::aci::upstream::{collect_buffered_upstream_body, UpstreamBodyStream};
 pub(super) async fn collect_upstream_body(
     body: UpstreamBodyStream,
     headers: &HashMap<String, String>,
+    limit: usize,
 ) -> Result<Vec<u8>, ServiceError> {
     let content_length = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, value)| value.parse().ok());
-    Ok(collect_buffered_upstream_body(body, content_length).await?)
+    Ok(collect_buffered_upstream_body(body, content_length, limit).await?)
 }
 
 pub(super) fn generate_receipt_id() -> String {

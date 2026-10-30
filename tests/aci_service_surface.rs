@@ -815,6 +815,67 @@ async fn oversized_upstream_responses_return_502_in_direct_mode() {
     }
 }
 
+#[tokio::test]
+async fn configured_buffered_response_limit_allows_large_embedding_batches_and_rejects_overflow() {
+    let body = Bytes::from(common::large_embeddings_response());
+    assert!(body.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES);
+    let upstream_body = body.clone();
+    let upstream = Router::new().route(
+        "/v1/embeddings",
+        axum::routing::post(move || {
+            let body = upstream_body.clone();
+            async move { ([("content-type", "application/json")], body) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for (limit, expected) in [
+        (
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            StatusCode::BAD_GATEWAY,
+        ),
+        (2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES, StatusCode::OK),
+        (body.len() - 1, StatusCode::BAD_GATEWAY),
+    ] {
+        let upstream = OpenAICompatibleBackend::new(format!("http://{address}"))
+            .unwrap()
+            .with_max_buffered_response_bytes(limit);
+        let mut config = AciServiceConfig::for_test();
+        config.max_buffered_response_bytes = limit;
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(upstream),
+                Arc::new(InMemoryReceiptStore::default()),
+                config,
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service),
+        };
+        let response = requester
+            .post(
+                "/v1/embeddings",
+                br#"{"model":"aci-model","input":["test"],"encoding_format":"float"}"#,
+                &[],
+            )
+            .await;
+        assert_eq!(response.status, expected, "limit={limit}");
+        if expected == StatusCode::OK {
+            assert_eq!(response.body, body);
+            assert!(response.headers.contains_key("x-receipt-id"));
+        } else {
+            assert_eq!(json_body(&response)["error"]["type"], "upstream_error");
+        }
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
 // ---------------------------------------------------------------------------
 // Reports
 // ---------------------------------------------------------------------------

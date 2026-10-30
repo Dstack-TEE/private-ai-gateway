@@ -114,7 +114,7 @@ pub enum UpstreamError {
     Transport(String),
     /// The buffered HTTP body or decompressed Chutes response exceeded the
     /// gateway's size limit. Reported to the client as a 502.
-    #[error("buffered upstream response exceeds {MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES} bytes")]
+    #[error("buffered upstream response exceeds configured size limit")]
     ResponseTooLarge,
     /// A deadline the gateway's own HTTP client enforced (connect or read
     /// timeout) expired before the upstream answered. Kept apart from

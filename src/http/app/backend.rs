@@ -453,7 +453,7 @@ async fn fetch_report_nvidia_payload(
         tracing::warn!(upstream = %target.upstream_name, status = %resp.status(), "upstream attestation report non-2xx");
         return None;
     }
-    let bytes = read_buffered_upstream_response(resp)
+    let bytes = read_buffered_upstream_response(resp, target.max_buffered_response_bytes)
         .await
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "read upstream attestation report"))
         .ok()?;

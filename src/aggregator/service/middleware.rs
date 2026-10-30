@@ -606,22 +606,23 @@ impl AciService {
                         // other truncated/unreadable bodies still degrade to empty
                         // for the caller's normalizer to emit its generic message.
                         let upstream_headers = upstream_response.headers;
-                        let upstream_body =
-                            match collect_upstream_body(upstream_response.body, &upstream_headers)
-                                .await
-                            {
-                                Ok(body) => body,
-                                Err(ServiceError::Upstream(
-                                    err @ UpstreamError::ResponseTooLarge,
-                                )) => {
-                                    if let Some(status) = abandoned_status(&err, &prepared) {
-                                        abandon(&mut failed_attempts, status);
-                                    }
-                                    upgrade_err(&mut aggregated_err, 2, err.into());
-                                    continue;
+                        let upstream_body = match collect_upstream_body(
+                            upstream_response.body,
+                            &upstream_headers,
+                            self.config.max_buffered_response_bytes,
+                        )
+                        .await
+                        {
+                            Ok(body) => body,
+                            Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
+                                if let Some(status) = abandoned_status(&err, &prepared) {
+                                    abandon(&mut failed_attempts, status);
                                 }
-                                Err(_) => Vec::new(),
-                            };
+                                upgrade_err(&mut aggregated_err, 2, err.into());
+                                continue;
+                            }
+                            Err(_) => Vec::new(),
+                        };
                         // A last-candidate answer is retained rather than returned while
                         // a capacity-retry pass is still available and this pass produced
                         // any capacity signal: the walk exit decides whether to replay the

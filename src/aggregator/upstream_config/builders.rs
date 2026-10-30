@@ -144,7 +144,8 @@ fn build_provider_backend(
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
             Ok(Arc::new(backend))
         }
         UpstreamProvider::ZeroGPrivateComputer => Ok(Arc::new(
@@ -155,7 +156,8 @@ fn build_provider_backend(
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone()),
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes),
         )),
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
@@ -171,7 +173,8 @@ fn build_provider_backend(
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
             if let Some(token) = &cfg.bearer_token {
                 backend = if cfg.provider == UpstreamProvider::Anthropic {
                     backend.with_anthropic_api_key(token.clone())
@@ -203,6 +206,7 @@ pub(super) fn build_chutes_provider_backend(
     )
     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
     .with_name(cfg.name.clone())
+    .with_max_buffered_response_bytes(options.max_buffered_response_bytes)
     .with_session_store(session_store);
     if let Some(token) = &cfg.bearer_token {
         backend = backend.with_bearer_token(token.clone());

@@ -71,6 +71,7 @@ fn unverified() -> UpstreamError {
 }
 
 pub struct ZeroGProviderBackend {
+    max_buffered_response_bytes: usize,
     name: String,
     router_base: String,
     api_key: String,
@@ -86,6 +87,7 @@ impl ZeroGProviderBackend {
         read_timeout_seconds: u64,
     ) -> Result<Self, UpstreamError> {
         Ok(Self {
+            max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             name: ZERO_G_PROVIDER.to_string(),
             router_base: router_base.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
@@ -95,6 +97,11 @@ impl ZeroGProviderBackend {
                 SIGNATURE_FETCH_TIMEOUT_SECONDS,
             )?,
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.max_buffered_response_bytes = limit;
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -167,6 +174,7 @@ impl ZeroGProviderBackend {
             })
             .ok_or_else(|| rejected("response carried no valid ZG-Res-Key"))?;
         let check = SignatureCheck {
+            max_buffered_response_bytes: self.max_buffered_response_bytes,
             client: self.signature_client.clone(),
             url: format!("{api}/proxy/signature/{key}"),
             signer: provider.signing_address,
@@ -215,6 +223,7 @@ fn bound_provider(
 /// Fetches the §8 signature directly from the verified broker (the router does
 /// not serve it) and checks it against the verified signer.
 struct SignatureCheck {
+    max_buffered_response_bytes: usize,
     client: reqwest::Client,
     url: String,
     signer: String,
@@ -246,7 +255,9 @@ impl SignatureCheck {
             }
             match self.client.get(&self.url).send().await {
                 Ok(response) if response.status().is_success() => {
-                    let body = read_buffered_upstream_response(response).await?;
+                    let body =
+                        read_buffered_upstream_response(response, self.max_buffered_response_bytes)
+                            .await?;
                     return serde_json::from_slice(&body)
                         .map_err(|e| UpstreamError::Transport(e.to_string()));
                 }
@@ -287,8 +298,10 @@ impl UpstreamBackend for ZeroGProviderBackend {
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let (response, mut opener, check) = self.send(req, event).await?;
-        let frame = serde_json::from_slice(&read_buffered_upstream_response(response).await?)
-            .map_err(rejected)?;
+        let frame = serde_json::from_slice(
+            &read_buffered_upstream_response(response, self.max_buffered_response_bytes).await?,
+        )
+        .map_err(rejected)?;
         let body = opener.open_frame(frame)?;
         check.verify(&opener.signed_text(false)?).await?;
         Ok(UpstreamResponse {

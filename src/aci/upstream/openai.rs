@@ -40,6 +40,7 @@ enum UpstreamAuth {
 /// elsewhere and emit `upstream.verified` with its result; this
 /// object is the forwarding plumbing only.
 pub struct OpenAICompatibleBackend {
+    pub(super) max_buffered_response_bytes: usize,
     name: String,
     base_url: String,
     path: String,
@@ -110,6 +111,7 @@ impl OpenAICompatibleBackend {
             .build()
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
         Ok(Self {
+            max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             name: "openai-compatible".to_string(),
             base_url: base,
             path: "/v1/chat/completions".to_string(),
@@ -119,6 +121,11 @@ impl OpenAICompatibleBackend {
             connect_timeout_seconds,
             read_timeout_seconds,
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.max_buffered_response_bytes = limit;
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -226,7 +233,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = read_buffered_upstream_response(resp).await?;
+        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -276,7 +283,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = read_buffered_upstream_response(resp).await?;
+        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -379,7 +386,7 @@ impl OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = read_buffered_upstream_response(resp).await?;
+        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,

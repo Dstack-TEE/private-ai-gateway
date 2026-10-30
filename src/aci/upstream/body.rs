@@ -4,26 +4,28 @@ use futures_util::StreamExt;
 
 use super::{transport_error, UpstreamBodyStream, UpstreamError};
 
-/// Maximum body size for a buffered upstream response, including decompressed
+/// Default operator limit for buffered upstream responses, including decompressed
 /// Chutes responses. Streaming responses are not collected under this limit.
 pub const MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) async fn read_buffered_upstream_response(
     response: reqwest::Response,
+    limit: usize,
 ) -> Result<Vec<u8>, UpstreamError> {
     let content_length = response.content_length();
     let body = response
         .bytes_stream()
         .map(|chunk| chunk.map_err(transport_error));
-    collect_buffered_upstream_body(Box::pin(body), content_length).await
+    collect_buffered_upstream_body(Box::pin(body), content_length, limit).await
 }
 
 pub(crate) async fn collect_buffered_upstream_body(
     mut body: UpstreamBodyStream,
     content_length: Option<u64>,
+    limit: usize,
 ) -> Result<Vec<u8>, UpstreamError> {
     let capacity = match content_length {
-        Some(length) if length > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 => {
+        Some(length) if length > limit as u64 => {
             return Err(UpstreamError::ResponseTooLarge);
         }
         Some(length) => (length as usize).min(1024 * 1024),
@@ -32,7 +34,7 @@ pub(crate) async fn collect_buffered_upstream_body(
     let mut out = Vec::with_capacity(capacity);
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
-        if chunk.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES - out.len() {
+        if chunk.len() > limit - out.len() {
             return Err(UpstreamError::ResponseTooLarge);
         }
         out.extend_from_slice(&chunk);
@@ -60,9 +62,13 @@ mod tests {
                 Ok(Bytes::from_static(b"llo")),
             ]));
             assert_eq!(
-                collect_buffered_upstream_body(body, content_length)
-                    .await
-                    .unwrap(),
+                collect_buffered_upstream_body(
+                    body,
+                    content_length,
+                    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES
+                )
+                .await
+                .unwrap(),
                 b"hello"
             );
         }
@@ -73,6 +79,7 @@ mod tests {
         let body = collect_buffered_upstream_body(
             full_body(),
             Some(MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64),
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         )
         .await
         .unwrap();
@@ -87,7 +94,12 @@ mod tests {
                 .chain(stream::once(async { Ok(Bytes::from_static(b"x")) }))
                 .chain(stream::poll_fn(|_| panic!("read beyond the size limit")));
             assert!(matches!(
-                collect_buffered_upstream_body(Box::pin(body), content_length).await,
+                collect_buffered_upstream_body(
+                    Box::pin(body),
+                    content_length,
+                    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES
+                )
+                .await,
                 Err(UpstreamError::ResponseTooLarge)
             ));
         }
@@ -99,7 +111,8 @@ mod tests {
         assert!(matches!(
             collect_buffered_upstream_body(
                 body,
-                Some(MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 + 1)
+                Some(MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 + 1),
+                MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             )
             .await,
             Err(UpstreamError::ResponseTooLarge)
@@ -112,7 +125,7 @@ mod tests {
             Err(UpstreamError::Timeout("read deadline".to_string()))
         }));
         assert!(matches!(
-            collect_buffered_upstream_body(body, None).await,
+            collect_buffered_upstream_body(body, None, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES).await,
             Err(UpstreamError::Timeout(_))
         ));
     }

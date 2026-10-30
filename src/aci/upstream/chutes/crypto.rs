@@ -30,9 +30,7 @@ use super::{
     ChutesE2eeRequest, CHUTES_INFO_REQ, CHUTES_INFO_RESP, CHUTES_INFO_STREAM, CHUTES_MLKEM_CT_SIZE,
     CHUTES_TAG_SIZE,
 };
-use crate::aci::upstream::{
-    UpstreamBodyStream, UpstreamError, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
-};
+use crate::aci::upstream::{UpstreamBodyStream, UpstreamError};
 
 pub(super) fn chutes_e2ee_pubkey_sha256(e2e_pubkey_b64: &str) -> Result<String, UpstreamError> {
     let pubkey = BASE64
@@ -84,6 +82,7 @@ pub(super) fn build_chutes_e2ee_request(
 pub(super) fn decrypt_chutes_response(
     response_blob: &[u8],
     response_sk: &MlKemDecapsulationKey768,
+    limit: usize,
 ) -> Result<Vec<u8>, UpstreamError> {
     if response_blob.len() <= CHUTES_MLKEM_CT_SIZE + 12 + CHUTES_TAG_SIZE {
         return Err(UpstreamError::Transport(
@@ -101,7 +100,7 @@ pub(super) fn decrypt_chutes_response(
         CHUTES_INFO_RESP,
     )?;
     let plaintext = chacha_decrypt(&sym_key, nonce, ciphertext)?;
-    gzip_decompress(&plaintext)
+    gzip_decompress(&plaintext, limit)
 }
 
 pub(super) fn decrypt_chutes_stream_init(
@@ -179,14 +178,13 @@ fn gzip_compress(plaintext: &[u8]) -> Result<Vec<u8>, UpstreamError> {
         .map_err(|e| UpstreamError::Transport(e.to_string()))
 }
 
-fn gzip_decompress(compressed: &[u8]) -> Result<Vec<u8>, UpstreamError> {
-    let mut decoder =
-        GzDecoder::new(compressed).take(MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 + 1);
+fn gzip_decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, UpstreamError> {
+    let mut decoder = GzDecoder::new(compressed).take((limit as u64).saturating_add(1));
     let mut plaintext = Vec::new();
     decoder
         .read_to_end(&mut plaintext)
         .map_err(|e| UpstreamError::Transport(e.to_string()))?;
-    if plaintext.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES {
+    if plaintext.len() > limit {
         return Err(UpstreamError::ResponseTooLarge);
     }
     Ok(plaintext)
@@ -334,12 +332,16 @@ impl Stream for ChutesE2eeDecryptingStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
 
     #[test]
     fn gzip_round_trip_under_limit() {
         let plaintext = b"buffered Chutes response";
         let compressed = gzip_compress(plaintext).unwrap();
-        assert_eq!(gzip_decompress(&compressed).unwrap(), plaintext);
+        assert_eq!(
+            gzip_decompress(&compressed, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES).unwrap(),
+            plaintext
+        );
     }
 
     #[test]
@@ -351,7 +353,7 @@ mod tests {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
             std::io::copy(&mut std::io::repeat(b'x').take(length as u64), &mut encoder).unwrap();
             let compressed = encoder.finish().unwrap();
-            let result = gzip_decompress(&compressed);
+            let result = gzip_decompress(&compressed, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES);
             if length == MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES {
                 let plaintext = result.unwrap();
                 assert_eq!(plaintext.len(), length);
@@ -365,7 +367,7 @@ mod tests {
     #[test]
     fn gzip_rejects_invalid_compressed_data() {
         assert!(matches!(
-            gzip_decompress(b"not gzip"),
+            gzip_decompress(b"not gzip", MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES),
             Err(UpstreamError::Transport(_))
         ));
     }

@@ -22,7 +22,8 @@ bodies under a 32 MiB limit. A larger body receives `413` in the surface's JSON
 error envelope. The Anthropic envelope includes the request ID; the OpenAI
 envelope does not.
 
-Buffered upstream responses are limited to 64 MiB, including upstream error
+Buffered upstream responses default to a 64 MiB operator limit, configurable with
+[`max_buffered_response_bytes`](configuration-reference.md#buffered-response-memory), including upstream error
 bodies and the decompressed output of Chutes E2EE responses. An advertised
 response length over this limit is rejected before reading the body; responses
 without a known length are stopped when they exceed the limit. Oversized
