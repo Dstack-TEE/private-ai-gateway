@@ -32,14 +32,16 @@ Minimal container configuration:
 | --- | --- | --- | --- |
 | `bind` | string | `127.0.0.1:8086` | TCP listener address. The gateway serves HTTP and does not terminate TLS. |
 | `state_dir` | string | `/var/lib/private-ai-gateway` | Writable directory owned by one gateway process. An empty string is rejected. |
-| `upstream_config_seed_path` | string | unset | Read-only upstream JSON copied to `<state_dir>/upstreams.json` only when the active file is missing or whitespace-only. |
+| `upstream_config_seed_path` | string | unset | Read-only upstream JSON copied to `<state_dir>/upstreams.json` only when the active file is missing or whitespace-only, except in `direct_serving` mode where the seed is required and reapplied on every startup. |
 | `upstream_pull` | object | unset | Authenticated HTTPS source for the complete runtime upstream config. See [Upstream pull](#upstream-pull). |
 | `admin_token` | string | unset | Bearer token for the upstream admin API. Admin routes return `404` when unset. |
 | `admin_token_sha256` | hex string | unset | SHA-256 the admin token must match, whether it comes from `admin_token`, `PRIVATE_AI_GATEWAY_ADMIN_TOKEN`, or `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE`. Startup fails on a missing or mismatched token. |
+| `inbound_token` | string | unset | Optional bearer token required on every inference endpoint when configured. Must be non-empty visible ASCII without whitespace. Deliver it as a runtime secret; see [Inbound inference authentication](#inbound-inference-authentication). |
+| `inbound_token_sha256` | hex string | unset | Optional SHA-256 pin for the resolved inbound token (bare hex or `sha256:` prefix). A missing token, invalid digest, or mismatch fails startup. |
 | `keyset_not_after_seconds` | positive integer | `2592000` | Lifetime of a sealed workload keyset. The gateway re-seals the same keys with a fresh `not_after` once half the lifetime has passed, so the served keyset digest changes then. Zero is rejected. |
 | `attested_session_ttl_seconds` | positive integer | `3600` | Validity of newly sealed attested sessions, independent of receipt retention and verifier-cache TTL. Zero, negative, non-integer and unrepresentable expiry values are rejected. Existing documents keep their original expiry. |
 | `subject` | string | unset | Optional policy-interpreted workload-keyset subject. The gateway publishes it but generic verifiers do not trust it without an acceptance policy. |
-| `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop. Setting it together with `middleware` is a startup error. |
+| `direct_serving` | boolean | `false` | Report `service_capabilities.serving: "direct"` for a workload that performs inference itself and has no upstream hop outside that workload. Requires `upstream_config_seed_path`; `middleware`, an effective `admin_token` (including environment/file overrides), `admin_token_sha256`, and `upstream_pull` are startup errors. The seed replaces persisted upstream routes on every startup. |
 | `enable_e2ee` | boolean | `true` | Advertise and terminate the [E2EE v2 compatibility extension](../spec/e2ee-v2.md). When false, the report carries `supported_e2ee_versions: []` and v2 requests fail with `400 e2ee_invalid_version`. The legacy `X-Signing-Algo` E2EE path is not affected. |
 | `tls` | object | empty | Downstream certificate bindings published in the attested keyset. See [Downstream TLS binding](#downstream-tls-binding). |
 | `dstack_endpoint` | string | dstack SDK default | dstack SDK endpoint. `unix:/path` and `unix:///path` are normalized to `/path`; HTTP endpoints pass through to the SDK. |
@@ -63,7 +65,7 @@ The gateway derives these paths from `state_dir`:
 
 | Path | Mutability | Purpose |
 | --- | --- | --- |
-| `upstreams.json` | Replaced through the admin API or `upstream_pull` | Active upstream routes and credentials. |
+| `upstreams.json` | Replaced through the admin API or `upstream_pull`; reset from the seed at startup in `direct_serving` mode | Active upstream routes and credentials. |
 | `sessions.jsonl` | Append and periodic compaction | Attested-session records. |
 | `sessions.jsonl.lock` | Advisory lock | Prevents two gateway processes from owning one session log. |
 
@@ -75,7 +77,7 @@ process fails to acquire the session-log lock.
 
 ### Seed behavior
 
-When `upstream_config_seed_path` is set, startup follows this order:
+When `upstream_config_seed_path` is set and `direct_serving` is false, startup follows this order:
 
 1. Read `<state_dir>/upstreams.json` if it exists.
 2. Keep it when it contains any non-whitespace bytes.
@@ -85,6 +87,54 @@ When `upstream_config_seed_path` is set, startup follows this order:
 An existing active file wins even if a new deployment changes the seed. Replace
 the active config through `PUT /v1/admin/upstreams` or reset the state volume as
 an explicit operator action.
+
+With `direct_serving: true`, startup instead requires a readable, valid seed and
+copies it over the active config every time, ignoring persisted routes. The
+admin API is disabled and upstream pull is forbidden. Put the seed's route
+definitions in the measured deployment and mount them read-only. Reviewing
+that deployment must establish that each route leads to an inference engine
+inside the same attested workload; the flag does not verify engine placement.
+
+## Inbound inference authentication
+
+Without `inbound_token`, inference retains its existing access rules, including
+anonymous inference without middleware. The token remains optional in
+`direct_serving` mode for compatibility; private workers should configure it.
+
+When configured, every inference endpoint requires `Authorization: Bearer
+<token>` before its body is processed or forwarded: chat completions, legacy
+completions, embeddings, Messages, Responses, and System One. Missing or invalid
+credentials return `401` with `WWW-Authenticate: Bearer`. Token digests are
+compared in constant time. CORS preflights, health, model discovery, canonical
+attestation, and legacy reports remain public. Receipt and session routes keep
+their existing access rules, including ownership checks on receipts.
+The startup configuration rejects `inbound_token` with `middleware`, which uses
+tenant API keys instead, and requires it to differ from `admin_token`.
+
+Rejected uploads are discarded without buffering before sending the `401`, so
+streaming reverse proxies can receive the JSON error without a mid-upload reset.
+The discard has independent limits: 32 connections, 32 MiB per body, 1 second idle,
+and 5 seconds total. If a limit is reached, the gateway closes the connection.
+With `Expect: 100-continue`, it sends the final `401` and closes without polling
+the body or sending `100 Continue`.
+
+Resolution order is `PRIVATE_AI_GATEWAY_INBOUND_TOKEN`, then the file named by
+`PRIVATE_AI_GATEWAY_INBOUND_TOKEN_FILE`, then static `inbound_token`. Blank
+environment variables are treated as unset; file contents are trimmed, and
+empty or unreadable files fail startup. A configured empty static token is
+rejected. Debug formatting redacts the static token. An optional measured
+`inbound_token_sha256` pins the resolved secret without publishing it.
+
+Use encrypted runtime environment variables or a mounted secret, keeping
+plaintext credentials out of measured Compose. If a deployment renders JSON
+from Compose, reference `${PRIVATE_AI_GATEWAY_INBOUND_TOKEN}` in its template;
+the gateway itself does not expand `${VAR}` in JSON. An outer gateway sends
+the worker's token through the existing upstream `bearer_token` field. This
+shared credential also owns the worker's receipts; it does not provide separate
+end-user identities. See the [direct-worker deployment example](../deploy/README.md#direct-serving-worker).
+
+Before rolling back to an older binary, remove `inbound_token` and
+`inbound_token_sha256` if configured: older binaries reject unknown fields.
 
 ## Upstream pull
 
@@ -406,6 +456,8 @@ The gateway process and provider-verifier children use:
 | `PRIVATE_AI_GATEWAY_CONFIG_PATH` | Required path to the static gateway config. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime admin token overriding static `admin_token`. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE` | Optional path to a file holding the admin token, such as a Compose secret, read when `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is unset. Surrounding whitespace is trimmed; an empty or unreadable file fails startup. |
+| `PRIVATE_AI_GATEWAY_INBOUND_TOKEN` | Optional inference bearer token overriding static `inbound_token`. Blank values are treated as unset. |
+| `PRIVATE_AI_GATEWAY_INBOUND_TOKEN_FILE` | Optional mounted-secret path, used when `PRIVATE_AI_GATEWAY_INBOUND_TOKEN` is unset. Surrounding whitespace is trimmed; an empty or unreadable file fails startup. |
 | `RUST_LOG` | `tracing_subscriber` filter. Defaults to `info`. |
 | `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](getting-started.md#install-dependencies). |
 | `DSTACK_VERIFIER_URL` | External verifier URL consumed by NEAR AI and PhalaDirect bridge code. Those adapters default to `http://localhost:8080` when unset. |

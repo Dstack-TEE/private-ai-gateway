@@ -3355,6 +3355,7 @@ dependencies = [
  "serde_json_canonicalizer",
  "sha2",
  "sha3 0.10.9",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

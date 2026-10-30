@@ -42,7 +42,7 @@ use private_ai_gateway::aggregator::service::{
     UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session::EvidenceRef;
-use private_ai_gateway::http::{build_router, build_router_with_admin};
+use private_ai_gateway::http::{build_router, build_router_with_admin, build_router_with_auth};
 use serde_json::Value;
 use tokio::time::Instant;
 use tower::ServiceExt;
@@ -234,6 +234,15 @@ impl UpstreamBackend for RecordingUpstream {
             status_code: 200,
             body: self.response_body.clone(),
             headers,
+            served_instance_id: None,
+        })
+    }
+
+    async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
+        Ok(UpstreamResponse {
+            status_code: 200,
+            body: br#"{"object":"list","data":[]}"#.to_vec(),
+            headers: HashMap::new(),
             served_instance_id: None,
         })
     }
@@ -448,6 +457,225 @@ fn harness_for_sessions(
         .current_verification_requests(None, None, true)
         .remove(0);
     (harness, request)
+}
+
+fn harness_with_inbound_auth() -> Harness {
+    let mut harness = harness();
+    harness.requester.app = build_router_with_auth(
+        harness.service.clone(),
+        common::session_config(serde_json::json!([])),
+        Some("separate-admin-token".into()),
+        Some("inference-secret".into()),
+        None,
+    );
+    harness
+}
+
+#[tokio::test]
+async fn inbound_auth_refusals_complete_over_tcp_without_reset_or_continue() {
+    assert_inbound_auth_upload_refusal("/v1/chat/completions").await;
+}
+
+async fn assert_inbound_auth_upload_refusal(path: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let harness = harness_with_inbound_auth();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            harness.requester.app.clone(),
+        ),
+    );
+    let mut body = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
+    body.extend(vec![b'x'; 96 * 1024]);
+    body.extend_from_slice(b"\r\n--upload--\r\n");
+    for (chunked, expect) in [(false, false), (true, false), (false, true)] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let framing = if chunked {
+                "Transfer-Encoding: chunked\r\n".to_string()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=upload\r\n{framing}Connection: close\r\n{expect_header}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                for chunk in body.chunks(1024) {
+                    if chunked {
+                        socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    }
+                    socket.write_all(chunk).await.expect("401 must not reset an in-progress upload");
+                    if chunked {
+                        socket.write_all(b"\r\n").await.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                if chunked {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("401 must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("www-authenticate: bearer"), "{headers}");
+        assert!(
+            headers.contains("content-type: application/json"),
+            "{headers}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap()["error"]["type"],
+            "unauthorized"
+        );
+    }
+    assert!(harness.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn inbound_auth_protects_every_inference_route_before_forwarding() {
+    let harness = harness_with_inbound_auth();
+    for path in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+        "/v1/messages",
+        "/v1/responses",
+        "/v1/systemone",
+    ] {
+        for headers in [
+            vec![],
+            vec![("authorization", "Bearer wrong-secret")],
+            vec![("authorization", "Bearer separate-admin-token")],
+        ] {
+            let response = harness.requester.post(path, CHAT_REQUEST, &headers).await;
+            assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(response.headers["www-authenticate"], "Bearer");
+            assert_eq!(response.headers["x-aci-version"], "aci/1");
+            assert!(response.headers.contains_key("x-aci-keyset-digest"));
+            assert!(!String::from_utf8_lossy(&response.body).contains("inference-secret"));
+        }
+    }
+    assert!(harness.upstream_calls.lock().unwrap().is_empty());
+    let mut uri = String::new();
+    for path in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/embeddings",
+        "/v1/messages",
+        "/v1/responses",
+        "/v1/systemone",
+    ] {
+        let response = harness
+            .requester
+            .post(
+                path,
+                CHAT_REQUEST,
+                &[("authorization", "bEaReR\t inference-secret  ")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{path}");
+        if path == "/v1/chat/completions" {
+            uri = format!(
+                "/v1/aci/receipts/{}",
+                response.headers["x-receipt-id"].to_str().unwrap()
+            );
+        }
+    }
+    assert_eq!(harness.upstream_calls.lock().unwrap().len(), 6);
+    assert_eq!(
+        harness.requester.get(&uri, &[]).await.status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        harness
+            .requester
+            .get(&uri, &[("authorization", "Bearer wrong-secret")])
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        harness
+            .requester
+            .get(&uri, &[("authorization", "Bearer inference-secret")])
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn inbound_auth_keeps_discovery_artifacts_and_cors_public() {
+    let harness = harness_with_inbound_auth();
+    for path in [
+        "/",
+        "/health",
+        "/v1/models",
+        "/v1/aci/attestation",
+        "/v1/attestation/report",
+        "/v1/aci/sessions",
+    ] {
+        assert_eq!(
+            harness.requester.get(path, &[]).await.status,
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+    for path in [
+        "/v1/models/providers/example",
+        "/v1/embeddings/models",
+        "/v1/aci/sessions/missing",
+        "/v1/aci/receipts/missing",
+        "/v1/signature/missing",
+        "/missing",
+    ] {
+        assert_eq!(
+            harness.requester.get(path, &[]).await.status,
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let preflight = Request::builder()
+        .method("OPTIONS")
+        .uri("/v1/chat/completions")
+        .header("origin", "https://client.example")
+        .header("access-control-request-method", "POST")
+        .body(Body::empty())
+        .unwrap();
+    let response = harness.requester.call(preflight).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.headers["access-control-allow-origin"], "*");
+    assert_eq!(response.headers["x-aci-version"], "aci/1");
+    assert_eq!(
+        harness
+            .requester
+            .get(
+                "/v1/admin/upstreams",
+                &[("authorization", "Bearer inference-secret")]
+            )
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        harness
+            .requester
+            .get(
+                "/v1/admin/upstreams",
+                &[("authorization", "Bearer separate-admin-token")]
+            )
+            .await
+            .status,
+        StatusCode::OK
+    );
 }
 
 fn harness_with_streaming_upstream_error() -> Harness {

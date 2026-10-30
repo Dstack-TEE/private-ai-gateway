@@ -54,6 +54,39 @@ The checked-in upstream seed is empty. Before deployment, either:
 
 [`upstreams.example.json`](upstreams.example.json) demonstrates current Anthropic, Tinfoil, NEAR AI, Chutes, and Phala-direct entries. It contains placeholders, not production policy.
 
+## Direct-serving worker
+
+For a gateway in front of an inference engine inside the same GPU CVM, start
+from [gateway.direct.config.example.json](gateway.direct.config.example.json).
+This topology uses no middleware, admin token, or upstream pull. Include the
+seed's routes in the measured Compose and mount the seed read-only; for example,
+with a co-deployed engine listening on `engine:8000`:
+
+```json
+[
+  {
+    "name": "local-engine",
+    "provider": "openai-compatible",
+    "base_url": "http://engine:8000",
+    "models": { "local-model": "engine-model-id" }
+  }
+]
+```
+
+The gateway validates and reapplies that seed at every startup, replacing
+persisted routes. Supply a dedicated inference bearer through encrypted runtime
+`PRIVATE_AI_GATEWAY_INBOUND_TOKEN` or a mounted secret named by
+`PRIVATE_AI_GATEWAY_INBOUND_TOKEN_FILE`. Add `inbound_token_sha256` to the
+measured static config to pin the secret if required. Plaintext secrets must
+never appear in the measured manifest. Authentication is optional for backward
+compatibility, so explicitly configure it for private workers.
+
+An outer gateway configures this worker as `provider: "aci-service"`, sends the
+same secret through upstream `bearer_token`, and pins its measured app ID and
+accepted KMS root. Set up attested TLS using the certificate bindings below;
+the outer verifier requires HTTPS and an enforceable SPKI binding. The example
+does not itself prove engine placement, GPU attestation, or weight provenance.
+
 ## One-Command Deploy
 
 From this directory:

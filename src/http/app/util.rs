@@ -13,9 +13,10 @@ use super::AppState;
 
 pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let value = headers.get("authorization")?.to_str().ok()?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?;
+    let (scheme, token) = value.split_once(char::is_whitespace)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
     let token = token.trim();
     if token.is_empty() {
         return None;
@@ -151,7 +152,55 @@ pub(super) fn is_connection_error(err: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::force_tee_true;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+
+    use super::{extract_bearer, force_tee_true};
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_preserves_token_bytes() {
+        for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+            for separator in [" ", "  ", "\t", " \t"] {
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("{scheme}{separator}Case-Sensitive_Token  "))
+                        .unwrap(),
+                );
+                assert_eq!(
+                    extract_bearer(&headers).as_deref(),
+                    Some("Case-Sensitive_Token")
+                );
+            }
+        }
+        // Retain the existing trim-only handling of token contents.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer Token With Internal Spaces"),
+        );
+        assert_eq!(
+            extract_bearer(&headers).as_deref(),
+            Some("Token With Internal Spaces")
+        );
+    }
+
+    #[test]
+    fn bearer_parser_rejects_missing_scheme_separator_or_token() {
+        assert_eq!(extract_bearer(&HeaderMap::new()), None);
+        for value in [
+            "",
+            "Bearer",
+            "BEARER \t",
+            "BearerToken",
+            "Bearer- Token",
+            "Basic Token",
+            " Bearer Token",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+            assert_eq!(extract_bearer(&headers), None, "{value:?}");
+        }
+    }
 
     #[test]
     fn force_tee_true_forces_and_dedupes() {
