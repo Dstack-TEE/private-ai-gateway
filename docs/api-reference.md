@@ -73,8 +73,9 @@ upload is read and validated; in middleware mode, it also follows control-plane
 admission and route selection. The response body and any pending write buffers
 retain the slot until completion, error, or disconnect releases them. There is
 no heartbeat while waiting for an image. The buffered upstream response limit
-remains 64 MiB. A 2xx response with an empty `data` array, more images than
-requested, or any item missing a string `b64_json` becomes a sanitized
+uses the configured operator policy (64 MiB by default). A 2xx response with an
+empty `data` array, more images than requested, or any item missing a string
+`b64_json` becomes a sanitized
 `502 upstream_error` in both routing modes, before receipt hashing and image
 billing.
 

@@ -451,7 +451,6 @@ fn harness_for_sessions(
     (harness, request)
 }
 
-
 fn harness_with_streaming_upstream_error() -> Harness {
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "application/json".to_string());
