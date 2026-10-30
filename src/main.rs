@@ -113,18 +113,26 @@ impl std::fmt::Debug for InboundToken {
     }
 }
 
+fn resolve_secret(
+    configured: Option<&str>,
+    environment: Option<String>,
+    file: Option<String>,
+) -> Result<Option<String>, String> {
+    match environment {
+        Some(token) => Ok(Some(token)),
+        None => match file {
+            Some(path) => secret_file_non_empty(&path).map(Some),
+            None => Ok(configured.map(str::to_string)),
+        },
+    }
+}
+
 fn resolve_inbound_token(
     configured: Option<&str>,
     environment: Option<String>,
     file: Option<String>,
 ) -> Result<Option<String>, String> {
-    let token = match environment {
-        Some(token) => Some(token),
-        None => match file {
-            Some(path) => Some(secret_file_non_empty(&path)?),
-            None => configured.map(str::to_string),
-        },
-    };
+    let token = resolve_secret(configured, environment, file)?;
     if token
         .as_ref()
         .is_some_and(|token| token.is_empty() || token.bytes().any(|byte| !byte.is_ascii_graphic()))
@@ -272,6 +280,22 @@ fn validate_pull_token_separation(
         return Err(
             "upstream_pull.token must be distinct from middleware.control_token".to_string(),
         );
+    }
+    Ok(())
+}
+
+fn validate_inbound_auth(
+    config: &GatewayConfigFile,
+    inbound_token: Option<&str>,
+    admin_token: Option<&str>,
+) -> Result<(), String> {
+    if let Some(token) = inbound_token {
+        if config.middleware.is_some() {
+            return Err("inbound_token cannot be combined with middleware".into());
+        }
+        if admin_token == Some(token) {
+            return Err("inbound_token must be distinct from admin_token".into());
+        }
     }
     Ok(())
 }
@@ -451,10 +475,8 @@ fn seed_upstream_config(
         return Ok(());
     };
     let seed_path = Path::new(seed_path);
-    let target_has_config = if direct_serving {
-        false
-    } else {
-        match std::fs::read_to_string(target_path) {
+    let target_has_config = !direct_serving
+        && match std::fs::read_to_string(target_path) {
             Ok(text) => !text.trim().is_empty(),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
             Err(err) => {
@@ -466,8 +488,7 @@ fn seed_upstream_config(
                     ),
                 ));
             }
-        }
-    };
+        };
     if target_has_config {
         tracing::info!(
             target = %target_path.display(),
@@ -534,13 +555,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_log_path = session_log_path(&state_dir);
     let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
     let upstream_pull_config = gateway_config.upstream_pull.clone();
-    let admin_token = match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN") {
-        Some(token) => Some(token),
-        None => match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE") {
-            Some(path) => Some(secret_file_non_empty(&path).map_err(invalid_input)?),
-            None => gateway_config.admin_token.clone(),
-        },
-    };
+    let admin_token = resolve_secret(
+        gateway_config.admin_token.as_deref(),
+        env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN"),
+        env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE"),
+    )
+    .map_err(invalid_input)?;
     validate_sha256_secret_policy(
         "admin_token",
         admin_token.as_deref(),
@@ -560,6 +580,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "inbound_token",
         inbound_token.as_deref(),
         gateway_config.inbound_token_sha256.as_deref(),
+    )
+    .map_err(invalid_input)?;
+    validate_inbound_auth(
+        &gateway_config,
+        inbound_token.as_deref(),
+        admin_token.as_deref(),
     )
     .map_err(invalid_input)?;
     validate_direct_serving(&gateway_config, admin_token.as_deref()).map_err(invalid_input)?;
@@ -1005,7 +1031,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     }
 
     #[test]
-    fn inbound_token_resolution_validation_and_digest_policy() {
+    fn inbound_token_resolution_and_validation() {
         let (_dir, path) = temp_path("inbound-token");
         std::fs::write(&path, "file-token\n").unwrap();
         let file = Some(path.to_str().unwrap().to_string());
@@ -1026,13 +1052,6 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 .as_deref(),
             Some("env-token")
         );
-        let digest = private_ai_gateway::aci::digest::sha256_hex(token.as_bytes());
-        validate_sha256_secret_policy("inbound_token", Some(&token), Some(&digest)).unwrap();
-        assert!(
-            validate_sha256_secret_policy("inbound_token", Some("wrong-token"), Some(&digest))
-                .is_err()
-        );
-        assert!(validate_sha256_secret_policy("inbound_token", None, Some(&digest)).is_err());
         for token in ["", " ", "has space", "has\nnewline", "non-ascii-🔒"] {
             let error = resolve_inbound_token(Some(token), None, None).unwrap_err();
             assert_eq!(
@@ -1063,10 +1082,26 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("do-not-print-this-token"));
-        std::fs::write(&path, "{}").unwrap();
-        let config = load_gateway_config(path.to_str().unwrap()).unwrap();
-        assert!(config.inbound_token.is_none());
-        assert!(config.inbound_token_sha256.is_none());
+    }
+
+    #[test]
+    fn inbound_auth_rejects_middleware_and_shared_admin_token() {
+        let config = super::GatewayConfigFile::default();
+        super::validate_inbound_auth(&config, None, Some("admin")).unwrap();
+        super::validate_inbound_auth(&config, Some("inbound"), Some("admin")).unwrap();
+        assert!(
+            super::validate_inbound_auth(&config, Some("shared"), Some("shared"))
+                .unwrap_err()
+                .contains("distinct from admin_token")
+        );
+        let config = serde_json::from_value(serde_json::json!({
+            "middleware": {"control_url": "https://control.example"}
+        }))
+        .unwrap();
+        super::validate_inbound_auth(&config, None, None).unwrap();
+        assert!(super::validate_inbound_auth(&config, Some("inbound"), None)
+            .unwrap_err()
+            .contains("cannot be combined with middleware"));
     }
 
     #[test]

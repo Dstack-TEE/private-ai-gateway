@@ -108,6 +108,8 @@ credentials return `401` with `WWW-Authenticate: Bearer`. Token digests are
 compared in constant time. CORS preflights, health, model discovery, canonical
 attestation, and legacy reports remain public. Receipt and session routes keep
 their existing access rules, including ownership checks on receipts.
+The startup configuration rejects `inbound_token` with `middleware`, which uses
+tenant API keys instead, and requires it to differ from `admin_token`.
 
 Rejected uploads are discarded without buffering before sending the `401`, so
 streaming reverse proxies can receive the JSON error without a mid-upload reset.

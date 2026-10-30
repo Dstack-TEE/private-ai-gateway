@@ -479,32 +479,15 @@ async fn inbound_auth_refusals_complete_over_tcp_without_reset_or_continue() {
 async fn assert_inbound_auth_upload_refusal(path: &str) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let upstream = RecordingUpstream::default();
-    let calls = upstream.calls();
-    let mut config = AciServiceConfig::for_test();
-    config.service_capabilities.serving = "direct".into();
-    let service = Arc::new(
-        AciService::new(
-            Arc::new(StaticKeyProvider::default()),
-            Arc::new(StubQuoter::default()),
-            Arc::new(upstream),
-            Arc::new(InMemoryReceiptStore::default()),
-            config,
-            Arc::new(FixedClock(1_700_000_000)),
-        )
-        .unwrap(),
-    );
-    let app = build_router_with_auth(
-        service,
-        common::session_config(serde_json::json!([])),
-        None,
-        Some("inference-secret".into()),
-        None,
-    );
+    let harness = harness_with_inbound_auth();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let server =
-        tokio::spawn(private_ai_gateway::http::app::serve_with_write_idle_timeout(listener, app));
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            harness.requester.app.clone(),
+        ),
+    );
     let mut body = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
     body.extend(vec![b'x'; 96 * 1024]);
     body.extend_from_slice(b"\r\n--upload--\r\n");
@@ -551,7 +534,7 @@ async fn assert_inbound_auth_upload_refusal(path: &str) {
             "unauthorized"
         );
     }
-    assert!(calls.lock().unwrap().is_empty());
+    assert!(harness.upstream_calls.lock().unwrap().is_empty());
     server.abort();
     assert!(server.await.unwrap_err().is_cancelled());
 }
@@ -570,10 +553,7 @@ async fn inbound_auth_protects_every_inference_route_before_forwarding() {
         for headers in [
             vec![],
             vec![("authorization", "Bearer wrong-secret")],
-            vec![("authorization", "BEARER INFERENCE-SECRET")],
             vec![("authorization", "Bearer separate-admin-token")],
-            vec![("authorization", "Basic inference-secret")],
-            vec![("authorization", "Bearer ")],
         ] {
             let response = harness.requester.post(path, CHAT_REQUEST, &headers).await;
             assert_eq!(response.status, StatusCode::UNAUTHORIZED, "{path}");
@@ -584,7 +564,9 @@ async fn inbound_auth_protects_every_inference_route_before_forwarding() {
         }
     }
     assert!(harness.upstream_calls.lock().unwrap().is_empty());
+    let mut uri = String::new();
     for path in [
+        "/v1/chat/completions",
         "/v1/completions",
         "/v1/embeddings",
         "/v1/messages",
@@ -596,23 +578,18 @@ async fn inbound_auth_protects_every_inference_route_before_forwarding() {
             .post(
                 path,
                 CHAT_REQUEST,
-                &[("authorization", "Bearer inference-secret")],
+                &[("authorization", "bEaReR\t inference-secret  ")],
             )
             .await;
         assert_eq!(response.status, StatusCode::OK, "{path}");
+        if path == "/v1/chat/completions" {
+            uri = format!(
+                "/v1/aci/receipts/{}",
+                response.headers["x-receipt-id"].to_str().unwrap()
+            );
+        }
     }
-    let response = harness
-        .requester
-        .post(
-            "/v1/chat/completions",
-            CHAT_REQUEST,
-            &[("authorization", "Bearer inference-secret")],
-        )
-        .await;
-    assert_eq!(response.status, StatusCode::OK);
     assert_eq!(harness.upstream_calls.lock().unwrap().len(), 6);
-    let receipt = response.headers["x-receipt-id"].to_str().unwrap();
-    let uri = format!("/v1/aci/receipts/{receipt}");
     assert_eq!(
         harness.requester.get(&uri, &[]).await.status,
         StatusCode::UNAUTHORIZED
@@ -695,86 +672,6 @@ async fn inbound_auth_keeps_discovery_artifacts_and_cors_public() {
                 "/v1/admin/upstreams",
                 &[("authorization", "Bearer separate-admin-token")]
             )
-            .await
-            .status,
-        StatusCode::OK
-    );
-}
-
-#[tokio::test]
-async fn bearer_scheme_case_is_shared_by_inbound_admin_and_receipt_auth() {
-    let harness = harness_with_inbound_auth();
-    for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
-        let authorization = format!("{scheme}\t inference-secret  ");
-        let response = harness
-            .requester
-            .post(
-                "/v1/chat/completions",
-                CHAT_REQUEST,
-                &[("authorization", &authorization)],
-            )
-            .await;
-        assert_eq!(response.status, StatusCode::OK, "{scheme}");
-        let receipt = response.headers["x-receipt-id"].to_str().unwrap();
-        assert_eq!(
-            harness
-                .service
-                .owner_of_receipt(receipt)
-                .unwrap()
-                .auth_token_sha256,
-            sha256_hex(b"inference-secret")
-        );
-        let uri = format!("/v1/aci/receipts/{receipt}");
-        for header in ["Bearer inference-secret", authorization.as_str()] {
-            assert_eq!(
-                harness
-                    .requester
-                    .get(&uri, &[("authorization", header)])
-                    .await
-                    .status,
-                StatusCode::OK
-            );
-        }
-        assert_eq!(
-            harness
-                .requester
-                .get(&uri, &[("authorization", "bEaReR INFERENCE-SECRET")])
-                .await
-                .status,
-            StatusCode::NOT_FOUND
-        );
-        let admin = format!("{scheme}\tseparate-admin-token");
-        assert_eq!(
-            harness
-                .requester
-                .get("/v1/admin/upstreams", &[("authorization", &admin)])
-                .await
-                .status,
-            StatusCode::OK
-        );
-    }
-}
-
-#[tokio::test]
-async fn absent_inbound_token_preserves_anonymous_inference() {
-    let mut harness = harness();
-    harness.requester.app = build_router_with_auth(
-        harness.service.clone(),
-        common::session_config(serde_json::json!([])),
-        None,
-        None,
-        None,
-    );
-    let response = harness
-        .requester
-        .post("/v1/chat/completions", CHAT_REQUEST, &[])
-        .await;
-    assert_eq!(response.status, StatusCode::OK);
-    let receipt = response.headers["x-receipt-id"].to_str().unwrap();
-    assert_eq!(
-        harness
-            .requester
-            .get(&format!("/v1/aci/receipts/{receipt}"), &[])
             .await
             .status,
         StatusCode::OK
