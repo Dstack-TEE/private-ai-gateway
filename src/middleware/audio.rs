@@ -79,7 +79,10 @@ impl AudioError {
             error_type: "invalid_request_error",
         }
     }
-    pub fn into_response(self) -> Response {
+}
+
+impl IntoResponse for AudioError {
+    fn into_response(self) -> Response {
         let mut response = (self.status, Json(json!({"error":{"type":self.error_type, "code":self.code,"param":self.param,"message":self.message}}))).into_response();
         if matches!(
             self.status,
@@ -378,7 +381,8 @@ pub fn sanitize_response(
 ) -> Result<(Value, AudioUsage), &'static str> {
     let audio = usage(&body)?;
     canonicalize(&mut body);
-    normalize_usage(&mut body, &audio);
+    // Expose the validated integer duration used for billing.
+    body["usage"] = json!({"type":"duration","seconds":audio.seconds});
     if params.get("response_format").and_then(Value::as_str) == Some("verbose_json") {
         body["duration"] = json!(audio.raw_duration);
         if !body.get("language").is_some_and(Value::is_string) {
@@ -399,11 +403,9 @@ fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
     if !body.get("text").is_some_and(Value::is_string) {
         return Err("missing transcription text");
     }
-    let usage = body.get("usage");
-    let duration = if usage.is_some_and(|v| {
+    let duration = if let Some(usage) = body.get("usage").filter(|v| {
         v.get("seconds").is_some() || v.get("type").and_then(Value::as_str) == Some("duration")
     }) {
-        let usage = usage.ok_or("missing duration usage")?;
         if usage.get("type").and_then(Value::as_str) != Some("duration") {
             return Err("invalid duration usage type");
         }
@@ -421,22 +423,12 @@ fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
     })
 }
 
-/// Expose the same validated integer duration that is billed. Keep the raw
-/// provider duration in AudioUsage and the verbose response's duration field.
-fn normalize_usage(body: &mut Value, audio: &AudioUsage) {
-    body["usage"] = json!({"type":"duration","seconds":audio.seconds});
-}
-
 fn reduce_format(body: &mut Value, params: &Value) {
     if params.get("response_format").and_then(Value::as_str) != Some("verbose_json") {
         if let Some(object) = body.as_object_mut() {
             object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages"));
         }
     }
-}
-
-fn nonnegative(v: &Value) -> bool {
-    v.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -471,7 +463,6 @@ fn canonicalize(body: &mut Value) {
     };
     object.retain(|k, v| match k.as_str() {
         "text" | "language" | "task" => v.is_string(),
-        "duration" => nonnegative(v),
         "segments" | "words" | "languages" => v.is_array(),
         _ => false,
     });

@@ -91,6 +91,7 @@ use crate::middleware::Middleware;
 mod backend;
 mod error_responses;
 mod handlers;
+mod rejected_body;
 mod util;
 mod write_idle_timeout;
 

@@ -104,6 +104,11 @@ follows the [control-plane pricing contract](control-plane-contract.md#image-gen
 
 ### Audio transcription
 
+Images and audio require an `Authorization` header in both direct and middleware
+modes. Requests missing it receive `401` before parsing, buffering, or admission,
+using the bounded discard described in the configuration reference. In middleware
+mode, credentials continue through the existing control-plane authorization.
+
 Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
 `model` and exactly one nonempty `file` (up to 25 MiB), with filename extension
 `flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, or `webm`.
@@ -123,8 +128,9 @@ parts, and malformed multipart return `400`.
 
 Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
 255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
-402 MiB byte budget (16 times the whole-body limit) and a 60-second read deadline
-(`408 upload_timeout`). Each received chunk reserves only its actual bytes;
+402 MiB byte budget (16 times the whole-body limit) and a 60-second whole-upload deadline
+(`408 upload_timeout`). A 25 MiB file needs about 3.5 Mbps to finish within
+that deadline. Each received chunk reserves only its actual bytes;
 `Content-Length` is used only for early 413 rejection. Connections with no
 buffered data reserve no upload capacity. Budget exhaustion returns
 `429 rate_limit_exceeded` with `Retry-After: 1`. Size failures (`413`) and upload

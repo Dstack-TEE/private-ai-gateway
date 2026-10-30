@@ -522,21 +522,28 @@ async fn buffered_multimodal_endpoint(
     body: Body,
     endpoint: Endpoint,
 ) -> Response {
+    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+        let mut response = error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "inference bearer token required",
+        );
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer"),
+        );
+        return discard_before_reply(&headers, body, super::MAX_REQUEST_BODY_BYTES, response).await;
+    }
     // Decide before parsing or admission. Bounded discard preserves the JSON refusal.
     if has_e2ee_headers(&headers)
         || headers
             .keys()
             .any(|key| key.as_str().starts_with("x-e2ee-"))
     {
-        let limit = if endpoint == Endpoint::AudioTranscriptions {
-            crate::middleware::audio::MAX_BODY_BYTES
-        } else {
-            super::MAX_REQUEST_BODY_BYTES
-        };
         return discard_before_reply(
             &headers,
             body,
-            limit,
+            super::MAX_REQUEST_BODY_BYTES,
             error_response(
                 StatusCode::BAD_REQUEST,
                 "e2ee_unsupported_endpoint",
@@ -957,22 +964,21 @@ pub(super) async fn openai_completion_endpoint(
     } else {
         direct_params
     };
-    let forwarded_body =
-        if normalized || aci_stripped || is_audio || is_images {
-            match serde_json::to_vec(&direct_params) {
-                Ok(bytes) => Some(bytes),
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to serialize normalized request");
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "failed to serialize normalized request",
-                    );
-                }
+    let forwarded_body = if normalized || aci_stripped || is_audio || is_images {
+        match serde_json::to_vec(&direct_params) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize normalized request");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "failed to serialize normalized request",
+                );
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     // Uploads and invalid requests do not reserve image generation capacity.
     // Middleware admission happens after its control-plane consult instead.
