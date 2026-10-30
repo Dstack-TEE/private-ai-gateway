@@ -326,6 +326,8 @@ pub enum ErrorClass {
     RequestShapingFailed,
     /// No attested route or session was eligible; no prompt was forwarded.
     NoEligibleAttestedRoute,
+    /// The gateway has no capacity for another media request.
+    GatewayCapacity,
     /// The keyset committed in early headers expired before a new admission.
     KeysetExpired,
     /// The upstream answered with a non-2xx status.

@@ -364,7 +364,22 @@ async fn run_inner(
     if client_endpoint == Endpoint::ImagesGenerations {
         match super::images::try_acquire() {
             Ok(permit) => *image_permit = Some(permit),
-            Err(_) => return super::images::capacity_response(),
+            Err(_) => {
+                meter.gateway_failure(
+                    429,
+                    ErrorSource::Gateway,
+                    ErrorClass::GatewayCapacity,
+                    false,
+                );
+                let body = super::images::capacity_body(Some(&request_id));
+                return finalize_generated(
+                    429,
+                    body,
+                    &[("retry-after", "1".into())],
+                    e2ee,
+                    outcome_ctx,
+                );
+            }
         }
     }
     let forward_candidates: Vec<ForwardCandidate> = shaped
@@ -538,7 +553,7 @@ async fn run_inner(
                         if client_endpoint == Endpoint::ImagesGenerations {
                             super::images::validate_response(
                                 &upstream_json,
-                                params.get("n").and_then(Value::as_u64).unwrap_or(1) as usize,
+                                super::images::requested_count(&params),
                             )
                             .map_err(str::to_string)?;
                         }

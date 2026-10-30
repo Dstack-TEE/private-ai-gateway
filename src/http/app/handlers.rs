@@ -828,18 +828,17 @@ pub(super) async fn openai_completion_endpoint(
         return middleware.handle_completion(&state.service, input).await;
     }
 
-    if endpoint_path == IMAGES_GENERATIONS_PATH {
-        if let Err(err) = crate::middleware::images::validate_request(&parsed) {
+    let is_images = endpoint_path == IMAGES_GENERATIONS_PATH;
+    let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
+    let direct_params = if is_images {
+        if let Err(err) = crate::middleware::images::validate_request(&direct_params) {
             return err.into_response();
         }
-    }
-    let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
-    let direct_params = if endpoint_path == IMAGES_GENERATIONS_PATH {
         crate::middleware::images::upstream_body(&direct_params)
     } else {
         direct_params
     };
-    let forwarded_body = if normalized || aci_stripped || endpoint_path == IMAGES_GENERATIONS_PATH {
+    let forwarded_body = if normalized || aci_stripped || is_images {
         match serde_json::to_vec(&direct_params) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
@@ -857,7 +856,7 @@ pub(super) async fn openai_completion_endpoint(
 
     // Uploads and invalid requests do not reserve image generation capacity.
     // Middleware admission happens after its control-plane consult instead.
-    let permit = if endpoint_path == IMAGES_GENERATIONS_PATH {
+    let permit = if is_images {
         match crate::middleware::images::try_acquire() {
             Ok(permit) => Some(permit),
             Err(_) => return crate::middleware::images::capacity_response(),

@@ -318,43 +318,19 @@ impl AciService {
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
             if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-                #[derive(serde::Deserialize)]
-                struct ImageRequestCount {
-                    n: Option<usize>,
-                }
-                let requested_count = serde_json::from_slice::<ImageRequestCount>(&forwarded_body)
-                    .ok()
-                    .and_then(|request| request.n)
-                    .unwrap_or(1);
-                let validated = serde_json::from_slice::<Value>(&upstream_response.body)
-                    .ok()
-                    .filter(|body| {
-                        crate::middleware::images::validate_response(body, requested_count).is_ok()
-                    });
+                use crate::middleware::{errors, images};
                 upstream_headers.insert("content-type".to_string(), "application/json".to_string());
-                if let Some(mut body) = validated {
-                    crate::middleware::images::canonicalize(&mut body);
-                    (
-                        upstream_response.status_code,
-                        serde_json::to_vec(&body).map_err(|err| {
-                            ServiceError::Upstream(UpstreamError::Transport(format!(
-                                "failed to serialize image response: {err}"
-                            )))
-                        })?,
-                    )
-                } else {
-                    (
+                match images::response_body(&upstream_response.body, &forwarded_body) {
+                    Some(body) => (upstream_response.status_code, body),
+                    None => (
                         502,
-                        crate::middleware::errors::envelope_bytes(
-                            crate::middleware::errors::Surface::Openai,
-                            crate::middleware::errors::error_type(
-                                crate::middleware::errors::Surface::Openai,
-                                502,
-                            ),
+                        errors::envelope_bytes(
+                            errors::Surface::Openai,
+                            errors::error_type(errors::Surface::Openai, 502),
                             "upstream returned a malformed success body",
                             None,
                         ),
-                    )
+                    ),
                 }
             } else {
                 (upstream_response.status_code, upstream_response.body)
@@ -372,11 +348,7 @@ impl AciService {
             )
         };
 
-        let chat_id = if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-            None
-        } else {
-            extract_chat_id(&client_body)
-        };
+        let chat_id = extract_chat_id(&client_body);
         let e2ee = req.e2ee.as_ref();
         let wire_response_body = match e2ee {
             Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,
