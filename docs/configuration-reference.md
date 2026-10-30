@@ -66,7 +66,8 @@ complete upstream bodies; this setting bounds each collected body and Chutes'
 decompressed output. A body above the configured value returns a sanitized
 `502`. Initial buffer reservation remains capped at 1 MiB. Concurrent requests,
 parsing, decryption, and canonicalization can retain additional copies, so this
-is not a total process-memory budget.
+is not a total process-memory budget. Audio transcriptions retain their separate
+8 MiB response cap regardless of this setting.
 
 The default remains 64 MiB. Very large float-format embedding batches can exceed
 it: raising the limit permits those responses at a higher per-request memory
