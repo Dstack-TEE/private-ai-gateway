@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::aci::upstream::UpstreamError;
+use crate::aci::upstream::{read_buffered_upstream_response, UpstreamError};
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
     ReceiptOwner, ServiceError, StreamingForwardResult, UpstreamVerificationError,
@@ -22,7 +22,7 @@ use super::error_responses::{
     e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
     internal_error_response, refusal_error_body,
 };
-use crate::middleware::errors::{normalize_upstream_error, surface_for_path};
+use crate::middleware::errors::{self, normalize_upstream_error, surface_for_path};
 
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
@@ -149,8 +149,15 @@ async fn forward_to_backend_inner(
             Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
                 invalid_request_response(message)
             }
-            Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
-                upstream_proxy_error_response(err)
+            Err(ServiceError::Upstream(UpstreamError::ResponseTooLarge)) => {
+                let surface = surface_for_path(input.endpoint_path);
+                errors::error_response(
+                    surface,
+                    502,
+                    errors::error_type(surface, 502),
+                    errors::upstream_message(502),
+                    Some(&request_id),
+                )
             }
             Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
                 gateway_timeout_response(
@@ -211,8 +218,15 @@ async fn forward_to_backend_inner(
         Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
             invalid_request_response(message)
         }
-        Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
-            upstream_proxy_error_response(err)
+        Err(ServiceError::Upstream(UpstreamError::ResponseTooLarge)) => {
+            let surface = surface_for_path(input.endpoint_path);
+            errors::error_response(
+                surface,
+                502,
+                errors::error_type(surface, 502),
+                errors::upstream_message(502),
+                Some(&request_id),
+            )
         }
         Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
             surface_for_path(input.endpoint_path),
@@ -439,9 +453,11 @@ async fn fetch_report_nvidia_payload(
         tracing::warn!(upstream = %target.upstream_name, status = %resp.status(), "upstream attestation report non-2xx");
         return None;
     }
-    let body: Value = resp
-        .json()
+    let bytes = read_buffered_upstream_response(resp)
         .await
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "read upstream attestation report"))
+        .ok()?;
+    let body: Value = serde_json::from_slice(&bytes)
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "parse upstream attestation report"))
         .ok()?;
     match target.provider {

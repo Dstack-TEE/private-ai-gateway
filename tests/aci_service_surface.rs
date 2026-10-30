@@ -738,13 +738,15 @@ fn legacy_ecdsa_request(
 
 #[tokio::test]
 async fn oversized_upstream_responses_return_502_in_direct_mode() {
-    for (status, stream, advertised_length) in [
-        (StatusCode::OK, false, false),
-        (StatusCode::BAD_REQUEST, true, false),
-        (StatusCode::BAD_REQUEST, true, true),
+    for (path, status, stream, advertised_length) in [
+        ("/v1/chat/completions", StatusCode::OK, false, false),
+        ("/v1/chat/completions", StatusCode::BAD_REQUEST, true, false),
+        ("/v1/chat/completions", StatusCode::BAD_REQUEST, true, true),
+        ("/v1/messages", StatusCode::OK, false, true),
+        ("/v1/messages", StatusCode::BAD_REQUEST, true, true),
     ] {
         let fake_upstream = Router::new().route(
-            "/v1/chat/completions",
+            path,
             axum::routing::post(move || async move {
                 if advertised_length {
                     // The headers alone must trigger rejection, before any
@@ -790,11 +792,8 @@ async fn oversized_upstream_responses_return_502_in_direct_mode() {
             "model": "aci-model", "messages": [], "stream": stream,
         }))
         .unwrap();
-        let response = tokio::time::timeout(
-            Duration::from_secs(2),
-            requester.post("/v1/chat/completions", &request, &[]),
-        )
-        .await;
+        let response =
+            tokio::time::timeout(Duration::from_secs(2), requester.post(path, &request, &[])).await;
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
 
@@ -805,7 +804,13 @@ async fn oversized_upstream_responses_return_502_in_direct_mode() {
             "{status} stream={stream} advertised_length={advertised_length}"
         );
         let body: Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(body["error"]["type"], "upstream_error");
+        if path == "/v1/messages" {
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], "api_error");
+            assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        } else {
+            assert_eq!(body["error"]["type"], "upstream_error");
+        }
         assert!(!response.headers.contains_key("x-receipt-id"));
     }
 }

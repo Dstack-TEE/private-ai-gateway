@@ -26,7 +26,7 @@ pub(crate) async fn collect_buffered_upstream_body(
         Some(length) if length > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES as u64 => {
             return Err(UpstreamError::ResponseTooLarge);
         }
-        Some(length) => length as usize,
+        Some(length) => (length as usize).min(1024 * 1024),
         None => 0,
     };
     let mut out = Vec::with_capacity(capacity);
