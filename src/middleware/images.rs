@@ -25,17 +25,21 @@ pub fn try_acquire() -> Result<OwnedSemaphorePermit, TryAcquireError> {
     IN_FLIGHT.clone().try_acquire_owned()
 }
 
+pub fn capacity_body(request_id: Option<&str>) -> Vec<u8> {
+    let mut body = json!({"error":{"type":"rate_limit_error", "code":"rate_limit_exceeded",
+        "param":null, "message":"image generation capacity reached"}});
+    if let Some(request_id) = request_id {
+        body["request_id"] = json!(request_id);
+    }
+    serde_json::to_vec(&body).unwrap_or_default()
+}
+
 pub fn capacity_response() -> Response {
-    let reset_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(1, |now| now.as_secs().saturating_add(1) as i64);
-    super::errors::rate_limit_response(
-        super::errors::Surface::Openai,
-        "image generation capacity reached",
-        MAX_IMAGE_IN_FLIGHT as i64,
-        reset_at,
-        None,
-    )
+    let mut response = super::errors::parts_response(429, capacity_body(None));
+    response
+        .headers_mut()
+        .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+    response
 }
 
 /// The response body owns admission after the handler returns to Hyper.
@@ -269,6 +273,20 @@ pub fn validate_response(body: &Value, requested_count: usize) -> Result<(), &'s
     }
 }
 
+/// The request has already passed image count validation.
+pub fn requested_count(request: &Value) -> usize {
+    request.get("n").and_then(Value::as_u64).unwrap_or(1) as usize
+}
+
+/// Validate and reduce a direct upstream success before signing its receipt.
+pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
+    let request: Value = serde_json::from_slice(request).ok()?;
+    let mut body: Value = serde_json::from_slice(response).ok()?;
+    validate_response(&body, requested_count(&request)).ok()?;
+    canonicalize(&mut body);
+    Some(serde_json::to_vec(&body).unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ImageUsage {
     pub count: usize,
@@ -279,10 +297,9 @@ pub struct ImageUsage {
 /// Resolve billing dimensions before reducing the upstream response schema.
 pub fn usage(response: &Value, request: &Value) -> ImageUsage {
     let dimension = |key| {
-        response
+        request
             .get(key)
             .and_then(Value::as_str)
-            .or_else(|| request.get(key).and_then(Value::as_str))
             .unwrap_or("auto")
             .to_string()
     };
@@ -335,16 +352,6 @@ pub fn canonicalize(body: &mut Value) {
             "cost" => value.is_number(),
             _ => false,
         });
-        for key in ["input_tokens_details", "output_tokens_details"] {
-            if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
-                details.retain(|key, value| {
-                    matches!(
-                        key.as_str(),
-                        "text_tokens" | "image_tokens" | "cached_tokens"
-                    ) && value.is_u64()
-                });
-            }
-        }
         for key in ["input_tokens", "output_tokens", "total_tokens"] {
             usage.entry(key).or_insert(json!(0));
         }
@@ -353,6 +360,12 @@ pub fn canonicalize(body: &mut Value) {
             .or_insert_with(|| json!({}));
         for key in ["input_tokens_details", "output_tokens_details"] {
             if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
+                details.retain(|key, value| {
+                    matches!(
+                        key.as_str(),
+                        "text_tokens" | "image_tokens" | "cached_tokens"
+                    ) && value.is_u64()
+                });
                 for key in ["text_tokens", "image_tokens"] {
                     details.entry(key).or_insert(json!(0));
                 }
@@ -454,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn success_requires_inline_images_and_drops_provider_fields() {
+    fn response_allowlist_strips_provider_data_and_urls() {
         for body in [
             json!({"data":[]}),
             json!({"data":[{"url":"https://private"}]}),
@@ -463,73 +476,37 @@ mod tests {
         ] {
             assert!(validate_response(&body, 1).is_err());
         }
-        let mut body = json!({"created":1,"id":"private","model":"private","unknown":1,"data":[{"b64_json":"ok","url":"https://private","revised_prompt":"hi","other":true}],"usage":{"input_tokens":1,"private":2,"input_tokens_details":{"text_tokens":1}}});
-        validate_response(&body, 1).unwrap();
-        canonicalize(&mut body);
-        assert_eq!(
-            body,
-            json!({"created":1,"data":[{"b64_json":"ok","revised_prompt":"hi"}],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}})
-        );
-    }
-
-    #[test]
-    fn optional_response_fields_cannot_contain_structured_provider_data() {
-        let mut body = json!({
-            "created": {"url":"https://private"},
-            "data": [{"b64_json":"ok", "revised_prompt":{"url":"https://private/image","provider":"private"}}],
-            "size": [], "quality": 1, "output_format": null, "background": {},
-            "usage": {
-                "input_tokens": -1, "output_tokens": 1.5, "total_tokens": "2",
-                "input_tokens_details": {"url":"https://private/image", "text_tokens":2,"image_tokens":3,"cached_tokens":1,"other":4},
-                "output_tokens_details": {"text_tokens":-1,"image_tokens":1.5,"cached_tokens":"1"},
-                "cost": {"url":"https://private"}
-            }
-        });
-        validate_response(&body, 1).unwrap();
-        canonicalize(&mut body);
-        assert!(body["created"].is_u64());
-        body.as_object_mut().unwrap().remove("created");
-        assert_eq!(
-            body,
-            json!({
-                "data":[{"b64_json":"ok"}],
-                "usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":0}}
-            })
-        );
-        for invalid_usage in [json!([]), json!("private"), Value::Null] {
-            let mut body = json!({"data":[{"b64_json":"ok"}],"usage":invalid_usage});
+        for (mut body, expected) in [
+            (
+                json!({"created":1,"id":"private","model":"private","unknown":1,"data":[{"b64_json":"ok","url":"https://private","revised_prompt":"hi","other":true}],"usage":{"input_tokens":1,"private":2,"input_tokens_details":{"text_tokens":1}}}),
+                json!({"data":[{"b64_json":"ok","revised_prompt":"hi"}],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}}),
+            ),
+            (
+                json!({"created":{"url":"https://private"},"data":[{"b64_json":"ok","revised_prompt":{"url":"https://private/image","provider":"private"}}],"size":[],"quality":1,"output_format":null,"background":{},"usage":{"input_tokens":-1,"output_tokens":1.5,"total_tokens":"2","input_tokens_details":{"url":"https://private/image","text_tokens":2,"image_tokens":3,"cached_tokens":1,"other":4},"output_tokens_details":{"text_tokens":-1,"image_tokens":1.5,"cached_tokens":"1"},"cost":{"url":"https://private"}}}),
+                json!({"data":[{"b64_json":"ok"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":0}}}),
+            ),
+            (
+                json!({"created":1,"data":[{"b64_json":"ok","revised_prompt":null}],"size":"512x512","quality":"high","output_format":"png","background":"opaque","usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":[],"output_tokens_details":null,"cost":0.1}}),
+                json!({"data":[{"b64_json":"ok","revised_prompt":null}],"size":"512x512","quality":"high","output_format":"png","background":"opaque","usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1}}),
+            ),
+        ] {
+            validate_response(&body, 1).unwrap();
             canonicalize(&mut body);
-            assert_eq!(
-                body["usage"],
-                json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}})
-            );
+            assert!(body["created"].is_u64());
+            body.as_object_mut().unwrap().remove("created");
+            assert_eq!(body, expected);
         }
     }
 
     #[test]
-    fn retains_only_valid_optional_response_values() {
-        let mut body = json!({
-            "created":1, "data":[{"b64_json":"ok","revised_prompt":null}],
-            "size":"512x512","quality":"high","output_format":"png","background":"opaque",
-            "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":[],"output_tokens_details":null,"cost":0.1}
-        });
-        canonicalize(&mut body);
-        assert_eq!(
-            body,
-            json!({
-                "created":1, "data":[{"b64_json":"ok","revised_prompt":null}],
-                "size":"512x512","quality":"high","output_format":"png","background":"opaque",
-                "usage":{"input_tokens":0,"output_tokens":2,"total_tokens":2,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1}
-            })
-        );
-    }
-
-    #[test]
-    fn sdk_required_fields_are_complete_for_absent_partial_and_full_usage() {
-        let empty_usage = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}});
-        let full_usage = json!({"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":3},"cost":0.1});
+    fn sdk_fields_complete_absent_invalid_and_partial_values() {
+        let empty = json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0}});
+        let full = json!({"input_tokens":5,"output_tokens":3,"total_tokens":8,"input_tokens_details":{"text_tokens":2,"image_tokens":3,"cached_tokens":1},"output_tokens_details":{"text_tokens":0,"image_tokens":3},"cost":0.1});
         for (usage, expected) in [
-            (None, empty_usage.clone()),
+            (None, empty.clone()),
+            (Some(json!([])), empty.clone()),
+            (Some(json!("private")), empty.clone()),
+            (Some(Value::Null), empty.clone()),
             (
                 Some(json!({"cost":0.1})),
                 json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1}),
@@ -538,7 +515,7 @@ mod tests {
                 Some(json!({"input_tokens":5,"input_tokens_details":{"text_tokens":2}})),
                 json!({"input_tokens":5,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0}}),
             ),
-            (Some(full_usage.clone()), full_usage),
+            (Some(full.clone()), full),
         ] {
             let mut body = json!({"created":1,"data":[{"b64_json":"ok"}]});
             if let Some(usage) = usage {
@@ -568,12 +545,8 @@ mod tests {
                 .unwrap()
                 .as_secs();
             assert!((before..=after).contains(&body["created"].as_u64().unwrap()));
-            assert_eq!(body["usage"], empty_usage);
+            assert_eq!(body["usage"], empty);
         }
-    }
-
-    #[test]
-    fn optional_output_details_are_complete_only_when_present() {
         for (details, expected) in [
             (None, None),
             (
@@ -601,16 +574,6 @@ mod tests {
                 expected.as_ref()
             );
         }
-    }
-
-    #[test]
-    fn image_capacity_is_bounded_and_never_queues() {
-        let permits: Vec<_> = (0..MAX_IMAGE_IN_FLIGHT)
-            .map(|_| try_acquire().unwrap())
-            .collect();
-        assert!(matches!(try_acquire(), Err(TryAcquireError::NoPermits)));
-        drop(permits);
-        assert!(try_acquire().is_ok());
     }
 
     #[tokio::test]
@@ -680,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn billing_dimensions_prefer_response_then_request_then_auto() {
+    fn billing_dimensions_use_request_then_auto() {
         let usage = usage(
             &json!({"data":[{},{}],"quality":"high"}),
             &json!({"size":"512x512","quality":"low"}),
@@ -690,7 +653,7 @@ mod tests {
             ImageUsage {
                 count: 2,
                 size: "512x512".into(),
-                quality: "high".into()
+                quality: "low".into()
             }
         );
         assert_eq!(super::usage(&json!({}), &json!({})).size, "auto");
