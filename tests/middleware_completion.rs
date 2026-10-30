@@ -5732,6 +5732,7 @@ fn audio_http_request(provider: &Value, host: &str) -> axum::http::Request<axum:
     axum::http::Request::builder()
         .method("POST")
         .uri("/v1/audio/transcriptions")
+        .header("authorization", "Bearer tenant-key")
         .header("host", host)
         .header("content-type", "multipart/form-data; boundary=upload")
         .header("x-aci-provider", provider.to_string())
@@ -5761,16 +5762,29 @@ fn audio_policy_service() -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>)
     (build_service_with_backend(Arc::new(router)), requests)
 }
 
-#[tokio::test]
-async fn audio_http_tee_only_host_rejects_non_tee_candidate_despite_caller_opt_out() {
-    use tower::ServiceExt;
-    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
-    let (service, requests) = audio_policy_service();
+fn audio_policy_router(
+    service: Arc<AciService>,
+    middleware: Middleware,
+) -> (tempfile::TempDir, Router) {
     let directory = tempfile::tempdir().unwrap();
     let manager = Arc::new(
         UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
             .unwrap(),
     );
+    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service,
+        manager,
+        None,
+        Arc::new(middleware),
+    );
+    (directory, app)
+}
+
+#[tokio::test]
+async fn audio_http_tee_only_host_rejects_non_tee_candidate_despite_caller_opt_out() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
+    let (service, requests) = audio_policy_service();
     let mw = new_middleware(&MiddlewareConfig {
         control_url: url,
         tee_only_domains: vec!["tee.example".into()],
@@ -5781,12 +5795,7 @@ async fn audio_http_tee_only_host_rejects_non_tee_candidate_despite_caller_opt_o
         send_request_features: None,
     })
     .unwrap();
-    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
-        service,
-        manager,
-        None,
-        Arc::new(mw),
-    );
+    let (_directory, app) = audio_policy_router(service, mw);
     let provider = json!({"aci_verified":false,"order":["plain"]});
     let response = app
         .oneshot(audio_http_request(&provider, "tee.example"))
@@ -5806,17 +5815,7 @@ async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reache
     use tower::ServiceExt;
     let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"tee:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
     let (service, requests) = audio_policy_service();
-    let directory = tempfile::tempdir().unwrap();
-    let manager = Arc::new(
-        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
-            .unwrap(),
-    );
-    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
-        service.clone(),
-        manager,
-        None,
-        Arc::new(middleware(url)),
-    );
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
     let (status, headers, _) = response_parts(
         app.clone()
             .oneshot(audio_http_request(

@@ -373,9 +373,20 @@ async fn run_inner(
             if client_endpoint == Endpoint::AudioTranscriptions {
                 service.record_audio_failure("admission_rejection");
             }
-            meter.gateway_failure(429, ErrorSource::Gateway, ErrorClass::GatewayCapacity, false);
+            meter.gateway_failure(
+                429,
+                ErrorSource::Gateway,
+                ErrorClass::GatewayCapacity,
+                false,
+            );
             let body = super::admission::capacity_body(Some(&request_id));
-            return finalize_generated(429, body, &[("retry-after", "1".into())], e2ee, outcome_ctx);
+            return finalize_generated(
+                429,
+                body,
+                &[("retry-after", "1".into())],
+                e2ee,
+                outcome_ctx,
+            );
         }
     }
     drop(upload_permit);
