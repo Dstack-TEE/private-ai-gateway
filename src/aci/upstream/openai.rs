@@ -234,12 +234,9 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = super::body::read_response_for_path(
-            resp,
-            path,
-            self.max_buffered_response_bytes,
-        )
-        .await?;
+        let body =
+            super::body::read_response_for_path(resp, path, self.max_buffered_response_bytes)
+                .await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -290,12 +287,9 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = super::body::read_response_for_path(
-            resp,
-            path,
-            self.max_buffered_response_bytes,
-        )
-        .await?;
+        let body =
+            super::body::read_response_for_path(resp, path, self.max_buffered_response_bytes)
+                .await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,

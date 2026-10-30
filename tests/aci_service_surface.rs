@@ -561,8 +561,6 @@ async fn assert_media_missing_authorization_upload_refusal(harness: &Harness, pa
     assert!(server.await.unwrap_err().is_cancelled());
 }
 
-
-
 fn harness_with_streaming_upstream_error() -> Harness {
     let mut headers = HashMap::new();
     headers.insert("content-type".to_string(), "application/json".to_string());
@@ -4479,13 +4477,20 @@ async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eig
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+    let limit = 2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
+    let mut config = AciServiceConfig::for_test();
+    config.max_buffered_response_bytes = limit;
     let service = Arc::new(
         AciService::new(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
-            Arc::new(OpenAICompatibleBackend::new(format!("http://{address}")).unwrap()),
+            Arc::new(
+                OpenAICompatibleBackend::new(format!("http://{address}"))
+                    .unwrap()
+                    .with_max_buffered_response_bytes(limit),
+            ),
             Arc::new(InMemoryReceiptStore::default()),
-            AciServiceConfig::for_test(),
+            config,
             Arc::new(FixedClock(1_700_000_000)),
         )
         .unwrap(),
