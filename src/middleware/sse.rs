@@ -166,6 +166,7 @@ impl StreamReport {
             selected_route_id: self.selected_route_id.clone(),
             request_model: self.request_model.clone(),
             usage,
+            images: None,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             tenant: self.tenant,

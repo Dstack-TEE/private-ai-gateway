@@ -3821,3 +3821,230 @@ async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
         assert!(h.backend.events.lock().unwrap().is_empty());
     }
 }
+
+const IMAGE_REQUEST: &[u8] =
+    br#"{"model":"aci-model","prompt":"a blue circle","n":1,"user":"alice","safety_identifier":"hashed-user","style":"vivid"}"#;
+
+#[tokio::test]
+async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"created":1,"id":"upstream-id","model":"private","size":{"url":"https://private"},"data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"}}],"usage":{"input_tokens":-1,"input_tokens_details":{"text_tokens":1,"url":"https://private/image"},"output_tokens_details":[],"cost":{"provider":"private"}}}"#,
+    ));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
+    let resp = h
+        .requester
+        .post("/v1/images/generations", IMAGE_REQUEST, &[])
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}})
+    );
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/images/generations"));
+        let body: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"model":"aci-model","prompt":"a blue circle","n":1,"response_format":"b64_json"})
+        );
+    }
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/images/generations");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(IMAGE_REQUEST)
+    );
+    let fetched = h
+        .requester
+        .get(&format!("/v1/aci/receipts/{receipt_id}"), &[])
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
+    let h = harness();
+    for patch in [
+        r#""n":0"#,
+        r#""response_format":"url""#,
+        r#""stream":true"#,
+        r#""stream":false"#,
+        r#""seed":1"#,
+    ] {
+        let body = format!("{{\"model\":\"aci-model\",\"prompt\":\"hi\",{patch}}}");
+        let resp = h
+            .requester
+            .post("/v1/images/generations", body.as_bytes(), &[])
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        if patch.contains("seed") {
+            assert_eq!(json_body(&resp)["error"]["code"], "unknown_parameter");
+            assert_eq!(json_body(&resp)["error"]["param"], "seed");
+        }
+    }
+    for name in [
+        "x-signing-algo",
+        "x-e2ee-version",
+        "x-e2ee-unknown",
+        "x-client-pub-key",
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header(name, "x")
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(1), h.requester.call(request))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&resp), "e2ee_unsupported_endpoint");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn images_forward_requested_maximum_and_accept_fewer_without_fill() {
+    for returned in 1..=2 {
+        let upstream = serde_json::to_vec(
+            &serde_json::json!({"data":vec![serde_json::json!({"b64_json":"ok"});returned]}),
+        )
+        .unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                br#"{"model":"aci-model","prompt":"hello","n":2}"#,
+                &[],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(json_body(&resp)["data"].as_array().unwrap().len(), returned);
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&calls[0].body).unwrap()["n"],
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn images_malformed_success_is_502_and_receipt_hashes_sanitized_error() {
+    for (n, upstream) in [
+        (
+            Some(1),
+            serde_json::json!({"data":[{"url":"https://private"}]}),
+        ),
+        (
+            Some(2),
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+        (
+            None,
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+    ] {
+        let upstream = serde_json::to_vec(&upstream).unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let mut request = serde_json::json!({"model":"aci-model","prompt":"hello"});
+        if let Some(n) = n {
+            request["n"] = serde_json::json!(n);
+        }
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                &serde_json::to_vec(&request).unwrap(),
+                &[],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert!(!String::from_utf8_lossy(&resp.body).contains("https://private"));
+        assert_eq!(error_type(&resp), "upstream_error");
+        assert!(json_body(&resp).get("data").is_none());
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&resp.body)
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"data":[{"b64_json":"image"}]}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..private_ai_gateway::middleware::images::MAX_IMAGE_IN_FLIGHT {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(stream::poll_fn(move |_| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+            std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header("content-type", "application/json")
+            .header("content-length", "1000000")
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each handler has reached its stalled body read before the normal request.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester
+            .post("/v1/images/generations", IMAGE_REQUEST, &[]),
+    )
+    .await
+    .unwrap();
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}

@@ -145,6 +145,9 @@ def assert_strict_reference(
 
 
 def provider_options(provider: Provider, env: dict[str, str]) -> dict[str, str]:
+    if provider.provider == "near-ai":
+        api_key = env.get(provider.api_key_env)
+        return {"near_ai_api_key": api_key} if api_key else {}
     if provider.provider == "armet-ai":
         # Mirrors ArmetAiProviderVerifier: lowercased pins, bearer when set.
         options = {
@@ -181,7 +184,7 @@ def redact_verifier_request(request: dict[str, Any], api_key_env: str) -> dict[s
     provider_options = redacted.get("provider_options")
     if isinstance(provider_options, dict):
         redacted["provider_options"] = dict(provider_options)
-        for secret in ("chutes_api_key", "armet_ai_bearer_token"):
+        for secret in ("chutes_api_key", "armet_ai_bearer_token", "near_ai_api_key"):
             if secret in redacted["provider_options"]:
                 redacted["provider_options"][secret] = "<redacted>"
     redacted["api_key_env"] = api_key_env

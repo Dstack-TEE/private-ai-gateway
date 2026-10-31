@@ -3225,6 +3225,9 @@ impl UpstreamBackend for SequencedUpstream {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         let body = match status {
+            200 if req.request.path.as_deref() == Some("/v1/images/generations") => {
+                br#"{"data":[{"b64_json":"ok"}]}"#.to_vec()
+            }
             200 => br#"{"id":"ok","choices":[]}"#.to_vec(),
             // The recognized upstream capacity/no-targets signal, under a
             // status OUTSIDE the retryable whitelist — guards the shared
@@ -3829,6 +3832,7 @@ async fn send_request_features_off_restores_the_featureless_pre_body() {
 
     let _ = mw.handle_completion(&service, chat_input()).await;
     let pre = pres.lock().unwrap().first().cloned().unwrap();
+    assert_eq!(pre["endpoint"], "/v1/chat/completions");
     // The rollback lever: off must mean the pre body of the featureless era,
     // not a request field with empty innards.
     assert!(
@@ -5401,4 +5405,281 @@ async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
         .service
         .get_attested_session(original.session_id())
         .is_none());
+}
+
+fn images_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","safety_identifier":"hashed-user","style":"vivid"});
+    CompletionInput {
+        endpoint: Endpoint::ImagesGenerations,
+        endpoint_path: "/v1/images/generations",
+        received_body: serde_json::to_vec(&params).unwrap(),
+        params,
+        request_id: "req-images".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn images_reject_invalid_counts_before_consult() {
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}]})).await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for n in [json!(0), json!(11), json!(1.5)] {
+        let mut input = images_input();
+        input.params["n"] = n;
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, _, body) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "invalid_parameter");
+        assert_eq!(body["error"]["param"], "n");
+    }
+    assert!(pres.lock().unwrap().is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn images_opt_in_consult_schema_cost_and_post_usage() {
+    for (requested, returned, with_usage) in
+        [(Some(2), 1, false), (Some(2), 2, true), (None, 1, false)]
+    {
+        let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+            {"routeId":"plain:model","format":"openai"},
+            {"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],
+            "pricing":{"imageCostPerImage":{"512x512|high":"99","512x512|low":"0.1"},"inputCostPerToken":"0.01","outputCostPerToken":"0.02"}})).await;
+        let mut upstream = json!({"created":1,"id":"private","model":"private","data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"},"unknown":1}],"quality":"high","background":{"url":"https://private"},"provider":"private"});
+        upstream["data"] = json!(vec![upstream["data"][0].clone(); returned]);
+        if with_usage {
+            upstream["usage"] = json!({"input_tokens":2,"output_tokens":3,"trace":"private","input_tokens_details":{"text_tokens":2,"url":"https://private/image"},"output_tokens_details":{"image_tokens":3,"provider":"private"}});
+        } else {
+            upstream.as_object_mut().unwrap().remove("created");
+        }
+        let (service, requests) = build_recording_service(
+            200,
+            serde_json::to_vec(&upstream).unwrap(),
+            "application/json",
+        );
+        let original_digest = service.workload_keyset_digest();
+        assert_eq!(
+            service.renew_keyset_if_due(600_000_000).unwrap(),
+            Some(2_300_000_000)
+        );
+        assert_ne!(service.workload_keyset_digest(), original_digest);
+        let mut input = images_input();
+        if let Some(n) = requested {
+            input.params["n"] = json!(n);
+        } else {
+            input.params.as_object_mut().unwrap().remove("n");
+        }
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"],
+            json!(vec![json!({"b64_json":"aW1hZ2U="}); returned])
+        );
+        assert_eq!(
+            body["usage"]["cost"],
+            json!(if with_usage { 0.28 } else { 0.1 })
+        );
+        assert!(body.get("id").is_none());
+        assert!(body.get("model").is_none());
+        assert!(body.get("provider").is_none());
+        assert!(body["usage"].get("trace").is_none());
+        assert!(body.get("background").is_none());
+        if with_usage {
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens":2,"output_tokens":3,"total_tokens":0,"input_tokens_details":{"text_tokens":2,"image_tokens":0},"output_tokens_details":{"text_tokens":0,"image_tokens":3},"cost":0.28})
+            );
+            assert_eq!(body["created"], 1);
+        } else {
+            assert_eq!(
+                body["usage"],
+                json!({"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":0,"image_tokens":0},"cost":0.1})
+            );
+            assert!(body["created"].as_u64().unwrap() > 0);
+        }
+        assert!(!body.to_string().contains("https://private"));
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        assert_eq!(
+            receipt.document_json().unwrap()["workload_keyset_digest"],
+            headers["x-aci-keyset-digest"].to_str().unwrap()
+        );
+        assert_eq!(
+            headers["x-aci-keyset-digest"],
+            service.workload_keyset_digest()
+        );
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].path.as_deref(), Some("/v1/images/generations"));
+            assert_eq!(requests[0].body["response_format"], "b64_json");
+            assert_eq!(
+                requests[0].body.get("n"),
+                requested.map(|n| json!(n)).as_ref()
+            );
+            assert!(requests[0].body.get("style").is_none());
+            assert!(requests[0].body.get("user").is_none());
+            assert!(requests[0].body.get("safety_identifier").is_none());
+        }
+        assert_eq!(
+            pres.lock().unwrap()[0]["endpoint"],
+            "/v1/images/generations"
+        );
+        assert!(pres.lock().unwrap()[0].get("request").is_none());
+        let report = wait_for_post(&posts, |post| post["requestId"] == "req-images").await;
+        assert_eq!(report["selectedRouteId"], "image:model");
+        assert_eq!(
+            report["images"],
+            json!({"count":returned,"size":"512x512","quality":"low"})
+        );
+        assert_eq!(
+            report["usage"],
+            if with_usage {
+                upstream["usage"].clone()
+            } else {
+                Value::Null
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report() {
+    let pricing = json!({"imageCostPerImage":"0.1","inputCostPerToken":rust_decimal::Decimal::MAX.to_string()});
+    let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],"pricing":pricing})).await;
+    let upstream_usage = json!({"input_tokens":2,"total_tokens":2,"cost":0});
+    let (service, _) = build_recording_service(
+        200,
+        serde_json::to_vec(&json!({"data":[{"b64_json":"ok"}],"usage":upstream_usage})).unwrap(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, images_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["usage"],
+        json!({"input_tokens":2,"output_tokens":0,"total_tokens":2,"input_tokens_details":{"text_tokens":0,"image_tokens":0}})
+    );
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let report = wait_for_post(&posts, |post| post["requestId"] == "req-images").await;
+    assert_eq!(report["status"], 200);
+    assert_eq!(
+        report["images"],
+        json!({"count":1,"size":"512x512","quality":"low"})
+    );
+    assert_eq!(report["usage"], upstream_usage);
+    assert_eq!(report["pricing"], pricing);
+}
+
+#[tokio::test]
+async fn images_no_opt_in_candidate_returns_model_not_found() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, images_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["type"], "model_not_found");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn images_malformed_2xx_is_not_billed_and_never_returns_url() {
+    for (requested, upstream) in [
+        (Some(1), json!({"data":[{"url":"https://private"}]})),
+        (
+            Some(2),
+            json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+        (None, json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"}]})),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"image:model","format":"openai","supportedEndpoints":["/v1/images/generations"]}],"pricing":{"imageCostPerImage":"1"}})).await;
+        let (service, requests) = build_recording_service(
+            200,
+            serde_json::to_vec(&upstream).unwrap(),
+            "application/json",
+        );
+        let mut input = images_input();
+        if let Some(n) = requested {
+            input.params["n"] = json!(n);
+        } else {
+            input.params.as_object_mut().unwrap().remove("n");
+        }
+        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, 502);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(body.get("data").is_none());
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        let document = receipt.document_json().unwrap();
+        let returned = document["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "response.returned")
+            .unwrap();
+        assert_eq!(
+            returned["body_hash"],
+            private_ai_gateway::aci::digest::sha256_hex(&serde_json::to_vec(&body).unwrap())
+        );
+        assert!(!body.to_string().contains("https://private"));
+        let report = wait_for_post(&posts, |post| post["requestId"] == "req-images").await;
+        assert_eq!(report["status"], 502);
+        assert!(report["usage"].is_null());
+        assert!(report.get("images").is_none());
+    }
+}
+
+#[tokio::test]
+async fn images_failed_attempts_carry_no_billable_image_usage() {
+    let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[
+        {"routeId":"images:first","format":"openai","supportedEndpoints":["/v1/images/generations"]},
+        {"routeId":"images:second","format":"openai","supportedEndpoints":["/v1/images/generations"]}],
+        "pricing":{"imageCostPerImage":"0.1"}})).await;
+    let (service, _, _) = build_sequenced_service(vec![500, 200]);
+    let (status, _, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, images_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["usage"]["cost"], json!(0.1));
+    let failure = wait_for_post(&posts, |post| post["selectedRouteId"] == "images:first").await;
+    assert_eq!(failure["status"], 500);
+    assert!(failure.get("images").is_none());
+    assert!(failure["usage"].is_null());
+    let success = wait_for_post(&posts, |post| post["selectedRouteId"] == "images:second").await;
+    assert_eq!(
+        success["images"],
+        json!({"count":1,"size":"512x512","quality":"low"})
+    );
 }

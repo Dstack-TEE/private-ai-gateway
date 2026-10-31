@@ -10,10 +10,10 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 
 struct ResolvedUsage {
-    prompt: i64,
-    completion: i64,
-    cache_read: i64,
-    cache_creation: i64,
+    prompt: i128,
+    completion: i128,
+    cache_read: i128,
+    cache_creation: i128,
 }
 
 // Read a token count, accepting integer- or float-encoded numbers (a provider
@@ -79,17 +79,18 @@ fn resolve_usage(usage: &Value) -> ResolvedUsage {
     // either family — otherwise native Anthropic usage under-counts input. A
     // Responses `input_tokens` is already that total: adding its cached portion
     // again would count those tokens twice.
-    let input = token_value(usage, "input_tokens").unwrap_or(0);
+    // Widen before adding or subtracting provider-controlled i64 counters.
+    let input = i128::from(token_value(usage, "input_tokens").unwrap_or(0));
     let prompt = match token_value(usage, "prompt_tokens") {
-        Some(prompt_tokens) => prompt_tokens,
+        Some(prompt_tokens) => i128::from(prompt_tokens),
         None if responses_cached.is_some() => input,
-        None => input + cache_read + cache_creation,
+        None => input + i128::from(cache_read) + i128::from(cache_creation),
     };
     ResolvedUsage {
         prompt,
-        completion,
-        cache_read,
-        cache_creation,
+        completion: i128::from(completion),
+        cache_read: i128::from(cache_read),
+        cache_creation: i128::from(cache_creation),
     }
 }
 
@@ -105,6 +106,12 @@ fn rate(pricing: &Value, key: &str) -> Option<Decimal> {
 
 /// Compute the request cost from usage and pricing, as an `f64`.
 pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
+    token_cost(usage, pricing)
+        .and_then(|cost| cost.to_f64())
+        .unwrap_or(0.0)
+}
+
+fn token_cost(usage: &Value, pricing: &Value) -> Option<Decimal> {
     let resolved = resolve_usage(usage);
     let input_rate = rate(pricing, "inputCostPerToken").unwrap_or(Decimal::ZERO);
     let cache_read_rate = rate(pricing, "cacheReadCostPerToken").unwrap_or(input_rate);
@@ -113,11 +120,58 @@ pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
 
     let uncached_input = (resolved.prompt - resolved.cache_read - resolved.cache_creation).max(0);
 
-    let cost = Decimal::from(uncached_input) * input_rate
-        + Decimal::from(resolved.cache_read) * cache_read_rate
-        + Decimal::from(resolved.cache_creation) * cache_creation_rate
-        + Decimal::from(resolved.completion) * output_rate;
-    cost.to_f64().unwrap_or(0.0)
+    [
+        (uncached_input, input_rate),
+        (resolved.cache_read, cache_read_rate),
+        (resolved.cache_creation, cache_creation_rate),
+        (resolved.completion, output_rate),
+    ]
+    .into_iter()
+    .try_fold(Decimal::ZERO, |total, (count, rate)| {
+        total.checked_add(Decimal::from_i128(count)?.checked_mul(rate)?)
+    })
+}
+
+// Control-plane image prices are bounded, unsigned plain decimals. Validate
+// the spelling before parsing so signs, exponents, and rounded scales fail.
+fn image_rate(value: &Value) -> Option<Decimal> {
+    let value = value.as_str()?;
+    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if integer.is_empty()
+        || !integer.bytes().all(|c| c.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+        || fraction.len() > 18
+        || !fraction.bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let rate = Decimal::from_str_exact(value).ok()?;
+    (rate <= Decimal::from(1_000_000)).then_some(rate)
+}
+
+/// Image unit price uses exact dimensions, then size, then the default.
+/// Invalid image rates contribute zero; unrepresentable costs are omitted.
+pub fn compute_image_cost(
+    usage: Option<&Value>,
+    pricing: &Value,
+    images: &super::images::ImageUsage,
+) -> Option<f64> {
+    let configured = pricing.get("imageCostPerImage");
+    let unit = match configured {
+        Some(Value::Object(rates)) => rates
+            .get(&format!("{}|{}", images.size, images.quality))
+            .or_else(|| rates.get(&images.size))
+            .or_else(|| rates.get("default")),
+        value => value,
+    }
+    .and_then(image_rate)
+    .unwrap_or(Decimal::ZERO);
+    let tokens = match usage {
+        Some(usage) => token_cost(usage, pricing)?,
+        None => Decimal::ZERO,
+    };
+    let images = Decimal::from_usize(images.count).and_then(|count| count.checked_mul(unit))?;
+    images.checked_add(tokens)?.to_f64()
 }
 
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
@@ -290,5 +344,139 @@ mod tests {
     fn cost_to_json_matches_js_integer_formatting() {
         assert_eq!(cost_to_json(0.0), json!(0));
         assert_eq!(cost_to_json(0.000135), json!(0.000135));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::middleware::images::ImageUsage;
+    use serde_json::json;
+
+    #[test]
+    fn image_rates_reject_invalid_spelling_scale_and_range() {
+        let images = ImageUsage {
+            count: 2,
+            size: "512x512".into(),
+            quality: "high".into(),
+        };
+        for invalid in [
+            json!("-0.1"),
+            json!("+0.1"),
+            json!("1e-2"),
+            json!("1E2"),
+            json!("1_000"),
+            json!(".1"),
+            json!("1."),
+            json!(" 1"),
+            json!("1 "),
+            json!(""),
+            json!("0.0000000000000000001"),
+            json!("1000000.000000000000000001"),
+            json!("79228162514264337593543950335"),
+            json!("9999999999999999999999999999999999999999"),
+            json!(0.1),
+            Value::Null,
+        ] {
+            // A malformed exact match is missing pricing, not permission to
+            // charge a broader fallback. Token pricing still contributes.
+            let pricing = json!({"imageCostPerImage":{"512x512|high":invalid,"default":"1"},"inputCostPerToken":"0.01"});
+            assert_eq!(
+                compute_image_cost(Some(&json!({"input_tokens":2})), &pricing, &images),
+                Some(0.02),
+                "{pricing}"
+            );
+        }
+        for valid in [
+            "0",
+            "0.000000000000000001",
+            "1000000",
+            "1000000.000000000000000000",
+        ] {
+            assert!(image_rate(&json!(valid)).is_some(), "{valid}");
+        }
+        assert_eq!(
+            compute_image_cost(None, &json!({"imageCostPerImage":"1000000"}), &images),
+            Some(2_000_000.0)
+        );
+    }
+
+    #[test]
+    fn image_cost_checked_arithmetic_does_not_panic_on_extreme_token_rates() {
+        let images = ImageUsage {
+            count: 2,
+            size: "auto".into(),
+            quality: "auto".into(),
+        };
+        let max_rate = Decimal::MAX.to_string();
+        for usage in [
+            json!({"input_tokens":2}),
+            json!({"input_tokens":1,"output_tokens":1}),
+            json!({"input_tokens":i64::MAX,"cache_read_input_tokens":i64::MAX,"cache_creation_input_tokens":i64::MAX}),
+            json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":i64::MAX}),
+        ] {
+            let pricing = json!({"imageCostPerImage":"0.1","inputCostPerToken":max_rate,"outputCostPerToken":max_rate});
+            assert_eq!(
+                compute_image_cost(Some(&usage), &pricing, &images),
+                None,
+                "{usage}"
+            );
+        }
+        // Each component fits but their sum does not.
+        let pricing = json!({"imageCostPerImage":"1","inputCostPerToken":max_rate});
+        assert_eq!(
+            compute_image_cost(Some(&json!({"input_tokens":1})), &pricing, &images),
+            None
+        );
+    }
+
+    #[test]
+    fn image_cost_handles_max_token_counts_at_bounded_rates() {
+        let usage = json!({
+            "input_tokens":i64::MAX,"output_tokens":i64::MAX,
+            "cache_read_input_tokens":i64::MAX,"cache_creation_input_tokens":i64::MAX
+        });
+        let pricing = json!({
+            "imageCostPerImage":"1000000",
+            "inputCostPerToken":"1000000","outputCostPerToken":"1000000"
+        });
+        let images = ImageUsage {
+            count: 10,
+            size: "auto".into(),
+            quality: "auto".into(),
+        };
+        // Four i64::MAX token buckets at $1e6/token remain below $3.69e25,
+        // well within Decimal's $7.92e28 limit, even with the image charge.
+        let cost = compute_image_cost(Some(&usage), &pricing, &images).unwrap();
+        assert!(cost > 0.0 && cost < 3.69e25);
+    }
+
+    #[test]
+    fn image_lookup_precedence_and_combined_token_cost() {
+        let images = ImageUsage {
+            count: 2,
+            size: "512x512".into(),
+            quality: "high".into(),
+        };
+        for (rates, expected) in [
+            (json!("0.1"), 0.2),
+            (
+                json!({"512x512|high":"0.1","512x512":"0.2","default":"0.3"}),
+                0.2,
+            ),
+            (json!({"512x512":"0.2","default":"0.3"}), 0.4),
+            (json!({"default":"0.3"}), 0.6),
+            (json!({"other":"0.4"}), 0.0),
+        ] {
+            let pricing = json!({"imageCostPerImage":rates,"inputCostPerToken":"0.01","outputCostPerToken":"0.02"});
+            assert_eq!(compute_image_cost(None, &pricing, &images), Some(expected));
+            let cost = compute_image_cost(
+                Some(&json!({"input_tokens":2,"output_tokens":3})),
+                &pricing,
+                &images,
+            )
+            .unwrap();
+            assert!((cost - expected - 0.08).abs() < 1e-12);
+        }
     }
 }

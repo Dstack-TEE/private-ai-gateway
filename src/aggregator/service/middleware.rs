@@ -276,7 +276,11 @@ impl AciService {
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = extract_chat_id(&response.body);
+        let chat_id = if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+            None
+        } else {
+            extract_chat_id(&response.body)
+        };
         let recorded = admission
             .lease
             .as_ref()
@@ -786,7 +790,11 @@ impl AciService {
                 // held back and committed after the walk must not be counted again
                 // on commit.
                 let status = upstream_response.status_code;
-                let response_model = accepted_response_model(status, &upstream_response.body);
+                let response_model = accepted_response_model(status, &upstream_response.body)
+                    .or_else(|| {
+                        (endpoint_path == super::IMAGES_GENERATIONS_PATH)
+                            .then(|| prepared.model_id.clone())
+                    });
                 self.metrics.record_upstream_response(
                     endpoint_path,
                     RequestMode::Buffered,

@@ -26,8 +26,8 @@ use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{
     is_sse_content_type, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
     E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
-    MiddlewareForwardResult, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
-    ServiceResponseStream, UpstreamVerificationError, RESPONSES_PATH,
+    MiddlewareForwardResult, MiddlewareReceiptDraft, MiddlewareReceiptJournal, ReceiptOwner,
+    ServiceError, ServiceResponseStream, UpstreamVerificationError, RESPONSES_PATH,
 };
 
 use super::control::ControlClient;
@@ -97,6 +97,29 @@ pub async fn run(
     prefix_hash_key: &PrefixHashKey,
     input: CompletionInput,
 ) -> Response {
+    let mut image_permit = None;
+    let response = run_inner(
+        control,
+        service,
+        sse_keepalive_ms,
+        send_request_features,
+        prefix_hash_key,
+        input,
+        &mut image_permit,
+    )
+    .await;
+    super::images::hold_permit(response, image_permit)
+}
+
+async fn run_inner(
+    control: &ControlClient,
+    service: &Arc<AciService>,
+    sse_keepalive_ms: Option<u64>,
+    send_request_features: bool,
+    prefix_hash_key: &PrefixHashKey,
+    input: CompletionInput,
+    image_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Response {
     let CompletionInput {
         endpoint,
         endpoint_path,
@@ -123,6 +146,11 @@ pub async fn run(
         user_model: user_model.clone(),
     });
 
+    if endpoint == Endpoint::ImagesGenerations {
+        if let Err(err) = super::images::validate_request(&params) {
+            return err.into_response();
+        }
+    }
     let started = Instant::now();
     let client_endpoint = endpoint;
     let validated = match endpoint {
@@ -222,6 +250,7 @@ pub async fn run(
     let consult = control
         .consult_pre(
             model,
+            client_endpoint.path(),
             api_key_hash.as_deref(),
             provider,
             tee_only,
@@ -247,6 +276,7 @@ pub async fn run(
         started,
         is_streaming: stream,
         armed: None,
+        images: None,
     };
 
     // Denial (also the fail-closed control-unavailable path: allow=false, 503).
@@ -329,6 +359,28 @@ pub async fn run(
         meter.gateway_failure(404, ErrorSource::Control, ErrorClass::ModelNotFound, stream);
         let body = errors::envelope_bytes(surface, "model_not_found", &message, Some(&request_id));
         return finalize_generated(404, body, &[], e2ee, outcome_ctx);
+    }
+    // Admit only validated uploads that the control plane allowed and can route.
+    if client_endpoint == Endpoint::ImagesGenerations {
+        match super::images::try_acquire() {
+            Ok(permit) => *image_permit = Some(permit),
+            Err(_) => {
+                meter.gateway_failure(
+                    429,
+                    ErrorSource::Gateway,
+                    ErrorClass::GatewayCapacity,
+                    false,
+                );
+                let body = super::images::capacity_body(Some(&request_id));
+                return finalize_generated(
+                    429,
+                    body,
+                    &[("retry-after", "1".into())],
+                    e2ee,
+                    outcome_ctx,
+                );
+            }
+        }
     }
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
@@ -498,6 +550,13 @@ pub async fn run(
                 let converted = serde_json::from_slice::<Value>(&forward.upstream_body)
                     .map_err(|err| err.to_string())
                     .and_then(|mut upstream_json| {
+                        if client_endpoint == Endpoint::ImagesGenerations {
+                            super::images::validate_response(
+                                &upstream_json,
+                                super::images::requested_count(&params),
+                            )
+                            .map_err(str::to_string)?;
+                        }
                         if exclude_reasoning {
                             response_transform::exclude_reasoning(&mut upstream_json);
                         }
@@ -531,12 +590,25 @@ pub async fn run(
                             "upstream returned a malformed success body",
                             Some(&request_id),
                         );
+                        // Images are always buffered: retain the served route's
+                        // receipt draft and attest the sanitized error bytes.
+                        if client_endpoint == Endpoint::ImagesGenerations {
+                            return finalize_buffered(
+                                forward.receipt,
+                                502,
+                                body,
+                                e2ee,
+                                outcome_ctx,
+                            );
+                        }
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
-                // Raw usage (pre-cost) goes to the report; cost is injected only
-                // into the client body's top-level usage.
+                // Raw usage (before cost or image SDK defaults) goes to the
+                // report; only the client body's usage is normalized below.
                 let raw_usage = transformed.get("usage").cloned();
+                meter.images = (client_endpoint == Endpoint::ImagesGenerations)
+                    .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
                         transformed,
@@ -550,7 +622,26 @@ pub async fn run(
                 // cost billed: the bridge's Responses usage cannot carry
                 // cache-creation tokens.
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
-                    if let Some(usage) = raw_usage
+                    if let Some(images) = meter.images.as_ref() {
+                        if let Some(cost) =
+                            pricing::compute_image_cost(raw_usage.as_ref(), pricing_config, images)
+                        {
+                            if !transformed.get("usage").is_some_and(Value::is_object) {
+                                transformed["usage"] = serde_json::json!({});
+                            }
+                            transformed["usage"]["cost"] = pricing::cost_to_json(cost);
+                        } else {
+                            // Control bills independently from raw usage and its
+                            // pricing snapshot. Never display a free request on
+                            // arithmetic overflow or replace the upstream usage.
+                            if let Some(usage) =
+                                transformed.get_mut("usage").and_then(Value::as_object_mut)
+                            {
+                                usage.remove("cost");
+                            }
+                            tracing::warn!("image cost arithmetic overflow; omitting usage.cost");
+                        }
+                    } else if let Some(usage) = raw_usage
                         .clone()
                         .or_else(|| transformed.get("usage").cloned())
                     {
@@ -616,30 +707,13 @@ pub async fn run(
                 (mapped, body)
             };
 
-            match service.finalize_middleware_receipt(
+            finalize_buffered(
                 forward.receipt,
+                client_status,
                 final_body,
-                Some("application/json"),
-                requester.clone(),
                 e2ee,
-            ) {
-                Ok(finalized) => {
-                    let status =
-                        StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
-                    let mut headers = gateway_owned_headers("application/json");
-                    insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
-                    insert_header(
-                        &mut headers,
-                        "x-aci-keyset-digest",
-                        &finalized.receipt.workload_keyset_digest,
-                    );
-                    apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
-                    (status, headers, finalized.wire_body).into_response()
-                }
-                // The receipt finalizer consumed the E2EE context, so a generated
-                // error here is necessarily cleartext.
-                Err(err) => service_error_response(outcome_ctx, err, None),
-            }
+                outcome_ctx,
+            )
         }
         Ok(MiddlewareForwardResult::Stream(forward)) => {
             // Normalized, not relayed: providers spell the content type
@@ -919,6 +993,7 @@ fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCan
 // waited for. While `armed` holds the forward's journal, that drop reports a
 // client disconnect against the candidate that was in flight.
 struct Meter {
+    images: Option<super::images::ImageUsage>,
     control: ControlClient,
     request_id: String,
     endpoint_path: &'static str,
@@ -1375,6 +1450,7 @@ impl Meter {
             selected_route_id: None,
             request_model: self.request_model.clone(),
             usage: None,
+            images: None,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             tenant: self.tenant,
@@ -1404,6 +1480,7 @@ impl Meter {
             status,
             attempt_index: Some(attempt_index),
             selected_route_id: selected_route_id.map(str::to_string),
+            images: self.images.clone().filter(|_| (200..300).contains(&status)),
             usage,
             error_message: error_class,
             ..self.base()
@@ -1676,6 +1753,39 @@ fn service_error_response(
         Some(request_id),
     );
     finalize_generated(status, body, &[], e2ee, outcome)
+}
+
+// Finalize a buffered answer, including a sanitized malformed-image error.
+fn finalize_buffered(
+    draft: MiddlewareReceiptDraft,
+    client_status: u16,
+    final_body: Vec<u8>,
+    e2ee: Option<E2eeRequestContext>,
+    outcome: OutcomeCtx<'_>,
+) -> Response {
+    match outcome.service.finalize_middleware_receipt(
+        draft,
+        final_body,
+        Some("application/json"),
+        outcome.requester.clone(),
+        e2ee,
+    ) {
+        Ok(finalized) => {
+            let status = StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut headers = gateway_owned_headers("application/json");
+            insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
+            insert_header(
+                &mut headers,
+                "x-aci-keyset-digest",
+                &finalized.receipt.workload_keyset_digest,
+            );
+            apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), true);
+            (status, headers, finalized.wire_body).into_response()
+        }
+        // The receipt finalizer consumed the E2EE context, so a generated
+        // error here is necessarily cleartext.
+        Err(err) => service_error_response(outcome, err, None),
+    }
 }
 
 // Build a generated (no-receipt) response, E2EE-encrypting the body when a

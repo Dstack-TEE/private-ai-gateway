@@ -233,7 +233,10 @@ pub fn extract(
             }
             _ => {}
         },
-        Endpoint::Embed | Endpoint::CreateModelResponse | Endpoint::SystemOne => return None,
+        Endpoint::Embed
+        | Endpoint::CreateModelResponse
+        | Endpoint::SystemOne
+        | Endpoint::ImagesGenerations => return None,
     }
 
     // Legacy `functions` is still forwarded by the request transform, so it is
@@ -396,7 +399,10 @@ fn conversation_opening(endpoint: Endpoint, params: &Value) -> Option<Value> {
         Endpoint::Complete => params
             .get("prompt")
             .map(|prompt| Value::Array(vec![prompt.clone()])),
-        Endpoint::Embed | Endpoint::CreateModelResponse | Endpoint::SystemOne => None,
+        Endpoint::Embed
+        | Endpoint::CreateModelResponse
+        | Endpoint::SystemOne
+        | Endpoint::ImagesGenerations => None,
     }
 }
 

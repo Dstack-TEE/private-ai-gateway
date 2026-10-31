@@ -9,6 +9,7 @@ pub mod completion;
 pub mod config;
 pub mod control;
 pub mod errors;
+pub mod images;
 pub mod pricing;
 pub mod reasoning;
 pub mod request_features;
