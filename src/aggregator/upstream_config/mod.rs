@@ -282,6 +282,7 @@ impl UpstreamVerifierMode {
 
 #[derive(Debug, Clone)]
 pub struct UpstreamRuntimeOptions {
+    pub max_buffered_response_bytes: usize,
     pub verifier_mode: UpstreamVerifierMode,
     pub accepted_subjects: Vec<String>,
     pub accepted_image_digests: Vec<String>,
@@ -300,6 +301,7 @@ pub struct UpstreamRuntimeOptions {
 /// upstream node. Produced by [`UpstreamConfigManager::attestation_upstream_target`].
 #[derive(Debug, Clone)]
 pub struct AttestationUpstreamTarget {
+    pub max_buffered_response_bytes: usize,
     pub upstream_name: String,
     pub provider: UpstreamProvider,
     /// Base URL with any trailing slash trimmed.
@@ -407,6 +409,7 @@ impl UpstreamConfigManager {
             .cloned()
             .unwrap_or_else(|| model.to_string());
         Some(AttestationUpstreamTarget {
+            max_buffered_response_bytes: self.options.max_buffered_response_bytes,
             upstream_name: cfg.name.clone(),
             provider: cfg.provider,
             base_url: cfg.base_url.trim_end_matches('/').to_string(),

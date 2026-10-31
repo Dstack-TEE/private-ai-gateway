@@ -206,6 +206,8 @@ mod tests {
             UpstreamConfigManager::load(
                 path,
                 UpstreamRuntimeOptions {
+                    max_buffered_response_bytes:
+                        crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
                     verifier_mode: UpstreamVerifierMode::None,
                     accepted_subjects: Vec::new(),
                     accepted_image_digests: Vec::new(),

@@ -133,6 +133,7 @@ struct GatewayConfigFile {
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
     upstream_verification_concurrency: usize,
+    max_buffered_response_bytes: usize,
     /// Deployment-owned Privatemode sidecar policy. Unlike upstream routes,
     /// this is static so the admin API cannot redirect plaintext to another
     /// proxy or change the measured proxy-image pin.
@@ -167,6 +168,8 @@ impl Default for GatewayConfigFile {
             dstack_endpoint: None,
             middleware: None,
             upstream_verification_concurrency: 4,
+            max_buffered_response_bytes:
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             privatemode_proxy: None,
         }
     }
@@ -191,6 +194,9 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
     let config: GatewayConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
+    if config.max_buffered_response_bytes == 0 {
+        return Err("gateway max_buffered_response_bytes must be greater than zero".into());
+    }
     if config.upstream_verification_concurrency == 0 {
         return Err(
             "gateway upstream_verification_concurrency must be greater than zero".to_string(),
@@ -515,6 +521,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upstream_config = Arc::new(UpstreamConfigManager::load(
         upstream_config_path.clone(),
         UpstreamRuntimeOptions {
+            max_buffered_response_bytes: gateway_config.max_buffered_response_bytes,
             verifier_mode: UpstreamVerifierMode::None,
             accepted_subjects: Vec::new(),
             accepted_image_digests: Vec::new(),
@@ -575,6 +582,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provenance_unknown = source_provenance.is_unknown();
     let config = AciServiceConfig {
+        max_buffered_response_bytes: gateway_config.max_buffered_response_bytes,
         tee_type: "tdx".to_string(),
         source_provenance,
         keyset_not_after,
@@ -1084,6 +1092,30 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert_eq!(middleware.control_token.as_deref(), Some("secret"));
         // Optional timeouts default to None and fall back inside the client.
         assert_eq!(middleware.control_timeout_ms, None);
+    }
+
+    #[test]
+    fn gateway_buffered_response_limit_defaults_overrides_and_rejects_zero() {
+        let (_directory, path) = temp_path("buffered-response-limit");
+        for (body, expected) in [
+            (
+                "{}",
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            ),
+            (r#"{"max_buffered_response_bytes":134217728}"#, 134217728),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                load_gateway_config(path.to_str().unwrap())
+                    .unwrap()
+                    .max_buffered_response_bytes,
+                expected
+            );
+        }
+        std::fs::write(&path, r#"{"max_buffered_response_bytes":0}"#).unwrap();
+        assert!(load_gateway_config(path.to_str().unwrap())
+            .unwrap_err()
+            .contains("max_buffered_response_bytes must be greater than zero"));
     }
 
     #[test]

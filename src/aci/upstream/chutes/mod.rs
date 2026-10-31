@@ -19,8 +19,9 @@ pub use session::ChutesSessionStore;
 
 use super::tls::response_headers;
 use super::{
-    transport_error, OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend,
-    UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    read_buffered_upstream_response, transport_error, OpenAICompatibleBackend,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crypto::{
@@ -80,6 +81,11 @@ impl ChutesProviderBackend {
             client,
             session_store: Arc::new(ChutesSessionStore::new()),
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.inner = self.inner.with_max_buffered_response_bytes(limit);
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -219,7 +225,8 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body =
+            read_buffered_upstream_response(resp, self.inner.max_buffered_response_bytes).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -254,7 +261,8 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body =
+            read_buffered_upstream_response(resp, self.inner.max_buffered_response_bytes).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -337,7 +345,8 @@ impl ChutesProviderBackend {
             .await
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(transport_error)?;
+        let body =
+            read_buffered_upstream_response(resp, self.inner.max_buffered_response_bytes).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Upstream { status });
         }
@@ -374,12 +383,11 @@ impl UpstreamBackend for ChutesProviderBackend {
         let status_code = invoke.status_code;
         let headers = invoke.headers;
         let served_instance_id = Some(invoke.instance_id);
-        let body = invoke
-            .response
-            .bytes()
-            .await
-            .map_err(transport_error)?
-            .to_vec();
+        let body = read_buffered_upstream_response(
+            invoke.response,
+            self.inner.max_buffered_response_bytes,
+        )
+        .await?;
         if status_code != 200 {
             return Ok(UpstreamResponse {
                 status_code,
@@ -388,7 +396,11 @@ impl UpstreamBackend for ChutesProviderBackend {
                 served_instance_id,
             });
         }
-        let body = decrypt_chutes_response(&body, &invoke.response_sk)?;
+        let body = decrypt_chutes_response(
+            &body,
+            &invoke.response_sk,
+            self.inner.max_buffered_response_bytes,
+        )?;
         Ok(UpstreamResponse {
             status_code,
             body,

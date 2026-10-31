@@ -46,6 +46,7 @@ Minimal container configuration:
 | `middleware` | object | unset | Enables the in-process middleware and external control-plane client. See [Middleware fields](#middleware-fields). |
 | `privatemode_proxy` | object | unset | Static policy for an official Privatemode proxy co-deployed in the measured Compose. Required before a `privatemode` route can load. See [Privatemode proxy](#privatemode-proxy). |
 | `upstream_verification_concurrency` | positive integer | `4` | Maximum concurrent background verifier-cache refreshes, including initial verification. Limits pressure on the shared verifier sidecar; request-time verification is independent. |
+| `max_buffered_response_bytes` | positive integer | `67108864` (64 MiB) | Operator resource limit for each buffered upstream response, including error bodies, metadata/attestation reads, and decrypted Chutes gzip output. Streaming success responses are not collected under this limit. See [Buffered response memory](#buffered-response-memory). |
 
 Do not set `upstream_verification_concurrency` in production until the rollback
 window has passed: the older binary rejects unknown static configuration fields.
@@ -56,6 +57,29 @@ Rollback restores the earlier admission/citation and streaming-retention bugs.
 `receipt_ttl_seconds` remains a service-library setting with default `3600`;
 it is not a static gateway configuration field. There is no environment or
 per-provider override for session validity.
+
+### Buffered response memory
+
+`max_buffered_response_bytes` is a gateway memory policy, not a maximum derived
+from the embeddings API. Buffered receipts and response canonicalization require
+complete upstream bodies; this setting bounds each collected body and Chutes'
+decompressed output. A body above the configured value returns a sanitized
+`502`. Initial buffer reservation remains capped at 1 MiB. Concurrent requests,
+parsing, decryption, and canonicalization can retain additional copies, so this
+is not a total process-memory budget.
+
+The default remains 64 MiB. Very large float-format embedding batches can exceed
+it: raising the limit permits those responses at a higher per-request memory
+cost. Select a value using the deployment's memory and concurrency budget.
+Current official [OpenAI Python SDK](https://github.com/openai/openai-python/blob/10f9dd012363229a6c6f3fddb73403427fcd5eef/src/openai/lib/_parsing/_embeddings.py)
+and [Node SDK](https://github.com/openai/openai-node/blob/2ac178e958fce3d4bc3ae7c5ebcb4cad7244bdf7/src/lib/embeddings.ts)
+request base64 by default and decode it locally; raw HTTP defaults to float, and
+PAG preserves an explicitly requested `encoding_format`.
+
+Like `upstream_verification_concurrency`, this setting has no environment or
+per-provider override. It follows the configured-buffer policy used by
+[Envoy](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/processing_mode.proto#enum-extensions-filters-http-ext-proc-v3-processingmode-bodysendmode).
+Remove the field before rolling back to a binary that does not recognize it.
 
 ### Runtime state files
 

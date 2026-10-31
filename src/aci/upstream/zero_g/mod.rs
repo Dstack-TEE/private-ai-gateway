@@ -17,8 +17,9 @@ mod protocol;
 use protocol::{seal_chat_request, verify_signature, ChatSignature, ResponseOpener};
 
 use super::{
-    forwarding_client, readiness_client, transport_error, PreparedUpstreamRequest, UpstreamBackend,
-    UpstreamBodyStream, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    forwarding_client, read_buffered_upstream_response, readiness_client, transport_error,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamBodyStream, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 
@@ -70,6 +71,7 @@ fn unverified() -> UpstreamError {
 }
 
 pub struct ZeroGProviderBackend {
+    max_buffered_response_bytes: usize,
     name: String,
     router_base: String,
     api_key: String,
@@ -85,6 +87,7 @@ impl ZeroGProviderBackend {
         read_timeout_seconds: u64,
     ) -> Result<Self, UpstreamError> {
         Ok(Self {
+            max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             name: ZERO_G_PROVIDER.to_string(),
             router_base: router_base.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
@@ -94,6 +97,11 @@ impl ZeroGProviderBackend {
                 SIGNATURE_FETCH_TIMEOUT_SECONDS,
             )?,
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.max_buffered_response_bytes = limit;
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -166,6 +174,7 @@ impl ZeroGProviderBackend {
             })
             .ok_or_else(|| rejected("response carried no valid ZG-Res-Key"))?;
         let check = SignatureCheck {
+            max_buffered_response_bytes: self.max_buffered_response_bytes,
             client: self.signature_client.clone(),
             url: format!("{api}/proxy/signature/{key}"),
             signer: provider.signing_address,
@@ -214,6 +223,7 @@ fn bound_provider(
 /// Fetches the §8 signature directly from the verified broker (the router does
 /// not serve it) and checks it against the verified signer.
 struct SignatureCheck {
+    max_buffered_response_bytes: usize,
     client: reqwest::Client,
     url: String,
     signer: String,
@@ -224,7 +234,10 @@ impl SignatureCheck {
     async fn verify(&self, expected_text: &str) -> Result<(), UpstreamError> {
         let signature = self.fetch().await.map_err(|reason| {
             tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_unavailable", %reason, "0G response signature could not be fetched");
-            UpstreamError::Transport("0G response signature unavailable".to_string())
+            match reason {
+                UpstreamError::ResponseTooLarge => reason,
+                _ => UpstreamError::Transport("0G response signature unavailable".to_string()),
+            }
         })?;
         verify_signature(&signature, expected_text, &self.signer).map_err(|reason| {
             tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_invalid", %reason, "0G response signature failed verification");
@@ -234,7 +247,7 @@ impl SignatureCheck {
 
     /// Retries 404 (the broker caches the signature at end of response), 5xx
     /// and transport errors, as 0G's client does.
-    async fn fetch(&self) -> Result<ChatSignature, String> {
+    async fn fetch(&self) -> Result<ChatSignature, UpstreamError> {
         let mut last_error = String::new();
         for attempt in 0..3 {
             if attempt > 0 {
@@ -242,10 +255,11 @@ impl SignatureCheck {
             }
             match self.client.get(&self.url).send().await {
                 Ok(response) if response.status().is_success() => {
-                    return response
-                        .json()
-                        .await
-                        .map_err(|e| e.without_url().to_string());
+                    let body =
+                        read_buffered_upstream_response(response, self.max_buffered_response_bytes)
+                            .await?;
+                    return serde_json::from_slice(&body)
+                        .map_err(|e| UpstreamError::Transport(e.to_string()));
                 }
                 Ok(response) => {
                     last_error = format!("signature endpoint returned {}", response.status());
@@ -256,7 +270,7 @@ impl SignatureCheck {
                 Err(err) => last_error = err.without_url().to_string(),
             }
         }
-        Err(last_error)
+        Err(UpstreamError::Transport(last_error))
     }
 }
 
@@ -284,7 +298,10 @@ impl UpstreamBackend for ZeroGProviderBackend {
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let (response, mut opener, check) = self.send(req, event).await?;
-        let frame = response.json().await.map_err(rejected)?;
+        let frame = serde_json::from_slice(
+            &read_buffered_upstream_response(response, self.max_buffered_response_bytes).await?,
+        )
+        .map_err(rejected)?;
         let body = opener.open_frame(frame)?;
         check.verify(&opener.signed_text(false)?).await?;
         Ok(UpstreamResponse {
