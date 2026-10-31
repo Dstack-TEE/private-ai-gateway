@@ -67,7 +67,7 @@ impl UpstreamBackend for StubUpstream {
         Some("http://stub-upstream")
     }
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        *self.received.lock().unwrap() = Some(req.body);
+        *self.received.lock().unwrap() = Some(req.body.to_vec());
         let mut headers = std::collections::HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {

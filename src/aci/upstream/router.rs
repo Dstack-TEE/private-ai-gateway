@@ -14,6 +14,7 @@ use super::{
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
 pub struct ModelRoute {
+    pub force_verbose_json: bool,
     pub public_model_id: String,
     pub upstream_model_id: String,
     pub upstream: Arc<dyn UpstreamBackend>,
@@ -58,6 +59,7 @@ impl ModelRoute {
             ));
         }
         Ok(Self {
+            force_verbose_json: false,
             public_model_id,
             upstream_model_id,
             upstream,
@@ -77,6 +79,11 @@ impl ModelRoute {
             }
             p
         });
+        self
+    }
+
+    pub fn with_force_verbose_json(mut self, enabled: bool) -> Self {
+        self.force_verbose_json = enabled;
         self
     }
 
@@ -178,7 +185,15 @@ impl UpstreamBackend for ModelRouterBackend {
             None => self.route_for(&body_model_id)?,
         };
         let mut request = req;
-        request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
+        request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?.into();
+        if request.form.is_some() && route.force_verbose_json {
+            let mut metadata: serde_json::Value = serde_json::from_slice(&request.body)
+                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
+            metadata["response_format"] = json!("verbose_json");
+            request.body = serde_json::to_vec(&metadata)
+                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?
+                .into();
+        }
         // The chat-shaped downstream surfaces (`/v1/chat/completions` and the
         // Anthropic `/v1/messages`) are converted to the upstream's chat
         // request format before they reach here, so both must target the
@@ -316,8 +331,8 @@ impl UpstreamBackend for ModelRouterBackend {
 mod tests {
     use super::*;
 
-    struct StubBackend {
-        name: &'static str,
+    pub(super) struct StubBackend {
+        pub(super) name: &'static str,
     }
 
     #[async_trait]
@@ -364,7 +379,7 @@ mod tests {
         {
             let prepared = router
                 .prepare(UpstreamRequest {
-                    body: body.clone(),
+                    body: body.clone().into(),
                     target_route_id: Some(id.into()),
                     ..Default::default()
                 })
@@ -409,7 +424,7 @@ mod tests {
                 let body = serde_json::to_vec(&json!({"model":"public", "stream":stream})).unwrap();
                 let prepared = router
                     .prepare(UpstreamRequest {
-                        body,
+                        body: body.into(),
                         path: Some(downstream.into()),
                         ..Default::default()
                     })
@@ -459,7 +474,7 @@ mod tests {
         let body = br#"{"model":"openai/gpt-oss-120b","messages":[]}"#.to_vec();
         let default_prepared = router
             .prepare(UpstreamRequest {
-                body: body.clone(),
+                body: body.clone().into(),
                 ..Default::default()
             })
             .unwrap();
@@ -471,7 +486,7 @@ mod tests {
 
         let targeted_prepared = router
             .prepare(UpstreamRequest {
-                body,
+                body: body.into(),
                 target_route_id: Some("secretai-107:openai/gpt-oss-120b".to_string()),
                 ..Default::default()
             })
@@ -504,7 +519,7 @@ mod tests {
         let body = br#"{"model":"openai/gpt-4o","messages":[]}"#.to_vec();
         router
             .prepare(UpstreamRequest {
-                body,
+                body: body.into(),
                 path: Some(surface.to_string()),
                 ..Default::default()
             })

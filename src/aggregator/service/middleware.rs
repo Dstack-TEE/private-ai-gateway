@@ -187,7 +187,7 @@ pub(super) struct BufferedCommit {
     pub route_id: String,
     pub path: &'static str,
     pub middleware_forwarded_body: Vec<u8>,
-    pub forwarded_body: Vec<u8>,
+    pub forwarded_body: bytes::Bytes,
 }
 
 /// The request/response context observed for one forwarded candidate,
@@ -276,7 +276,10 @@ impl AciService {
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+        let chat_id = if matches!(
+            endpoint_path,
+            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+        ) {
             None
         } else {
             extract_chat_id(&response.body)
@@ -446,7 +449,9 @@ impl AciService {
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
                 let prepared = match self.upstream.prepare(UpstreamRequest {
-                    body: candidate.body.clone(),
+                    body: candidate.body.clone().into(),
+                    form: req.audio_form.clone(),
+                    content_type: None,
                     headers: upstream_headers.clone(),
                     path: Some(candidate.path.to_string()),
                     target_route_id: Some(route_id.clone()),
@@ -467,6 +472,13 @@ impl AciService {
                         continue;
                     }
                 };
+
+                let mut prepared = prepared;
+                if let Err(err) = prepared.encode_audio().await {
+                    abandon(&mut failed_attempts, 502);
+                    upgrade_err(&mut aggregated_err, 2, err.into());
+                    continue;
+                }
 
                 // A route not known to be attested cannot serve an
                 // `aci_verified` request. Kept out of `failed_attempts`: this is a
@@ -792,8 +804,11 @@ impl AciService {
                 let status = upstream_response.status_code;
                 let response_model = accepted_response_model(status, &upstream_response.body)
                     .or_else(|| {
-                        (endpoint_path == super::IMAGES_GENERATIONS_PATH)
-                            .then(|| prepared.model_id.clone())
+                        (matches!(
+                            endpoint_path,
+                            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+                        ))
+                        .then(|| prepared.model_id.clone())
                     });
                 self.metrics.record_upstream_response(
                     endpoint_path,

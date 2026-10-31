@@ -319,6 +319,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
+            audio_form: None,
             context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: CHAT_REQUEST,

@@ -174,6 +174,15 @@ pub fn compute_image_cost(
     images.checked_add(tokens)?.to_f64()
 }
 
+/// Audio prices use the same bounded, unsigned decimal grammar as image prices.
+pub fn compute_audio_cost(pricing: &Value, audio: &super::audio::AudioUsage) -> Option<f64> {
+    let unit = pricing
+        .get("audioCostPerSecond")
+        .map(image_rate)
+        .unwrap_or(Some(Decimal::ZERO))?;
+    Decimal::from(audio.seconds).checked_mul(unit)?.to_f64()
+}
+
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
 /// integer-valued cost has no decimal point, otherwise the shortest round-trip
 /// form. The numeric value is identical either way.

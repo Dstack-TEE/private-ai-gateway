@@ -497,7 +497,9 @@ impl UpstreamConfigManager {
                     return Vec::new();
                 };
                 let Ok(prepared) = state.backend.prepare(UpstreamRequest {
-                    body,
+                    form: None,
+                    content_type: None,
+                    body: body.into(),
                     path: None,
                     target_route_id: None,
                     headers: HashMap::new(),

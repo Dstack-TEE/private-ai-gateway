@@ -158,8 +158,13 @@ def merged_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def load_providers(path: Path, selected: Iterable[str] | None = None) -> list[Provider]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    providers = [Provider.from_json(item) for item in data]
     selected_set = set(selected or [])
+    # Pending providers are opt-in probes, not default launch coverage.
+    providers = [
+        Provider.from_json(item)
+        for item in data
+        if selected_set or not item.get("pending_verification")
+    ]
     if selected_set:
         providers = [
             provider

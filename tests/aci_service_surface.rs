@@ -19,7 +19,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
@@ -399,13 +399,13 @@ fn harness_with(
     let upstream_calls = upstream.calls();
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
+        supported_multipart_constraint_endpoints: vec!["/v1/audio/transcriptions".into()],
         supported_e2ee_versions: if enable_e2ee {
             vec!["2".to_string()]
         } else {
             vec![]
         },
         serving: "aggregator".to_string(),
-        ..Default::default()
     };
     // Configured TLS SPKI for the keyset, instead of the test provider default.
     cfg.tls_public_keys = Some(vec![TlsSpki {
@@ -449,6 +449,116 @@ fn harness_for_sessions(
         .current_verification_requests(None, None, true)
         .remove(0);
     (harness, request)
+}
+
+#[tokio::test]
+async fn media_missing_authorization_refuses_streamed_uploads_before_consult() {
+    use private_ai_gateway::middleware::{Middleware, PrefixHashKey};
+    let consulted = Arc::new(AtomicUsize::new(0));
+    let calls = consulted.clone();
+    let control = Router::new().fallback(move || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    for middleware in [false, true] {
+        let mut h = harness();
+        let mw = middleware.then(|| {
+            Arc::new(
+                Middleware::new(
+                    PrefixHashKey::new([7; 32]),
+                    &serde_json::from_value(
+                        serde_json::json!({"control_url":format!("http://{address}")}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+        });
+        h.requester.app = if let Some(middleware) = mw {
+            private_ai_gateway::http::build_router_with_admin_and_middleware(
+                h.service.clone(),
+                common::session_config(serde_json::json!([])),
+                None,
+                middleware,
+            )
+        } else {
+            build_router(h.service.clone())
+        };
+        for path in ["/v1/images/generations", "/v1/audio/transcriptions"] {
+            assert_media_missing_authorization_upload_refusal(&h, path).await;
+        }
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_eq!(consulted.load(Ordering::SeqCst), 0);
+}
+
+async fn assert_media_missing_authorization_upload_refusal(harness: &Harness, path: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            harness.requester.app.clone(),
+        ),
+    );
+    let mut body = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
+    body.extend(vec![b'x'; 96 * 1024]);
+    body.extend_from_slice(b"\r\n--upload--\r\n");
+    for (chunked, expect) in [(false, false), (true, false), (false, true)] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let framing = if chunked {
+                "Transfer-Encoding: chunked\r\n".to_string()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=upload\r\n{framing}Connection: close\r\n{expect_header}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                for chunk in body.chunks(1024) {
+                    if chunked {
+                        socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    }
+                    socket.write_all(chunk).await.expect("401 must not reset an in-progress upload");
+                    if chunked {
+                        socket.write_all(b"\r\n").await.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                if chunked {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("401 must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("www-authenticate: bearer"), "{headers}");
+        assert!(
+            headers.contains("content-type: application/json"),
+            "{headers}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap()["error"]["type"],
+            "unauthorized"
+        );
+    }
+    assert!(harness.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }
 
 fn harness_with_streaming_upstream_error() -> Harness {
@@ -1875,7 +1985,7 @@ async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/completions"));
-        assert_eq!(calls[0].body, request);
+        assert_eq!(calls[0].body.as_ref(), request);
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
@@ -1979,7 +2089,7 @@ async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_rece
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/systemone"));
-        assert_eq!(calls[0].body, request);
+        assert_eq!(calls[0].body.as_ref(), request);
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
@@ -3838,7 +3948,11 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     assert_ne!(h.service.workload_keyset_digest(), original_digest);
     let resp = h
         .requester
-        .post("/v1/images/generations", IMAGE_REQUEST, &[])
+        .post(
+            "/v1/images/generations",
+            IMAGE_REQUEST,
+            &[("authorization", "Bearer tenant-key")],
+        )
         .await;
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
@@ -3878,13 +3992,16 @@ async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
     );
     let fetched = h
         .requester
-        .get(&format!("/v1/aci/receipts/{receipt_id}"), &[])
+        .get(
+            &format!("/v1/aci/receipts/{receipt_id}"),
+            &[("authorization", "Bearer tenant-key")],
+        )
         .await;
     assert_eq!(fetched.status, StatusCode::OK);
 }
 
-#[tokio::test]
-async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
+#[tokio::test(start_paused = true)]
+async fn images_reject_url_stream_unknown_and_e2ee_without_parsing_upload() {
     let h = harness();
     for patch in [
         r#""n":0"#,
@@ -3896,7 +4013,11 @@ async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
         let body = format!("{{\"model\":\"aci-model\",\"prompt\":\"hi\",{patch}}}");
         let resp = h
             .requester
-            .post("/v1/images/generations", body.as_bytes(), &[])
+            .post(
+                "/v1/images/generations",
+                body.as_bytes(),
+                &[("authorization", "Bearer tenant-key")],
+            )
             .await;
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
         if patch.contains("seed") {
@@ -3913,12 +4034,13 @@ async fn images_reject_url_stream_unknown_and_e2ee_before_reading_body() {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/images/generations")
+            .header("authorization", "Bearer tenant-key")
             .header(name, "x")
             .body(Body::from_stream(stream::pending::<
                 Result<Bytes, std::io::Error>,
             >()))
             .unwrap();
-        let resp = tokio::time::timeout(Duration::from_secs(1), h.requester.call(request))
+        let resp = tokio::time::timeout(Duration::from_secs(2), h.requester.call(request))
             .await
             .unwrap();
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
@@ -3940,7 +4062,7 @@ async fn images_forward_requested_maximum_and_accept_fewer_without_fill() {
             .post(
                 "/v1/images/generations",
                 br#"{"model":"aci-model","prompt":"hello","n":2}"#,
-                &[],
+                &[("authorization", "Bearer tenant-key")],
             )
             .await;
         assert_eq!(resp.status, StatusCode::OK);
@@ -3981,7 +4103,7 @@ async fn images_malformed_success_is_502_and_receipt_hashes_sanitized_error() {
             .post(
                 "/v1/images/generations",
                 &serde_json::to_vec(&request).unwrap(),
-                &[],
+                &[("authorization", "Bearer tenant-key")],
             )
             .await;
         assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
@@ -4008,7 +4130,7 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
     ));
     let mut uploads = Vec::new();
     let mut started = Vec::new();
-    for _ in 0..private_ai_gateway::middleware::images::MAX_IMAGE_IN_FLIGHT {
+    for _ in 0..private_ai_gateway::middleware::admission::MAX_IN_FLIGHT {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut tx = Some(tx);
         let upload = Body::from_stream(stream::poll_fn(move |_| {
@@ -4020,6 +4142,7 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
         let request = Request::builder()
             .method("POST")
             .uri("/v1/images/generations")
+            .header("authorization", "Bearer tenant-key")
             .header("content-type", "application/json")
             .header("content-length", "1000000")
             .body(upload)
@@ -4036,8 +4159,11 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
     }
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        h.requester
-            .post("/v1/images/generations", IMAGE_REQUEST, &[]),
+        h.requester.post(
+            "/v1/images/generations",
+            IMAGE_REQUEST,
+            &[("authorization", "Bearer tenant-key")],
+        ),
     )
     .await
     .unwrap();
@@ -4046,5 +4172,410 @@ async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
         assert!(upload.await.unwrap_err().is_cancelled());
     }
     assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+fn transcription_request(extra: &str) -> Vec<u8> {
+    format!("--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n{extra}--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private.wav\"\r\nContent-Type: audio/wav\r\n\r\nspoken audio\r\n--upload--\r\n").into_bytes()
+}
+
+fn transcription_http(body: Vec<u8>) -> axum::http::request::Builder {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("authorization", "Bearer tenant-key")
+        .header("content-type", "multipart/form-data; boundary=upload")
+        .header("content-length", body.len())
+}
+
+#[tokio::test]
+async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_id() {
+    let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":2.965,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
+    let raw = transcription_request("");
+    let request = transcription_http(raw.clone())
+        .header("x-aci-provider", r#"{"order":["near"]}"#)
+        .body(Body::from(raw.clone()))
+        .unwrap();
+    let resp = h.requester.call(request).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":3}})
+    );
+    let forwarded = {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/transcriptions"));
+        assert!(!calls[0].headers.contains_key("x-aci-provider"));
+        calls[0].clone()
+    };
+    let (params, form) = private_ai_gateway::middleware::audio::parse(
+        forwarded.body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(params["model"], "aci-model");
+    assert_eq!(params["response_format"], "json");
+    assert_eq!(form.file, "spoken audio");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/audio/transcriptions");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(&forwarded.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn audio_malformed_duration_withholds_transcript_and_keeps_forwarded_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}"#,
+    ));
+    let raw = transcription_request("");
+    let resp = h
+        .requester
+        .call(
+            transcription_http(raw.clone())
+                .body(Body::from(raw))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&resp.body).contains("private transcript"));
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert!(!payload_event(&receipt_payload(&receipt), "request.forwarded").is_null());
+}
+
+#[tokio::test(start_paused = true)]
+async fn audio_rejects_bad_carriers_without_parsing_upload() {
+    let h = harness();
+    for request in [
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "null"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "{"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", r#"{"aci_unknown":true}"#),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", r#"{"aci_session_ids":[]}"#),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "{}")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "x".repeat(8193)),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header(
+                "x-aci-provider",
+                axum::http::HeaderValue::from_bytes(b"{\"order\":[\"n\xc3\xa9ar\"]}").unwrap(),
+            ),
+    ] {
+        let resp = tokio::time::timeout(
+            Duration::from_secs(2),
+            h.requester.call(
+                request
+                    .header("authorization", "Bearer tenant-key")
+                    .body(Body::from_stream(stream::pending::<
+                        Result<Bytes, std::io::Error>,
+                    >()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_header_constraint_refusal_has_required_receipt_without_forwarding() {
+    let h = harness_serving_optional(Arc::new(AlwaysFailed));
+    let raw = transcription_request("");
+    let response = h
+        .requester
+        .call(
+            transcription_http(raw.clone())
+                .header("x-aci-provider", r#"{"aci_verified":true}"#)
+                .body(Body::from(raw.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_type(&response), "upstream_verification_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    let verified = payload_event(&payload, "upstream.verified");
+    assert_eq!(verified["required"], true);
+    assert_eq!(verified["result"], "failed");
+    assert!(!payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "request.forwarded"));
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+}
+
+#[tokio::test]
+async fn audio_header_refusals_complete_over_tcp_without_reset_or_continue() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let h = harness();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            h.requester.app.clone(),
+        ),
+    );
+    for (carrier, length, expect, status) in [
+        ("x-e2ee-unknown: 1\r\n", 4 * 1024 * 1024, false, 400),
+        ("x-e2ee-unknown: 1\r\n", 25 * 1024 * 1024, true, 400),
+        ("", 33 * 1024 * 1024, true, 413),
+    ] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST /v1/audio/transcriptions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tenant-key\r\nContent-Length: {length}\r\nConnection: close\r\n{expect_header}{carrier}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                let chunk = [b'x'; 16 * 1024];
+                let mut remaining = length;
+                while remaining > 0 {
+                    let count = remaining.min(chunk.len());
+                    socket.write_all(&chunk[..count]).await.expect("refusal must not reset an in-progress upload");
+                    remaining -= count;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("refusal must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        assert!(!response.contains("100 Continue"));
+        assert!(response
+            .to_ascii_lowercase()
+            .contains("connection: close\r\n"));
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(serde_json::from_str::<Value>(body).unwrap()["error"].is_object());
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn audio_invalid_parameters_reject_before_forwarding() {
+    let h = harness();
+    for (name, value, code) in [
+        ("provider", "true", "unknown_parameter"),
+        ("response_format", "srt", "invalid_parameter"),
+    ] {
+        let raw = transcription_request(&format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+        let resp = h
+            .requester
+            .call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let error = &json_body(&resp)["error"];
+        assert_eq!(error["code"], code);
+        assert_eq!(error["type"], "invalid_request_error");
+        assert_eq!(error["param"], name);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eight_mib() {
+    let fake_upstream = Router::new().route(
+        "/v1/audio/transcriptions",
+        axum::routing::post(move |headers: HeaderMap, body: Body| async move {
+            let bytes = to_bytes(body, 4096).await.unwrap();
+            let (params, file) = private_ai_gateway::middleware::audio::parse(
+                bytes,
+                headers["content-type"].to_str().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(params["model"], "aci-model");
+            assert_eq!(file.file, "spoken audio");
+            let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+            axum::http::Response::builder()
+                .status(400)
+                .body(Body::from_stream(stream::iter(
+                    (0..9).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+                )))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+    let limit = 2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
+    let mut config = AciServiceConfig::for_test();
+    config.max_buffered_response_bytes = limit;
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(
+                OpenAICompatibleBackend::new(format!("http://{address}"))
+                    .unwrap()
+                    .with_max_buffered_response_bytes(limit),
+            ),
+            Arc::new(InMemoryReceiptStore::default()),
+            config,
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let requester = Requester {
+        app: build_router(service.clone()),
+    };
+    let raw = transcription_request("");
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        requester.call(
+            transcription_http(raw.clone())
+                .body(Body::from(raw))
+                .unwrap(),
+        ),
+    )
+    .await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let response = result.expect("reject oversized audio response before waiting for its body");
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    assert!(metrics
+        .contains("private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"));
+}
+
+#[tokio::test]
+async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"hello","duration":1}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..32 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"-")) }).chain(
+                stream::poll_fn(move |_| {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                    std::task::Poll::Pending
+                }),
+            ),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            // A declared full upload must not reserve that much capacity.
+            .header(
+                "content-length",
+                private_ai_gateway::middleware::audio::MAX_BODY_BYTES,
+            )
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each upload has delivered one byte and stalled.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let raw = transcription_request("");
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester.call(
+            transcription_http(raw.clone())
+                .header("authorization", "Bearer requester")
+                .body(Body::from(raw))
+                .unwrap(),
+        ),
+    )
+    .await;
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let response = response.expect("stalled uploads must not consume per-connection slots");
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(json_body(&response)["text"], "hello");
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 }

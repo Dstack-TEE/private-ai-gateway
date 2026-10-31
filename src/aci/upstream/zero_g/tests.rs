@@ -351,7 +351,9 @@ impl Fixture {
     fn request(&self, body: Value) -> PreparedUpstreamRequest {
         PreparedUpstreamRequest {
             request: UpstreamRequest {
-                body: serde_json::to_vec(&body).unwrap(),
+                form: None,
+                content_type: None,
+                body: serde_json::to_vec(&body).unwrap().into(),
                 // Caller-supplied 0G controls must never reach the router.
                 headers: HashMap::from([(TRUST_MODE_HEADER.to_string(), "standard".to_string())]),
                 path: Some(CHAT_COMPLETIONS_PATH.into()),

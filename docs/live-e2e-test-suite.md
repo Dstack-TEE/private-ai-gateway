@@ -65,6 +65,27 @@ For each entry with the `chat` capability, the case:
    requires the entry's `binding` type, checks the evidence digest, and
    requires `tee_attested` to be asserted.
 
+### Audio transcription case
+
+`audio_transcriptions` provider capability runs
+`cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
+committed 94,958-byte synthetic spoken WAV in both `json` and `verbose_json`
+formats. It checks required field types, recognizable fixture
+words, positive integer billable seconds, response allowlists, null chat id,
+received/returned body hashes, the serving attested session, and offline
+`pap audit`. Artifacts preserve the exact raw multipart upload for audit.
+The provider list includes NEAR `openai/whisper-large-v3` and a Privatemode
+`whisper-large-v3` entry explicitly marked pending pinned-proxy verification.
+Pending entries are skipped by default; select the provider explicitly for a
+diagnostic probe. The latter is intentionally blocked by the gateway's encrypted-path allowlist;
+it is not a launch-ready provider. No live provider call is part of unit tests.
+
+Before launch, test `json` duration and `verbose_json` per provider.
+NEAR's native JSON contains only `text`, so the gateway automatically requests
+verbose output internally for NEAR audio while preserving the caller's format.
+Run on an authorized test CVM, then delete the CVM. Do not enable production
+routes until client fail-closed releases and control-plane audio ingestion ship.
+
 ### Image generation case
 
 For each entry with the `images` capability, `cases/images.py` sends one
@@ -265,7 +286,7 @@ Optional fields are:
 
 | Field | Meaning |
 | --- | --- |
-| `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
+| `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, `audio_transcriptions`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
 | `requires` | Additional environment variables preflight must find. |
 | `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |

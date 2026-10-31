@@ -105,7 +105,7 @@ impl UpstreamBackend for StubUpstream {
         Some("http://stub-upstream")
     }
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        *self.received.lock().unwrap() = Some(req.body);
+        *self.received.lock().unwrap() = Some(req.body.to_vec());
         Ok(UpstreamResponse {
             status_code: 200,
             body: self.body.clone(),

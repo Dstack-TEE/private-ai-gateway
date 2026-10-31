@@ -130,7 +130,9 @@ async fn run() -> Result<(), String> {
     }))
     .map_err(|e| format!("serialize body: {e}"))?;
     let request = UpstreamRequest {
-        body,
+        form: None,
+        content_type: None,
+        body: body.into(),
         headers: HashMap::new(),
         path: Some("/v1/embeddings".to_string()),
         target_route_id: None,

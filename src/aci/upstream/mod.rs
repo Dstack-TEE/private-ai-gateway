@@ -60,7 +60,11 @@ pub const DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamRequest {
-    pub body: Vec<u8>,
+    /// Shared file bytes, encoded once after route selection and model rewrite.
+    pub form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
+    /// Matches `body`; absent for JSON requests.
+    pub content_type: Option<String>,
+    pub body: Bytes,
     pub headers: HashMap<String, String>,
     pub path: Option<String>,
     pub target_route_id: Option<String>,
@@ -79,6 +83,20 @@ pub struct PreparedUpstreamRequest {
     /// pinned ACI session. Unconstrained requests may use any classification;
     /// their receipts still record the verification outcome.
     pub is_tee: Option<bool>,
+}
+
+impl PreparedUpstreamRequest {
+    pub(crate) async fn encode_audio(&mut self) -> Result<(), UpstreamError> {
+        if let Some(form) = self.request.form.take() {
+            let params = serde_json::from_slice(&self.request.body).map_err(|_| {
+                UpstreamError::InvalidRequest("invalid transcription metadata".into())
+            })?;
+            let (body, content_type) = form.encode(&params).await?;
+            self.request.body = body;
+            self.request.content_type = Some(content_type);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -114,7 +132,7 @@ pub enum UpstreamError {
     Transport(String),
     /// The buffered HTTP body or decompressed Chutes response exceeded the
     /// gateway's size limit. Reported to the client as a 502.
-    #[error("buffered upstream response exceeds configured size limit")]
+    #[error("buffered upstream response exceeds the endpoint size limit")]
     ResponseTooLarge,
     /// A deadline the gateway's own HTTP client enforced (connect or read
     /// timeout) expired before the upstream answered. Kept apart from

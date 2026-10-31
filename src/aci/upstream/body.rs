@@ -8,6 +8,19 @@ use super::{transport_error, UpstreamBodyStream, UpstreamError};
 /// Chutes responses. Streaming responses are not collected under this limit.
 pub const MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
+pub(crate) async fn read_response_for_path(
+    response: reqwest::Response,
+    path: Option<&str>,
+    limit: usize,
+) -> Result<Vec<u8>, UpstreamError> {
+    let limit = if path == Some(crate::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH) {
+        crate::middleware::audio::MAX_RESPONSE_BYTES
+    } else {
+        limit
+    };
+    read_buffered_upstream_response(response, limit).await
+}
+
 pub(crate) async fn read_buffered_upstream_response(
     response: reqwest::Response,
     limit: usize,

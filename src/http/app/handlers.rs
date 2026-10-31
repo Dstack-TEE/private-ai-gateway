@@ -21,9 +21,9 @@ use crate::aci::types::{
     AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
 use crate::aggregator::service::{
-    E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH,
-    SYSTEMONE_PATH,
+    E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, AUDIO_TRANSCRIPTIONS_PATH,
+    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH,
+    MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
@@ -37,6 +37,7 @@ use super::error_responses::{
     internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
     unsupported_e2ee_response, upstream_config_error_response,
 };
+use super::rejected_body::discard_before_reply;
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
     request_host_domain,
@@ -504,19 +505,75 @@ pub(super) async fn images_generations(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // Refuse before reading any body, including incomplete E2EE headers.
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+}
+
+pub(super) async fn audio_transcriptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
+}
+
+async fn buffered_multimodal_endpoint(
+    state: AppState,
+    headers: HeaderMap,
+    body: Body,
+    endpoint: Endpoint,
+) -> Response {
+    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+        let mut response = error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "inference bearer token required",
+        );
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer"),
+        );
+        return discard_before_reply(&headers, body, super::MAX_REQUEST_BODY_BYTES, response).await;
+    }
+    // Decide before parsing or admission. Bounded discard preserves the JSON refusal.
     if has_e2ee_headers(&headers)
         || headers
             .keys()
             .any(|key| key.as_str().starts_with("x-e2ee-"))
     {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "e2ee_unsupported_endpoint",
-            "E2EE is not supported on /v1/images/generations",
-        );
+        return discard_before_reply(
+            &headers,
+            body,
+            super::MAX_REQUEST_BODY_BYTES,
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "e2ee_unsupported_endpoint",
+                format!("E2EE is not supported on {}", endpoint.path()),
+            ),
+        )
+        .await;
     }
-    openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
+    openai_completion_endpoint(state, headers, body, endpoint.path(), true).await
+}
+
+// The carrier is consumed here. It is routing policy, never an upstream header.
+fn multipart_provider(headers: &HeaderMap) -> Result<Option<Value>, String> {
+    use crate::aci::types::{MAX_MULTIPART_PROVIDER_BYTES, MULTIPART_PROVIDER_HEADER};
+    let mut values = headers.get_all(MULTIPART_PROVIDER_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() || value.as_bytes().len() > MAX_MULTIPART_PROVIDER_BYTES {
+        return Err("duplicate or oversized X-ACI-Provider".into());
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| "X-ACI-Provider must contain only ASCII bytes")?;
+    let provider: Value = serde_json::from_str(value).map_err(|_| "invalid X-ACI-Provider JSON")?;
+    if !provider.is_object() {
+        return Err("X-ACI-Provider must be an object".into());
+    }
+    aci_constraint(&json!({"provider":provider}))?;
+    Ok(Some(provider))
 }
 
 #[derive(Debug, Default)]
@@ -637,6 +694,10 @@ fn body_too_large_response(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    headers.insert(
+        axum::http::header::CONNECTION,
+        HeaderValue::from_static("close"),
+    );
     (StatusCode::PAYLOAD_TOO_LARGE, headers, body).into_response()
 }
 
@@ -656,38 +717,83 @@ pub(super) async fn openai_completion_endpoint(
     } else {
         Surface::Openai
     };
-    // Reject on a declared length before reading anything; this is the common
-    // case (a client that sets content-length) and avoids buffering the body.
-    if let Some(declared) =
-        header_str(&headers, "content-length").and_then(|value| value.parse::<usize>().ok())
-    {
-        if declared > super::MAX_REQUEST_BODY_BYTES {
-            return body_too_large_response(surface, &request_id);
-        }
-    }
-    let body = match axum::body::to_bytes(body, super::MAX_REQUEST_BODY_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            // `to_bytes` fails either because the body ran past the limit or
-            // because the transport broke mid-read. Only the former is a 413;
-            // the response is written without draining the rest of the upload,
-            // so a client still sending may still see a reset after the 413
-            // headers — the content-length check above catches the usual case.
-            // The limit error can sit at any depth of the wrapper chain, so
-            // walk the whole chain rather than trusting one `source()` level.
-            let mut source = std::error::Error::source(&err);
-            while let Some(current) = source {
-                if current.is::<http_body_util::LengthLimitError>() {
-                    return body_too_large_response(surface, &request_id);
-                }
-                source = current.source();
-            }
-            return error_response(
+    let is_audio = endpoint_path == AUDIO_TRANSCRIPTIONS_PATH;
+    if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+        return discard_before_reply(
+            &headers,
+            body,
+            super::MAX_REQUEST_BODY_BYTES,
+            error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                "could not read request body",
-            );
+                "X-ACI-Provider is only supported on multipart transcription requests",
+            ),
+        )
+        .await;
+    }
+    let provider_header = if is_audio {
+        match multipart_provider(&headers) {
+            Ok(value) => value,
+            Err(message) => {
+                return discard_before_reply(
+                    &headers,
+                    body,
+                    crate::middleware::audio::MAX_BODY_BYTES,
+                    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
+                )
+                .await;
+            }
         }
+    } else {
+        None
+    };
+    let mut upload_permit = None;
+    let body = if is_audio {
+        match crate::middleware::audio::read_upload(&headers, body).await {
+            Ok((bytes, permit)) => {
+                upload_permit = Some(permit);
+                bytes
+            }
+            Err(err) => {
+                state.service.record_audio_failure("upload_rejection");
+                return err.into_response();
+            }
+        }
+    } else {
+        // Reject on a declared length before reading anything; this is the common
+        // case (a client that sets content-length) and avoids buffering the body.
+        if let Some(declared) =
+            header_str(&headers, "content-length").and_then(|value| value.parse::<usize>().ok())
+        {
+            if declared > super::MAX_REQUEST_BODY_BYTES {
+                return body_too_large_response(surface, &request_id);
+            }
+        }
+        let body = match axum::body::to_bytes(body, super::MAX_REQUEST_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                // `to_bytes` fails either because the body ran past the limit or
+                // because the transport broke mid-read. Only the former is a 413;
+                // the response is written without draining the rest of the upload,
+                // so a client still sending may still see a reset after the 413
+                // headers — the content-length check above catches the usual case.
+                // The limit error can sit at any depth of the wrapper chain, so
+                // walk the whole chain rather than trusting one `source()` level.
+                let mut source = std::error::Error::source(&err);
+                while let Some(current) = source {
+                    if current.is::<http_body_util::LengthLimitError>() {
+                        return body_too_large_response(surface, &request_id);
+                    }
+                    source = current.source();
+                }
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "could not read request body",
+                );
+            }
+        };
+        body
     };
     let has_e2ee = has_e2ee_headers(&headers);
     // `supported_e2ee_versions` advertises client-facing E2EE extensions (ACI
@@ -722,25 +828,42 @@ pub(super) async fn openai_completion_endpoint(
             body.as_ref(),
             endpoint_path,
         ) {
-            Ok(prepared) => (prepared.decrypted_body, Some(prepared.context)),
+            Ok(prepared) => (Bytes::from(prepared.decrypted_body), Some(prepared.context)),
             Err(err) => return e2ee_error_response(err),
         }
     } else {
-        (body.to_vec(), None)
+        (body, None)
     };
 
     // Surface obviously-broken bodies early; we still hash exactly
     // the bytes visible after TLS / E2EE termination.
-    let parsed = match serde_json::from_slice::<Value>(&service_body) {
-        Ok(value) => value,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                format!("invalid json: {e}"),
-            );
+    let (mut parsed, audio_form) = if is_audio {
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        match crate::middleware::audio::parse(service_body.clone(), content_type).await {
+            Ok((params, form)) => (params, Some(form)),
+            Err(err) => {
+                state.service.record_audio_failure("upload_rejection");
+                return err.into_response();
+            }
+        }
+    } else {
+        match serde_json::from_slice::<Value>(&service_body) {
+            Ok(value) => (value, None),
+            Err(_) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid JSON request body",
+                )
+            }
         }
     };
+    if let Some(provider) = provider_header {
+        parsed["provider"] = provider;
+    }
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
     if headers.contains_key("x-upstream-verification") {
@@ -784,17 +907,18 @@ pub(super) async fn openai_completion_endpoint(
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    let endpoint = match endpoint_path {
+        COMPLETIONS_PATH => Endpoint::Complete,
+        EMBEDDINGS_PATH => Endpoint::Embed,
+        MESSAGES_PATH => Endpoint::Messages,
+        RESPONSES_PATH => Endpoint::CreateModelResponse,
+        SYSTEMONE_PATH => Endpoint::SystemOne,
+        AUDIO_TRANSCRIPTIONS_PATH => Endpoint::AudioTranscriptions,
+        IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
+        CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
+        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
+    };
     if let Some(middleware) = state.middleware.clone() {
-        let endpoint = match endpoint_path {
-            COMPLETIONS_PATH => Endpoint::Complete,
-            EMBEDDINGS_PATH => Endpoint::Embed,
-            MESSAGES_PATH => Endpoint::Messages,
-            RESPONSES_PATH => Endpoint::CreateModelResponse,
-            SYSTEMONE_PATH => Endpoint::SystemOne,
-            IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
-            CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
-            _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
-        };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
         // TEE-only host: force attested serving. The `tee_only` flag is carried
         // to the control plane so a non-TEE model is a 404 before any forward,
@@ -810,6 +934,8 @@ pub(super) async fn openai_completion_endpoint(
         };
         let aci_required = aci.required || tee_only;
         let input = CompletionInput {
+            audio_form,
+            upload_permit,
             endpoint,
             endpoint_path,
             surface,
@@ -838,7 +964,7 @@ pub(super) async fn openai_completion_endpoint(
     } else {
         direct_params
     };
-    let forwarded_body = if normalized || aci_stripped || is_images {
+    let forwarded_body = if normalized || aci_stripped || is_audio || is_images {
         match serde_json::to_vec(&direct_params) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
@@ -856,18 +982,21 @@ pub(super) async fn openai_completion_endpoint(
 
     // Uploads and invalid requests do not reserve image generation capacity.
     // Middleware admission happens after its control-plane consult instead.
-    let permit = if is_images {
-        match crate::middleware::images::try_acquire() {
-            Ok(permit) => Some(permit),
-            Err(_) => return crate::middleware::images::capacity_response(),
+    let permit = match crate::middleware::admission::try_acquire(endpoint) {
+        Ok(permit) => permit,
+        Err(_) => {
+            if is_audio {
+                state.service.record_audio_failure("admission_rejection");
+            }
+            return crate::middleware::admission::capacity_response();
         }
-    } else {
-        None
     };
 
+    drop(upload_permit);
     let response = forward_to_backend(
         state.service,
         BackendForwardInput {
+            audio_form,
             context,
             endpoint_path,
             received_body: service_body,
@@ -880,7 +1009,7 @@ pub(super) async fn openai_completion_endpoint(
         },
     )
     .await;
-    crate::middleware::images::hold_permit(response, permit)
+    crate::middleware::admission::hold_permit(response, permit)
 }
 pub(super) async fn completions(
     State(state): State<AppState>,

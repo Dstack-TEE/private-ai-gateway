@@ -66,7 +66,8 @@ complete upstream bodies; this setting bounds each collected body and Chutes'
 decompressed output. A body above the configured value returns a sanitized
 `502`. Initial buffer reservation remains capped at 1 MiB. Concurrent requests,
 parsing, decryption, and canonicalization can retain additional copies, so this
-is not a total process-memory budget.
+is not a total process-memory budget. Audio transcriptions retain their separate
+8 MiB response cap regardless of this setting.
 
 The default remains 64 MiB. Very large float-format embedding batches can exceed
 it: raising the limit permits those responses at a higher per-request memory
@@ -475,3 +476,35 @@ configuration that contains it and keeps its previous configuration. The gateway
 also saves the configuration it receives, and an older gateway cannot start from
 a saved configuration that contains the field. Before rolling a gateway back,
 remove the field and wait until every gateway has picked up the change.
+
+### Transcription routing and launch gate
+
+Middleware audio candidates must explicitly list `/v1/audio/transcriptions` in
+`supportedEndpoints`. Runtime `path: "/v1/audio/transcriptions"` is
+rejected for Chutes, 0G Private Computer, and
+Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
+blocked until multipart encryption/decryption is verified in the exact pinned
+v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`).
+Public source refs did not establish that support; do not add an unencrypted
+fallback. NEAR's launch model is `openai/whisper-large-v3`. Its native `json`
+response contains only `text`, without the duration needed for billing. The
+gateway therefore always requests `verbose_json` internally for NEAR audio
+and preserves the caller's requested output format. Other providers receive
+the requested format. No word timestamps are added unless requested.
+
+Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
+402 MiB upload byte budget (60-second read deadline), independent 16 inference
+slots, and 8 MiB upstream response. Upload bytes are charged chunk by chunk
+until handoff or drop; connections with no buffered data and declared
+`Content-Length` do not reserve upload capacity.
+Header-based audio/image refusals discard unread bytes without buffering up to
+the endpoint body limit, with a separate 32-connection cap, 5-second total
+deadline and 1-second read-idle deadline. A full discard cap closes immediately;
+this phase holds neither upload bytes nor inference permits.
+Requests with `Expect: 100-continue` receive the final header refusal immediately
+and close without reading the body or sending `100 Continue`. Upload size
+failures and read timeouts also close the connection; byte-budget exhaustion
+returns `429 rate_limit_exceeded` with `Retry-After: 1`.
+`private_ai_gateway_audio_failures_total{reason}` uses fixed
+reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
+`response_size_failure`, without audio, prompts, or filenames.

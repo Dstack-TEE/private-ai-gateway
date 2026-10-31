@@ -32,6 +32,7 @@ pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const RESPONSES_PATH: &str = "/v1/responses";
+pub use crate::aci::types::AUDIO_TRANSCRIPTIONS_PATH;
 pub const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
@@ -244,6 +245,10 @@ impl AciService {
 
     pub fn upstream(&self) -> &dyn UpstreamBackend {
         self.upstream.as_ref()
+    }
+
+    pub fn record_audio_failure(&self, reason: &str) {
+        self.metrics.record_audio_failure(reason);
     }
 
     pub fn metrics(&self) -> Result<MetricsSnapshot, ServiceError> {
