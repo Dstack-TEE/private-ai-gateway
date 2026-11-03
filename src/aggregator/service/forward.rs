@@ -296,7 +296,11 @@ impl AciService {
         };
         let selected = (*admission).select(upstream_response.served_instance_id.as_deref())?;
         let response_model =
-            accepted_response_model(upstream_response.status_code, &upstream_response.body);
+            accepted_response_model(upstream_response.status_code, &upstream_response.body)
+                .or_else(|| {
+                    (endpoint_path == super::IMAGES_GENERATIONS_PATH)
+                        .then(|| prepared.model_id.clone())
+                });
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -313,7 +317,24 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            (upstream_response.status_code, upstream_response.body)
+            if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+                use crate::middleware::{errors, images};
+                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
+                match images::response_body(&upstream_response.body, &forwarded_body) {
+                    Some(body) => (upstream_response.status_code, body),
+                    None => (
+                        502,
+                        errors::envelope_bytes(
+                            errors::Surface::Openai,
+                            errors::error_type(errors::Surface::Openai, 502),
+                            "upstream returned a malformed success body",
+                            None,
+                        ),
+                    ),
+                }
+            } else {
+                (upstream_response.status_code, upstream_response.body)
+            }
         } else {
             // The envelope is JSON; don't let the client inherit a non-JSON
             // upstream content-type (some backends 5xx with text/*).

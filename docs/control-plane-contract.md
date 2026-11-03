@@ -31,6 +31,7 @@ The request uses camelCase:
 
 ```json
 {
+  "endpoint": "/v1/chat/completions",
   "apiKeyHash": "3f2c...",
   "model": "public-model-id",
   "provider": {
@@ -52,6 +53,7 @@ The request uses camelCase:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
+| `endpoint` | Yes | Public inference path, present for every endpoint. |
 | `apiKeyHash` | No | Lowercase SHA-256 hex of the client's bearer token. Omitted for anonymous requests. |
 | `model` | No at the wire level | Public model ID from the client body. A control plane should reject a missing model for model inference. |
 | `provider` | No | Original client provider-routing object, forwarded without schema reduction. The control plane should validate all policy fields it supports. |
@@ -108,20 +110,73 @@ An allow response:
 | Response field | Required | Contract |
 | --- | --- | --- |
 | `allow` | Yes | Boolean decision. |
-| `pricing` | No | Per-token prices as numeric strings or numbers: `inputCostPerToken`, `outputCostPerToken`, `cacheReadCostPerToken`, and `cacheCreationCostPerToken`. A missing input or output price counts as zero; a missing cache price uses the input price. When pricing is present, the gateway prices the upstream usage and adds the result to the client's response as `usage.cost`, in buffered and streaming responses. The object is copied to post-consult reports. |
+| `pricing` | No | Per-token prices as numeric strings or numbers: `inputCostPerToken`, `outputCostPerToken`, `cacheReadCostPerToken`, and `cacheCreationCostPerToken`. A missing input or output price counts as zero; a missing cache price uses the input price. When pricing is present, the gateway prices the upstream usage and adds the result to the client's response as `usage.cost`, in buffered and streaming responses. The object is copied to post-consult reports. `imageCostPerImage` adds per-image pricing; see [Image generation](#image-generation). |
 | `candidates` | Required for an allowed inference | Ordered route candidates. An empty or missing list produces a no-route error. |
 | `candidates[].routeId` | Yes | `<upstream name>:<public model ID>` matching the active gateway upstream config. |
 | `candidates[].format` | Yes | `openai` or `anthropic`. Selects request and response transformation. |
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
-| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
 | `spendMode` | No | `regular`, `subscription`, or `subscription_overflow`. |
 | `userTier` | No | Sent to every upstream attempt as the `x-user-tier` header. |
 | `rateLimit` | No | Used on a denied `429`; object fields are `limit` and Unix-seconds `resetAt`. |
+
+### Image generation
+
+`/v1/images/generations` is default-off in middleware mode: each eligible
+`openai` candidate must list that exact path in `supportedEndpoints`. Omitted
+or empty lists do not opt in. No eligible candidate returns the existing
+`404 model_not_found`. The image opt-in does not dedicate a candidate; chat
+continues to route to it. `anthropic` format does not support image generation.
+Only reviewed verifiable models should be offered; the initial NEAR model is
+`black-forest-labs/FLUX.2-klein-4B` over the existing TLS SPKI-bound adapter.
+
+Request up to `n` images (`n` is an integer from 1 through 10, default 1);
+providers may return fewer, and image charges use the returned count.
+The gateway validates `n` before pre-consult and forwards it unchanged without
+retries to fill the count. A response must contain 1 through `n` images;
+excess images produce a sanitized 502 with a receipt over the error bytes
+and no billable `images` block in the post report.
+
+`pricing.imageCostPerImage` is a decimal string, or an object of decimal strings.
+Each rate must be an unsigned plain decimal with an integer part, at most
+18 fractional digits, and a value no greater than `1000000` USD/image. Signs, exponents,
+underscores, whitespace, and a decimal point without following digits are invalid.
+Lookup uses `"<size>|<quality>"`, then `"<size>"`, then `"default"`. For example:
+
+```json
+{"imageCostPerImage": {"512x512|high": "0.02", "512x512": "0.01", "default": "0.015"}}
+```
+
+An absent, empty, or invalid selected rate counts as zero; an invalid exact
+match does not trigger a broader fallback. Image dimensions
+are resolved from the successful upstream response, then the request, then
+`"auto"`. `count` is the upstream `data.length` before canonicalization.
+The gateway uses decimal arithmetic for:
+
+```text
+token_cost = uncached_input * input_rate + cache_read * cache_read_rate
+             + cache_creation * cache_creation_rate + output * output_rate
+cost = count * image_unit_rate + token_cost
+```
+
+Token rates and usage follow the existing token normalization rules; absent
+usage or rates contribute zero. Arithmetic is checked: if an image or token
+component or their sum cannot be represented, the gateway logs a warning and
+omits the client's `usage.cost`, preserving other upstream usage fields and
+the post report. Token rates are not capped by this contract. The control
+plane computes billing independently from its pricing snapshot and reported
+usage; the gateway's `usage.cost` is informational. On a successful image
+response with representable pricing, the gateway adds `usage.cost`. Client
+image responses always contain the SDK-required token usage fields, filled
+with zero when the provider reports none. The post report preserves raw
+provider usage before these defaults and cost injection, and never bills image
+counts on failed responses. A billing implementation must charge only a
+successful report's `images.count`, using the same lookup and token formula.
 
 ### Reasoning format
 
@@ -291,6 +346,7 @@ The stable fields are:
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
 | `usage` | Always, nullable | Raw provider usage before client cost injection. |
+| `images` | Successful image generation only | `{count, size, quality}`: upstream image count before canonicalization; size and quality resolved from response, then request, then `"auto"`. Used with `imageCostPerImage` as described above. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
 | `ttftMs` | Optional | Time to first token for a streaming attempt. |
 | `isStreaming` | Optional | Whether the report covers a streaming path. |

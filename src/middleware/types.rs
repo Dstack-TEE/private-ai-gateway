@@ -326,6 +326,8 @@ pub enum ErrorClass {
     RequestShapingFailed,
     /// No attested route or session was eligible; no prompt was forwarded.
     NoEligibleAttestedRoute,
+    /// The gateway has no capacity for another media request.
+    GatewayCapacity,
     /// The keyset committed in early headers expired before a new admission.
     KeysetExpired,
     /// The upstream answered with a non-2xx status.
@@ -442,6 +444,8 @@ pub struct PostReport {
     pub request_model: String,
     /// Raw upstream usage before any cost injection, or `null`.
     pub usage: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<super::images::ImageUsage>,
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,

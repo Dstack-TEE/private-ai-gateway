@@ -34,6 +34,11 @@ The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest th
 
 The verifier cache omits the model from its key because every configured model uses the same router channel. The receipt records the selected model; the session records the shared router evidence.
 
+Image generation for `black-forest-labs/FLUX.2-klein-4B` uses this same router
+TLS attestation. It does not establish the image model instance, workload,
+or weights provenance. NEAR image responses carry no token usage; middleware
+billing uses `images.count` and synthesizes `usage.cost` from image pricing.
+
 These tampered inputs were rejected live against `cloud-api.near.ai`:
 
 | Tampered input | Rejection |
@@ -70,19 +75,27 @@ Run the hermetic report-data tamper test:
 cargo test --test soundness_report_data
 ```
 
-For a live verifier run, start a trusted dstack verifier and set `DSTACK_VERIFIER_URL` explicitly:
+For a live verifier run, start a trusted dstack verifier, set
+`DSTACK_VERIFIER_URL` explicitly, and load `NEARAI_API_KEY` into the environment.
+The attestation endpoint requires authentication. Construct the credential
+inside the process so it does not appear in command-line arguments:
 
 ```sh
 export DSTACK_VERIFIER_URL='http://localhost:18080'
-request_hash="sha256:$(printf '0%.0s' {1..64})"
-jq -n --arg hash "$request_hash" '{
-  api_version: "aci.provider-verifier.request.v1",
-  provider: "near-ai",
-  upstream_name: "near-ai-live",
-  url_origin: "https://cloud-api.near.ai",
-  model_id: "google/gemma-4-31B-it",
-  forwarded_body_hash: $hash,
-  required: true,
-  timeout_seconds: 300
-}' | uv run python scripts/private_ai_provider_verifier.py
+python3 - <<'PY' | uv run python scripts/private_ai_provider_verifier.py
+import json
+import os
+
+print(json.dumps({
+    "api_version": "aci.provider-verifier.request.v1",
+    "provider": "near-ai",
+    "upstream_name": "near-ai-live",
+    "url_origin": "https://cloud-api.near.ai",
+    "model_id": "google/gemma-4-31B-it",
+    "forwarded_body_hash": "sha256:" + "0" * 64,
+    "required": True,
+    "timeout_seconds": 300,
+    "provider_options": {"near_ai_api_key": os.environ["NEARAI_API_KEY"]},
+}))
+PY
 ```

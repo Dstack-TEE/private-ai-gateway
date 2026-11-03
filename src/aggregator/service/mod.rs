@@ -32,6 +32,7 @@ pub const COMPLETIONS_PATH: &str = "/v1/completions";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const RESPONSES_PATH: &str = "/v1/responses";
+pub const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 

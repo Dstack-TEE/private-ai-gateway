@@ -22,7 +22,8 @@ use crate::aci::types::{
 };
 use crate::aggregator::service::{
     E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    SYSTEMONE_PATH,
 };
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
@@ -498,6 +499,26 @@ pub(super) async fn systemone(
     openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
+pub(super) async fn images_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    // Refuse before reading any body, including incomplete E2EE headers.
+    if has_e2ee_headers(&headers)
+        || headers
+            .keys()
+            .any(|key| key.as_str().starts_with("x-e2ee-"))
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE is not supported on /v1/images/generations",
+        );
+    }
+    openai_completion_endpoint(state, headers, body, IMAGES_GENERATIONS_PATH, true).await
+}
+
 #[derive(Debug, Default)]
 struct AciConstraint {
     required: bool,
@@ -770,7 +791,9 @@ pub(super) async fn openai_completion_endpoint(
             MESSAGES_PATH => Endpoint::Messages,
             RESPONSES_PATH => Endpoint::CreateModelResponse,
             SYSTEMONE_PATH => Endpoint::SystemOne,
-            _ => Endpoint::ChatComplete,
+            IMAGES_GENERATIONS_PATH => Endpoint::ImagesGenerations,
+            CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
+            _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
         };
         let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
         // TEE-only host: force attested serving. The `tee_only` flag is carried
@@ -805,8 +828,17 @@ pub(super) async fn openai_completion_endpoint(
         return middleware.handle_completion(&state.service, input).await;
     }
 
+    let is_images = endpoint_path == IMAGES_GENERATIONS_PATH;
     let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
-    let forwarded_body = if normalized || aci_stripped {
+    let direct_params = if is_images {
+        if let Err(err) = crate::middleware::images::validate_request(&direct_params) {
+            return err.into_response();
+        }
+        crate::middleware::images::upstream_body(&direct_params)
+    } else {
+        direct_params
+    };
+    let forwarded_body = if normalized || aci_stripped || is_images {
         match serde_json::to_vec(&direct_params) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
@@ -822,7 +854,18 @@ pub(super) async fn openai_completion_endpoint(
         None
     };
 
-    forward_to_backend(
+    // Uploads and invalid requests do not reserve image generation capacity.
+    // Middleware admission happens after its control-plane consult instead.
+    let permit = if is_images {
+        match crate::middleware::images::try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => return crate::middleware::images::capacity_response(),
+        }
+    } else {
+        None
+    };
+
+    let response = forward_to_backend(
         state.service,
         BackendForwardInput {
             context,
@@ -836,7 +879,8 @@ pub(super) async fn openai_completion_endpoint(
             stream,
         },
     )
-    .await
+    .await;
+    crate::middleware::images::hold_permit(response, permit)
 }
 pub(super) async fn completions(
     State(state): State<AppState>,

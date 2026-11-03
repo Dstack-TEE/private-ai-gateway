@@ -17,8 +17,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
-    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
-    SYSTEMONE_PATH,
+    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, IMAGES_GENERATIONS_PATH,
+    MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -39,6 +39,7 @@ pub enum Endpoint {
     Messages,
     CreateModelResponse,
     SystemOne,
+    ImagesGenerations,
 }
 
 impl Endpoint {
@@ -51,6 +52,7 @@ impl Endpoint {
             Endpoint::Messages => MESSAGES_PATH,
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
+            Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
         }
     }
 
@@ -62,6 +64,7 @@ impl Endpoint {
             Endpoint::Messages => "messages",
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",
+            Endpoint::ImagesGenerations => "imagesGenerations",
         }
     }
 }
@@ -207,6 +210,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
+            return Ok(super::images::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::Messages) => {
             let chat = messages_to_chat_params(params)?;
             return transform_to_provider_request(format, &chat, Endpoint::ChatComplete, engine);
@@ -283,6 +289,11 @@ pub fn build_candidates(
                 endpoint = endpoint.path(),
                 "candidate does not serve this endpoint; skipping"
             );
+            continue;
+        }
+        if endpoint == Endpoint::ImagesGenerations
+            && !candidate.supports_endpoint(IMAGES_GENERATIONS_PATH)
+        {
             continue;
         }
         let bridge = match &messages_chat {
@@ -793,10 +804,14 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
-        | (Anthropic, SystemOne) => return Err(TransformError::Unsupported { format, endpoint }),
+        | (Anthropic, SystemOne)
+        | (Anthropic, ImagesGenerations) => {
+            return Err(TransformError::Unsupported { format, endpoint })
+        }
     };
     Ok(config)
 }
@@ -3030,6 +3045,58 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["undeclared", "responses"]
         );
+    }
+
+    #[test]
+    fn images_candidates_require_opt_in_without_dedicating_the_model() {
+        let route = |id, endpoints| {
+            let mut route: RouteCandidate =
+                serde_json::from_value(json!({"routeId":id,"format":"openai"})).unwrap();
+            route.supported_endpoints = endpoints;
+            route
+        };
+        let candidates = [
+            route("plain", vec![]),
+            route("images", vec![IMAGES_GENERATIONS_PATH.into()]),
+        ];
+        let params = json!({"model":"image","prompt":"hi","n":2,"style":"vivid"});
+        let shaped = build_candidates(
+            &params,
+            Endpoint::ImagesGenerations,
+            &candidates,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(shaped.len(), 1);
+        assert_eq!(shaped[0].0, "images");
+        assert_eq!(
+            shaped[0].1,
+            json!({"model":"image","prompt":"hi","n":2,"response_format":"b64_json"})
+        );
+        assert!(build_candidates(
+            &params,
+            Endpoint::ImagesGenerations,
+            &candidates[..1],
+            None,
+            None
+        )
+        .unwrap()
+        .is_empty());
+        let chat = json!({"model":"image","messages":[{"role":"user","content":"hi"}]});
+        assert_eq!(
+            build_candidates(&chat, Endpoint::ChatComplete, &candidates, None, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(transform_to_provider_request(
+            ProviderFormat::Anthropic,
+            &params,
+            Endpoint::ImagesGenerations,
+            None
+        )
+        .is_err());
     }
 
     #[test]
