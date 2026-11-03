@@ -19,7 +19,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_BODY_BYTES: usize = MAX_FILE_BYTES + MAX_TEXT_BYTES + 64 * 1024;
-pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const UPSTREAM_FIELDS: &[&str] = &[
     "model",
     "language",

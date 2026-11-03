@@ -199,6 +199,30 @@ impl ChannelMaterial<'_> {
 }
 
 impl AciService {
+    fn sanitize_media_success(
+        &self,
+        endpoint_path: &str,
+        response: &[u8],
+        request: &[u8],
+        audio_metadata: Option<&Value>,
+    ) -> Result<Vec<u8>, &'static str> {
+        if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+            return crate::middleware::images::response_body(response, request)
+                .ok_or("upstream returned a malformed success body");
+        }
+        let message = "upstream returned a malformed transcription response";
+        let body = serde_json::from_slice::<Value>(response).map_err(|_| message)?;
+        let (body, _) = crate::middleware::audio::sanitize_response(
+            body,
+            audio_metadata.unwrap_or(&Value::Null),
+        )
+        .map_err(|_| {
+            self.metrics.record_audio_failure("malformed_duration");
+            message
+        })?;
+        serde_json::to_vec(&body).map_err(|_| message)
+    }
+
     pub async fn forward_chat_completion(
         &self,
         received_body: &[u8],
@@ -325,48 +349,24 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            if endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH {
+            if matches!(
+                endpoint_path,
+                super::AUDIO_TRANSCRIPTIONS_PATH | super::IMAGES_GENERATIONS_PATH
+            ) {
                 upstream_headers.insert("content-type".into(), "application/json".into());
-                let validated = serde_json::from_slice::<Value>(&upstream_response.body)
-                    .ok()
-                    .and_then(|body| {
-                        let params = audio_metadata.as_ref().unwrap_or(&Value::Null);
-                        match crate::middleware::audio::sanitize_response(body, params) {
-                            Ok((body, _)) => Some(body),
-                            Err(_) => {
-                                self.metrics.record_audio_failure("malformed_duration");
-                                None
-                            }
-                        }
-                    });
-                match validated {
-                    Some(body) => (
-                        upstream_response.status_code,
-                        serde_json::to_vec(&body).map_err(|e| {
-                            ServiceError::Upstream(UpstreamError::Transport(e.to_string()))
-                        })?,
-                    ),
-                    None => (
+                match self.sanitize_media_success(
+                    endpoint_path,
+                    &upstream_response.body,
+                    &forwarded_body,
+                    audio_metadata.as_ref(),
+                ) {
+                    Ok(body) => (upstream_response.status_code, body),
+                    Err(message) => (
                         502,
                         crate::middleware::errors::envelope_bytes(
                             crate::middleware::errors::Surface::Openai,
                             "upstream_error",
-                            "upstream returned a malformed transcription response",
-                            None,
-                        ),
-                    ),
-                }
-            } else if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-                use crate::middleware::{errors, images};
-                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
-                match images::response_body(&upstream_response.body, &forwarded_body) {
-                    Some(body) => (upstream_response.status_code, body),
-                    None => (
-                        502,
-                        errors::envelope_bytes(
-                            errors::Surface::Openai,
-                            errors::error_type(errors::Surface::Openai, 502),
-                            "upstream returned a malformed success body",
+                            message,
                             None,
                         ),
                     ),

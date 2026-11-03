@@ -165,9 +165,8 @@ Verbose `duration` always contains the validated raw duration. `language` uses
 the upstream string, then the requested language, then an empty string for
 unknown. Segment and word items must contain all SDK-required fields with valid
 types; incomplete items are dropped, and empty timestamp arrays are omitted.
-Audio upstream responses have a separate 8 MiB cap, independent of
-`max_buffered_response_bytes`, including error bodies (`502` on
-overflow).
+Audio upstream responses, including error bodies, are capped at the smaller of
+`max_buffered_response_bytes` and 8 MiB (`502` on overflow).
 
 A successful response requires string `text` and a positive numeric duration:
 `usage.seconds` with `usage.type == "duration"`, otherwise top-level `duration`.

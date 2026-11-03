@@ -132,9 +132,9 @@ fn token_cost(usage: &Value, pricing: &Value) -> Option<Decimal> {
     })
 }
 
-// Control-plane image prices are bounded, unsigned plain decimals. Validate
+// Control-plane media unit prices are bounded, unsigned plain decimals. Validate
 // the spelling before parsing so signs, exponents, and rounded scales fail.
-fn image_rate(value: &Value) -> Option<Decimal> {
+fn unit_price(value: &Value) -> Option<Decimal> {
     let value = value.as_str()?;
     let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
     if integer.is_empty()
@@ -164,7 +164,7 @@ pub fn compute_image_cost(
             .or_else(|| rates.get("default")),
         value => value,
     }
-    .and_then(image_rate)
+    .and_then(unit_price)
     .unwrap_or(Decimal::ZERO);
     let tokens = match usage {
         Some(usage) => token_cost(usage, pricing)?,
@@ -178,7 +178,7 @@ pub fn compute_image_cost(
 pub fn compute_audio_cost(pricing: &Value, audio: &super::audio::AudioUsage) -> Option<f64> {
     let unit = pricing
         .get("audioCostPerSecond")
-        .map(image_rate)
+        .map(unit_price)
         .unwrap_or(Some(Decimal::ZERO))?;
     Decimal::from(audio.seconds).checked_mul(unit)?.to_f64()
 }
@@ -363,7 +363,7 @@ mod image_tests {
     use serde_json::json;
 
     #[test]
-    fn image_rates_reject_invalid_spelling_scale_and_range() {
+    fn unit_prices_reject_invalid_spelling_scale_and_range() {
         let images = ImageUsage {
             count: 2,
             size: "512x512".into(),
@@ -402,7 +402,7 @@ mod image_tests {
             "1000000",
             "1000000.000000000000000000",
         ] {
-            assert!(image_rate(&json!(valid)).is_some(), "{valid}");
+            assert!(unit_price(&json!(valid)).is_some(), "{valid}");
         }
         assert_eq!(
             compute_image_cost(None, &json!({"imageCostPerImage":"1000000"}), &images),

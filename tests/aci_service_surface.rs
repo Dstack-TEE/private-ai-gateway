@@ -4453,68 +4453,74 @@ async fn audio_invalid_parameters_reject_before_forwarding() {
 
 #[tokio::test]
 async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eight_mib() {
-    let fake_upstream = Router::new().route(
-        "/v1/audio/transcriptions",
-        axum::routing::post(move |headers: HeaderMap, body: Body| async move {
-            let bytes = to_bytes(body, 4096).await.unwrap();
-            let (params, file) = private_ai_gateway::middleware::audio::parse(
-                bytes,
-                headers["content-type"].to_str().unwrap(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(params["model"], "aci-model");
-            assert_eq!(file.file, "spoken audio");
-            let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
-            axum::http::Response::builder()
-                .status(400)
-                .body(Body::from_stream(stream::iter(
-                    (0..9).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
-                )))
-                .unwrap()
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
-    let limit = 2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
-    let mut config = AciServiceConfig::for_test();
-    config.max_buffered_response_bytes = limit;
-    let service = Arc::new(
-        AciService::new(
-            Arc::new(StaticKeyProvider::default()),
-            Arc::new(StubQuoter::default()),
-            Arc::new(
-                OpenAICompatibleBackend::new(format!("http://{address}"))
+    for (limit, response_mib) in [
+        (2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES, 9),
+        (1024 * 1024, 2),
+    ] {
+        let fake_upstream = Router::new().route(
+            "/v1/audio/transcriptions",
+            axum::routing::post(move |headers: HeaderMap, body: Body| async move {
+                let bytes = to_bytes(body, 4096).await.unwrap();
+                let (params, file) = private_ai_gateway::middleware::audio::parse(
+                    bytes,
+                    headers["content-type"].to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(params["model"], "aci-model");
+                assert_eq!(file.file, "spoken audio");
+                let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+                axum::http::Response::builder()
+                    .status(400)
+                    .body(Body::from_stream(stream::iter(
+                        (0..response_mib).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+                    )))
                     .unwrap()
-                    .with_max_buffered_response_bytes(limit),
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+        let mut config = AciServiceConfig::for_test();
+        config.max_buffered_response_bytes = limit;
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(
+                    OpenAICompatibleBackend::new(format!("http://{address}"))
+                        .unwrap()
+                        .with_max_buffered_response_bytes(limit),
+                ),
+                Arc::new(InMemoryReceiptStore::default()),
+                config,
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service.clone()),
+        };
+        let raw = transcription_request("");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            requester.call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
             ),
-            Arc::new(InMemoryReceiptStore::default()),
-            config,
-            Arc::new(FixedClock(1_700_000_000)),
         )
-        .unwrap(),
-    );
-    let requester = Requester {
-        app: build_router(service.clone()),
-    };
-    let raw = transcription_request("");
-    let result = tokio::time::timeout(
-        Duration::from_secs(2),
-        requester.call(
-            transcription_http(raw.clone())
-                .body(Body::from(raw))
-                .unwrap(),
-        ),
-    )
-    .await;
-    server.abort();
-    assert!(server.await.unwrap_err().is_cancelled());
-    let response = result.expect("reject oversized audio response before waiting for its body");
-    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
-    assert!(metrics
-        .contains("private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"));
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let response = result.expect("reject oversized audio response before waiting for its body");
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+        assert!(metrics.contains(
+            "private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"
+        ));
+    }
 }
 
 #[tokio::test]
