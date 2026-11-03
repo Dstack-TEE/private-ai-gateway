@@ -415,6 +415,14 @@ mod image_tests {
             compute_image_cost(Some(&json!({"input_tokens":1})), &pricing, &images),
             None
         );
+        assert_eq!(
+            compute_image_cost(
+                Some(&json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":i64::MAX})),
+                &pricing,
+                &images,
+            ),
+            None
+        );
     }
 
     #[test]
