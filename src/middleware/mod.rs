@@ -5,6 +5,8 @@
 //! forwards completions through the service in-process, and it relays model
 //! catalogs from the control plane.
 
+pub mod admission;
+pub mod audio;
 pub mod completion;
 pub mod config;
 pub mod control;

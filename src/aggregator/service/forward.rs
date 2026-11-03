@@ -199,6 +199,30 @@ impl ChannelMaterial<'_> {
 }
 
 impl AciService {
+    fn sanitize_media_success(
+        &self,
+        endpoint_path: &str,
+        response: &[u8],
+        request: &[u8],
+        audio_metadata: Option<&Value>,
+    ) -> Result<Vec<u8>, &'static str> {
+        if endpoint_path == super::IMAGES_GENERATIONS_PATH {
+            return crate::middleware::images::response_body(response, request)
+                .ok_or("upstream returned a malformed success body");
+        }
+        let message = "upstream returned a malformed transcription response";
+        let body = serde_json::from_slice::<Value>(response).map_err(|_| message)?;
+        let (body, _) = crate::middleware::audio::sanitize_response(
+            body,
+            audio_metadata.unwrap_or(&Value::Null),
+        )
+        .map_err(|_| {
+            self.metrics.record_audio_failure("malformed_duration");
+            message
+        })?;
+        serde_json::to_vec(&body).map_err(|_| message)
+    }
+
     pub async fn forward_chat_completion(
         &self,
         received_body: &[u8],
@@ -207,6 +231,7 @@ impl AciService {
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<ForwardResult, ServiceError> {
         self.forward_chat_completion_request(ChatCompletionRequest {
+            audio_form: None,
             context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body,
@@ -242,12 +267,16 @@ impl AciService {
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
-        let prepared = self.upstream.prepare(UpstreamRequest {
-            body: backend_input_body,
+        let audio_metadata = (endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH)
+            .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
+        let mut prepared = self.upstream.prepare(UpstreamRequest {
+            body: backend_input_body.into(),
+            form: req.audio_form,
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
+        prepared.encode_audio().await?;
         if aci_required && !attested_route_eligible(prepared.is_tee) {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(
@@ -298,8 +327,11 @@ impl AciService {
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body)
                 .or_else(|| {
-                    (endpoint_path == super::IMAGES_GENERATIONS_PATH)
-                        .then(|| prepared.model_id.clone())
+                    (matches!(
+                        endpoint_path,
+                        super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+                    ))
+                    .then(|| prepared.model_id.clone())
                 });
         self.metrics.record_upstream_response(
             endpoint_path,
@@ -317,17 +349,24 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-                use crate::middleware::{errors, images};
-                upstream_headers.insert("content-type".to_string(), "application/json".to_string());
-                match images::response_body(&upstream_response.body, &forwarded_body) {
-                    Some(body) => (upstream_response.status_code, body),
-                    None => (
+            if matches!(
+                endpoint_path,
+                super::AUDIO_TRANSCRIPTIONS_PATH | super::IMAGES_GENERATIONS_PATH
+            ) {
+                upstream_headers.insert("content-type".into(), "application/json".into());
+                match self.sanitize_media_success(
+                    endpoint_path,
+                    &upstream_response.body,
+                    &forwarded_body,
+                    audio_metadata.as_ref(),
+                ) {
+                    Ok(body) => (upstream_response.status_code, body),
+                    Err(message) => (
                         502,
-                        errors::envelope_bytes(
-                            errors::Surface::Openai,
-                            errors::error_type(errors::Surface::Openai, 502),
-                            "upstream returned a malformed success body",
+                        crate::middleware::errors::envelope_bytes(
+                            crate::middleware::errors::Surface::Openai,
+                            "upstream_error",
+                            message,
                             None,
                         ),
                     ),
@@ -448,7 +487,7 @@ impl AciService {
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
-            body: backend_input_body,
+            body: backend_input_body.into(),
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
             ..Default::default()
@@ -712,7 +751,13 @@ impl AciService {
         loop {
             // The future owns its inputs; the admission keeps its leases until
             // the attempt returns or is cancelled.
-            match forward(prepared.clone(), admission.event.clone()).await {
+            let result = forward(prepared.clone(), admission.event.clone()).await;
+            if prepared.request.path.as_deref() == Some(super::AUDIO_TRANSCRIPTIONS_PATH)
+                && matches!(result, Err(UpstreamError::ResponseTooLarge))
+            {
+                self.metrics.record_audio_failure("response_size_failure");
+            }
+            match result {
                 Ok(response) => return ReverifyOutcome::Forwarded(response, Box::new(admission)),
                 // Preserve the adapter's non-2xx status even when its body was
                 // withheld. No serving instance was authenticated in this case,

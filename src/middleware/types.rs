@@ -446,6 +446,8 @@ pub struct PostReport {
     pub usage: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<super::images::ImageUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<super::audio::AudioUsage>,
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,

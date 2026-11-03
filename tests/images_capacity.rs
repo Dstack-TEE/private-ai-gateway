@@ -9,7 +9,7 @@ use axum::{
 };
 use private_ai_gateway::{
     http::build_router_with_admin_and_middleware,
-    middleware::{images, Middleware, PrefixHashKey},
+    middleware::{admission, request_transform::Endpoint, Middleware, PrefixHashKey},
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -44,8 +44,8 @@ async fn middleware_capacity_refusal_reports_gateway_failure_with_request_id() {
         None,
         Arc::new(middleware),
     );
-    let permits: Vec<_> = (0..images::MAX_IMAGE_IN_FLIGHT)
-        .map(|_| images::try_acquire().unwrap())
+    let permits: Vec<_> = (0..admission::MAX_IN_FLIGHT)
+        .map(|_| admission::try_acquire(Endpoint::ImagesGenerations).unwrap())
         .collect();
     let response = app
         .oneshot(

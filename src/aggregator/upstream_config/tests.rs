@@ -1019,3 +1019,47 @@ fn streaming_usage_config_is_validated_and_visible_without_secrets() {
     config.path = Some("/v1/messages".into());
     assert!(super::validation::validate_config(&[config]).is_err());
 }
+
+#[test]
+fn audio_transcription_config_rejects_unsupported_adapters() {
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::ZeroGPrivateComputer,
+        UpstreamProvider::Anthropic,
+    ] {
+        let mut config = test_upstream_config("audio", provider, "whisper", "whisper");
+        config.path = Some("/v1/audio/transcriptions".into());
+        assert!(validate_config(&[config]).is_err());
+    }
+}
+
+#[test]
+fn near_audio_always_requests_verbose_duration_without_affecting_json_requests() {
+    use crate::aci::upstream::UpstreamRequest;
+    use bytes::Bytes;
+
+    for (provider, audio, expected_format) in [
+        (UpstreamProvider::NearAi, true, "verbose_json"),
+        (UpstreamProvider::NearAi, false, "json"),
+        (UpstreamProvider::OpenAiCompatible, true, "json"),
+    ] {
+        let config = test_upstream_config("audio", provider, "whisper", "upstream-whisper");
+        let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
+        let prepared = state
+            .backend
+            .prepare(UpstreamRequest {
+                body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
+                path: Some("/v1/audio/transcriptions".into()),
+                form: audio.then(|| {
+                    Arc::new(crate::middleware::audio::AudioForm {
+                        file: Bytes::from_static(b"audio"),
+                        extension: "wav".into(),
+                    })
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+        let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+        assert_eq!(fields["response_format"], expected_format);
+    }
+}

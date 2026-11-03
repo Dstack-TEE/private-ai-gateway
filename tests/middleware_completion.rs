@@ -59,6 +59,9 @@ struct MockUpstream {
 
 #[derive(Debug, Clone)]
 struct RecordedRequest {
+    headers: HashMap<String, String>,
+    raw_body: bytes::Bytes,
+    content_type: Option<String>,
     path: Option<String>,
     body: Value,
 }
@@ -81,9 +84,20 @@ impl UpstreamBackend for RecordingUpstream {
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        let parsed = if let Some(content_type) = req.content_type.as_deref() {
+            private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
+                .await
+                .unwrap()
+                .0
+        } else {
+            serde_json::from_slice(&req.body).unwrap()
+        };
         self.requests.lock().unwrap().push(RecordedRequest {
+            headers: req.headers.clone(),
+            raw_body: req.body.clone(),
+            content_type: req.content_type.clone(),
             path: req.path,
-            body: serde_json::from_slice(&req.body).unwrap(),
+            body: parsed,
         });
         Ok(UpstreamResponse {
             status_code: self.status,
@@ -633,12 +647,15 @@ fn attempts(chain: &[FailedAttempt]) -> Vec<(String, u16)> {
 
 fn chat_input() -> CompletionInput {
     CompletionInput {
+        audio_form: None,
+        upload_permit: None,
         endpoint: Endpoint::ChatComplete,
         endpoint_path: "/v1/chat/completions",
         surface: Surface::Openai,
         params: json!({ "model": "gpt-test", "messages": [{ "role": "user", "content": "hi" }] }),
         received_body: br#"{"model":"gpt-test","messages":[{"role":"user","content":"hi"}]}"#
-            .to_vec(),
+            .to_vec()
+            .into(),
         api_key_hash: Some("deadbeef".to_string()),
         requester: None,
         e2ee: None,
@@ -665,10 +682,12 @@ fn systemone_input() -> CompletionInput {
         "stream": true
     });
     CompletionInput {
+        audio_form: None,
+        upload_permit: None,
         endpoint: Endpoint::SystemOne,
         endpoint_path: "/v1/systemone",
         surface: Surface::Openai,
-        received_body: serde_json::to_vec(&params).unwrap(),
+        received_body: serde_json::to_vec(&params).unwrap().into(),
         params,
         api_key_hash: Some("deadbeef".to_string()),
         requester: None,
@@ -690,10 +709,12 @@ fn responses_input(stream: bool) -> CompletionInput {
         "max_output_tokens": 16
     });
     CompletionInput {
+        audio_form: None,
+        upload_permit: None,
         endpoint: Endpoint::CreateModelResponse,
         endpoint_path: "/v1/responses",
         surface: Surface::Openai,
-        received_body: serde_json::to_vec(&params).unwrap(),
+        received_body: serde_json::to_vec(&params).unwrap().into(),
         params,
         api_key_hash: Some("deadbeef".to_string()),
         requester: None,
@@ -1103,7 +1124,7 @@ async fn responses_stream_converts_chat_protocol_and_keeps_receipt_and_cost() {
         { "type": "web_search", "external_web_access": false }
     ]);
     input.params["tool_choice"] = json!("auto");
-    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    input.received_body = serde_json::to_vec(&input.params).unwrap().into();
     let response = middleware(control_url)
         .handle_completion(&service, input)
         .await;
@@ -1258,7 +1279,7 @@ async fn supported_responses_endpoint_keeps_protocol_and_path() {
         let mut input = responses_input(false);
         input.request_id = format!("req-{outcome}");
         input.params["reasoning"] = json!({ "effort": "future-native-value" });
-        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        input.received_body = serde_json::to_vec(&input.params).unwrap().into();
         let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
         assert_eq!(status, 200);
         assert_eq!(body["id"], format!("req-{outcome}"));
@@ -1724,7 +1745,7 @@ async fn responses_tool_arguments_are_delivered_or_marked_incomplete() {
             let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
             let mut input = responses_input(streaming);
             input.params["tools"] = json!([{ "type": "custom", "name": "shell" }]);
-            input.received_body = serde_json::to_vec(&input.params).unwrap();
+            input.received_body = serde_json::to_vec(&input.params).unwrap().into();
             let response = middleware(control_url)
                 .handle_completion(&service, input)
                 .await;
@@ -1915,10 +1936,12 @@ fn messages_input(stream: bool) -> CompletionInput {
         "messages": [{ "role": "user", "content": "hi" }]
     });
     CompletionInput {
+        audio_form: None,
+        upload_permit: None,
         endpoint: Endpoint::Messages,
         endpoint_path: "/v1/messages",
         surface: Surface::Anthropic,
-        received_body: serde_json::to_vec(&params).unwrap(),
+        received_body: serde_json::to_vec(&params).unwrap().into(),
         params,
         request_id: "req-messages".to_string(),
         stream,
@@ -2227,7 +2250,7 @@ async fn messages_thinking_is_bridged_both_ways() {
             if !thinking.is_null() {
                 input.params["thinking"] = thinking.clone();
             }
-            input.received_body = serde_json::to_vec(&input.params).unwrap();
+            input.received_body = serde_json::to_vec(&input.params).unwrap().into();
             let response = middleware(control_url)
                 .handle_completion(&service, input)
                 .await;
@@ -2562,7 +2585,7 @@ async fn image_fetch_5xx_becomes_400_and_is_not_failed_over() {
             ]
         }]
     });
-    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    input.received_body = serde_json::to_vec(&input.params).unwrap().into();
 
     let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 400, "a bad client image URL is a 400, not a 5xx");
@@ -2653,6 +2676,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
     .unwrap();
 
     let request = |session_ids| ChatCompletionRequest {
+        audio_form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             ..GatewayRequestContext::default()
@@ -3215,7 +3239,7 @@ impl UpstreamBackend for SequencedUpstream {
             .lock()
             .unwrap()
             .push(req.route_id.clone().unwrap_or_default());
-        self.bodies.lock().unwrap().push(req.request.body.clone());
+        self.bodies.lock().unwrap().push(req.request.body.to_vec());
         let status = self
             .statuses
             .lock()
@@ -3334,6 +3358,7 @@ fn build_sequenced_service_with(
 
 fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
+        audio_form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             user_tier: user_tier.map(str::to_string),
@@ -5062,7 +5087,7 @@ async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() 
     let mut input = chat_input();
     input.stream = true;
     input.params["stream"] = json!(true);
-    input.received_body = serde_json::to_vec(&input.params).unwrap();
+    input.received_body = serde_json::to_vec(&input.params).unwrap().into();
     let response = middleware(control_url)
         .handle_completion(&service, input)
         .await;
@@ -5410,9 +5435,11 @@ async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
 fn images_input() -> CompletionInput {
     let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","safety_identifier":"hashed-user","style":"vivid"});
     CompletionInput {
+        audio_form: None,
+        upload_permit: None,
         endpoint: Endpoint::ImagesGenerations,
         endpoint_path: "/v1/images/generations",
-        received_body: serde_json::to_vec(&params).unwrap(),
+        received_body: serde_json::to_vec(&params).unwrap().into(),
         params,
         request_id: "req-images".into(),
         ..chat_input()
@@ -5426,7 +5453,7 @@ async fn images_reject_invalid_counts_before_consult() {
     for n in [json!(0), json!(11), json!(1.5)] {
         let mut input = images_input();
         input.params["n"] = n;
-        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        input.received_body = serde_json::to_vec(&input.params).unwrap().into();
         let (status, _, body) = response_parts(
             middleware(url.clone())
                 .handle_completion(&service, input)
@@ -5475,7 +5502,7 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
         } else {
             input.params.as_object_mut().unwrap().remove("n");
         }
-        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        input.received_body = serde_json::to_vec(&input.params).unwrap().into();
         let (status, headers, body) =
             response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 200);
@@ -5629,7 +5656,7 @@ async fn images_malformed_2xx_is_not_billed_and_never_returns_url() {
         } else {
             input.params.as_object_mut().unwrap().remove("n");
         }
-        input.received_body = serde_json::to_vec(&input.params).unwrap();
+        input.received_body = serde_json::to_vec(&input.params).unwrap().into();
         let (status, headers, body) =
             response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 502);
@@ -5682,4 +5709,294 @@ async fn images_failed_attempts_carry_no_billable_image_usage() {
         success["images"],
         json!({"count":1,"size":"512x512","quality":"low"})
     );
+}
+
+fn audio_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","response_format":"json","prompt":"sensitive hint"});
+    CompletionInput {
+        endpoint: Endpoint::AudioTranscriptions,
+        endpoint_path: "/v1/audio/transcriptions",
+        params,
+        received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
+        audio_form: Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+            file: bytes::Bytes::from_static(b"sensitive audio"),
+            extension: "wav".into(),
+        })),
+        request_id: "req-audio".into(),
+        ..chat_input()
+    }
+}
+
+fn audio_http_request(provider: &Value, host: &str) -> axum::http::Request<axum::body::Body> {
+    let raw = "--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-test\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private.wav\"\r\n\r\nsensitive audio\r\n--upload--\r\n";
+    axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("authorization", "Bearer tenant-key")
+        .header("host", host)
+        .header("content-type", "multipart/form-data; boundary=upload")
+        .header("x-aci-provider", provider.to_string())
+        .body(axum::body::Body::from(raw))
+        .unwrap()
+}
+
+fn audio_policy_service() -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingUpstream {
+        requests: requests.clone(),
+        status: 200,
+        body: br#"{"text":"hello","duration":2.965}"#.to_vec(),
+        content_type: "application/json",
+    });
+    let mut router = ModelRouterBackend::new("audio-policy");
+    for (route, is_tee) in [("plain:model", false), ("tee:model", true)] {
+        router
+            .add_route(
+                ModelRoute::new("gpt-test", "whisper", backend.clone(), route)
+                    .unwrap()
+                    .with_is_tee(Some(is_tee)),
+            )
+            .unwrap();
+    }
+    (build_service_with_backend(Arc::new(router)), requests)
+}
+
+fn audio_policy_router(
+    service: Arc<AciService>,
+    middleware: Middleware,
+) -> (tempfile::TempDir, Router) {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = Arc::new(
+        UpstreamConfigManager::load(directory.path().join("upstreams.json"), runtime_options())
+            .unwrap(),
+    );
+    let app = private_ai_gateway::http::build_router_with_admin_and_middleware(
+        service,
+        manager,
+        None,
+        Arc::new(middleware),
+    );
+    (directory, app)
+}
+
+#[tokio::test]
+async fn audio_http_tee_only_host_rejects_non_tee_candidate_despite_caller_opt_out() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
+    let (service, requests) = audio_policy_service();
+    let mw = new_middleware(&MiddlewareConfig {
+        control_url: url,
+        tee_only_domains: vec!["tee.example".into()],
+        control_token: None,
+        control_timeout_ms: Some(2000),
+        control_post_timeout_ms: Some(2000),
+        sse_keepalive_ms: None,
+        send_request_features: None,
+    })
+    .unwrap();
+    let (_directory, app) = audio_policy_router(service, mw);
+    let provider = json!({"aci_verified":false,"order":["plain"]});
+    let response = app
+        .oneshot(audio_http_request(&provider, "tee.example"))
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    let _ = response_parts(response).await;
+    assert!(requests.lock().unwrap().is_empty());
+    let pre = &pres.lock().unwrap()[0];
+    assert_eq!(pre["tee"], true);
+    assert_eq!(pre["provider"], provider);
+    assert_eq!(pre["endpoint"], "/v1/audio/transcriptions");
+}
+
+#[tokio::test]
+async fn audio_http_header_policy_reaches_consult_enforces_pins_and_never_reaches_upstream() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"tee:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}]})).await;
+    let (service, requests) = audio_policy_service();
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    let (status, headers, _) = response_parts(
+        app.clone()
+            .oneshot(audio_http_request(
+                &json!({"aci_verified":true}),
+                "gateway.example",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    let document = receipt.document_json().unwrap();
+    let session = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for (pin, expected_status) in [(session.clone(), 200), ("ab".repeat(32), 412)] {
+        let provider = json!({"order":["tee"],"aci_session_ids":[pin]});
+        let (status, headers, _) = response_parts(
+            app.clone()
+                .oneshot(audio_http_request(&provider, "gateway.example"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected_status);
+        assert_eq!(pres.lock().unwrap().last().unwrap()["provider"], provider);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        let document = receipt.document_json().unwrap();
+        let events = document["event_log"].as_array().unwrap();
+        let verified = events
+            .iter()
+            .find(|e| e["type"] == "upstream.verified")
+            .unwrap();
+        assert_eq!(verified["required"], true);
+        if status == 200 {
+            assert_eq!(verified["session_id"], session);
+        } else {
+            assert!(!events.iter().any(|e| e["type"] == "request.forwarded"));
+        }
+    }
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["model"], "whisper");
+    for request in requests.iter() {
+        assert!(!request
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("x-aci-provider")));
+        assert!(request.body.get("provider").is_none());
+    }
+}
+
+#[tokio::test]
+async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output() {
+    let (url,pres,posts)=spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}],"pricing":{"audioCostPerSecond":"0.001","inputCostPerToken":"0.01"}})).await;
+    let (service,requests)=build_recording_service(200,serde_json::to_vec(&json!({"text":"hello","duration":2.965,"usage":{"type":"tokens","input_tokens":2,"output_tokens":1,"total_tokens":3,"input_token_details":{"audio_tokens":2,"private":"secret"}},"segments":[{"text":"hello","url":"secret"}]})).unwrap(),"application/json");
+    let original_digest = service.workload_keyset_digest();
+    assert_eq!(
+        service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(service.workload_keyset_digest(), original_digest);
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, audio_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!({"text":"hello","usage":{"type":"duration","seconds":3,"cost":0.003}})
+    );
+    let forwarded = {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        calls[0].clone()
+    };
+    let (fields, form) = private_ai_gateway::middleware::audio::parse(
+        forwarded.raw_body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fields["response_format"], "json");
+    assert_eq!(form.file, "sensitive audio");
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        receipt.document_json().unwrap()["workload_keyset_digest"],
+        headers["x-aci-keyset-digest"].to_str().unwrap()
+    );
+    assert_eq!(
+        headers["x-aci-keyset-digest"],
+        service.workload_keyset_digest()
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
+    assert_eq!(report["audio"], json!({"seconds":3,"raw_duration":2.965}));
+    assert_eq!(report["usage"], json!({"type":"duration","seconds":3}));
+    assert_eq!(report["status"], 200);
+    let pre = pres.lock().unwrap()[0].clone();
+    assert_eq!(pre["endpoint"], "/v1/audio/transcriptions");
+    let pre = pre.to_string();
+    assert!(!pre.contains("sensitive"));
+    assert!(!pre.contains("prompt"));
+    assert!(!pre.contains("filename"));
+    assert!(!pre.contains("prefixHash"));
+}
+
+#[tokio::test]
+async fn audio_invalid_duration_is_502_without_billing_or_retranscription() {
+    let (url, posts) = spawn_control_capturing(200, json!({
+        "allow":true,"candidates":[
+            {"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]},
+            {"routeId":"near:other","format":"openai","supportedEndpoints":["/v1/audio/transcriptions"]}
+        ],"pricing":{"audioCostPerSecond":"1"}
+    })).await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}"#
+            .to_vec(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, audio_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert!(!body.to_string().contains("private transcript"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert!(receipt.document_json().unwrap()["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "request.forwarded"));
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-audio").await;
+    assert_eq!(report["status"], 502);
+    assert!(report.get("audio").is_none());
+    assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn audio_requires_endpoint_opt_in() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[
+            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
+        ]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"text":"hello","duration":2.1}"#.to_vec(),
+        "application/json",
+    );
+    let (status, _, _) = response_parts(
+        middleware(url)
+            .handle_completion(&service, audio_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(requests.lock().unwrap().is_empty());
 }

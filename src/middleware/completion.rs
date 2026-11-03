@@ -48,13 +48,16 @@ use super::{pricing, response_transform, stream_transform};
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
 /// termination and JSON normalization.
 pub struct CompletionInput {
+    pub audio_form: Option<Arc<super::audio::AudioForm>>,
+    /// Byte-budget reservation for the buffered upload, held through consult.
+    pub upload_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub endpoint: Endpoint,
     pub endpoint_path: &'static str,
     pub surface: Surface,
     /// Normalized request body used for routing + transforms.
     pub params: Value,
     /// Exact cleartext bytes the service observed (recorded into the receipt).
-    pub received_body: Vec<u8>,
+    pub received_body: Bytes,
     /// SHA-256 hex of the bearer key, for the pre-consult.
     pub api_key_hash: Option<String>,
     pub requester: Option<ReceiptOwner>,
@@ -97,7 +100,7 @@ pub async fn run(
     prefix_hash_key: &PrefixHashKey,
     input: CompletionInput,
 ) -> Response {
-    let mut image_permit = None;
+    let mut inference_permit = None;
     let response = run_inner(
         control,
         service,
@@ -105,10 +108,10 @@ pub async fn run(
         send_request_features,
         prefix_hash_key,
         input,
-        &mut image_permit,
+        &mut inference_permit,
     )
     .await;
-    super::images::hold_permit(response, image_permit)
+    super::admission::hold_permit(response, inference_permit)
 }
 
 async fn run_inner(
@@ -118,9 +121,11 @@ async fn run_inner(
     send_request_features: bool,
     prefix_hash_key: &PrefixHashKey,
     input: CompletionInput,
-    image_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
+    inference_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let CompletionInput {
+        audio_form,
+        upload_permit,
         endpoint,
         endpoint_path,
         surface,
@@ -187,7 +192,7 @@ async fn run_inner(
                     endpoint_path,
                     request_id: &request_id,
                     model,
-                    received_body: received_body.as_slice(),
+                    received_body: received_body.as_ref(),
                     requester: &requester,
                 },
             );
@@ -226,7 +231,7 @@ async fn run_inner(
         endpoint_path,
         request_id: &request_id,
         model: model.unwrap_or(""),
-        received_body: received_body.as_slice(),
+        received_body: received_body.as_ref(),
         requester: &requester,
     };
     // Forward the routing block verbatim; the control plane validates it. Parsing
@@ -277,6 +282,7 @@ async fn run_inner(
         is_streaming: stream,
         armed: None,
         images: None,
+        audio: None,
     };
 
     // Denial (also the fail-closed control-unavailable path: allow=false, 503).
@@ -361,27 +367,29 @@ async fn run_inner(
         return finalize_generated(404, body, &[], e2ee, outcome_ctx);
     }
     // Admit only validated uploads that the control plane allowed and can route.
-    if client_endpoint == Endpoint::ImagesGenerations {
-        match super::images::try_acquire() {
-            Ok(permit) => *image_permit = Some(permit),
-            Err(_) => {
-                meter.gateway_failure(
-                    429,
-                    ErrorSource::Gateway,
-                    ErrorClass::GatewayCapacity,
-                    false,
-                );
-                let body = super::images::capacity_body(Some(&request_id));
-                return finalize_generated(
-                    429,
-                    body,
-                    &[("retry-after", "1".into())],
-                    e2ee,
-                    outcome_ctx,
-                );
+    match super::admission::try_acquire(client_endpoint) {
+        Ok(permit) => *inference_permit = permit,
+        Err(_) => {
+            if client_endpoint == Endpoint::AudioTranscriptions {
+                service.record_audio_failure("admission_rejection");
             }
+            meter.gateway_failure(
+                429,
+                ErrorSource::Gateway,
+                ErrorClass::GatewayCapacity,
+                false,
+            );
+            let body = super::admission::capacity_body(Some(&request_id));
+            return finalize_generated(
+                429,
+                body,
+                &[("retry-after", "1".into())],
+                e2ee,
+                outcome_ctx,
+            );
         }
     }
+    drop(upload_permit);
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
         .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {
@@ -433,9 +441,10 @@ async fn run_inner(
         forward_service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
+                    audio_form,
                     context,
                     endpoint_path,
-                    received_body: forward_body.as_slice(),
+                    received_body: forward_body.as_ref(),
                     forwarded_body: None,
                     aci_required,
                     aci_session_ids,
@@ -550,6 +559,17 @@ async fn run_inner(
                 let converted = serde_json::from_slice::<Value>(&forward.upstream_body)
                     .map_err(|err| err.to_string())
                     .and_then(|mut upstream_json| {
+                        if client_endpoint == Endpoint::AudioTranscriptions {
+                            let (body, audio) =
+                                super::audio::sanitize_response(upstream_json, &params).map_err(
+                                    |err| {
+                                        service.record_audio_failure("malformed_duration");
+                                        err.to_string()
+                                    },
+                                )?;
+                            upstream_json = body;
+                            meter.audio = Some(audio);
+                        }
                         if client_endpoint == Endpoint::ImagesGenerations {
                             super::images::validate_response(
                                 &upstream_json,
@@ -592,7 +612,10 @@ async fn run_inner(
                         );
                         // Images are always buffered: retain the served route's
                         // receipt draft and attest the sanitized error bytes.
-                        if client_endpoint == Endpoint::ImagesGenerations {
+                        if matches!(
+                            client_endpoint,
+                            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+                        ) {
                             return finalize_buffered(
                                 forward.receipt,
                                 502,
@@ -604,8 +627,8 @@ async fn run_inner(
                         return finalize_generated(502, body, &[], e2ee, outcome_ctx);
                     }
                 };
-                // Raw usage (before cost or image SDK defaults) goes to the
-                // report; only the client body's usage is normalized below.
+                // Report usage before cost or image SDK defaults. Audio usage
+                // has already been normalized to duration only.
                 let raw_usage = transformed.get("usage").cloned();
                 meter.images = (client_endpoint == Endpoint::ImagesGenerations)
                     .then(|| super::images::usage(&transformed, &params));
@@ -622,10 +645,19 @@ async fn run_inner(
                 // cost billed: the bridge's Responses usage cannot carry
                 // cache-creation tokens.
                 if let Some(pricing_config) = consult.pricing.as_ref().filter(|p| !p.is_null()) {
-                    if let Some(images) = meter.images.as_ref() {
-                        if let Some(cost) =
-                            pricing::compute_image_cost(raw_usage.as_ref(), pricing_config, images)
-                        {
+                    if meter.audio.is_some() || meter.images.is_some() {
+                        let cost = if let Some(audio) = meter.audio.as_ref() {
+                            pricing::compute_audio_cost(pricing_config, audio)
+                        } else {
+                            meter.images.as_ref().and_then(|images| {
+                                pricing::compute_image_cost(
+                                    raw_usage.as_ref(),
+                                    pricing_config,
+                                    images,
+                                )
+                            })
+                        };
+                        if let Some(cost) = cost {
                             if !transformed.get("usage").is_some_and(Value::is_object) {
                                 transformed["usage"] = serde_json::json!({});
                             }
@@ -639,7 +671,9 @@ async fn run_inner(
                             {
                                 usage.remove("cost");
                             }
-                            tracing::warn!("image cost arithmetic overflow; omitting usage.cost");
+                            tracing::warn!(
+                                "multimodal cost arithmetic overflow; omitting usage.cost"
+                            );
                         }
                     } else if let Some(usage) = raw_usage
                         .clone()
@@ -688,11 +722,11 @@ async fn run_inner(
                     surface,
                     upstream_status,
                     &forward.upstream_body,
-                    received_body.as_slice(),
+                    received_body.as_ref(),
                     Some(&request_id),
                 );
                 let class = errors::classify_upstream(
-                    received_body.as_slice(),
+                    received_body.as_ref(),
                     upstream_status,
                     &forward.upstream_body,
                 );
@@ -890,11 +924,11 @@ async fn run_inner(
                 surface,
                 forward.error.upstream_status,
                 &forward.error.upstream_body,
-                received_body.as_slice(),
+                received_body.as_ref(),
                 Some(&request_id),
             );
             let class = errors::classify_upstream(
-                received_body.as_slice(),
+                received_body.as_ref(),
                 forward.error.upstream_status,
                 &forward.error.upstream_body,
             );
@@ -994,6 +1028,7 @@ fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCan
 // client disconnect against the candidate that was in flight.
 struct Meter {
     images: Option<super::images::ImageUsage>,
+    audio: Option<super::audio::AudioUsage>,
     control: ControlClient,
     request_id: String,
     endpoint_path: &'static str,
@@ -1119,7 +1154,7 @@ fn build_early_streaming_response(
     inputs: StreamPipelineInputs,
     keepalive: Option<Duration>,
     surface: Surface,
-    received_body: Arc<Vec<u8>>,
+    received_body: Arc<Bytes>,
     requester: Option<ReceiptOwner>,
     request_id: String,
     started: Instant,
@@ -1178,7 +1213,7 @@ fn build_early_streaming_response(
             }
             other => {
                 let status =
-                    meter.account_forward_failure(surface, received_body.as_slice(), other);
+                    meter.account_forward_failure(surface, received_body.as_ref(), other);
                 yield Ok(Bytes::from(errors::stream_error_event(
                     protocol,
                     status,
@@ -1451,6 +1486,7 @@ impl Meter {
             request_model: self.request_model.clone(),
             usage: None,
             images: None,
+            audio: None,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             tenant: self.tenant,
@@ -1481,6 +1517,7 @@ impl Meter {
             attempt_index: Some(attempt_index),
             selected_route_id: selected_route_id.map(str::to_string),
             images: self.images.clone().filter(|_| (200..300).contains(&status)),
+            audio: self.audio.clone().filter(|_| (200..300).contains(&status)),
             usage,
             error_message: error_class,
             ..self.base()

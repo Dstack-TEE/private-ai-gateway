@@ -141,7 +141,7 @@ impl UpstreamBackend for MockUpstream {
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(UpstreamCall {
-            body: req.body,
+            body: req.body.to_vec(),
             headers: req.headers,
             path: req.path,
         });

@@ -43,8 +43,9 @@ impl StreamingUsage {
         if self == Self::Continuous {
             options.insert("continuous_usage_stats".into(), Value::Bool(true));
         }
-        request.body =
-            serde_json::to_vec(&body).map_err(|e| UpstreamError::Routing(e.to_string()))?;
+        request.body = serde_json::to_vec(&body)
+            .map_err(|e| UpstreamError::Routing(e.to_string()))?
+            .into();
         Ok(())
     }
 }

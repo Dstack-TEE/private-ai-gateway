@@ -167,6 +167,7 @@ impl StreamReport {
             request_model: self.request_model.clone(),
             usage,
             images: None,
+            audio: None,
             pricing: self.pricing.clone(),
             spend_mode: self.spend_mode,
             tenant: self.tenant,
