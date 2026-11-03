@@ -3,6 +3,7 @@
 //! candidates, and successful forwarding through receipt finalization.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +16,9 @@ use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
 use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
@@ -402,6 +404,8 @@ fn build_recording_service(
 
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes:
+            private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode: UpstreamVerifierMode::Preverified,
         accepted_subjects: vec![],
         accepted_image_digests: vec![],
@@ -2339,6 +2343,97 @@ async fn total_forward_failure_reports_upstream_failure() {
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
     assert_eq!(report["status"].as_i64(), Some(503));
     assert_eq!(report["selectedRouteId"], Value::Null);
+}
+
+#[tokio::test]
+async fn oversized_streaming_upstream_errors_return_502_and_fail_over() {
+    for advertised_length in [false, true] {
+        for failover in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let upstream_calls = calls.clone();
+            let app = Router::new().route(
+                "/v1/chat/completions",
+                post(move || {
+                    let calls = upstream_calls.clone();
+                    async move {
+                        if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                            return axum::http::Response::builder()
+                                .header("content-type", "text/event-stream")
+                                .body(axum::body::Body::from("data: {\"id\":\"ok\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                                .unwrap();
+                        }
+                        let mut response = axum::http::Response::builder()
+                            .status(axum::http::StatusCode::BAD_REQUEST);
+                        let body = if advertised_length {
+                            response = response.header("content-length", MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1);
+                            axum::body::Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>())
+                        } else {
+                            let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+                            let chunks = (0..=MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES / chunk.len())
+                                .map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
+                            axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+                        };
+                        response.body(body).unwrap()
+                    }
+                }),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let backend = OpenAICompatibleBackend::new(format!("http://{address}")).unwrap();
+            let service = Arc::new(
+                AciService::new(
+                    Arc::new(StaticKeyProvider::default()),
+                    Arc::new(StubQuoter::default()),
+                    Arc::new(backend),
+                    Arc::new(InMemoryReceiptStore::default()),
+                    AciServiceConfig::for_test(),
+                    Arc::new(FixedClock(1_700_000_000)),
+                )
+                .unwrap(),
+            );
+            let mut candidates = vec![json!({ "routeId": "openai:oversized", "format": "openai" })];
+            if failover {
+                candidates.push(json!({ "routeId": "openai:healthy", "format": "openai" }));
+            }
+            let (control_url, posts) =
+                spawn_control_capturing(200, json!({ "allow": true, "candidates": candidates }))
+                    .await;
+            let mw = middleware(control_url);
+            let mut input = chat_input();
+            input.stream = true;
+            let response = tokio::time::timeout(Duration::from_secs(2), async {
+                response_parts(mw.handle_completion(&service, input).await).await
+            })
+            .await;
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+
+            let (status, _, _) =
+                response.expect("reject or fail over without waiting for an oversized body");
+            assert_eq!(
+                status,
+                if failover { 200 } else { 502 },
+                "advertised_length={advertised_length} failover={failover}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), if failover { 2 } else { 1 });
+            let rejected = wait_for_post(&posts, |report| {
+                report["selectedRouteId"] == json!("openai:oversized")
+            })
+            .await;
+            assert_eq!(rejected["status"], json!(502));
+            assert_eq!(rejected["attemptIndex"], json!(0));
+            assert_eq!(rejected["isStreaming"], json!(true));
+            if failover {
+                let accepted = wait_for_post(&posts, |report| {
+                    report["selectedRouteId"] == json!("openai:healthy")
+                })
+                .await;
+                assert_eq!(accepted["status"], json!(200));
+                assert_eq!(accepted["attemptIndex"], json!(1));
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -5049,7 +5144,7 @@ async fn delayed_buffered_finalization_and_retained_failover_preserve_admission(
             .service
             .finalize_middleware_receipt(
                 forwarded.receipt,
-                RESPONSE,
+                RESPONSE.to_vec(),
                 Some("application/json"),
                 None,
                 None,
@@ -5131,7 +5226,7 @@ async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() 
         } else {
             let draft = journal.take().unwrap();
             h.service
-                .finalize_middleware_receipt(draft, &bytes, Some("text/event-stream"), None, None)
+                .finalize_middleware_receipt(draft, bytes, Some("text/event-stream"), None, None)
                 .unwrap();
         }
         let receipt = h
@@ -5254,7 +5349,7 @@ async fn replacing_a_retained_response_releases_its_session_lease() {
         .service
         .finalize_middleware_receipt(
             forwarded.receipt,
-            RESPONSE,
+            RESPONSE.to_vec(),
             Some("application/json"),
             None,
             None,

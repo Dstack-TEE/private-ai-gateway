@@ -618,7 +618,7 @@ pub async fn run(
 
             match service.finalize_middleware_receipt(
                 forward.receipt,
-                &final_body,
+                final_body,
                 Some("application/json"),
                 requester.clone(),
                 e2ee,
@@ -1602,6 +1602,7 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         ServiceError::Upstream(
             UpstreamError::Upstream { .. }
             | UpstreamError::Transport(_)
+            | UpstreamError::ResponseTooLarge
             | UpstreamError::ChannelBindingMismatch(_),
         )
         | ServiceError::TestKeysInProduction

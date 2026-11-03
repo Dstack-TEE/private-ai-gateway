@@ -319,6 +319,8 @@ pub fn session_config(
     let manager = UpstreamConfigManager::load(
         &path,
         UpstreamRuntimeOptions {
+            max_buffered_response_bytes:
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             verifier_mode: UpstreamVerifierMode::None,
             accepted_subjects: Vec::new(),
             accepted_image_digests: Vec::new(),
@@ -332,4 +334,22 @@ pub fn session_config(
         },
     );
     Arc::new(manager.unwrap())
+}
+
+/// A real 4096-dimensional float batch exceeding the default response budget.
+pub fn large_embeddings_response() -> Vec<u8> {
+    let vector = std::iter::repeat_n("-0.006929283495992422", 4096)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut body = String::from(r#"{"object":"list","model":"provider-model","data":["#);
+    for index in 0..1000 {
+        if index != 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            r#"{{"object":"embedding","index":{index},"embedding":[{vector}]}}"#
+        ));
+    }
+    body.push_str(r#"],"usage":{"prompt_tokens":290000,"total_tokens":290000}}"#);
+    body.into_bytes()
 }

@@ -42,6 +42,8 @@ pub(super) fn normalize_downstream_domain(raw: &str) -> Option<String> {
 
 /// Configuration accepted by [`super::AciService::new`].
 pub struct AciServiceConfig {
+    /// Operator limit for buffered upstream bodies.
+    pub max_buffered_response_bytes: usize,
     pub tee_type: String,
     /// Runtime source provenance. The binary populates this from
     /// `/etc/git-launcher/gateway.conf`; missing launcher metadata is
@@ -68,6 +70,7 @@ pub struct AciServiceConfig {
 impl AciServiceConfig {
     pub fn for_test() -> Self {
         Self {
+            max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             tee_type: "tdx".to_string(),
             source_provenance: SourceProvenance {
                 repo_url: Some("https://github.com/Dstack-TEE/private-ai-gateway".to_string()),

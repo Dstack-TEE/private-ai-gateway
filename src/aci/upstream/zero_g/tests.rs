@@ -270,6 +270,8 @@ enum Mode {
     Ok,
     WrongSigner,
     SignatureMissing,
+    OversizedSignature,
+    OversizedResponse,
     Unsealed,
     RouterError,
     Truncated,
@@ -420,6 +422,13 @@ async fn chat(
     if broker.mode == Mode::RouterError {
         return (StatusCode::BAD_GATEWAY, "provider-controlled text").into_response();
     }
+    if broker.mode == Mode::OversizedResponse {
+        let mut response = oversized_response();
+        response
+            .headers_mut()
+            .insert("zg-res-key", "res-1".parse().unwrap());
+        return response;
+    }
     let (request, client_key, request_hash) = open_request(&broker.secret, &object(&body)).unwrap();
     let stream = request["stream"] == json!(true);
     let plain = completion(stream);
@@ -467,9 +476,38 @@ async fn signature(State(broker): State<Arc<Broker>>) -> Response {
     if broker.mode == Mode::SignatureMissing {
         return StatusCode::NOT_FOUND.into_response();
     }
+    if broker.mode == Mode::OversizedSignature {
+        return oversized_response();
+    }
     let text = broker.signed_text.lock().unwrap().clone();
     let signature = sign(&broker.signing_key, &text);
     Json(json!({"text": text, "signature": signature, "signing_address": "0x00"})).into_response()
+}
+
+fn oversized_response() -> Response {
+    // Send the headers, then leave the body pending: the cap must reject the
+    // advertised length without waiting for any response bytes.
+    (
+        [(
+            "content-length",
+            (super::super::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1).to_string(),
+        )],
+        axum::body::Body::from_stream(
+            futures_util::stream::pending::<Result<Bytes, std::io::Error>>(),
+        ),
+    )
+        .into_response()
+}
+
+#[tokio::test]
+async fn buffered_response_and_signature_metadata_preserve_size_limit_errors() {
+    for mode in [Mode::OversizedResponse, Mode::OversizedSignature] {
+        let err = Fixture::new(mode).await.buffered().await.unwrap_err();
+        assert!(
+            matches!(err, UpstreamError::ResponseTooLarge),
+            "{mode:?}: {err}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -310,6 +310,11 @@ impl PrivatemodeProviderBackend {
         Ok(Self { inner, deployment })
     }
 
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.inner = self.inner.with_max_buffered_response_bytes(limit);
+        self
+    }
+
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.inner = self.inner.with_name(name);
         self

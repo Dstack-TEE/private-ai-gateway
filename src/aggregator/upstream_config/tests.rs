@@ -334,6 +334,7 @@ fn privatemode_route_must_match_the_static_proxy_deployment() {
 
 fn runtime_options(verifier_mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode,
         accepted_subjects: Vec::new(),
         accepted_image_digests: Vec::new(),

@@ -65,6 +65,7 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
         UpstreamError::Upstream { .. }
         | UpstreamError::Routing(_)
         | UpstreamError::Transport(_)
+        | UpstreamError::ResponseTooLarge
         | UpstreamError::ChannelBindingMismatch(_) => Some(502),
     }
 }
@@ -600,14 +601,28 @@ impl AciService {
                             status,
                             None,
                         );
-                        // Collect the (small) error body up front so the failover
-                        // decision can inspect it. A truncated/unreadable error body
-                        // must not abort the remaining candidates, so it degrades to
-                        // empty — the caller's normalizer emits its generic message.
+                        // Collect the error body up front so the failover decision
+                        // can inspect it. Oversized bodies are upstream failures;
+                        // other truncated/unreadable bodies still degrade to empty
+                        // for the caller's normalizer to emit its generic message.
                         let upstream_headers = upstream_response.headers;
-                        let upstream_body = collect_upstream_body(upstream_response.body)
-                            .await
-                            .unwrap_or_default();
+                        let upstream_body = match collect_upstream_body(
+                            upstream_response.body,
+                            &upstream_headers,
+                            self.config.max_buffered_response_bytes,
+                        )
+                        .await
+                        {
+                            Ok(body) => body,
+                            Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
+                                if let Some(status) = abandoned_status(&err, &prepared) {
+                                    abandon(&mut failed_attempts, status);
+                                }
+                                upgrade_err(&mut aggregated_err, 2, err.into());
+                                continue;
+                            }
+                            Err(_) => Vec::new(),
+                        };
                         // A last-candidate answer is retained rather than returned while
                         // a capacity-retry pass is still available and this pass produced
                         // any capacity signal: the walk exit decides whether to replay the
@@ -906,7 +921,7 @@ impl AciService {
     pub fn finalize_middleware_receipt(
         &self,
         mut draft: MiddlewareReceiptDraft,
-        final_cleartext_body: &[u8],
+        final_cleartext_body: Vec<u8>,
         content_type: Option<&str>,
         requester: Option<ReceiptOwner>,
         e2ee: Option<E2eeRequestContext>,
@@ -914,22 +929,22 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         if is_sse {
             let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(final_cleartext_body);
+            parser.observe(&final_cleartext_body);
             if parser.chat_id().is_some() {
                 draft.builder.set_chat_id(parser.chat_id());
             }
-        } else if let Some(chat_id) = extract_chat_id(final_cleartext_body) {
+        } else if let Some(chat_id) = extract_chat_id(&final_cleartext_body) {
             draft.builder.set_chat_id(Some(chat_id));
         }
 
         let wire_body = match e2ee.as_ref() {
             Some(ctx) => encrypt_e2ee_final_response(
-                final_cleartext_body,
+                &final_cleartext_body,
                 ctx,
                 &draft.endpoint_path,
                 is_sse,
             )?,
-            None => final_cleartext_body.to_vec(),
+            None => final_cleartext_body,
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),

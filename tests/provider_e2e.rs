@@ -511,6 +511,7 @@ fn normalized_sha256(bytes: &[u8]) -> String {
 
 #[derive(Clone)]
 struct ChutesProviderState {
+    response_body: Arc<Vec<u8>>,
     calls: Arc<Mutex<Vec<ProviderCall>>>,
     instance_requests: Arc<Mutex<Vec<String>>>,
     instances: Arc<Vec<ChutesFixtureInstance>>,
@@ -645,7 +646,7 @@ async fn chutes_invoke_handler(
         (
             StatusCode::OK,
             [("content-type", "application/octet-stream")],
-            encrypt_chutes_response_blob(response_pk, CHAT_RESPONSE),
+            encrypt_chutes_response_blob(response_pk, &state.response_body),
         )
     }
 }
@@ -690,6 +691,24 @@ async fn serve_chutes_provider_fixture_with_instances_and_lookup(
     BTreeMap<String, String>,
     Arc<Mutex<Vec<String>>>,
 ) {
+    serve_chutes_provider_fixture_with_response(
+        instance_defs,
+        lookup_name,
+        Arc::new(CHAT_RESPONSE.to_vec()),
+    )
+    .await
+}
+
+async fn serve_chutes_provider_fixture_with_response(
+    instance_defs: Vec<(&'static str, Vec<&'static str>)>,
+    lookup_name: &str,
+    response_body: Arc<Vec<u8>>,
+) -> (
+    String,
+    Arc<Mutex<Vec<ProviderCall>>>,
+    BTreeMap<String, String>,
+    Arc<Mutex<Vec<String>>>,
+) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let instance_requests = Arc::new(Mutex::new(Vec::new()));
     let mut e2e_pubkeys = BTreeMap::new();
@@ -713,6 +732,7 @@ async fn serve_chutes_provider_fixture_with_instances_and_lookup(
         .route("/e2e/instances/:chute_id", get(chutes_instances_handler))
         .route("/e2e/invoke", post(chutes_invoke_handler))
         .with_state(ChutesProviderState {
+            response_body,
             calls: calls.clone(),
             instance_requests: instance_requests.clone(),
             instances: Arc::new(instances),
@@ -740,6 +760,8 @@ fn temp_config_path() -> (tempfile::TempDir, PathBuf) {
 
 fn runtime_options(mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes:
+            private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode: mode,
         accepted_subjects: vec![],
         accepted_image_digests: vec![],
@@ -1877,6 +1899,77 @@ async fn chutes_provider_uses_e2ee_transport_for_buffered_requests() {
         json!("provider-model")
     );
     assert!(call.decrypted_body.as_ref().unwrap()["e2e_response_pk"].is_string());
+}
+
+#[tokio::test]
+async fn chutes_configured_response_limit_applies_after_gzip_decompression() {
+    use private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
+    let body = Arc::new(common::large_embeddings_response());
+    assert!(body.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES);
+    let (base_url, _, keys, _) = serve_chutes_provider_fixture_with_response(
+        vec![(
+            CHUTES_INSTANCE_ID,
+            vec![CHUTES_NONCE, CHUTES_NONCE_B, CHUTES_NONCE_C],
+        )],
+        "provider-model",
+        body.clone(),
+    )
+    .await;
+    for (limit, expected) in [
+        (
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            StatusCode::BAD_GATEWAY,
+        ),
+        (2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES, StatusCode::OK),
+        (body.len() - 1, StatusCode::BAD_GATEWAY),
+    ] {
+        let backend = ChutesProviderBackend::new_with_timeouts(base_url.clone(), 10, 600)
+            .unwrap()
+            .with_name("chutes-provider")
+            .with_bearer_token("chutes-secret")
+            .with_e2ee_api_base(base_url.clone())
+            .with_max_buffered_response_bytes(limit);
+        let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+            url_origin: Some(base_url.clone()),
+            channel_bindings: vec![chutes_key_binding(&keys[CHUTES_INSTANCE_ID])],
+            ..verified_event("chutes-provider", "provider-model")
+        });
+        let mut config = AciServiceConfig::for_test();
+        config.max_buffered_response_bytes = limit;
+        let service = Arc::new(
+            AciService::new_with_upstream_verifier(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(backend),
+                Arc::new(verifier),
+                Arc::new(InMemoryReceiptStore::default()),
+                config,
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let (status, _, response) = call(
+            build_router(service),
+            "POST",
+            "/v1/embeddings",
+            br#"{"model":"provider-model","input":["test"],"encoding_format":"float"}"#,
+        )
+        .await;
+        assert_eq!(
+            status,
+            expected,
+            "limit={limit}: {}",
+            String::from_utf8_lossy(&response[..response.len().min(1024)])
+        );
+        if expected == StatusCode::OK {
+            assert_eq!(response, *body);
+        } else {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&response).unwrap()["error"]["type"],
+                "upstream_error"
+            );
+        }
+    }
 }
 
 #[tokio::test]

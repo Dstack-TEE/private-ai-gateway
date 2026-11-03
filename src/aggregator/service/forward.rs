@@ -313,10 +313,7 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            (
-                upstream_response.status_code,
-                upstream_response.body.clone(),
-            )
+            (upstream_response.status_code, upstream_response.body)
         } else {
             // The envelope is JSON; don't let the client inherit a non-JSON
             // upstream content-type (some backends 5xx with text/*).
@@ -330,10 +327,11 @@ impl AciService {
             )
         };
 
+        let chat_id = extract_chat_id(&client_body);
         let e2ee = req.e2ee.as_ref();
         let wire_response_body = match e2ee {
             Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,
-            None => client_body.clone(),
+            None => client_body,
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -345,7 +343,6 @@ impl AciService {
         // do not even consult it; the byte source is the body the
         // service received from axum.
         let receipt_id = generate_receipt_id();
-        let chat_id = extract_chat_id(&client_body);
         let served_at = selected.admitted_at;
         let keyset = self.current_keyset();
         let mut builder = ReceiptBuilder::new(
@@ -498,7 +495,12 @@ impl AciService {
                 .record_stream_error(endpoint_path, StreamErrorKind::UpstreamNon2xx);
             let upstream_status = upstream_response.status_code;
             let upstream_headers = upstream_response.headers;
-            let upstream_body = collect_upstream_body(upstream_response.body).await?;
+            let upstream_body = collect_upstream_body(
+                upstream_response.body,
+                &upstream_headers,
+                self.config.max_buffered_response_bytes,
+            )
+            .await?;
             return Ok(StreamingForwardResult::UpstreamError(
                 StreamingUpstreamError {
                     upstream_status,

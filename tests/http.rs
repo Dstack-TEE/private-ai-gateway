@@ -971,6 +971,8 @@ async fn receipt_lookup_unknown_chat_id_returns_404() {
 
 fn upstream_runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes:
+            private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode: UpstreamVerifierMode::Preverified,
         accepted_subjects: vec![],
         accepted_image_digests: vec![],
@@ -1099,6 +1101,43 @@ async fn attestation_report_extracts_nearai_nvidia_payload_by_model_name() {
         nv["evidence_list"],
         serde_json::json!([{"certificate": "c", "evidence": "e"}])
     );
+}
+
+#[tokio::test]
+async fn attestation_report_omits_oversized_upstream_evidence_without_reading_body() {
+    let upstream = Router::new().route(
+        "/v1/attestation/report",
+        get(|| async {
+            Response::builder()
+                .header("content-length", 64 * 1024 * 1024 + 1)
+                .body(Body::from_stream(futures_util::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let config = format!(
+        r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"http://{address}","models":{{"phala/gemma":"gemma-up"}}}}]"#
+    );
+    let (_directory, _svc, app) = setup_with_config(&config);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.oneshot(
+        Request::builder()
+            .uri(format!("/v1/attestation/report?model=phala/gemma&nonce={TEST_NONCE}&signing_algo=ecdsa"))
+            .body(Body::empty()).unwrap()
+    )).await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let response = response
+        .expect("reject oversized evidence from headers")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body_bytes(response.into_body()).await).unwrap();
+    let nvidia: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
+    assert_eq!(nvidia["evidence_list"], serde_json::json!([]));
+    assert_eq!(nvidia["nonce"], TEST_NONCE);
 }
 
 #[tokio::test]
