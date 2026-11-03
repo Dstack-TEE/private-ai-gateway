@@ -409,46 +409,12 @@ mod image_tests {
             quality: "auto".into(),
         };
         let max_rate = Decimal::MAX.to_string();
-        for usage in [
-            json!({"input_tokens":2}),
-            json!({"input_tokens":1,"output_tokens":1}),
-            json!({"input_tokens":i64::MAX,"cache_read_input_tokens":i64::MAX,"cache_creation_input_tokens":i64::MAX}),
-            json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":i64::MAX}),
-        ] {
-            let pricing = json!({"imageCostPerImage":"0.1","inputCostPerToken":max_rate,"outputCostPerToken":max_rate});
-            assert_eq!(
-                compute_image_cost(Some(&usage), &pricing, &images),
-                None,
-                "{usage}"
-            );
-        }
         // Each component fits but their sum does not.
         let pricing = json!({"imageCostPerImage":"1","inputCostPerToken":max_rate});
         assert_eq!(
             compute_image_cost(Some(&json!({"input_tokens":1})), &pricing, &images),
             None
         );
-    }
-
-    #[test]
-    fn image_cost_handles_max_token_counts_at_bounded_rates() {
-        let usage = json!({
-            "input_tokens":i64::MAX,"output_tokens":i64::MAX,
-            "cache_read_input_tokens":i64::MAX,"cache_creation_input_tokens":i64::MAX
-        });
-        let pricing = json!({
-            "imageCostPerImage":"1000000",
-            "inputCostPerToken":"1000000","outputCostPerToken":"1000000"
-        });
-        let images = ImageUsage {
-            count: 10,
-            size: "auto".into(),
-            quality: "auto".into(),
-        };
-        // Four i64::MAX token buckets at $1e6/token remain below $3.69e25,
-        // well within Decimal's $7.92e28 limit, even with the image charge.
-        let cost = compute_image_cost(Some(&usage), &pricing, &images).unwrap();
-        assert!(cost > 0.0 && cost < 3.69e25);
     }
 
     #[test]

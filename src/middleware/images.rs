@@ -249,6 +249,9 @@ pub fn upstream_body(body: &Value) -> Value {
         "moderation",
     ] {
         if let Some(value) = body.get(key) {
+            if matches!(key, "size" | "quality" | "background") && value == "auto" {
+                continue;
+            }
             output.insert(key.into(), value.clone());
         }
     }
@@ -380,10 +383,14 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "output_compression":100, "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
+        assert_eq!(
+            upstream,
+            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "output_compression":100, "response_format":"b64_json"})
+        );
         for key in ["user", "safety_identifier", "style", "provider"] {
             assert!(upstream.get(key).is_none());
         }

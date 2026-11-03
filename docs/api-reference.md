@@ -56,7 +56,9 @@ default 1); providers may return fewer, and image charges use the returned
 count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
 `background`, `output_format`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
-for the string options are validated upstream. `response_format` must be absent
+for the string options are validated upstream. `size`, `quality`, and `background`
+set to `"auto"` are omitted upstream to use the provider defaults; request-based
+billing dimensions stay unchanged. `response_format` must be absent
 or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
