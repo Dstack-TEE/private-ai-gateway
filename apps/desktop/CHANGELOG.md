@@ -2,11 +2,25 @@
 
 ## [0.8.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0-beta.1...desktop-v0.8.0) (2026-11-03)
 
+Private AI Proxy 0.8.0 relays image generation and audio transcription through the verified Local API, and refuses constrained requests it can't check. Changes since stable 0.7.0.
 
-### Miscellaneous Chores
+### ⚠ BREAKING CHANGES
 
-* **desktop:** release 0.8.0 ([03ffa5d](https://github.com/Dstack-TEE/private-ai-gateway/commit/03ffa5d2bf6865556f886361b9263f9efc916134))
-* **desktop:** release 0.8.0 ([#527](https://github.com/Dstack-TEE/private-ai-gateway/issues/527)) ([db1cce4](https://github.com/Dstack-TEE/private-ai-gateway/commit/db1cce42ef19eef876c240f99e2e4de01a6ca9e3))
+* **Constrained requests must be JSON.** `pap serve` and `@phala/aci-verifier` refuse a constrained request whose body isn't sent as JSON. `curl -d` and `fetch` with a string body must set `Content-Type: application/json` ([#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517)).
+
+### Features
+
+* **Image generation.** The Local API relays `POST /v1/images/generations` to the verified gateway, with receipts like other requests ([#493](https://github.com/Dstack-TEE/private-ai-gateway/pull/493)).
+* **Audio transcription.** The Local API relays `POST /v1/audio/transcriptions` multipart uploads. Provider constraints travel in the `X-ACI-Provider` header, and only to gateways that advertise multipart support ([#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517)).
+
+### Bug Fixes
+
+* **Unverifiable bodies are refused.** A constrained request with a non-JSON body (other than a supported multipart upload) is refused locally instead of being forwarded unchecked ([#517](https://github.com/Dstack-TEE/private-ai-gateway/pull/517)).
+
+### Maintenance
+
+* Simplify keyset-renewal state and its test seams, with no behavior change ([#520](https://github.com/Dstack-TEE/private-ai-gateway/pull/520)).
+* Update desktop npm and Rust dependencies ([#505](https://github.com/Dstack-TEE/private-ai-gateway/pull/505), [#509](https://github.com/Dstack-TEE/private-ai-gateway/pull/509)).
 
 ## [0.8.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.7.0...desktop-v0.8.0-beta.1) (2026-10-29)
 
