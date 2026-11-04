@@ -8,9 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 
-const ENDPOINT_INVENTORY_SCHEMA_VERSION: u32 = 2;
 pub(crate) const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 pub(crate) const AUDIO_TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
 
@@ -39,142 +37,6 @@ pub enum Surface {
     AudioTranscriptions,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EndpointInventory {
-    schema_version: u32,
-    endpoint: String,
-    checked_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
-    results: Vec<EndpointObservation>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EndpointObservation {
-    model: String,
-    endpoint: String,
-    status: ObservationStatus,
-    reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    http_status: Option<u16>,
-    checks: EndpointChecks,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EndpointChecks {
-    streaming: EndpointCheck,
-    tools: EndpointCheck,
-    tool_result: EndpointCheck,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct EndpointCheck {
-    status: ObservationStatus,
-    reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    http_status: Option<u16>,
-}
-
-impl EndpointChecks {
-    fn entries(&self) -> [&EndpointCheck; 3] {
-        [&self.streaming, &self.tools, &self.tool_result]
-    }
-
-    fn supported(&self) -> bool {
-        self.entries()
-            .iter()
-            .all(|check| check.status == ObservationStatus::Supported)
-    }
-}
-
-fn supports_compatibility(
-    status: ObservationStatus,
-    reason: &str,
-    http_status: Option<u16>,
-) -> bool {
-    status == ObservationStatus::Supported
-        && http_status.is_some_and(|status| {
-            (200..300).contains(&status)
-                || (status == 429 && reason == "temporary_rate_or_quota_limit")
-                || ((matches!(status, 408 | 425) || (500..600).contains(&status))
-                    && status != 501
-                    && reason == "temporary_server_error")
-        })
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ObservationStatus {
-    Supported,
-    Unavailable,
-    Inconclusive,
-}
-
-impl EndpointInventory {
-    pub fn is_newer_than(&self, other: &Self) -> bool {
-        self.checked_at > other.checked_at
-    }
-
-    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let inventory: Self = serde_json::from_slice(bytes)
-            .map_err(|_| "Invalid model endpoint inventory".to_string())?;
-        let mut pairs = HashSet::new();
-        if inventory.schema_version != ENDPOINT_INVENTORY_SCHEMA_VERSION
-            || inventory.endpoint != "https://tee.redpill.ai"
-            || inventory
-                .reasoning_effort
-                .as_deref()
-                .is_some_and(|effort| !matches!(effort, "low" | "medium" | "high"))
-            || inventory.results.is_empty()
-            || inventory.results.len() > 10_000
-            || inventory.results.iter().any(|entry| {
-                entry.model.trim().is_empty()
-                    || entry.model.len() > 256
-                    || entry.reason.len() > 256
-                    || entry.checks.entries().iter().any(|check| {
-                        check.reason.is_empty()
-                            || check.reason.len() > 256
-                            || check
-                                .http_status
-                                .is_some_and(|status| !(100..600).contains(&status))
-                            || (check.status == ObservationStatus::Supported
-                                && !supports_compatibility(
-                                    check.status,
-                                    &check.reason,
-                                    check.http_status,
-                                ))
-                    })
-                    || !matches!(
-                        entry.endpoint.as_str(),
-                        "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
-                    )
-                    || !pairs.insert((&entry.model, &entry.endpoint))
-                    || entry
-                        .http_status
-                        .is_some_and(|status| !(100..600).contains(&status))
-                    || (entry.status == ObservationStatus::Supported
-                        && !supports_compatibility(entry.status, &entry.reason, entry.http_status))
-            })
-        {
-            return Err("Invalid model endpoint inventory".to_string());
-        }
-        let models: HashSet<_> = inventory.results.iter().map(|entry| &entry.model).collect();
-        if pairs.len() != models.len() * 3 {
-            return Err("Incomplete model endpoint inventory".to_string());
-        }
-        Ok(inventory)
-    }
-
-    pub fn bundled() -> Result<Self, String> {
-        // Released apps refresh from this repository path, so the file stays there.
-        Self::parse(include_bytes!("../../gateway/src/endpoint-support.json"))
-    }
-}
-
 impl Surface {
     pub fn path(self) -> &'static str {
         match self {
@@ -201,13 +63,6 @@ impl Surface {
 pub struct CatalogModel {
     pub remote: RemoteModel,
     display_name: String,
-    /// Local endpoint observations, separate from the verified remote metadata.
-    /// None means this endpoint has no compatibility inventory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supported_surfaces: Option<Vec<Surface>>,
-    /// None means agent capabilities have not been probed for this endpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_surfaces: Option<Vec<Surface>>,
 }
 
 impl CatalogModel {
@@ -217,21 +72,6 @@ impl CatalogModel {
                 surface,
                 Surface::ChatCompletions | Surface::Messages | Surface::Responses
             ) && self.outputs("transcription"))
-            && (matches!(
-                surface,
-                Surface::SystemOne | Surface::Images | Surface::AudioTranscriptions
-            ) || self
-                .supported_surfaces
-                .as_ref()
-                .is_none_or(|surfaces| surfaces.contains(&surface)))
-    }
-
-    pub fn supports_agent(&self, surface: Surface) -> bool {
-        self.supports(surface)
-            && self
-                .agent_surfaces
-                .as_ref()
-                .is_none_or(|surfaces| surfaces.contains(&surface))
     }
 
     fn outputs(&self, modality: &str) -> bool {
@@ -360,8 +200,6 @@ impl Catalog {
             let model = CatalogModel {
                 display_name: display_name(&entry),
                 remote: entry,
-                supported_surfaces: None,
-                agent_surfaces: None,
             };
             let canonical = serde_json::to_vec(&model).map_err(|error| error.to_string())?;
             hasher.update((canonical.len() as u64).to_be_bytes());
@@ -384,83 +222,6 @@ impl Catalog {
         let mut catalog = self.clone();
         catalog.models.retain(|model| model.supports(surface));
         catalog
-    }
-
-    pub fn for_agent_surface(&self, surface: Surface) -> Self {
-        let mut catalog = self.for_surface(surface);
-        catalog.models.retain(|model| model.supports_agent(surface));
-        catalog
-    }
-
-    /// Apply only to the two shared preset services, never a custom route that
-    /// happens to expose the same model IDs. Unknown observations are excluded.
-    pub fn has_endpoint_inventory(endpoint: &str) -> bool {
-        let Ok(url) = reqwest::Url::parse(endpoint) else {
-            return false;
-        };
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.port_or_known_default() != Some(443)
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || !matches!(url.path(), "/" | "/v1" | "/v1/")
-            || !matches!(
-                url.host_str(),
-                Some("tee.redpill.ai" | "inference.phala.com")
-            )
-        {
-            return false;
-        }
-        true
-    }
-
-    pub fn apply_endpoint_inventory(
-        &mut self,
-        endpoint: &str,
-        inventory: &EndpointInventory,
-    ) -> Result<(), String> {
-        if !Self::has_endpoint_inventory(endpoint) {
-            return Ok(());
-        }
-        for model in &mut self.models {
-            model.supported_surfaces = Some(
-                [
-                    Surface::ChatCompletions,
-                    Surface::Messages,
-                    Surface::Responses,
-                ]
-                .into_iter()
-                .filter(|surface| {
-                    inventory.results.iter().any(|entry| {
-                        entry.model == model.id()
-                            && entry.endpoint == surface.path()
-                            && entry.status == ObservationStatus::Supported
-                    })
-                })
-                .collect(),
-            );
-            model.agent_surfaces = Some(
-                [
-                    Surface::ChatCompletions,
-                    Surface::Messages,
-                    Surface::Responses,
-                ]
-                .into_iter()
-                .filter(|surface| {
-                    inventory.results.iter().any(|entry| {
-                        entry.model == model.id()
-                            && entry.endpoint == surface.path()
-                            && entry.status == ObservationStatus::Supported
-                            && entry.checks.supported()
-                    })
-                })
-                .collect(),
-            );
-        }
-        let bytes = serde_json::to_vec(&self.models).map_err(|error| error.to_string())?;
-        self.revision = hex::encode(Sha256::digest(bytes));
-        Ok(())
     }
 
     pub fn removed_since(&self, previous: &Catalog) -> Vec<String> {

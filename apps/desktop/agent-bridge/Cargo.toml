@@ -23,7 +23,6 @@ desktop-core = { package = "private-ai-proxy-core", path = "../core", features =
 axum = "0.8"
 async-stream = "0.3"
 bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 futures-util = "0.3"
 hex = "0.4"
 jsonc-parser = { version = "0.34.0", features = ["serde", "cst"] }

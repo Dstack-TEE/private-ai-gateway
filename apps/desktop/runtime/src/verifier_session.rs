@@ -17,11 +17,10 @@ use std::{
     time::Duration,
 };
 
-use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::Error;
 use aci_protocol::types::ServiceCapabilities;
-use agent_bridge::catalog::{Catalog, EndpointInventory, Surface};
+use agent_bridge::catalog::{Catalog, Surface};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::config as settings_config;
 use desktop_core::contracts::{
@@ -37,7 +36,6 @@ use tokio::{runtime::Handle, sync::watch};
 const MAX_ACTIVITY: usize = 50;
 
 pub struct SessionManager {
-    inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -204,10 +202,6 @@ impl RuntimeState {
 }
 
 impl SessionManager {
-    pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
-        self.inventory = Some(Arc::new(inventory));
-        self
-    }
     pub fn new(
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
@@ -256,7 +250,6 @@ impl SessionManager {
                 state,
             }),
             proxy,
-            inventory: None,
             usage,
             launcher,
             task_runtime,
@@ -735,7 +728,7 @@ impl SessionManager {
         Ok(self.snapshot())
     }
 
-    async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
+    async fn load_catalog(&self, generation: u64, epoch: u64) -> Result<(), String> {
         let read = {
             let mut runtime = self.lock()?;
             if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready
@@ -757,23 +750,27 @@ impl SessionManager {
         if runtime.service.is_none() {
             return Ok(());
         }
-        let result = result.and_then(|mut catalog| {
-            if let Some(endpoint) = runtime.state.remote_url.as_deref() {
-                let inventory = match &self.inventory {
-                    Some(updater) => updater.current(),
-                    None => EndpointInventory::bundled()?,
-                };
-                catalog.apply_endpoint_inventory(endpoint, &inventory)?;
-            }
-            Ok(catalog)
-        });
         let outcome = match result {
             Ok(catalog) => {
                 runtime.state.status = VerificationStatus::Verified;
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
                 runtime.state.error = None;
-                self.publish_catalog(&mut runtime, catalog);
+                let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
+                runtime.last_catalog = Some(summary.clone());
+                runtime.state.catalog = Some(summary);
+                runtime.catalog = Some(catalog.clone());
+                if !runtime.verification_only {
+                    runtime.state.protected_since.get_or_insert_with(now_secs);
+                    self.proxy.publish(Session {
+                        generation: runtime.generation,
+                        epoch: runtime.epoch,
+                        session_id: Some(runtime.session_id.clone()),
+                        service: runtime.service.clone(),
+                        verified: true,
+                        catalog: Some(catalog),
+                    });
+                }
                 Ok(())
             }
             Err(error) => {
@@ -794,82 +791,7 @@ impl SessionManager {
         };
         drop(runtime);
         self.publish();
-        if outcome.is_ok() {
-            self.refresh_inventory(generation, epoch);
-        }
         outcome
-    }
-
-    fn publish_catalog(&self, runtime: &mut RuntimeState, catalog: Catalog) {
-        let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
-        runtime.last_catalog = Some(summary.clone());
-        runtime.state.catalog = Some(summary);
-        runtime.catalog = Some(catalog.clone());
-        if !runtime.verification_only {
-            runtime.state.protected_since.get_or_insert_with(now_secs);
-            self.proxy.publish(Session {
-                generation: runtime.generation,
-                epoch: runtime.epoch,
-                session_id: Some(runtime.session_id.clone()),
-                service: runtime.service.clone(),
-                verified: true,
-                catalog: Some(catalog),
-            });
-        }
-    }
-
-    fn refresh_inventory(self: &Arc<Self>, generation: u64, epoch: u64) {
-        let Some(updater) = self.inventory.clone() else {
-            return;
-        };
-        let eligible = self.lock().is_ok_and(|runtime| {
-            runtime
-                .state
-                .remote_url
-                .as_deref()
-                .is_some_and(Catalog::has_endpoint_inventory)
-        });
-        if !eligible {
-            return;
-        }
-        let manager = Arc::downgrade(self);
-        self.task_runtime.spawn(async move {
-            updater.refresh().await;
-            let Some(manager) = manager.upgrade() else {
-                return;
-            };
-            if let Err(error) = manager.apply_inventory(generation, epoch) {
-                tracing::warn!("Cannot apply model endpoint inventory: {error}");
-            }
-        });
-    }
-
-    fn apply_inventory(&self, generation: u64, epoch: u64) -> Result<(), String> {
-        let mut runtime = self.lock()?;
-        if runtime.generation != generation
-            || runtime.epoch != epoch
-            || !runtime.identity_ready
-            || runtime.state.status != VerificationStatus::Verified
-        {
-            return Ok(());
-        }
-        let (Some(mut catalog), Some(endpoint)) =
-            (runtime.catalog.clone(), runtime.state.remote_url.as_deref())
-        else {
-            return Ok(());
-        };
-        let Some(updater) = &self.inventory else {
-            return Ok(());
-        };
-        let previous = catalog.revision.clone();
-        catalog.apply_endpoint_inventory(endpoint, &updater.current())?;
-        if catalog.revision == previous {
-            return Ok(());
-        }
-        self.publish_catalog(&mut runtime, catalog);
-        drop(runtime);
-        self.publish();
-        Ok(())
     }
 
     fn update(&self, change: impl FnOnce(&mut AppState)) {
@@ -1010,31 +932,13 @@ pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.
 fn catalog_summary(catalog: &Catalog, previous: Option<&CatalogSummary>) -> CatalogSummary {
-    let inventory_surfaces = [
-        Surface::ChatCompletions,
-        Surface::Messages,
-        Surface::Responses,
-    ];
     let models: Vec<ModelSummary> = catalog
         .models
         .iter()
         .map(|model| {
-            let supported_endpoints: Vec<String> = inventory_surfaces
-                .iter()
-                .copied()
-                .filter(|surface| model.supports(*surface))
-                .map(|surface| surface.path().to_string())
-                .collect();
-            // Preserve no-inventory semantics for models that pass every text
-            // surface; an explicit empty list prevents decisions-only models
-            // from falling through the renderer's legacy `None` behavior.
-            let supported_endpoints = if model.supported_surfaces.is_none()
-                && supported_endpoints.len() == inventory_surfaces.len()
-            {
-                None
-            } else {
-                Some(supported_endpoints)
-            };
+            // None means every text surface; an explicit empty list keeps
+            // models without text output out of the renderer's text pickers.
+            let supported_endpoints = (!model.supports(Surface::ChatCompletions)).then(Vec::new);
             ModelSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),

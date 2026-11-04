@@ -37,12 +37,11 @@ describes the boundary.
 | `core` | Client side shared by the app, CLI and backend: contracts, the management API and its client, the local endpoint, the `config.toml` model, paths |
 | `runtime` | Persistent backend: controller, settings files, the management API server, verifier sessions, usage, account login, web UI |
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
-| `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
 | `../../crates/aci-verify` | Shared policy-neutral ACI verification mechanisms: report binding, dstack event-log replay and KMS custody chain, declared TLS selection |
 | `brand` | Source branding and icon assets |
 | `npm` | npm packaging of the CLI |
-| `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
+| `scripts` | Reproducible build, packaging, and release tooling |
 
 Every package ships the same three sibling executables; see
 [CLI distribution](docs/cli-distribution.md).
@@ -82,8 +81,7 @@ text part. The catalog must explicitly advertise `transcription` in
 Models advertising `transcription` output are excluded from
 chat, Messages, and Responses. Models such as Gemini that accept audio and text
 and advertise only `text` output keep their chat endpoints.
-Like System One and images, this route bypasses the text endpoint compatibility
-inventory. Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
+Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
 text within the existing 32 MiB body limit. File parts are drained without
 collecting another file buffer. Other Local API routes reject multipart.
 
@@ -164,7 +162,6 @@ Run the focused checks from `apps/desktop`:
 ```bash
 npm run check
 npm run test:release
-npm run test:probe
 
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -189,30 +186,13 @@ Phala and RedPill sign-in flows. The renderer, `config.toml`, agent
 configuration, command arguments, and diagnostics never receive the raw saved
 credential.
 
-## Model Compatibility Inventory
+## Model Catalog
 
-`gateway/src/endpoint-support.json` contains dated endpoint observations for the
-RedPill and Phala presets. The verified live catalog remains authoritative;
-inventory data only filters models that are known to match an agent's API
-surface.
-
-Probe a service explicitly:
-
-```bash
-node scripts/probe-model-endpoints.mjs \
-  --endpoint https://tee.redpill.ai \
-  --key-env REDPILL_AI_API_KEY \
-  --previous gateway/src/endpoint-support.json \
-  --json
-```
-
-Pass credentials through the named environment variable, never as command-line
-arguments. Temporary HTTP failures remain availability failures rather than
-proof of incompatibility. Network errors and malformed responses remain
-inconclusive. Review the complete report before updating the inventory.
-Models whose catalog `output_modalities` is an array without `text` are recorded
-as `unavailable` with reason `no_text_output`, including all capability checks,
-without inference requests. Models without output modality metadata are probed normally.
+The verified live catalog (`GET /v1/models` through the ACI verifier) is the
+only model list. Every listed model is offered on the Chat Completions,
+Messages and Responses surfaces unless its `output_modalities` excludes text;
+image and transcription surfaces require an explicit `image` or
+`transcription` output modality.
 
 ## Branding
 

@@ -974,7 +974,7 @@ pub(super) fn connection_options(
         catalog.is_some_and(|catalog| {
             catalog
                 .get(model)
-                .is_some_and(|entry| entry.supports_agent(agent.surface()))
+                .is_some_and(|entry| entry.supports(agent.surface()))
         })
     };
     let current = selected_model(agent, Some(doc)).filter(compatible);
@@ -993,7 +993,7 @@ pub(super) fn connection_options(
                     catalog
                         .models
                         .iter()
-                        .find(|model| model.supports_agent(agent.surface()))
+                        .find(|model| model.supports(agent.surface()))
                 })
                 .map(|model| model.id().to_string())
         }),
