@@ -534,8 +534,8 @@ fn config(agent: Agent) -> String {
         .to_string()
 }
 
-/// Models with every projected attribute, and models without any: no text or
-/// image input, and zero limits.
+/// A model with every projected attribute, models with few or none, and a
+/// zero-limit transcription model that agents never see.
 fn rich_catalog(completion: &str) -> Catalog {
     Catalog::from_remote(
         &json!({"data": [

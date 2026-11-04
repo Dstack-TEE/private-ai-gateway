@@ -41,7 +41,7 @@ describes the boundary.
 | `../../crates/aci-verify` | Shared policy-neutral ACI verification mechanisms: report binding, dstack event-log replay and KMS custody chain, declared TLS selection |
 | `brand` | Source branding and icon assets |
 | `npm` | npm packaging of the CLI |
-| `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
+| `scripts` | Reproducible build, packaging, and release tooling |
 
 Every package ships the same three sibling executables; see
 [CLI distribution](docs/cli-distribution.md).
@@ -81,8 +81,7 @@ text part. The catalog must explicitly advertise `transcription` in
 Models advertising `transcription` output are excluded from
 chat, Messages, and Responses. Models such as Gemini that accept audio and text
 and advertise only `text` output keep their chat endpoints.
-Like System One and images, this route bypasses the text endpoint compatibility
-inventory. Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
+Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
 text within the existing 32 MiB body limit. File parts are drained without
 collecting another file buffer. Other Local API routes reject multipart.
 

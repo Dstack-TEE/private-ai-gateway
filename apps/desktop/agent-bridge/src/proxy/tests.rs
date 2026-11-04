@@ -121,6 +121,56 @@ fn tokens() -> TokenSet {
     set
 }
 
+#[tokio::test]
+async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let catalog = Catalog::from_remote(
+        &json!({"data": [
+            {"id": "text", "output_modalities": ["text"]},
+            {"id": "decisions", "output_modalities": ["decisions"]},
+            {"id": "image", "output_modalities": ["image"]},
+            {"id": "audio", "output_modalities": ["transcription"]}
+        ]}),
+        1,
+    )
+    .unwrap();
+    state.publish(Session {
+        verified: true,
+        catalog: Some(catalog),
+        ..Session::default()
+    });
+    for (token, expected) in [
+        ("codex-token", &["text"][..]),
+        ("claude-token", &["text"]),
+        ("opencode-token", &["text"]),
+        (
+            "local-tools-token",
+            &["text", "decisions", "image", "audio"],
+        ),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let response = models(State(state.clone()), headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let ids: Vec<_> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{token}");
+    }
+    assert!(check_catalog(&state, Some("text"), Surface::Messages).is_ok());
+    let error = check_catalog(&state, Some("decisions"), Surface::Messages).unwrap_err();
+    assert_eq!(error.code, "model_endpoint_unavailable");
+}
+
 async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
     state.publish(Session {
         generation,
