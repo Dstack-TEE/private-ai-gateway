@@ -2,10 +2,15 @@
 
 ## [0.8.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.1) (2026-11-04)
 
+Private AI Proxy 0.8.1 shows every model the verified gateway lists. Changes since stable 0.8.0.
 
 ### Bug Fixes
 
-* **desktop:** show every verified catalog model ([#532](https://github.com/Dstack-TEE/private-ai-gateway/issues/532)) ([41b84f9](https://github.com/Dstack-TEE/private-ai-gateway/commit/41b84f9da69ab24119b53f0d8de0410caae94dde))
+* **New models appear right away.** On the RedPill and Phala presets, models missing from a hand-maintained compatibility list were hidden, so newly launched models such as `deepseek/deepseek-v4.1-flash-1017` never showed up in the app, the Local API model list, or agent pickers. The verified live catalog is now the only model list. Models that advertise no text output (decision, image, or transcription models) still stay out of coding agents ([#532](https://github.com/Dstack-TEE/private-ai-gateway/pull/532)).
+
+### Maintenance
+
+* Update desktop npm dependencies ([#529](https://github.com/Dstack-TEE/private-ai-gateway/pull/529)).
 
 ## [0.8.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0-beta.1...desktop-v0.8.0) (2026-11-03)
 
