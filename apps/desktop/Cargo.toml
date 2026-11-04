@@ -10,3 +10,13 @@ resolver = "2"
 
 [workspace.package]
 version = "0.8.1"
+
+# Shipped binaries, after Tauri's app size guide
+# (https://v2.tauri.app/concept/size/): whole-program optimization and no
+# symbol table, at the cost of longer release builds. The default opt-level
+# stays for the proxy's TLS and verification work, and panics keep unwinding
+# because the agent bridge's proxy catches them per request.
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
