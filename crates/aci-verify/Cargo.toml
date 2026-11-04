@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 aci-protocol = { path = "../aci-protocol" }
 base64 = "0.22"
+cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", tag = "verifier-v0.6.3" }
+ez-hash = "1.1.0"
 hex = "0.4"
 k256 = { version = "0.13", features = ["ecdsa"] }
 serde = { version = "1", features = ["derive"] }

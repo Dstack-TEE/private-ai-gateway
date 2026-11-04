@@ -8,35 +8,20 @@ use aci_protocol::types::WorkloadKeyset;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use k256::EncodedPoint;
 use serde_json::Value;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256};
 use sha3::Keccak256;
 
 use crate::decode_hex;
 
-const DSTACK_RUNTIME_EVENT_TYPE: u32 = 0x08000001;
-
-/// One entry of dstack's event log, in the wire shape of the dstack SDK's
-/// `EventLog`.
-#[derive(
-    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
-)]
-pub struct DstackEventLog {
-    pub imr: u32,
-    pub event_type: u32,
-    pub digest: String,
-    pub event: String,
-    pub event_payload: String,
-}
+// Keep the public name while using upstream's wire parser and versioned event type.
+// Digest and payload fields are decoded bytes; serde still uses hex on the wire.
+pub use cc_eventlog::TdxEvent as DstackEventLog;
 
 /// An event log whose replay matched a quote's RTMR3. Only
 /// [`verify_dstack_event_log`] builds one, so a measurement read from it is
 /// always one the quote binds.
 #[derive(Debug)]
 pub struct VerifiedEventLog(Vec<DstackEventLog>);
-
-#[derive(Debug, thiserror::Error)]
-#[error("invalid dstack event_log evidence: {0}")]
-struct InvalidEventLog(String);
 
 /// Replay the dstack event log to RTMR3 and require it to match the quote's
 /// `rt_mr3` (`None` for a quote that is not TDX), returning the verified
@@ -51,7 +36,26 @@ pub fn verify_dstack_event_log(
         .ok_or("missing dstack event_log evidence")?;
     let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
         .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
-    let rtmr3 = replay_dstack_rtmr(&events, 3).map_err(|e| e.to_string())?;
+    cc_eventlog::tdx::validate_v2_preimages(&events).map_err(|e| e.to_string())?;
+    let mut runtime_events = Vec::new();
+    for (index, event) in events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.imr == 3)
+    {
+        // RTMR3 is dstack's runtime register. Other event types have no
+        // reconstructable preimage in TdxEvent, so cannot establish this binding.
+        let runtime = event
+            .to_runtime_event()
+            .ok_or_else(|| format!("dstack RTMR3 event {index} is not a runtime event"))?;
+        if event.digest != runtime.sha384_digest() {
+            return Err(format!(
+                "dstack runtime event {index} digest does not match its fields"
+            ));
+        }
+        runtime_events.push(runtime);
+    }
+    let rtmr3 = cc_eventlog::replay_events::<ez_hash::Sha384>(&runtime_events, None);
     let quote_rtmr3 = quote_rtmr3.ok_or("dstack event log verification requires a TDX quote")?;
     if rtmr3.as_slice() != quote_rtmr3 {
         return Err("dstack event_log RTMR3 does not match verified quote".to_string());
@@ -59,40 +63,17 @@ pub fn verify_dstack_event_log(
     Ok(VerifiedEventLog(events))
 }
 
-/// The single pre-`system-ready` dstack runtime event named `event_name`
-/// (`None` when the verified log carries none). A log carrying more than one
-/// is the tampering shape this lookup exists to catch, so it is an error,
-/// never a silent "absent".
+/// The first boot-time runtime event named `event_name`, following dstack's
+/// `find_event` semantics: stop at `system-ready`, ignoring application events.
 pub fn dstack_rtmr3_event<'a>(
     events: &'a [DstackEventLog],
     event_name: &str,
 ) -> Result<Option<&'a DstackEventLog>, String> {
-    runtime_event_before_system_ready(events, event_name).map_err(|e| e.to_string())
-}
-
-fn runtime_event_before_system_ready<'a>(
-    events: &'a [DstackEventLog],
-    event_name: &str,
-) -> Result<Option<&'a DstackEventLog>, InvalidEventLog> {
-    let mut matches = events
+    Ok(events
         .iter()
-        .take_while(|event| {
-            !(event.imr == 3
-                && event.event_type == DSTACK_RUNTIME_EVENT_TYPE
-                && event.event == "system-ready")
-        })
-        .filter(|event| {
-            event.imr == 3
-                && event.event_type == DSTACK_RUNTIME_EVENT_TYPE
-                && event.event == event_name
-        });
-    let event = matches.next();
-    if matches.next().is_some() {
-        return Err(InvalidEventLog(format!(
-            "multiple pre-system-ready {event_name} events"
-        )));
-    }
-    Ok(event)
+        .filter(|event| event.imr == 3 && event.is_runtime_event())
+        .take_while(|event| event.event != "system-ready")
+        .find(|event| event.event == event_name))
 }
 
 /// The RTMR3-measured compose hash that `app_compose` reproduces (§9.1(4)).
@@ -106,7 +87,8 @@ pub fn verify_dstack_compose_measurement(
     let measured = dstack_rtmr3_event(&events.0, "compose-hash")
         .map_err(|e| format!("dstack event log rejected: {e}"))?
         .ok_or_else(|| "verified event log carries no compose-hash event".to_string())?;
-    let measured_hash: [u8; 32] = decode_hex(&measured.event_payload)?
+    let measured_hash: [u8; 32] = measured
+        .event_payload
         .as_slice()
         .try_into()
         .map_err(|_| "compose-hash event must contain 32 bytes".to_string())?;
@@ -120,7 +102,7 @@ pub fn dstack_app_id(events: &VerifiedEventLog) -> Result<Vec<u8>, String> {
     let event = dstack_rtmr3_event(&events.0, "app-id")
         .map_err(|e| format!("dstack event log rejected: {e}"))?
         .ok_or_else(|| "verified event log carries no app-id event".to_string())?;
-    decode_hex(&event.event_payload)
+    Ok(event.event_payload.clone())
 }
 
 /// Verify that `app_compose` is the preimage of the compose measurement
@@ -140,36 +122,6 @@ pub fn verify_dstack_app_compose(
         );
     }
     Ok(())
-}
-
-fn replay_dstack_rtmr(events: &[DstackEventLog], imr: u32) -> Result<[u8; 48], InvalidEventLog> {
-    let mut mr = vec![0u8; 48];
-    for event in events.iter().filter(|event| event.imr == imr) {
-        let mut digest = dstack_event_digest(event)?;
-        if digest.len() < 48 {
-            digest.resize(48, 0);
-        }
-        mr.extend_from_slice(&digest);
-        mr = Sha384::digest(&mr).to_vec();
-    }
-    mr.as_slice()
-        .try_into()
-        .map_err(|_| InvalidEventLog("replayed RTMR is not 48 bytes".to_string()))
-}
-
-fn dstack_event_digest(event: &DstackEventLog) -> Result<Vec<u8>, InvalidEventLog> {
-    if event.event_type != DSTACK_RUNTIME_EVENT_TYPE {
-        return decode_hex(&event.digest).map_err(InvalidEventLog);
-    }
-
-    let payload = decode_hex(&event.event_payload).map_err(InvalidEventLog)?;
-    let mut hasher = Sha384::new();
-    hasher.update(event.event_type.to_ne_bytes());
-    hasher.update(b":");
-    hasher.update(event.event.as_bytes());
-    hasher.update(b":");
-    hasher.update(payload);
-    Ok(hasher.finalize().to_vec())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -436,62 +388,5 @@ mod tests {
                 "{field}"
             );
         }
-    }
-
-    fn runtime_event(event: &str, payload: &[u8]) -> DstackEventLog {
-        let mut event = DstackEventLog {
-            imr: 3,
-            event_type: DSTACK_RUNTIME_EVENT_TYPE,
-            digest: String::new(),
-            event: event.to_string(),
-            event_payload: hex::encode(payload),
-        };
-        event.digest = hex::encode(dstack_event_digest(&event).unwrap());
-        event
-    }
-
-    #[test]
-    fn replay_recomputes_runtime_event_digest_from_semantic_fields() {
-        let measured = runtime_event("app-id", &[0x11; 20]);
-        let expected_rtmr = replay_dstack_rtmr(std::slice::from_ref(&measured), 3).unwrap();
-
-        let mut tampered = runtime_event("compose-hash", &[0x22; 32]);
-        tampered.digest = measured.digest;
-        let tampered_rtmr = replay_dstack_rtmr(&[tampered], 3).unwrap();
-
-        assert_ne!(tampered_rtmr, expected_rtmr);
-    }
-
-    #[test]
-    fn semantic_events_must_be_dstack_runtime_events() {
-        let disguised_firmware_event = DstackEventLog {
-            imr: 3,
-            event_type: 0,
-            digest: hex::encode([0x33; 48]),
-            event: "compose-hash".to_string(),
-            event_payload: hex::encode([0x44; 32]),
-        };
-
-        assert!(
-            runtime_event_before_system_ready(&[disguised_firmware_event], "compose-hash")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_semantic_events() {
-        let compose_hash = runtime_event("compose-hash", &[0x44; 32]);
-        let err = runtime_event_before_system_ready(
-            &[compose_hash.clone(), compose_hash],
-            "compose-hash",
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert_eq!(
-            err,
-            "invalid dstack event_log evidence: multiple pre-system-ready compose-hash events"
-        );
     }
 }

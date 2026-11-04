@@ -275,6 +275,24 @@ host. Policy flags narrow what it accepts:
 Without a custody policy, the CLI reports custody as skipped. The TypeScript
 verifier does not check custody.
 
+The dstack event-log reference is upstream
+[`cc-eventlog` at `verifier-v0.6.3`](https://github.com/Dstack-TEE/dstack/tree/verifier-v0.6.3/dstack/cc-eventlog).
+Rust uses that crate directly; TypeScript ports its V1 and V2 digest/preimage
+checks and replay, pending an upstream JS/wasm package. Both recompute every
+RTMR3 runtime digest, require it to match the advertised digest and replay to
+the quoted RTMR3, and select the first runtime `compose-hash` before
+`system-ready`, following upstream `find_event`. V2 additionally requires the
+supplied preimage to match both the digest and the canonical JCS event bytes.
+RTMR3 entries of other types are rejected because their payload binding cannot
+be reconstructed. Shared fixtures generated with upstream check both ports.
+This authenticates the compose measurement when combined with quote verification;
+release acceptance remains caller policy.
+
+The unpublished Rust `aci-verify` API now aliases `DstackEventLog` to upstream
+`TdxEvent`: `digest` and `event_payload` are decoded byte vectors (use
+`hex::encode` for display), with upstream `version` and `preimage` fields.
+The JSON wire format remains hex strings.
+
 Clients do not check whether the gateway runs a production or development dstack
 OS image. A development image permits operator access to the gateway. Users who
 need assurance about the OS image should verify the quote, event log, and VM
