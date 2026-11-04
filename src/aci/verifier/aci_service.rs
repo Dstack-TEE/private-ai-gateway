@@ -25,6 +25,7 @@ use super::{
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
+use crate::aci::upstream::{read_buffered_upstream_response, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 #[derive(Debug, thiserror::Error)]
@@ -326,6 +327,7 @@ pub struct AciServiceUpstreamVerifier {
     policy: AciServiceVerifierPolicy,
     cache_ttl_seconds: u64,
     request_timeout_seconds: u64,
+    max_buffered_response_bytes: usize,
     cache: RwLock<Option<CachedAciServiceVerification>>,
     verify_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
@@ -377,12 +379,18 @@ impl AciServiceUpstreamVerifier {
             policy,
             cache_ttl_seconds,
             request_timeout_seconds,
+            max_buffered_response_bytes: MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             cache: RwLock::new(None),
             verify_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             appraisal: None,
             verifier_id: Self::VERIFIER_ID.to_string(),
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.max_buffered_response_bytes = limit;
+        self
     }
 
     pub fn with_default_pccs(
@@ -451,8 +459,7 @@ impl AciServiceUpstreamVerifier {
             .await
             .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         let status = response.status().as_u16();
-        let body = response
-            .bytes()
+        let body = read_buffered_upstream_response(response, self.max_buffered_response_bytes)
             .await
             .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         if !(200..300).contains(&status) {

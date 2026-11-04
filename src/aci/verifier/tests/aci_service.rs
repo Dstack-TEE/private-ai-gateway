@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, Semaphore};
@@ -41,6 +42,77 @@ async fn wait_until_wall(not_after: u64) {
     })
     .await
     .expect("wall clock did not pass keyset expiry");
+}
+
+#[tokio::test]
+async fn canonical_attestation_reads_enforce_the_configured_cap() {
+    use axum::{body::Body, response::Response, routing::get, Router};
+
+    for with_length in [false, true] {
+        let app = Router::new().fallback(get(move || async move {
+            let body = futures_util::stream::once(async {
+                Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"0123456789abcdefg"))
+            })
+            .chain(futures_util::stream::pending());
+            let mut response = Response::builder();
+            if with_length {
+                response = response.header("content-length", "17");
+            }
+            response.body(Body::from_stream(body)).unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let verifier = verifier(&origin).with_max_buffered_response_bytes(16);
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), verifier.verify(request(&origin))).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let event = result.expect("oversized attestation should stop before EOF");
+        assert_eq!(event.result, VerificationResult::Failed);
+        assert!(event
+            .reason
+            .unwrap()
+            .contains("exceeds the endpoint size limit"));
+        assert!(verifier.cached(&request(&origin)).is_none());
+    }
+}
+
+#[tokio::test]
+async fn canonical_attestation_deadline_covers_a_stalled_body() {
+    use axum::{body::Body, response::Response, routing::get, Router};
+
+    let app = Router::new().fallback(get(|| async {
+        let body = futures_util::stream::once(async {
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"{"))
+        })
+        .chain(futures_util::stream::pending());
+        Response::new(Body::from_stream(body))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
+        &origin,
+        "http://127.0.0.1:1",
+        AciServiceVerifierPolicy::new(
+            vec!["test-subject".to_string()],
+            Vec::new(),
+            vec![public_key_uncompressed_hex(&signing_key(1))],
+        )
+        .unwrap(),
+        300,
+        1,
+        1,
+    )
+    .unwrap();
+    let result =
+        tokio::time::timeout(Duration::from_secs(2), verifier.verify(request(&origin))).await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let event = result.expect("attestation body must obey the request deadline");
+    assert_eq!(event.result, VerificationResult::Failed);
+    assert!(event.reason.unwrap().contains("timed out"));
 }
 
 struct Control {

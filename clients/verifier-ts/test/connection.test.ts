@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 
 import { computeKeysetDigest, hashBody } from '../src/index.js';
 import { connectAciWithTransport } from '../src/runtime/connection.js';
@@ -505,6 +507,60 @@ test('multipart preserves wire bytes and audits the effective header pins with l
       } finally {
         await connection.close();
       }
+    }
+  }
+});
+
+test('pinned probes and receipt/session bodies share the configured deadline', { timeout: 3000 }, async (t) => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{');
+  });
+  t.after(() => new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeAllConnections();
+  }));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+
+  for (const artifact of ['attestation', 'receipts', 'sessions']) {
+    const fake = fakeTransportFactory(fx.ENVELOPE, fx.KEYSET_DIGEST);
+    const factory: PinnedTransportFactory = (options) => {
+      const transport = fake.factory(options);
+      const originalFetch = transport.fetch;
+      transport.fetch = (input, init) => {
+        const request = new Request(input, init);
+        return new URL(request.url).pathname.includes(`/${artifact}`)
+          ? fetch(`http://127.0.0.1:${address.port}`, { signal: request.signal })
+          : originalFetch(input, init);
+      };
+      return transport;
+    };
+    const connecting = connectAciWithTransport(
+      { baseURL: 'https://api.example.com', timeoutMs: 100, serving: { requireVerified: false } },
+      factory,
+      async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST),
+    );
+    if (artifact === 'attestation') {
+      await assert.rejects(connecting, /timed out/);
+      continue;
+    }
+    const connection = await connecting;
+    try {
+      await (await connection.fetch('https://api.example.com/v1/chat/completions', {
+        method: 'POST', body: fx.REQUEST_BODY,
+      })).text();
+      if (artifact === 'receipts') {
+        await assert.rejects(connection.verifyReceipt(), /timed out/);
+      } else {
+        const audit = await connection.verifyReceipt();
+        assert.equal(audit.transcript.lines.find((line) => line.id === 'upstream-2')?.reason,
+          'no session record supplied');
+      }
+    } finally {
+      await connection.close();
     }
   }
 });
