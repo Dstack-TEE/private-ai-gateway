@@ -13,9 +13,8 @@ use sha3::Keccak256;
 
 use crate::decode_hex;
 
-// Keep the public name while using upstream's wire parser and versioned event type.
-// Digest and payload fields are decoded bytes; serde still uses hex on the wire.
-pub use cc_eventlog::TdxEvent as DstackEventLog;
+mod event_log;
+pub use event_log::DstackEventLog;
 
 /// An event log whose replay matched a quote's RTMR3. Only
 /// [`verify_dstack_event_log`] builds one, so a measurement read from it is
@@ -36,26 +35,7 @@ pub fn verify_dstack_event_log(
         .ok_or("missing dstack event_log evidence")?;
     let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
         .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
-    cc_eventlog::tdx::validate_v2_preimages(&events).map_err(|e| e.to_string())?;
-    let mut runtime_events = Vec::new();
-    for (index, event) in events
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event.imr == 3)
-    {
-        // RTMR3 is dstack's runtime register. Other event types have no
-        // reconstructable preimage in TdxEvent, so cannot establish this binding.
-        let runtime = event
-            .to_runtime_event()
-            .ok_or_else(|| format!("dstack RTMR3 event {index} is not a runtime event"))?;
-        if event.digest != runtime.sha384_digest() {
-            return Err(format!(
-                "dstack runtime event {index} digest does not match its fields"
-            ));
-        }
-        runtime_events.push(runtime);
-    }
-    let rtmr3 = cc_eventlog::replay_events::<ez_hash::Sha384>(&runtime_events, None);
+    let rtmr3 = event_log::replay_rtmr3(&events)?;
     let quote_rtmr3 = quote_rtmr3.ok_or("dstack event log verification requires a TDX quote")?;
     if rtmr3.as_slice() != quote_rtmr3 {
         return Err("dstack event_log RTMR3 does not match verified quote".to_string());
