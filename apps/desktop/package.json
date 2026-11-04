@@ -24,7 +24,6 @@
     "generate:contracts": "node scripts/generate-contracts.mjs",
     "test:agents": "node --test scripts/agent-integrations.test.mjs",
     "test:state": "node --test scripts/app-state.test.mjs scripts/create-api.test.mjs",
-    "test:probe": "node --test scripts/probe-model-endpoints.test.mjs",
     "test:release": "node --test scripts/create-update-manifest.test.mjs scripts/npm-install.test.mjs scripts/npm-registry.test.mjs scripts/package-*.test.mjs scripts/release-*.test.mjs",
     "package:npm": "node scripts/package-npm.mjs"
   },

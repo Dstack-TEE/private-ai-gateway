@@ -121,51 +121,6 @@ fn tokens() -> TokenSet {
     set
 }
 
-#[tokio::test]
-async fn discovery_and_request_admission_share_endpoint_capabilities() {
-    let (state, _events) = state();
-    state.set_tokens(tokens());
-    let mut catalog = Catalog::from_remote(
-        &json!({"data": [
-            {"id": "responses-only"}, {"id": "messages-only"}, {"id": "chat-only"}
-        ]}),
-        1,
-    )
-    .unwrap();
-    for (model, surface) in catalog.models.iter_mut().zip([
-        Surface::Responses,
-        Surface::Messages,
-        Surface::ChatCompletions,
-    ]) {
-        model.supported_surfaces = Some(vec![surface]);
-    }
-    state.publish(Session {
-        verified: true,
-        catalog: Some(catalog),
-        ..Session::default()
-    });
-    for (token, expected) in [
-        ("codex-token", "responses-only"),
-        ("claude-token", "messages-only"),
-        ("opencode-token", "chat-only"),
-    ] {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-        let response = models(State(state.clone()), headers).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(body["data"].as_array().unwrap().len(), 1);
-        assert_eq!(body["data"][0]["id"], expected);
-    }
-    assert!(check_catalog(&state, Some("messages-only"), Surface::Messages).is_ok());
-    let error = check_catalog(&state, Some("messages-only"), Surface::Responses).unwrap_err();
-    assert_eq!(error.code, "model_endpoint_unavailable");
-}
-
 async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
     state.publish(Session {
         generation,
@@ -419,10 +374,7 @@ async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
     verified(&state, &upstream, 1, 1).await;
     state.set_api_key(Some("sk-real".to_string()));
 
-    // Endpoint inventory observations cover only the three agent surfaces;
-    // System One still admits any model present in the verified catalog.
     let mut session = state.session();
-    session.catalog.as_mut().unwrap().models[0].supported_surfaces = Some(vec![Surface::Responses]);
     session.catalog.as_mut().unwrap().models[0]
         .remote
         .extra
@@ -495,7 +447,6 @@ async fn images_are_local_tools_only_and_require_advertised_image_output() {
     state.set_api_key(Some("sk-real".to_string()));
     let mut session = state.session();
     let model = &mut session.catalog.as_mut().unwrap().models[0];
-    model.supported_surfaces = Some(vec![Surface::Responses]);
     model
         .remote
         .extra
@@ -580,7 +531,6 @@ async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_
     state.set_api_key(Some("sk-real".to_string()));
     let mut session = state.session();
     let model = &mut session.catalog.as_mut().unwrap().models[0];
-    model.supported_surfaces = Some(vec![]);
     model
         .remote
         .extra

@@ -221,7 +221,7 @@ impl Projector {
                 let existing = doc.get_str(&["model", "default"]);
                 let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
                     .or(existing.as_deref());
-                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports_agent(agent.surface())))) {
+                if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports(agent.surface())))) {
                     return Err(AgentError::IncompatibleModel);
                 }
                 let path = Agent::Hermes.config_path(&self.home, self.tool_env);
@@ -513,7 +513,7 @@ impl Projector {
             if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
                 if catalog
                     .get(&model)
-                    .is_none_or(|model| !model.supports_agent(agent.surface()))
+                    .is_none_or(|model| !model.supports(agent.surface()))
                 {
                     status.attention = Some(format!(
                         "`{model}` is not available from the current profile. Choose an available model in the agent; the connection does not need to be recreated."

@@ -14,8 +14,6 @@ mod request;
 use request::model_of;
 pub use request::{check_carrier_headers, multipart};
 mod routes;
-#[cfg(test)]
-use routes::models;
 pub use routes::router;
 mod usage;
 use usage::*;

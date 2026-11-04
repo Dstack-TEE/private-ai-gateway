@@ -296,18 +296,13 @@ impl DesktopRuntime {
             config_files: settings.files(),
             ..AppState::default()
         };
-        let manager = Arc::new(
-            SessionManager::new(
-                proxy.clone(),
-                usage.clone(),
-                launcher,
-                task_runtime.clone(),
-                initial_state,
-            )
-            .with_endpoint_inventory(crate::endpoint_inventory::InventoryUpdater::new(
-                data_dir.join("model-endpoints-cache.json"),
-            )?),
-        );
+        let manager = Arc::new(SessionManager::new(
+            proxy.clone(),
+            usage.clone(),
+            launcher,
+            task_runtime.clone(),
+            initial_state,
+        ));
         let runtime = Arc::new(Self {
             manager: manager.clone(),
             proxy: proxy.clone(),

@@ -1,155 +1,5 @@
 use super::*;
 
-#[test]
-fn downloaded_inventory_rejects_unknown_schema_duplicate_and_partial_observations() {
-    let valid = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-    for malformed in [
-        {
-            let mut value = valid.clone();
-            value["schemaVersion"] = json!(1);
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["schemaVersion"] = json!(3);
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["checkedAt"] = json!("2026-02-30T00:00:00Z");
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["results"][0]["status"] = json!("maybe");
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["results"][0]["endpoint"] = json!("/admin");
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["results"][0] = value["results"][1].clone();
-            value
-        },
-        {
-            let mut value = valid.clone();
-            value["results"].as_array_mut().unwrap().pop();
-            value
-        },
-    ] {
-        assert!(EndpointInventory::parse(&serde_json::to_vec(&malformed).unwrap()).is_err());
-    }
-
-    let mut temporary = valid.clone();
-    temporary["results"][0]["status"] = json!("supported");
-    temporary["results"][0]["reason"] = json!("temporary_server_error");
-    temporary["results"][0]["httpStatus"] = json!(503);
-    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_ok());
-
-    temporary["results"][0]["httpStatus"] = json!(400);
-    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_err());
-
-    temporary["results"][0]["httpStatus"] = json!(501);
-    assert!(EndpointInventory::parse(&serde_json::to_vec(&temporary).unwrap()).is_err());
-}
-
-#[test]
-fn observations_are_scoped_and_never_add_unlisted_models() {
-    let original = Catalog::from_remote(
-        &json!({"data": [
-            {"id": "z-ai/glm-5.3"},
-            {"id": "meta-llama/llama-3.3-70b-instruct"},
-            {"id": "new-unprobed-model"}
-        ]}),
-        1,
-    )
-    .unwrap();
-    let inventory = EndpointInventory::bundled().unwrap();
-    for endpoint in ["https://tee.redpill.ai", "https://inference.phala.com/v1"] {
-        let mut catalog = original.clone();
-        catalog
-            .apply_endpoint_inventory(endpoint, &inventory)
-            .unwrap();
-        assert_ne!(catalog.revision, original.revision);
-        assert_eq!(catalog.openai_list(), original.openai_list());
-        assert!(catalog
-            .get("new-unprobed-model")
-            .unwrap()
-            .agent_surfaces
-            .as_ref()
-            .is_some_and(Vec::is_empty));
-        for surface in [
-            Surface::ChatCompletions,
-            Surface::Messages,
-            Surface::Responses,
-        ] {
-            assert!(catalog
-                .for_surface(surface)
-                .get("new-unprobed-model")
-                .is_none());
-            assert!(catalog
-                .for_agent_surface(surface)
-                .get("new-unprobed-model")
-                .is_none());
-        }
-    }
-    for endpoint in [
-        "https://example.com",
-        "https://tee.redpill.ai/custom",
-        "https://tee.redpill.ai:444",
-    ] {
-        let mut catalog = original.clone();
-        catalog
-            .apply_endpoint_inventory(endpoint, &inventory)
-            .unwrap();
-        assert_eq!(catalog.revision, original.revision);
-        assert!(catalog
-            .models
-            .iter()
-            .all(|model| model.supported_surfaces.is_none()));
-    }
-}
-
-#[test]
-fn agent_projections_require_all_checks_without_blocking_direct_api_access() {
-    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-    for entry in value["results"].as_array_mut().unwrap() {
-        entry["checks"] = json!({
-            "streaming": {"status": "supported", "reason": "valid_event_stream", "httpStatus": 200},
-            "tools": {"status": "supported", "reason": "valid_streamed_tool_call", "httpStatus": 200},
-            "toolResult": {"status": "supported", "reason": "valid_tool_result_response", "httpStatus": 200}
-        });
-        if entry["model"] == "z-ai/glm-5.3" && entry["endpoint"] == "/v1/responses" {
-            entry["checks"]["tools"]["status"] = json!("inconclusive");
-        }
-    }
-    let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
-    let mut older = value.clone();
-    older["checkedAt"] = json!((inventory.checked_at - chrono::TimeDelta::seconds(1)).to_rfc3339());
-    let older = EndpointInventory::parse(&serde_json::to_vec(&older).unwrap()).unwrap();
-    assert!(!older.is_newer_than(&inventory));
-    let mut catalog = Catalog::from_remote(&json!({"data": [{"id": "z-ai/glm-5.3"}]}), 1).unwrap();
-    catalog
-        .apply_endpoint_inventory("https://tee.redpill.ai", &inventory)
-        .unwrap();
-    let model = &catalog.models[0];
-    assert!(model.supports(Surface::Responses));
-    assert!(!model.supports_agent(Surface::Responses));
-    assert!(catalog
-        .for_agent_surface(Surface::Responses)
-        .models
-        .is_empty());
-    assert!(model.supports_agent(Surface::Messages));
-
-    value["results"][0]["checks"]
-        .as_object_mut()
-        .unwrap()
-        .remove("toolResult");
-    assert!(EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).is_err());
-}
 fn remote() -> Value {
     json!({ "data": [
         { "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "context_length": 131072, "supported_features": ["tools"], "is_tee": true },
@@ -184,12 +34,10 @@ fn output_modalities_gate_surfaces_and_agent_projections() {
     let decisions = catalog.get("decisions").unwrap();
     assert!(decisions.supports(Surface::SystemOne));
     assert!(!decisions.supports(Surface::Responses));
-    assert!(!decisions.supports_agent(Surface::Responses));
 
     let text = catalog.get("text").unwrap();
     assert!(!text.supports(Surface::SystemOne));
     assert!(text.supports(Surface::Responses));
-    assert!(text.supports_agent(Surface::Responses));
 
     let legacy = catalog.get("legacy").unwrap();
     assert!(legacy.supports(Surface::SystemOne));
@@ -197,7 +45,7 @@ fn output_modalities_gate_surfaces_and_agent_projections() {
 }
 
 #[test]
-fn images_require_explicit_modality_and_bypass_text_inventory() {
+fn images_require_explicit_image_output() {
     let original = Catalog::from_remote(
         &json!({ "data": [
             { "id": "images", "output_modalities": ["image"] },
@@ -211,42 +59,21 @@ fn images_require_explicit_modality_and_bypass_text_inventory() {
         1,
     )
     .unwrap();
-    // The probe records all three text endpoints as unavailable for image-only
-    // models. These observations remain valid without adding an images entry.
-    let mut value = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
     for surface in [
         Surface::ChatCompletions,
         Surface::Messages,
         Surface::Responses,
     ] {
-        let check = json!({"status": "unavailable", "reason": "no_text_output"});
-        value["results"].as_array_mut().unwrap().push(json!({
-            "model": "images", "endpoint": surface.path(),
-            "status": "unavailable", "reason": "no_text_output",
-            "checks": {"streaming": check, "tools": check, "toolResult": check}
-        }));
         assert!(!original.get("images").unwrap().supports(surface));
-        assert!(!original.get("images").unwrap().supports_agent(surface));
     }
-    let inventory = EndpointInventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
-    for endpoint in [
-        "https://example.com",
-        "https://tee.redpill.ai",
-        "https://inference.phala.com/v1",
-    ] {
-        let mut catalog = original.clone();
-        catalog
-            .apply_endpoint_inventory(endpoint, &inventory)
-            .unwrap();
-        let images = catalog.for_surface(Surface::Images);
-        let ids: Vec<_> = images.models.iter().map(CatalogModel::id).collect();
-        assert_eq!(ids, ["images", "mixed"]);
-    }
+    let images = original.for_surface(Surface::Images);
+    let ids: Vec<_> = images.models.iter().map(CatalogModel::id).collect();
+    assert_eq!(ids, ["images", "mixed"]);
     assert_eq!(Surface::Images.path(), "/v1/images/generations");
 }
 
 #[test]
-fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
+fn transcriptions_require_only_transcription_output() {
     let original = Catalog::from_remote(
         &json!({ "data": [
             { "id": "audio", "input_modalities": ["audio"], "output_modalities": ["transcription"] },
@@ -269,7 +96,6 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
                 !original.get(id).unwrap().supports(surface),
                 "{id}: {surface:?}"
             );
-            assert!(!original.get(id).unwrap().supports_agent(surface));
         }
         for id in ["gemini", "missing-output", "legacy"] {
             assert!(
@@ -278,12 +104,7 @@ fn transcriptions_require_only_transcription_output_and_bypass_inventory() {
             );
         }
     }
-    let mut catalog = original;
-    for model in &mut catalog.models {
-        // Text endpoint observations never enable or disable STT.
-        model.supported_surfaces = Some(vec![]);
-    }
-    let audio = catalog.for_surface(Surface::AudioTranscriptions);
+    let audio = original.for_surface(Surface::AudioTranscriptions);
     let ids: Vec<_> = audio.models.iter().map(CatalogModel::id).collect();
     assert_eq!(ids, ["audio", "mixed-output"]);
 }
