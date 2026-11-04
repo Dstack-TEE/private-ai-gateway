@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **desktop:** show every verified catalog model ([#532](https://github.com/Dstack-TEE/private-ai-gateway/issues/532)) ([41b84f9](https://github.com/Dstack-TEE/private-ai-gateway/commit/41b84f9da69ab24119b53f0d8de0410caae94dde))
+
 ## [0.8.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0-beta.1...desktop-v0.8.0) (2026-11-03)
 
 Private AI Proxy 0.8.0 relays image generation and audio transcription through the verified Local API, and refuses constrained requests it can't check. Changes since stable 0.7.0.
