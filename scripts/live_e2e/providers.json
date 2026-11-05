@@ -141,5 +141,17 @@
     "capabilities": [
       "images_edits"
     ]
+  },
+  {
+    "name": "tinfoil-live-speech",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
+    "public_model": "live-tinfoil-speech",
+    "upstream_model": "qwen3-tts",
+    "api_key_env": "TINFOIL_API_KEY",
+    "binding": "tls_spki_sha256",
+    "capabilities": [
+      "speech"
+    ]
   }
 ]
