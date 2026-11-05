@@ -599,35 +599,25 @@ async fn buffered_multimodal_endpoint(
                 .await;
             }
         };
-        let (bytes, permit) =
-            match crate::middleware::media::read_upload(&headers, body, kind).await {
-                Ok(upload) => upload,
-                Err(err) => {
-                    if kind == FormKind::Transcription {
-                        state.service.record_audio_failure("upload_rejection");
-                    } else {
-                        state.service.record_image_failure("upload_rejection");
-                    }
-                    return err.into_response();
+        let upload = async {
+            let (bytes, permit) =
+                crate::middleware::media::read_upload(&headers, body, kind).await?;
+            let content_type = header_str(&headers, "content-type").unwrap_or("");
+            let (params, form) = match kind {
+                FormKind::Transcription => {
+                    crate::middleware::audio::parse(bytes.clone(), content_type).await?
+                }
+                FormKind::ImageEdit => {
+                    crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
                 }
             };
-        let content_type = header_str(&headers, "content-type").unwrap_or("");
-        let parsed_form = match kind {
-            FormKind::Transcription => {
-                crate::middleware::audio::parse(bytes.clone(), content_type).await
-            }
-            FormKind::ImageEdit => {
-                crate::middleware::image_edits::parse(bytes.clone(), content_type).await
-            }
-        };
-        let (mut params, form) = match parsed_form {
-            Ok(parsed) => parsed,
+            Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
+        }
+        .await;
+        let (bytes, permit, mut params, form) = match upload {
+            Ok(upload) => upload,
             Err(err) => {
-                if kind == FormKind::Transcription {
-                    state.service.record_audio_failure("upload_rejection");
-                } else {
-                    state.service.record_image_failure("upload_rejection");
-                }
+                (kind.spec().record_failure)(&state.service, "upload_rejection");
                 return err.into_response();
             }
         };

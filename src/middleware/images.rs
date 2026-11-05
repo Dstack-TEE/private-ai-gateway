@@ -52,13 +52,56 @@ pub(crate) fn reject_unknown(
     Ok(())
 }
 
-/// Validate the complete client body before consulting or forwarding.
-pub fn validate_request(body: &Value) -> Result<(), RequestError> {
+pub(crate) fn object_with<'a>(
+    body: &'a Value,
+    allowed: &[&str],
+) -> Result<&'a Map<String, Value>, RequestError> {
     let object = body
         .as_object()
         .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    reject_unknown(
-        object,
+    reject_unknown(object, allowed)?;
+    Ok(object)
+}
+
+pub(crate) fn require_strings(body: &Value, keys: &[&str]) -> Result<(), RequestError> {
+    for &key in keys {
+        if !body.get(key).is_some_and(Value::is_string) {
+            return Err(RequestError::invalid(
+                key,
+                "required parameter must be a string",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn max_chars(
+    body: &Value,
+    keys: &[&str],
+    max: usize,
+    message: &str,
+) -> Result<(), RequestError> {
+    for &key in keys {
+        if body
+            .get(key)
+            .is_some_and(|value| !value.as_str().is_some_and(|s| s.chars().count() <= max))
+        {
+            return Err(RequestError::invalid(key, message));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn pick(body: &Value, keys: &[&str]) -> Map<String, Value> {
+    keys.iter()
+        .filter_map(|&key| body.get(key).map(|value| (key.into(), value.clone())))
+        .collect()
+}
+
+/// Validate the complete client body before consulting or forwarding.
+pub fn validate_request(body: &Value) -> Result<(), RequestError> {
+    let object = object_with(
+        body,
         &[
             "model",
             "prompt",
@@ -78,23 +121,13 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "partial_images",
         ],
     )?;
-    for key in ["model", "prompt"] {
-        if !object.get(key).is_some_and(Value::is_string) {
-            return Err(RequestError::invalid(
-                key,
-                "required parameter must be a string",
-            ));
-        }
-    }
-    if body["prompt"]
-        .as_str()
-        .is_some_and(|s| s.chars().count() > 32_000)
-    {
-        return Err(RequestError::invalid(
-            "prompt",
-            "prompt must be at most 32000 characters",
-        ));
-    }
+    require_strings(body, &["model", "prompt"])?;
+    max_chars(
+        body,
+        &["prompt"],
+        32_000,
+        "prompt must be at most 32000 characters",
+    )?;
     for key in [
         "size",
         "quality",
@@ -141,25 +174,23 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 
 /// Build from an allowlist, even after a candidate replaces the model id.
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = Map::new();
-    for key in [
-        "model",
-        "prompt",
-        "n",
-        "size",
-        "quality",
-        "background",
-        "output_format",
-        "output_compression",
-        "moderation",
-    ] {
-        if let Some(value) = body.get(key) {
-            if matches!(key, "size" | "quality" | "background") && value == "auto" {
-                continue;
-            }
-            output.insert(key.into(), value.clone());
-        }
-    }
+    let mut output = pick(
+        body,
+        &[
+            "model",
+            "prompt",
+            "n",
+            "size",
+            "quality",
+            "background",
+            "output_format",
+            "output_compression",
+            "moderation",
+        ],
+    );
+    output.retain(|key, value| {
+        !(matches!(key.as_str(), "size" | "quality" | "background") && value == "auto")
+    });
     output.insert("response_format".into(), json!("b64_json"));
     Value::Object(output)
 }
