@@ -4635,3 +4635,53 @@ async fn rerank_auth_and_e2ee_refuse_before_json_parse() {
     }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn rerank_strips_provider_cost_and_honors_optional_documents_in_direct_mode() {
+    for (return_documents, document) in [
+        (None, Value::Null),
+        (Some(false), Value::Null),
+        (
+            Some(false),
+            serde_json::json!({"text":"private text","url":"private"}),
+        ),
+        (Some(false), serde_json::json!("private")),
+    ] {
+        let upstream = serde_json::to_vec(&serde_json::json!({
+            "results":[{"index":0,"relevance_score":0.9,"document":document}],
+            "usage":{"prompt_tokens":5,"total_tokens":5,"cost":99,"completion_tokens":100}
+        }))
+        .unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let mut request = serde_json::json!({"model":"aci-model","query":"q","documents":["a"]});
+        if let Some(return_documents) = return_documents {
+            request["return_documents"] = return_documents.into();
+        }
+        let response = h
+            .requester
+            .post(
+                "/v1/rerank",
+                &serde_json::to_vec(&request).unwrap(),
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body = json_body(&response);
+        assert_eq!(
+            body["results"],
+            serde_json::json!([{"index":0,"relevance_score":0.9}])
+        );
+        assert_eq!(
+            body["usage"],
+            serde_json::json!({"prompt_tokens":5,"total_tokens":5})
+        );
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&response.body)
+        );
+    }
+}

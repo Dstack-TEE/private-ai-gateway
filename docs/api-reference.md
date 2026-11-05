@@ -425,6 +425,8 @@ block are accepted but never forwarded. Unknown parameters are rejected with
 The buffered response contains only `id`, `model`, `results` (unique, in-range
 `index`, finite `relevance_score`, optional `document: {text}`), and `usage`
 (`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
-exceed `top_n`. Missing or malformed usage produces `502` with a receipt rather
+exceed `top_n`. Null documents are treated as absent, and `return_documents: false`
+suppresses documents even if a provider returns them. Provider cost and billing
+extensions are removed before metering or direct response signing. Missing or malformed usage produces `502` with a receipt rather
 than a free request. Billing uses existing input-token pricing. Look up the
 receipt using `x-receipt-id`.

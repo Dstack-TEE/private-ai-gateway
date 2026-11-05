@@ -576,16 +576,8 @@ async fn run_inner(
                             meter.audio = Some(audio);
                         }
                         if client_endpoint == Endpoint::Rerank {
-                            super::rerank::validate_response(&upstream_json, &params)
+                            super::rerank::sanitize_response(&mut upstream_json, &params)
                                 .map_err(str::to_string)?;
-                            // Strip upstream billing extensions before pricing or reporting.
-                            super::rerank::canonicalize(&mut upstream_json);
-                            if let Some(usage) = upstream_json
-                                .get_mut("usage")
-                                .and_then(Value::as_object_mut)
-                            {
-                                usage.remove("cost");
-                            }
                         }
                         if client_endpoint == Endpoint::ImagesGenerations {
                             super::images::validate_response(
