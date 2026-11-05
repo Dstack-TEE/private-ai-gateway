@@ -2,16 +2,13 @@
 
 use std::collections::HashSet;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-use super::images::{reject_unknown, RequestError};
+use super::images::{max_chars, object_with, pick, require_strings, RequestError};
 
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
-    let object = body
-        .as_object()
-        .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    reject_unknown(
-        object,
+    object_with(
+        body,
         &[
             "model",
             "query",
@@ -25,14 +22,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "provider",
         ],
     )?;
-    for key in ["model", "query"] {
-        if !body.get(key).is_some_and(Value::is_string) {
-            return Err(RequestError::invalid(
-                key,
-                "required parameter must be a string",
-            ));
-        }
-    }
+    require_strings(body, &["model", "query"])?;
     if body.get("user").is_some_and(|v| !v.is_string()) {
         return Err(RequestError::invalid("user", "parameter must be a string"));
     }
@@ -81,34 +71,29 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             ));
         }
     }
-    if body
-        .get("instruction")
-        .is_some_and(|value| !value.as_str().is_some_and(|s| s.chars().count() <= 32_000))
-    {
-        return Err(RequestError::invalid(
-            "instruction",
-            "instruction must be a string of at most 32000 characters",
-        ));
-    }
+    max_chars(
+        body,
+        &["instruction"],
+        32_000,
+        "instruction must be a string of at most 32000 characters",
+    )?;
     Ok(())
 }
 
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = Map::new();
-    for key in [
-        "model",
-        "query",
-        "documents",
-        "top_n",
-        "return_documents",
-        "max_tokens_per_doc",
-        "instruction",
-        "truncate_prompt_tokens",
-    ] {
-        if let Some(value) = body.get(key) {
-            output.insert(key.into(), value.clone());
-        }
-    }
+    let mut output = pick(
+        body,
+        &[
+            "model",
+            "query",
+            "documents",
+            "top_n",
+            "return_documents",
+            "max_tokens_per_doc",
+            "instruction",
+            "truncate_prompt_tokens",
+        ],
+    );
     if let Some(documents) = output.get_mut("documents").and_then(Value::as_array_mut) {
         for document in documents {
             if let Some(text) = document.get("text").and_then(Value::as_str) {
@@ -233,6 +218,7 @@ mod tests {
         ] {
             assert_eq!(upstream[key], request[key]);
         }
+        validate_request(&json!({"model":"reranker", "query":"q", "documents":["a"], "instruction":"界".repeat(32000)})).unwrap();
         for patch in [
             json!({"documents":[]}),
             json!({"documents":[{"text":"a","url":"private"}]}),
@@ -255,11 +241,6 @@ mod tests {
                 .extend(patch.as_object().unwrap().clone());
             assert!(validate_request(&body).is_err(), "{body}");
         }
-    }
-
-    #[test]
-    fn instruction_accepts_the_unicode_character_limit() {
-        validate_request(&json!({"model":"reranker", "query":"q", "documents":["a"], "instruction":"界".repeat(32000)})).unwrap();
     }
 
     #[test]

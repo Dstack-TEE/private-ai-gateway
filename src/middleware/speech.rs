@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use axum::http::HeaderValue;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
-use super::images::{reject_unknown, RequestError};
+use super::images::{max_chars, object_with, pick, require_strings, RequestError};
 
 const UPSTREAM_FIELDS: &[&str] = &[
     "model",
@@ -17,11 +17,8 @@ const UPSTREAM_FIELDS: &[&str] = &[
 ];
 
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
-    let object = body
-        .as_object()
-        .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    reject_unknown(
-        object,
+    object_with(
+        body,
         &[
             "model",
             "input",
@@ -33,25 +30,13 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "provider",
         ],
     )?;
-    for key in ["model", "input", "voice"] {
-        if !body.get(key).is_some_and(Value::is_string) {
-            return Err(RequestError::invalid(
-                key,
-                "required parameter must be a string",
-            ));
-        }
-    }
-    for key in ["input", "instructions"] {
-        if body
-            .get(key)
-            .is_some_and(|v| !v.as_str().is_some_and(|s| s.chars().count() <= 4096))
-        {
-            return Err(RequestError::invalid(
-                key,
-                "parameter must be a string of at most 4096 characters",
-            ));
-        }
-    }
+    require_strings(body, &["model", "input", "voice"])?;
+    max_chars(
+        body,
+        &["input", "instructions"],
+        4096,
+        "parameter must be a string of at most 4096 characters",
+    )?;
     if body.get("response_format").is_some_and(|v| {
         !v.as_str()
             .is_some_and(|s| ["mp3", "opus", "aac", "flac", "wav", "pcm"].contains(&s))
@@ -83,13 +68,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 }
 
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = Map::new();
-    for &key in UPSTREAM_FIELDS {
-        if let Some(value) = body.get(key) {
-            output.insert(key.into(), value.clone());
-        }
-    }
-    Value::Object(output)
+    Value::Object(pick(body, UPSTREAM_FIELDS))
 }
 
 pub fn usage(body: &Value) -> Option<Value> {

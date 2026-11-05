@@ -28,6 +28,7 @@ pub(crate) struct FormSpec {
     pub(crate) max_body_bytes: usize,
     max_text_bytes: usize,
     upstream_fields: fn(&Value) -> Value,
+    pub(crate) record_failure: fn(&crate::aggregator::service::AciService, &str),
 }
 
 const TRANSCRIPTION: FormSpec = FormSpec {
@@ -38,6 +39,7 @@ const TRANSCRIPTION: FormSpec = FormSpec {
     max_body_bytes: super::audio::MAX_BODY_BYTES,
     max_text_bytes: super::audio::MAX_TEXT_BYTES,
     upstream_fields: super::audio::upstream_fields,
+    record_failure: crate::aggregator::service::AciService::record_audio_failure,
 };
 const IMAGE_EDIT: FormSpec = FormSpec {
     label: "image edit",
@@ -47,6 +49,7 @@ const IMAGE_EDIT: FormSpec = FormSpec {
     max_body_bytes: super::image_edits::MAX_BODY_BYTES,
     max_text_bytes: super::image_edits::MAX_TEXT_BYTES,
     upstream_fields: super::image_edits::upstream_fields,
+    record_failure: crate::aggregator::service::AciService::record_image_failure,
 };
 
 impl FormKind {
