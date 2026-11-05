@@ -421,7 +421,10 @@ forwarding, candidate opt-in, receipts and metrics use `/v1/rerank` for all thre
 `POST /v1/rerank` requires Authorization and a JSON object with `model`, `query`
 (string), and `documents` (1–1000 strings or objects containing only `text`).
 Optional `top_n` is an integer from 1 to the document count; `return_documents`
-is a boolean (provider default: true). `user` and the gateway `provider` routing
+is a boolean (provider default: true). `max_tokens_per_doc` and
+`truncate_prompt_tokens` are optional positive integers forwarded unchanged;
+`instruction` is an optional string of at most 32000 Unicode characters.
+`user` and the gateway `provider` routing
 block are accepted but never forwarded. Unknown parameters are rejected with
 `400 unknown_parameter`; streaming and E2EE are unsupported.
 
@@ -437,17 +440,19 @@ receipt using `x-receipt-id`.
 ### Image edits
 
 Send `multipart/form-data` to `POST /v1/images/edits` with `model`, `prompt`
-(up to 32000 Unicode characters), and exactly one `image` or `image[]` part (PNG/JPEG/WebP,
-recognized by magic bytes, at most 20 MiB). The body limit is 21 MiB, with
+(up to 32000 Unicode characters), and exactly one `image` or `image[]` part
+(PNG/JPEG/WebP, recognized by magic bytes, at most 20 MiB). The body limit is 21 MiB, with
 at most 1 MiB aggregate text. Non-prompt string fields (`model`, `size`,
-`response_format`, `user`, and the compatibility fields below) are capped at 1024 bytes each; oversized values
-receive `400 invalid_parameter` before routing. Optional fields are `size`, `response_format`
+`response_format`, `user`, and the compatibility fields below) are capped at
+1024 bytes each; oversized values receive `400 invalid_parameter` before routing.
+Optional fields are `size`, `response_format`
 (only `b64_json`, forced upstream), `user` (removed upstream), and `n`
-(only `1`, removed upstream). `quality=auto`, `background=auto`, `safety_identifier`, and `stream=false` are
-accepted and removed upstream; `output_format` uses generation validation and
+(only `1`, removed upstream). `quality=auto`, `background=auto`,
+`safety_identifier`, and `stream=false` are accepted and removed upstream; `output_format` uses generation validation and
 forwarding. Non-auto quality/background, `mask`, multiple images (including mixed
 `image`/`image[]` names), streaming, `partial_images`, unknown fields, duplicate
-parts, and invalid UTF-8 are rejected. Caller filenames and MIME headers never reach the provider.
+parts, and invalid UTF-8 are rejected. Caller filenames and MIME headers never
+reach the provider.
 
 Use `X-ACI-Provider` for routing constraints as described above. The received
 multipart bytes and the exact encoded upstream bytes are independently hashed
