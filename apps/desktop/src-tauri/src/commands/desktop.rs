@@ -65,16 +65,12 @@ pub(crate) async fn open_web_ui(
 /// Copies `text`; a `secret` one, such as the Local API key, stays out of
 /// clipboard history.
 #[tauri::command]
-pub(crate) async fn copy_text(
-    app: AppHandle,
-    text: String,
-    secret: Option<bool>,
-) -> Result<(), CallError> {
+pub(crate) async fn copy_text(text: String, secret: Option<bool>) -> Result<(), CallError> {
     if text.is_empty() || text.len() > 4_096 {
         return Err("Invalid clipboard text".into());
     }
     Ok(run_blocking(move || {
-        crate::clipboard::write_text(&app, text, secret.unwrap_or(false))
+        crate::clipboard::write_text(text, secret.unwrap_or(false))
             .map_err(|_| "Cannot copy text".to_string())
     })
     .await?)

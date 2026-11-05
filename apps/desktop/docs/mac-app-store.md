@@ -48,10 +48,10 @@ workflow resolves at the tagged commit, so the MAS and Direct artifacts cannot
 drift to different source revisions. The marketing version is the committed
 app version.
 
-The `Desktop Mac App Store` worker pins **macos-26** for verification and production
-packaging, retaining `universal-apple-darwin`. It does not use `macos-latest` or
-Xcode 27 preview. The runner's GA default is Xcode 26.6 as of 2026-09-19; record
-the actual Xcode version in the build log.
+The `Desktop Mac App Store` worker pins the GitHub-hosted **xcode-27** image
+(macOS 27, Apple Silicon) for verification and production packaging, retaining
+`universal-apple-darwin`. It does not use `macos-latest`; record the actual
+Xcode version in the build log.
 
 Configure the protected `mac-app-store` environment using the step-scoped
 `Validate App Store signing settings` and `Validate App Store Connect upload
@@ -280,7 +280,7 @@ renderer's Node tests, Agent Integrations among them); `npm run test:release`
 `git diff --check`. In CI, `Desktop Tauri` (`desktop-native.yml`) runs fmt, the
 workspace clippy and tests, `npm run check` and `npm run test:release` on
 Linux; `Desktop Mac App Store` runs the `mac-app-store` feature clippy and
-tests on macos-26, where its macOS-only code compiles. Both run for every
+tests on xcode-27, where its macOS-only code compiles. Both run for every
 `apps/desktop/**` change. Use `npm run test:agents` for a focused rerun.
 
 Agent contract tests cover both credential modes, missing helper, quoted Home
@@ -298,6 +298,6 @@ Agent authority is withdrawn.
 Record verification results against the exact source revision in CI or the
 release audit. Ignored live, OS Keychain, root and subprocess fixtures do not
 count as passed coverage. The macOS-only SMAppService and bookmark branches are
-not executed on Linux. The MAS workflow checks those branches on macos-26.
+not executed on Linux. The MAS workflow checks those branches on xcode-27.
 Signing, native APIs, browser presentation and ASC review remain separate gates
 above.

@@ -244,9 +244,9 @@ impl Task {
             Self::CopyEndpoint => {
                 let endpoint = client.state()?.proxy_url;
                 let endpoint = endpoint.ok_or("The Local API is unavailable")?;
-                clipboard::write_text(app, endpoint, false)
+                clipboard::write_text(endpoint, false)
             }
-            Self::CopyKey => clipboard::write_text(app, client.call(rpc::GetClientKey)?, true),
+            Self::CopyKey => clipboard::write_text(client.call(rpc::GetClientKey)?, true),
             Self::ActivateProfile(profile_id) => {
                 client.call(rpc::ActivateProfile { profile_id })?;
                 Ok(())

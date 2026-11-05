@@ -21,14 +21,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-# The clipboard plugin's crate, to mark secrets it cannot.
 arboard = { version = "3", features = ["wayland-data-control"] }
 auto-launch = "0.6"
 desktop-core = { package = "private-ai-proxy-core", path = "../core" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tauri = { version = "2.12.2", features = ["image-png", "tray-icon"] }
-tauri-plugin-clipboard-manager = "2.4.1"
 tauri-plugin-dialog = "2.8.1"
 tauri-plugin-opener = "2.7.0"
 tauri-plugin-single-instance = { version = "2.4", features = ["deep-link"] }
@@ -40,7 +38,7 @@ tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
 tracing = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "6"
+zbus = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Foundation", "UI_Notifications", "UI_ViewManagement"] }
