@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.2...desktop-v0.8.3) (2026-11-05)
+
+
+### Bug Fixes
+
+* **desktop:** check Universal binaries with lipo -archs ([#537](https://github.com/Dstack-TEE/private-ai-gateway/issues/537)) ([9673324](https://github.com/Dstack-TEE/private-ai-gateway/commit/9673324ba99cfe1776bd6c592715186e3dbd43e3))
+
 ## [0.8.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.2) (2026-11-05)
 
 Private AI Proxy 0.8.2 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 was not published.
