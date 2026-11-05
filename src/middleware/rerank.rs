@@ -98,9 +98,10 @@ pub fn validate_response(body: &Value, request: &Value) -> Result<(), &'static s
                 || !result["relevance_score"]
                     .as_f64()
                     .is_some_and(f64::is_finite)
-                || result
-                    .get("document")
-                    .is_some_and(|document| !document.get("text").is_some_and(Value::is_string))
+                || (request.get("return_documents").and_then(Value::as_bool) != Some(false)
+                    && result.get("document").is_some_and(|document| {
+                        !document.is_null() && !document.get("text").is_some_and(Value::is_string)
+                    }))
         })
     {
         return Err(message);
@@ -148,11 +149,32 @@ pub fn canonicalize(body: &mut Value) {
     }
 }
 
+/// Validate and reduce provider output before metering or signing a direct receipt.
+/// Gateway cost is injected later and preserved by the final canonicalizer.
+pub fn sanitize_response(body: &mut Value, request: &Value) -> Result<(), &'static str> {
+    validate_response(body, request)?;
+    canonicalize(body);
+    if let Some(usage) = body.get_mut("usage").and_then(Value::as_object_mut) {
+        usage.remove("cost");
+    }
+    if let Some(results) = body.get_mut("results").and_then(Value::as_array_mut) {
+        for result in results {
+            if let Some(result) = result.as_object_mut() {
+                if request.get("return_documents").and_then(Value::as_bool) == Some(false)
+                    || result.get("document").is_some_and(Value::is_null)
+                {
+                    result.remove("document");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
     let request: Value = serde_json::from_slice(request).ok()?;
     let mut body: Value = serde_json::from_slice(response).ok()?;
-    validate_response(&body, &request).ok()?;
-    canonicalize(&mut body);
+    sanitize_response(&mut body, &request).ok()?;
     serde_json::to_vec(&body).ok()
 }
 
