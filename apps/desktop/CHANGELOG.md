@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.8.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.2) (2026-11-05)
+## [0.8.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.3) (2026-11-05)
 
-Private AI Proxy 0.8.2 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 was not published.
+Private AI Proxy 0.8.3 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 and 0.8.2 were not published.
 
 ### Bug Fixes
 
@@ -15,6 +15,7 @@ Private AI Proxy 0.8.2 shows every model the verified gateway lists and ships sm
 ### Maintenance
 
 * macOS packages and the Mac App Store build are built on macOS 27 with Xcode 27.1 ([#534](https://github.com/Dstack-TEE/private-ai-gateway/pull/534)).
+* Universal macOS binaries are checked with `lipo -archs`, which Xcode 27 requires ([#537](https://github.com/Dstack-TEE/private-ai-gateway/pull/537)).
 * The macOS package check retries unmounting the DMG while Finder releases it ([#536](https://github.com/Dstack-TEE/private-ai-gateway/pull/536)).
 * Update desktop npm dependencies ([#529](https://github.com/Dstack-TEE/private-ai-gateway/pull/529)).
 
