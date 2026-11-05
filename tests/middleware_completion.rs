@@ -6302,3 +6302,45 @@ async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
         assert_eq!(request.body["model"], "flux");
     }
 }
+
+#[tokio::test]
+async fn rerank_aliases_share_canonical_opt_in_forwarding_receipts_and_metrics() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}]})).await;
+    let (service, requests) = build_recording_service(200, br#"{"results":[{"index":0,"relevance_score":1}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.to_vec(), "application/json");
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    for path in ["/v2/rerank", "/rerank"] {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&rerank_input().params).unwrap(),
+            ))
+            .unwrap();
+        let (status, headers, _) =
+            response_parts(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, 200);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert_eq!(receipt.document_json().unwrap()["endpoint"], "/v1/rerank");
+    }
+    let pres = pres.lock().unwrap();
+    assert_eq!(pres.len(), 2);
+    assert!(pres.iter().all(|pre| pre["endpoint"] == "/v1/rerank"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path.as_deref() == Some("/v1/rerank")));
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    assert!(metrics.lines().any(
+        |line| line.starts_with("private_ai_gateway_requests_total{")
+            && line.contains("endpoint=\"/v1/rerank\"")
+            && line.ends_with(" 2")
+    ));
+    assert!(!metrics.contains("endpoint=\"/v2/rerank\""));
+    assert!(!metrics.contains("endpoint=\"/rerank\""));
+}

@@ -238,6 +238,8 @@ fn build_router_inner(
             post(images_edits),
         )
         .route(crate::aggregator::service::RERANK_PATH, post(rerank))
+        .route("/v2/rerank", post(rerank))
+        .route("/rerank", post(rerank))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(

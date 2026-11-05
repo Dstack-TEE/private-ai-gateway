@@ -416,6 +416,8 @@ are listed under [`POST /consult/post`](control-plane-contract.md#post-consultpo
 
 ### Reranking
 
+`POST /v2/rerank` and `POST /rerank` are aliases of `/v1/rerank`; upstream
+forwarding, candidate opt-in, receipts and metrics use `/v1/rerank` for all three.
 `POST /v1/rerank` requires Authorization and a JSON object with `model`, `query`
 (string), and `documents` (1–1000 strings or objects containing only `text`).
 Optional `top_n` is an integer from 1 to the document count; `return_documents`
