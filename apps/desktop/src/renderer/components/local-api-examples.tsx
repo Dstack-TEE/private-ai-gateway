@@ -12,13 +12,21 @@ import { errorMessage } from "../lib/error-message";
 import { localEndpoint, maskClientKey } from "../lib/format";
 import { useShell } from "../lib/shell";
 
+const kinds: { value: ExampleKind; label: string }[] = [
+  { value: "chat", label: "Chat" },
+  { value: "images", label: "Images" },
+  { value: "transcription", label: "Transcription" },
+  { value: "decisions", label: "Decisions" },
+];
+
 export function LocalApiExamplesDialog(control: DialogControl) {
   const { state, clientKey: apiKey, clientKeyVisible } = useShell();
   const endpoint = state.proxyUrl ?? localEndpoint(state.localApi);
   const catalog = state.catalog?.models ?? [];
-  const decisionsAvailable = exampleModels("decisions", catalog).length > 0;
+  // Chat is always offered; the other kinds only when the catalog has a model for them.
+  const available = (entry: ExampleKind) => entry === "chat" || exampleModels(entry, catalog).length > 0;
   const [tab, setTab] = useState<ExampleKind>("chat");
-  const kind = decisionsAvailable ? tab : "chat";
+  const kind = available(tab) ? tab : "chat";
   const models = exampleModels(kind, catalog);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
@@ -48,8 +56,8 @@ export function LocalApiExamplesDialog(control: DialogControl) {
   }, [examples, highlight, language]);
   const { copy, copying, error, isCopied, status } = useCopy();
   return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
-    <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { if (value === "chat" || value === "decisions") setTab(value); }}>
-      <TabsList aria-label="Example" className="w-full"><TabsTrigger value="chat">Chat</TabsTrigger><TabsTrigger value="decisions" disabled={!decisionsAvailable}>Decisions</TabsTrigger></TabsList>
+    <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { const entry = kinds.find((entry) => entry.value === value); if (entry) setTab(entry.value); }}>
+      <TabsList aria-label="Example" className="w-full">{kinds.map((entry) => <TabsTrigger key={entry.value} value={entry.value} disabled={!available(entry.value)}>{entry.label}</TabsTrigger>)}</TabsList>
       <TabsContent value={kind} className="flex min-h-0 flex-col gap-4">
         <Field>
           <FieldLabel htmlFor="example-model">Model</FieldLabel>
