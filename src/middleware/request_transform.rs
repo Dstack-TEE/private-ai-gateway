@@ -63,6 +63,35 @@ impl Endpoint {
         }
     }
 
+    pub(crate) fn from_path(path: &str) -> Option<Self> {
+        Some(match path {
+            CHAT_COMPLETIONS_PATH => Self::ChatComplete,
+            COMPLETIONS_PATH => Self::Complete,
+            EMBEDDINGS_PATH => Self::Embed,
+            RERANK_PATH => Self::Rerank,
+            MESSAGES_PATH => Self::Messages,
+            RESPONSES_PATH => Self::CreateModelResponse,
+            SYSTEMONE_PATH => Self::SystemOne,
+            IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
+            IMAGES_EDITS_PATH => Self::ImagesEdits,
+            AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_image(self) -> bool {
+        matches!(self, Self::ImagesGenerations | Self::ImagesEdits)
+    }
+
+    pub(crate) fn is_media(self) -> bool {
+        self.is_image() || self == Self::AudioTranscriptions
+    }
+
+    /// Native buffered endpoints require explicit candidate opt-in.
+    pub(crate) fn is_buffered_native(self) -> bool {
+        self.is_media() || self == Self::Rerank
+    }
+
     fn label(self) -> &'static str {
         match self {
             Endpoint::ChatComplete => "chatComplete",
@@ -310,14 +339,7 @@ pub fn build_candidates(
             );
             continue;
         }
-        if matches!(
-            endpoint,
-            Endpoint::Rerank
-                | Endpoint::ImagesGenerations
-                | Endpoint::ImagesEdits
-                | Endpoint::AudioTranscriptions
-        ) && !candidate.supports_endpoint(endpoint.path())
-        {
+        if endpoint.is_buffered_native() && !candidate.supports_endpoint(endpoint.path()) {
             continue;
         }
         let bridge = match &messages_chat {

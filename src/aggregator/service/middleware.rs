@@ -2,6 +2,8 @@
 //! middleware and finalizing the receipt/response it returns.
 //!
 
+use crate::middleware::request_transform::Endpoint;
+
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
 use super::forward::{attested_route_eligible, ReverifyOutcome, SelectedUpstream};
 use super::helpers::{
@@ -276,12 +278,7 @@ impl AciService {
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = if matches!(
-            endpoint_path,
-            super::IMAGES_GENERATIONS_PATH
-                | super::IMAGES_EDITS_PATH
-                | super::AUDIO_TRANSCRIPTIONS_PATH
-        ) {
+        let chat_id = if Endpoint::from_path(endpoint_path).is_some_and(Endpoint::is_media) {
             None
         } else {
             extract_chat_id(&response.body)
@@ -806,13 +803,8 @@ impl AciService {
                 let status = upstream_response.status_code;
                 let response_model = accepted_response_model(status, &upstream_response.body)
                     .or_else(|| {
-                        (matches!(
-                            endpoint_path,
-                            super::IMAGES_GENERATIONS_PATH
-                                | super::IMAGES_EDITS_PATH
-                                | super::AUDIO_TRANSCRIPTIONS_PATH
-                        ))
-                        .then(|| prepared.model_id.clone())
+                        (Endpoint::from_path(endpoint_path).is_some_and(Endpoint::is_media))
+                            .then(|| prepared.model_id.clone())
                     });
                 self.metrics.record_upstream_response(
                     endpoint_path,

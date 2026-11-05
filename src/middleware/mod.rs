@@ -41,6 +41,30 @@ use std::sync::Arc;
 use crate::aggregator::service::AciService;
 use errors::Surface;
 
+/// Validate buffered JSON metadata and return its upstream allowlist, when applicable.
+pub(crate) fn validate_buffered(
+    endpoint: request_transform::Endpoint,
+    params: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, images::RequestError> {
+    use request_transform::Endpoint;
+    let body = match endpoint {
+        Endpoint::ImagesGenerations => {
+            images::validate_request(params)?;
+            images::upstream_body(params)
+        }
+        Endpoint::ImagesEdits => {
+            image_edits::validate_request(params)?;
+            image_edits::upstream_fields(params)
+        }
+        Endpoint::Rerank => {
+            rerank::validate_request(params)?;
+            rerank::upstream_body(params)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(body))
+}
+
 /// Stamp the native SDK header from the same gateway identity used for billing.
 pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {
     if path == crate::aggregator::service::SYSTEMONE_PATH {

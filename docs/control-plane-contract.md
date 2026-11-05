@@ -477,21 +477,9 @@ Existing candidates remain inert until the control plane opts them in.
 
 ### Image edit routing and metering
 
-`/v1/images/edits` is default-off and uses `format: "openai"`; each candidate
-must opt into that exact path independently of generations. Consult pre receives
-`endpoint: "/v1/images/edits"` and routing policy from `X-ACI-Provider`, without
-file bytes, filenames, prompt text or prefix hashes. The gateway strips the
-carrier and re-encodes validated multipart fields after model selection.
-
-The image pricing and post-report contract above applies unchanged: successful
-edits report `images: {count: 1, size, quality: "auto"}`, with size resolved
-from the request (default `"auto"`). Charge `images.count × imageCostPerImage`
-using the same dimension lookup. Token components apply only when a provider
-reports usage and the model has token prices configured, as for generations;
-FLUX/NEAR has neither and bills only returned images. Its `usage` is absent in
-the report and token cost is zero. The gateway supplies SDK-compatible usage defaults only in the client
-response. Failed or malformed responses report no billable image usage. Edits
-and generations share the existing IMAGES admission semaphore. Audio and image
-uploads share one process-wide 402 MiB upload byte budget and the same 60-second
-read deadline. This endpoint
-ships with the next gateway deploy; candidates remain inert until opted in.
+`/v1/images/edits` requires OpenAI-format candidates to opt into that exact path
+independently of generations. Routing policy uses the `X-ACI-Provider` carrier,
+which is consumed by the gateway and never forwarded upstream. Edits are billed
+exactly like generations: returned image count plus token components only when
+the provider reports usage and the model has token prices configured; FLUX/NEAR
+has neither and bills only returned images.

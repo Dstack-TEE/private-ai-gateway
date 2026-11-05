@@ -1,3 +1,4 @@
+use crate::middleware::request_transform::Endpoint;
 use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
@@ -335,13 +336,8 @@ impl AciService {
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body)
                 .or_else(|| {
-                    (matches!(
-                        endpoint_path,
-                        super::IMAGES_GENERATIONS_PATH
-                            | super::IMAGES_EDITS_PATH
-                            | super::AUDIO_TRANSCRIPTIONS_PATH
-                    ))
-                    .then(|| prepared.model_id.clone())
+                    (Endpoint::from_path(endpoint_path).is_some_and(Endpoint::is_media))
+                        .then(|| prepared.model_id.clone())
                 });
         self.metrics.record_upstream_response(
             endpoint_path,
@@ -359,13 +355,7 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            if matches!(
-                endpoint_path,
-                super::RERANK_PATH
-                    | super::AUDIO_TRANSCRIPTIONS_PATH
-                    | super::IMAGES_GENERATIONS_PATH
-                    | super::IMAGES_EDITS_PATH
-            ) {
+            if Endpoint::from_path(endpoint_path).is_some_and(Endpoint::is_buffered_native) {
                 upstream_headers.insert("content-type".into(), "application/json".into());
                 match self.sanitize_media_success(
                     endpoint_path,

@@ -569,34 +569,33 @@ async fn buffered_multimodal_endpoint(
         .await;
     }
     let request_id = generate_request_id();
-    let is_audio = endpoint == Endpoint::AudioTranscriptions;
-    let is_multipart = is_audio || endpoint == Endpoint::ImagesEdits;
-    if !is_multipart && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+    use crate::middleware::media::FormKind;
+    let media: Option<FormKind> = match endpoint {
+        Endpoint::AudioTranscriptions => Some(FormKind::Transcription),
+        Endpoint::ImagesEdits => Some(FormKind::ImageEdit),
+        _ => None,
+    };
+    if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let media_kind = if is_audio {
-        crate::middleware::media::FormKind::Transcription
-    } else {
-        crate::middleware::media::FormKind::ImageEdit
-    };
-    let (received_body, parsed, audio_form, upload_permit) = if is_multipart {
+    let (received_body, parsed, audio_form, upload_permit) = if let Some(kind) = media {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
                     &headers,
                     body,
-                    media_kind.max_body_bytes(),
+                    kind.spec().max_body_bytes,
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
                 )
                 .await;
             }
         };
         let (bytes, permit) =
-            match crate::middleware::media::read_upload(&headers, body, media_kind).await {
+            match crate::middleware::media::read_upload(&headers, body, kind).await {
                 Ok(upload) => upload,
                 Err(err) => {
-                    if is_audio {
+                    if kind == FormKind::Transcription {
                         state.service.record_audio_failure("upload_rejection");
                     } else {
                         state.service.record_image_failure("upload_rejection");
@@ -605,15 +604,18 @@ async fn buffered_multimodal_endpoint(
                 }
             };
         let content_type = header_str(&headers, "content-type").unwrap_or("");
-        let parsed_form = if is_audio {
-            crate::middleware::audio::parse(bytes.clone(), content_type).await
-        } else {
-            crate::middleware::image_edits::parse(bytes.clone(), content_type).await
+        let parsed_form = match kind {
+            FormKind::Transcription => {
+                crate::middleware::audio::parse(bytes.clone(), content_type).await
+            }
+            FormKind::ImageEdit => {
+                crate::middleware::image_edits::parse(bytes.clone(), content_type).await
+            }
         };
         let (mut params, form) = match parsed_form {
             Ok(parsed) => parsed,
             Err(err) => {
-                if is_audio {
+                if kind == FormKind::Transcription {
                     state.service.record_audio_failure("upload_rejection");
                 } else {
                     state.service.record_image_failure("upload_rejection");
@@ -659,30 +661,17 @@ async fn buffered_multimodal_endpoint(
     if state.middleware.is_some() {
         return dispatch_completion(state, input, true).await;
     }
-    if endpoint == Endpoint::ImagesGenerations {
-        if let Err(err) = crate::middleware::images::validate_request(&input.params) {
-            return err.into_response();
-        }
-        input.params = crate::middleware::images::upstream_body(&input.params);
-    }
-    if endpoint == Endpoint::ImagesEdits {
-        if let Err(err) = crate::middleware::image_edits::validate_request(&input.params) {
-            return err.into_response();
-        }
-        input.params = crate::middleware::image_edits::upstream_fields(&input.params);
-    }
-    if endpoint == Endpoint::Rerank {
-        if let Err(err) = crate::middleware::rerank::validate_request(&input.params) {
-            return err.into_response();
-        }
-        input.params = crate::middleware::rerank::upstream_body(&input.params);
+    match crate::middleware::validate_buffered(endpoint, &input.params) {
+        Ok(Some(params)) => input.params = params,
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
     }
     // Uploads and invalid requests do not reserve generation capacity.
     // Middleware admission happens after its control-plane consult instead.
     let permit = match crate::middleware::admission::try_acquire(endpoint) {
         Ok(permit) => permit,
         Err(_) => {
-            if is_audio {
+            if media == Some(FormKind::Transcription) {
                 state.service.record_audio_failure("admission_rejection");
             }
             return crate::middleware::admission::capacity_response();
@@ -915,14 +904,11 @@ pub(super) async fn openai_completion_endpoint(
     };
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
-    let endpoint = match endpoint_path {
-        COMPLETIONS_PATH => Endpoint::Complete,
-        EMBEDDINGS_PATH => Endpoint::Embed,
-        MESSAGES_PATH => Endpoint::Messages,
-        RESPONSES_PATH => Endpoint::CreateModelResponse,
-        SYSTEMONE_PATH => Endpoint::SystemOne,
-        CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
-        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
+    let endpoint = match Endpoint::from_path(endpoint_path)
+        .filter(|endpoint| !endpoint.is_buffered_native())
+    {
+        Some(endpoint) => endpoint,
+        None => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
     };
     let mut input = match completion_input(
         &state,

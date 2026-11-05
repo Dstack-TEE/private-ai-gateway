@@ -151,20 +151,8 @@ async fn run_inner(
         user_model: user_model.clone(),
     });
 
-    if endpoint == Endpoint::ImagesGenerations {
-        if let Err(err) = super::images::validate_request(&params) {
-            return err.into_response();
-        }
-    }
-    if endpoint == Endpoint::ImagesEdits {
-        if let Err(err) = super::image_edits::validate_request(&params) {
-            return err.into_response();
-        }
-    }
-    if endpoint == Endpoint::Rerank {
-        if let Err(err) = super::rerank::validate_request(&params) {
-            return err.into_response();
-        }
+    if let Err(err) = super::validate_buffered(endpoint, &params) {
+        return err.into_response();
     }
     let started = Instant::now();
     let client_endpoint = endpoint;
@@ -584,10 +572,7 @@ async fn run_inner(
                             super::rerank::sanitize_response(&mut upstream_json, &params)
                                 .map_err(str::to_string)?;
                         }
-                        if matches!(
-                            client_endpoint,
-                            Endpoint::ImagesGenerations | Endpoint::ImagesEdits
-                        ) {
+                        if client_endpoint.is_image() {
                             super::images::validate_response(
                                 &upstream_json,
                                 super::images::requested_count(&params),
@@ -629,13 +614,7 @@ async fn run_inner(
                         );
                         // Images are always buffered: retain the served route's
                         // receipt draft and attest the sanitized error bytes.
-                        if matches!(
-                            client_endpoint,
-                            Endpoint::Rerank
-                                | Endpoint::ImagesGenerations
-                                | Endpoint::ImagesEdits
-                                | Endpoint::AudioTranscriptions
-                        ) {
+                        if client_endpoint.is_buffered_native() {
                             return finalize_buffered(
                                 forward.receipt,
                                 502,
@@ -650,11 +629,9 @@ async fn run_inner(
                 // Report usage before cost or image SDK defaults. Audio usage
                 // has already been normalized to duration only.
                 let raw_usage = transformed.get("usage").cloned();
-                meter.images = (matches!(
-                    client_endpoint,
-                    Endpoint::ImagesGenerations | Endpoint::ImagesEdits
-                ))
-                .then(|| super::images::usage(&transformed, &params));
+                meter.images = client_endpoint
+                    .is_image()
+                    .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
                         transformed,
