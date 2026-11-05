@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import secrets
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, run_pap_audit, write_bytes, write_json
-from .attested_sessions import assert_upstream_attested_sessions
-from .lifecycle import assert_receipt_log
+from ..common import Provider, json_bytes, request_json, write_bytes
+from .lifecycle import verify_served_request
 
 
 REQUESTER_TOKEN = "live-e2e-requester"
@@ -49,71 +47,16 @@ def run_speech_case(
         )
     if not response_body or not headers.get("content-type", "").lower().startswith("audio/"):
         raise RuntimeError(f"{provider.name} speech response is not buffered audio")
-    receipt_id = headers.get("x-receipt-id")
-    if not receipt_id:
-        raise RuntimeError(f"{provider.name} speech response missing x-receipt-id")
-
-    # A nonce is exactly 64 lowercase hex characters (spec §3.2).
-    nonce = secrets.token_hex(32)
-    report_status, _, report_body, report_json = request_json(
-        "GET",
-        f"{base_url}/v1/aci/attestation?nonce={nonce}",
-        timeout=120,
+    summary = verify_served_request(
+        base_url=base_url, provider=provider, endpoint="/v1/audio/speech", headers=headers,
+        provider_dir=provider_dir, request_path=request_path, response_path=response_path,
+        status=status, requester_token=REQUESTER_TOKEN,
+        receipt_check=lambda receipt: _check_receipt(provider, receipt),
     )
-    report_path = provider_dir / "report.json"
-    write_bytes(report_path, report_body)
-    if report_status != 200 or not isinstance(report_json, dict):
-        raise RuntimeError(f"{provider.name} attestation report fetch failed: {report_status}")
+    return {**summary, "audio_bytes": len(response_body), "content_type": headers.get("content-type")}
 
-    # Fetch the receipt by its gateway-owned identifier (spec §7.1).
-    receipt_status, _, receipt_body, receipt = request_json(
-        "GET",
-        f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
-        timeout=120,
-    )
-    receipt_path = provider_dir / "receipt.json"
-    write_bytes(receipt_path, receipt_body)
-    if receipt_status != 200 or not isinstance(receipt, dict):
-        raise RuntimeError(
-            f"{provider.name} speech receipt fetch failed: HTTP {receipt_status}"
-        )
 
-    assert_speech_receipt_log(provider, receipt)
+def _check_receipt(provider: Provider, receipt: dict[str, Any]) -> None:
     usage = [event.get("usage") for event in receipt.get("event_log", []) if event.get("type") == "usage.reported"]
     if usage != [{"type": "characters", "characters": len(PROBE_INPUT)}]:
         raise RuntimeError(f"{provider.name} speech receipt has incorrect character usage")
-    attested_sessions = assert_upstream_attested_sessions(
-        base_url=base_url,
-        provider=provider,
-        receipt=receipt,
-        artifact_dir=provider_dir,
-    )
-    if len(attested_sessions) != 1:
-        raise RuntimeError(f"{provider.name} expected one serving attested session")
-    verifier_summary = run_pap_audit(
-        report_path,
-        receipt_path,
-        provider_dir / "attested-session-0.json",
-        nonce,
-        request_path,
-        response_path,
-    )
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
-    return {
-        "provider": provider.name,
-        "receipt_id": receipt_id,
-        "status": status,
-        "audio_bytes": len(response_body),
-        "content_type": headers.get("content-type"),
-        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
-        "attested_sessions": attested_sessions,
-    }
-
-
-def assert_speech_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
-    if receipt.get("endpoint") != "/v1/audio/speech":
-        raise RuntimeError(
-            f"{provider.name} receipt endpoint must be /v1/audio/speech, got {receipt.get('endpoint')!r}"
-        )
-    assert_receipt_log(provider, receipt)
