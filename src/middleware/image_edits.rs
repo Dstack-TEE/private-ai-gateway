@@ -22,6 +22,11 @@ const FIELDS: &[&str] = &[
     "n",
     "user",
     "provider",
+    "quality",
+    "background",
+    "output_format",
+    "safety_identifier",
+    "stream",
 ];
 const KIND: FormKind = FormKind::ImageEdit;
 
@@ -30,7 +35,10 @@ pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
         images::reject_unknown(object, FIELDS)?;
     }
     images::validate_request(params)?;
-    for key in ["model", "size", "response_format", "user"] {
+    for &key in FIELDS {
+        if key == "prompt" {
+            continue;
+        }
         if params
             .get(key)
             .and_then(Value::as_str)
@@ -39,6 +47,14 @@ pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
             return Err(images::RequestError::invalid(
                 key,
                 &format!("parameter must be at most {MAX_METADATA_BYTES} bytes"),
+            ));
+        }
+    }
+    for key in ["quality", "background"] {
+        if params.get(key).is_some_and(|value| value != "auto") {
+            return Err(images::RequestError::invalid(
+                key,
+                "only auto is supported for image edits",
             ));
         }
     }
@@ -96,7 +112,11 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             return Err(KIND.invalid("fields"));
         }
         let value = std::str::from_utf8(&data).map_err(|_| KIND.invalid(&name))?;
-        if name == "n" {
+        if name == "stream" {
+            if value != "false" {
+                return Err(KIND.invalid(&name));
+            }
+        } else if name == "n" {
             if value != "1" {
                 return Err(KIND.invalid("n"));
             }
@@ -131,7 +151,14 @@ pub fn upstream_fields(params: &Value) -> Value {
     let mut fields = images::upstream_body(params);
     if let Some(fields) = fields.as_object_mut() {
         fields.retain(|key, _| {
-            ["model", "prompt", "size", "response_format"].contains(&key.as_str())
+            [
+                "model",
+                "prompt",
+                "size",
+                "response_format",
+                "output_format",
+            ]
+            .contains(&key.as_str())
         });
     }
     fields
@@ -201,14 +228,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_sdk_no_ops_and_reuses_generation_output_shaping() {
+        let (raw, ct) = request(
+            &[
+                ("model", "alias"),
+                ("prompt", "edit"),
+                ("quality", "auto"),
+                ("background", "auto"),
+                ("output_format", "png"),
+                ("safety_identifier", "private-user"),
+                ("stream", "false"),
+            ],
+            &[("image[]", Bytes::from_static(b"\xff\xd8\xffimage"))],
+        )
+        .await;
+        let (params, form) = parse(raw, &ct).await.unwrap();
+        assert!(params.get("stream").is_none());
+        let expected = json!({"model":"alias", "prompt":"edit", "output_format":"png", "response_format":"b64_json"});
+        assert_eq!(upstream_fields(&params), expected);
+        let (encoded, ct) = form.encode(&params).await.unwrap();
+        let (forwarded, _) = parse(encoded, &ct).await.unwrap();
+        assert_eq!(forwarded, expected);
+    }
+
+    #[tokio::test]
     async fn rejects_unsupported_fields_duplicates_and_invalid_files() {
         for patch in [
             ("mask", "x"),
             ("n", "2"),
-            ("stream", "false"),
+            ("stream", "true"),
             ("partial_images", "1"),
             ("quality", "high"),
-            ("output_format", "png"),
+            ("background", "opaque"),
             ("provider", "{}"),
             ("response_format", "url"),
             ("model", "duplicate"),
