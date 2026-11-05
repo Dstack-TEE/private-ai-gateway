@@ -18,6 +18,9 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "documents",
             "top_n",
             "return_documents",
+            "max_tokens_per_doc",
+            "instruction",
+            "truncate_prompt_tokens",
             "user",
             "provider",
         ],
@@ -67,12 +70,41 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "parameter must be a boolean",
         ));
     }
+    for key in ["max_tokens_per_doc", "truncate_prompt_tokens"] {
+        if body
+            .get(key)
+            .is_some_and(|value| !value.as_u64().is_some_and(|n| n > 0))
+        {
+            return Err(RequestError::invalid(
+                key,
+                "parameter must be a positive integer",
+            ));
+        }
+    }
+    if body
+        .get("instruction")
+        .is_some_and(|value| !value.as_str().is_some_and(|s| s.chars().count() <= 32_000))
+    {
+        return Err(RequestError::invalid(
+            "instruction",
+            "instruction must be a string of at most 32000 characters",
+        ));
+    }
     Ok(())
 }
 
 pub fn upstream_body(body: &Value) -> Value {
     let mut output = Map::new();
-    for key in ["model", "query", "documents", "top_n", "return_documents"] {
+    for key in [
+        "model",
+        "query",
+        "documents",
+        "top_n",
+        "return_documents",
+        "max_tokens_per_doc",
+        "instruction",
+        "truncate_prompt_tokens",
+    ] {
         if let Some(value) = body.get(key) {
             output.insert(key.into(), value.clone());
         }
@@ -181,11 +213,18 @@ mod tests {
 
     #[test]
     fn validates_inputs_without_forwarding_routing_metadata() {
-        let request = json!({"model":"reranker","query":"q","documents":["a",{"text":"b"}],"top_n":2,"return_documents":true,"provider":{},"user":"alice"});
+        let request = json!({"model":"reranker","query":"q","documents":["a",{"text":"b"}],"top_n":2,"return_documents":true,"provider":{},"user":"alice","max_tokens_per_doc":4096,"instruction":"Rank by relevance.","truncate_prompt_tokens":8192});
         validate_request(&request).unwrap();
         let upstream = upstream_body(&request);
         assert!(upstream.get("provider").is_none());
         assert!(upstream.get("user").is_none());
+        for key in [
+            "max_tokens_per_doc",
+            "instruction",
+            "truncate_prompt_tokens",
+        ] {
+            assert_eq!(upstream[key], request[key]);
+        }
         for patch in [
             json!({"documents":[]}),
             json!({"documents":[{"text":"a","url":"private"}]}),
@@ -195,6 +234,12 @@ mod tests {
             json!({"top_n":1.5}),
             json!({"return_documents":1}),
             json!({"stream":false}),
+            json!({"max_tokens_per_doc":0}),
+            json!({"max_tokens_per_doc":1.5}),
+            json!({"truncate_prompt_tokens":-1}),
+            json!({"truncate_prompt_tokens":true}),
+            json!({"instruction":1}),
+            json!({"instruction":"界".repeat(32001)}),
         ] {
             let mut body = request.clone();
             body.as_object_mut()
@@ -202,6 +247,11 @@ mod tests {
                 .extend(patch.as_object().unwrap().clone());
             assert!(validate_request(&body).is_err(), "{body}");
         }
+    }
+
+    #[test]
+    fn instruction_accepts_the_unicode_character_limit() {
+        validate_request(&json!({"model":"reranker", "query":"q", "documents":["a"], "instruction":"界".repeat(32000)})).unwrap();
     }
 
     #[test]
