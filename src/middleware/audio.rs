@@ -441,7 +441,8 @@ struct Segment {
     temperature: f64,
     avg_logprob: f64,
     compression_ratio: f64,
-    no_speech_prob: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_speech_prob: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -545,6 +546,10 @@ mod tests {
         let (forwarded, _) = parse(encoded, &ct).await.unwrap();
         assert_eq!(forwarded["model"], "upstream-model");
         assert_eq!(forwarded["response_format"], "verbose_json");
+        assert_eq!(
+            forwarded["timestamp_granularities[]"],
+            json!(["word", "segment"])
+        );
     }
 
     #[tokio::test]
@@ -790,7 +795,32 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_items_require_every_sdk_field_and_keep_no_private_fields() {
+    fn near_segments_without_no_speech_probability_are_preserved() {
+        let upstream = json!({
+            "text": " The quick brown fox jumps over the lazy dog.",
+            "duration": 2.965,
+            "language": "en",
+            "segments": [{
+                "id": 0,
+                "seek": 0,
+                "start": 0.0,
+                "end": 2.96,
+                "text": " The quick brown fox jumps over the lazy dog.",
+                "tokens": [440, 1702, 6292, 21026, 16704, 670, 264, 14847, 3000, 13],
+                "temperature": 0.0,
+                "avg_logprob": -0.11467078472681654,
+                "compression_ratio": 0.8653846153846154
+            }]
+        });
+        let mut expected = upstream.clone();
+        expected["usage"] = json!({"type":"duration","seconds":3});
+        let (body, _) =
+            sanitize_response(upstream, &json!({"response_format":"verbose_json"})).unwrap();
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn timestamp_items_require_schema_fields_and_keep_no_private_fields() {
         let segment = json!({"id":0,"seek":0,"start":0.0,"end":1.0,"text":"hello","tokens":[1],"temperature":0.0,"avg_logprob":-0.1,"compression_ratio":1.0,"no_speech_prob":0.0});
         let mut invalid = segment.clone();
         invalid["tokens"] = json!([1, "private"]);
@@ -798,7 +828,23 @@ mod tests {
         private["url"] = json!("private");
         let mut negative = segment.clone();
         negative["start"] = json!(-1);
-        let upstream = json!({"text":"hello","duration":1,"private":{},"segments":[private,invalid,negative,{"text":"hello"}],"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}],"languages":[{"code":"en","private":1},{"code":7},"private"]});
+        let mut segments = vec![private, invalid, negative, json!({"text":"hello"})];
+        for field in [
+            "id",
+            "seek",
+            "start",
+            "end",
+            "text",
+            "tokens",
+            "temperature",
+            "avg_logprob",
+            "compression_ratio",
+        ] {
+            let mut incomplete = segment.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            segments.push(incomplete);
+        }
+        let upstream = json!({"text":"hello","duration":1,"private":{},"segments":segments,"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}],"languages":[{"code":"en","private":1},{"code":7},"private"]});
         let (body, _) =
             sanitize_response(upstream.clone(), &json!({"response_format":"verbose_json"}))
                 .unwrap();
