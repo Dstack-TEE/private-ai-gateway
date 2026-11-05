@@ -437,7 +437,9 @@ receipt using `x-receipt-id`.
 Send `multipart/form-data` to `POST /v1/images/edits` with `model`, `prompt`
 (up to 32000 Unicode characters), and exactly one `image` (PNG/JPEG/WebP,
 recognized by magic bytes, at most 20 MiB). The body limit is 21 MiB, with
-at most 1 MiB aggregate text. Optional fields are `size`, `response_format`
+at most 1 MiB aggregate text. Non-prompt string fields (`model`, `size`,
+`response_format`, and `user`) are capped at 1024 bytes each; oversized values
+receive `400 invalid_parameter` before routing. Optional fields are `size`, `response_format`
 (only `b64_json`, forced upstream), `user` (removed upstream), and `n`
 (only `1`, removed upstream). `mask`, `image[]`, streaming, `partial_images`,
 `quality`, `output_format`, unknown fields, duplicate parts, and invalid UTF-8

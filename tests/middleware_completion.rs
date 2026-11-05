@@ -6302,3 +6302,25 @@ async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
         assert_eq!(request.body["model"], "flux");
     }
 }
+
+#[tokio::test]
+async fn image_edits_oversized_metadata_rejects_before_consult() {
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}]})).await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for key in ["model", "size", "user"] {
+        let mut input = image_edits_input();
+        input.params[key] = "x"
+            .repeat(private_ai_gateway::middleware::image_edits::MAX_METADATA_BYTES + 1)
+            .into();
+        let (status, _, body) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["param"], key);
+    }
+    assert!(pres.lock().unwrap().is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}

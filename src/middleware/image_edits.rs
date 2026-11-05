@@ -13,6 +13,7 @@ use super::{
 pub const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_BODY_BYTES: usize = 21 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = MAX_BODY_BYTES - MAX_FILE_BYTES;
+pub const MAX_METADATA_BYTES: usize = 1024;
 const KIND: FormKind = FormKind::ImageEdit;
 
 pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
@@ -38,6 +39,19 @@ pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
         }
     }
     images::validate_request(params)?;
+    for key in ["model", "size", "response_format", "user"] {
+        if params
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() > MAX_METADATA_BYTES)
+        {
+            return Err(images::RequestError {
+                code: "invalid_parameter",
+                param: key.into(),
+                message: format!("parameter must be at most {MAX_METADATA_BYTES} bytes"),
+            });
+        }
+    }
     if params.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
         return Err(images::RequestError {
             code: "invalid_parameter",
@@ -255,5 +269,31 @@ mod tests {
                 .status,
             axum::http::StatusCode::PAYLOAD_TOO_LARGE
         );
+    }
+    #[tokio::test]
+    async fn caps_non_prompt_metadata_at_the_upload_boundary() {
+        for key in ["model", "size", "user"] {
+            for (length, valid) in [(MAX_METADATA_BYTES, true), (MAX_METADATA_BYTES + 1, false)] {
+                let value = "x".repeat(length);
+                let mut fields = vec![("prompt", "edit")];
+                if key != "model" {
+                    fields.push(("model", "alias"));
+                }
+                fields.push((key, &value));
+                let (raw, ct) = request(
+                    &fields,
+                    &[("image", Bytes::from_static(b"\xff\xd8\xffimage"))],
+                )
+                .await;
+                let parsed = parse(raw, &ct).await;
+                if valid {
+                    parsed.unwrap();
+                } else {
+                    let error = parsed.unwrap_err();
+                    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+                    assert_eq!(error.param, key);
+                }
+            }
+        }
     }
 }
