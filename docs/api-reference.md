@@ -37,6 +37,7 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
+| `POST /v1/audio/speech` | OpenAI speech synthesis | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered audio with exact-byte receipts and character usage; explicit endpoint opt-in. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
 | `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | One input image; inline base64 output; separate endpoint opt-in and multipart constraints. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
@@ -467,3 +468,29 @@ FLUX/NEAR has neither and bills only returned images. A malformed 2xx
 (including multiple output images or URL-only output) becomes a receipted `502`
 without billable image usage. E2EE and missing-Authorization refusals precede
 parsing and admission. Desktop and verifier client support is delivered separately.
+
+### Speech synthesis
+
+`POST /v1/audio/speech` accepts JSON with required string `model`, `input`
+(at most 4096 Unicode scalars), and `voice`. Optional fields are
+`response_format` (`mp3`, `opus`, `aac`, `flac`, `wav`, or `pcm`), numeric `speed`
+from 0.25 through 4, and string `instructions` (at most 4096 Unicode scalars).
+`stream_format: "audio"` is accepted and removed upstream; `"sse"` and unknown
+fields are rejected with `400`. The JSON `provider` routing/pinning convention
+applies; routing metadata is never forwarded. Missing Authorization and E2EE
+refusals precede parsing and admission, as for the other buffered media routes.
+
+The success body is the exact buffered audio bytes, with the upstream `audio/*`
+content type preserved. Non-audio 2xx replies become sanitized receipted `502`s;
+upstream errors use the existing OpenAI error mapping. The configured buffered
+response cap applies. Speech and transcription share the 16-slot AUDIO admission
+semaphore; speech has no multipart upload or upload-byte reservation.
+
+Successful receipts include the signed §7.4 extension event
+`usage.reported: {usage: {type: "characters", characters: N}}`, where `N` is the
+Unicode scalar count of `input`, including spaces and punctuation. The receipt
+still hashes the exact binary response. Consult/post carries the same usage and
+pricing snapshot; only successful 2xx reports are billable. Audio bytes are not
+wrapped in JSON, and no new cost header is added. Tinfoil's `qwen3-tts` (for
+example voice `ryan`) and `voxtral-tts` (for example `neutral_female`) are the
+initial probed models; model listing requires the operator to confirm pricing.

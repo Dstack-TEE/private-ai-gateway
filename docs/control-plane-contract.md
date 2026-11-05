@@ -117,7 +117,7 @@ An allow response:
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
-| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Rerank requests go only to OpenAI-format candidates listing `/v1/rerank`. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing the exact requested path (`/v1/images/generations` or `/v1/images/edits`); this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Speech requests go only to OpenAI-format candidates listing `/v1/audio/speech`. Rerank requests go only to OpenAI-format candidates listing `/v1/rerank`. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing the exact requested path (`/v1/images/generations` or `/v1/images/edits`); this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
@@ -483,3 +483,19 @@ which is consumed by the gateway and never forwarded upstream. Edits are billed
 exactly like generations: returned image count plus token components only when
 the provider reports usage and the model has token prices configured; FLUX/NEAR
 has neither and bills only returned images.
+
+### Speech routing and metering
+
+`/v1/audio/speech` requires OpenAI-format candidates to opt into that exact path.
+Successful binary responses report `usage: {type: "characters", characters: N}`,
+where `N` is the Unicode scalar count of `input` (integer 0..4096), rather than
+upstream token/duration usage. The signed receipt includes the same gateway-derived
+usage in a `usage.reported` extension event; audio bytes and their content type
+are preserved and no new client cost header is added.
+
+`pricing.speechCostPerCharacter` is a decimal string in USD per Unicode scalar;
+control bills `characters × speechCostPerCharacter` only for 2xx reports and
+must deny missing or invalid pricing. Failed, rejected or non-audio responses
+carry no billable character usage. The gateway passes the consult pricing snapshot
+through unchanged in the post report. Tinfoil publishes no confirmed TTS rate
+here; an operator must check the dashboard before listing a speech model.
