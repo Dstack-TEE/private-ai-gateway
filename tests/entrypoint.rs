@@ -47,7 +47,7 @@ fn privatemode_deployment_contract_is_pinned() {
             "proxy service",
             proxy,
             &[
-                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
+                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b",
                 r#"    command:
       - --workspace
       - /var/lib/privatemode

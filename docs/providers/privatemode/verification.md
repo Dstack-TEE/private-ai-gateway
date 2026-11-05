@@ -72,10 +72,10 @@ this is not planned.
 
 ## What the manifest observation proves
 
-Privatemode v1.59 writes every fetched manifest to
+Privatemode v1.62 writes every fetched manifest to
 `<workspace>/manifests/log.txt`, the manifest history its documentation
 describes for audit. The documentation does not specify the line format; the
-gateway parses the v1.59 format (`<RFC 3339 time> <path>/<N>.json`, from
+gateway parses the v1.62 format (`<RFC 3339 time> <path>/<N>.json`, from
 [`internal/manifestlog`][manifestlog-source] in the tagged source) and resolves
 `<N>.json` next to the log. Recheck that format whenever the pinned proxy image
 changes. The gateway reads the latest version from the shared read-only
@@ -88,7 +88,7 @@ manifest-history volume and reports:
 
 This is useful update visibility, but it is not a channel binding. The proxy
 writes the history entry before Coordinator verification and before secret
-exchange completes. The v1.59 API does not expose the manifest associated with
+exchange completes. The v1.62 API does not expose the manifest associated with
 the secret used for a request. A receipt therefore must not use the observation
 to assert manifest-specific GPU, OS, serving-software, or model-weight claims.
 
@@ -120,7 +120,7 @@ startup and liveness. It does not use or identify the current inference secret.
 The refresh loop now retries failed background updates with bounded backoff;
 `LatestSecret` still fails closed if an expired secret cannot be refreshed.
 
-For inference, the gateway permits only these v1.59 handlers, all of which the
+For inference, the gateway permits only these v1.62 handlers, all of which the
 proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
 unstructured handlers, which the gateway does not expose; it forwards
 `/v1/models` unencrypted.
@@ -131,20 +131,22 @@ unstructured handlers, which the gateway does not expose; it forwards
 
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound because the Compose explicitly sets
-`--api-key-fallback=always`. Upstream v1.59 warns that the default will change
+`--api-key-fallback=always`. Upstream v1.62 warns that the default will change
 to `never` in a future release; the explicit flag preserves this behavior.
 As of 2026-10-19 PDT, the Compose uses the canonical `--api-key`,
 `--nvidia-ocsp-allow-unknown=false`, and
-`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.59.0 [CLI][cli-source]
+`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.62.0 [CLI][cli-source]
 shares each deprecated alias's flag value and backing variable with its
 canonical spelling, including the same `@file` credential loading and whitespace
 trimming. Switching spellings preserves behavior and removes deprecation
 warnings. The strict OCSP settings remain an admission condition: only good
 status is accepted, with no unknown-status tolerance or revoked-certificate
-grace period. On each encrypted request, the proxy authenticates the OCSP
-policy with an HMAC using the inference secret; the worker verifies that MAC
-and enforces the policy against its driver, GPU, and VBIOS statuses. See the
-[proxy handler][handler-source] and [worker enforcement][worker-source].
+grace period. On each encrypted request, the proxy includes the OCSP policy in
+authenticated metadata inside the encrypted request. The worker requires that
+metadata from v1.61 and newer clients, verifies it during decryption, and
+enforces the policy against its driver, GPU, and VBIOS statuses before
+forwarding to the model.
+See the [proxy handler][handler-source] and [worker enforcement][worker-source].
 
 The proxy supports `--listen-address`; its default remains `0.0.0.0`, appropriate
 for the private Compose network. The forwarding client rejects redirects and
@@ -153,6 +155,34 @@ ignores HTTP proxy environment variables.
 Plain HTTP is intentional on the internal hop. Both services and the private
 network are inside the same attested dstack workload. Privatemode E2EE protects
 the request after it leaves that workload.
+
+## Proxy timeouts
+
+The v1.62.0 [CLI][cli-source] exposes the incoming HTTP server's timeouts as
+flags. Their defaults match the values already hard-coded in v1.59.0:
+`--timeout-read=2m`, `--timeout-read-header=10s`, `--timeout-idle=1m`, and
+`--timeout-write=0`. The upstream response-header timeout remains one hour,
+now configurable with `--timeout-upstream-response-header`.
+
+The two-minute read timeout limits receiving the request body, not waiting for
+inference headers or completing a response. Before forwarding, the proxy's
+`limitRequestBody` middleware consumes the body through
+[`persist.ReadBody`][persist-source]. In Go 1.27's [`net/http` server][go-server-source],
+body EOF starts the background disconnect reader, which clears the socket's
+read deadline. `IdleTimeout` applies after the handler finishes while waiting
+for the next keep-alive request; it does not limit an active response. With no
+write timeout, long buffered inference and streaming responses remain supported.
+The Compose therefore keeps the existing command unchanged.
+
+On 2026-11-05 PST, the pinned image passed a controlled local HTTPS-upstream
+test at these defaults: a request with a fully consumed body received no
+headers for 130 seconds and then completed with HTTP 200. A second response
+sent SSE headers immediately, paused for 65 seconds between chunks twice, and
+completed at 130 seconds with HTTP 200 and exact expected bytes. The test used
+`GET /v1/models/{model}` through the same body-reading middleware as encrypted
+inference, without credentials or provider traffic. Separate minimal live
+`glm-5.3` buffered and streaming calls passed through the proxy with attestation,
+secret exchange, and strict OCSP settings; see [review.md](review.md).
 
 ## Prompt cache
 
@@ -172,7 +202,7 @@ bytes), which takes precedence. The proxy derives shard affinity from the
 effective salt and prompt content, helping repeated prefixes reach the same
 workers. This does not guarantee a cache hit or a particular worker. The
 gateway preserves caller salts and does not derive a tenant salt.
-See the tagged v1.59.0 [CLI][cli-source], [handler][handler-source], and
+See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
 [shard-key implementation][shard-source].
 
 ## Session binding and claims
@@ -257,8 +287,11 @@ To test a Phala deployment, follow the
 - [Privatemode TCB source](https://github.com/edgelesssys/privatemode-public)
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
-[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
-[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
-[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
-[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/internal/oss/mutators/mutators.go
-[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/inference-proxy/internal/adapter/inference/inference.go
+[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/cmd/cmd.go
+[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/internal/server/server.go
+[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/internal/oss/mutators/mutators.go
+[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/inference-proxy/internal/adapter/inference/inference.go
+
+[persist-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/internal/oss/persist/persist.go
+[go-server-source]: https://github.com/golang/go/blob/go1.27.0/src/net/http/server.go
