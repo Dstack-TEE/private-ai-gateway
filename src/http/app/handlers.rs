@@ -524,6 +524,14 @@ pub(super) async fn images_generations(
     buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
 }
 
+pub(super) async fn audio_speech(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioSpeech).await
+}
+
 pub(super) async fn audio_transcriptions(
     State(state): State<AppState>,
     headers: HeaderMap,

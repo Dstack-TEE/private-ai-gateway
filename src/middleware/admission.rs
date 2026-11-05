@@ -23,7 +23,9 @@ pub fn try_acquire(endpoint: Endpoint) -> Result<Option<OwnedSemaphorePermit>, T
         Endpoint::ImagesGenerations | Endpoint::ImagesEdits => {
             IMAGES.clone().try_acquire_owned().map(Some)
         }
-        Endpoint::AudioTranscriptions => AUDIO.clone().try_acquire_owned().map(Some),
+        Endpoint::AudioTranscriptions | Endpoint::AudioSpeech => {
+            AUDIO.clone().try_acquire_owned().map(Some)
+        }
         _ => Ok(None),
     }
 }
@@ -191,6 +193,14 @@ mod tests {
             .collect();
         let audio = try_acquire(Endpoint::AudioTranscriptions).unwrap();
         drop(audio);
+        let speech: Vec<_> = (0..MAX_IN_FLIGHT)
+            .map(|_| try_acquire(Endpoint::AudioSpeech).unwrap())
+            .collect();
+        assert!(matches!(
+            try_acquire(Endpoint::AudioTranscriptions),
+            Err(TryAcquireError::NoPermits)
+        ));
+        drop(speech);
         assert!(matches!(
             try_acquire(Endpoint::ImagesGenerations),
             Err(TryAcquireError::NoPermits)

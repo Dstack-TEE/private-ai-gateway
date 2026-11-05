@@ -306,6 +306,12 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
+        if endpoint_path == super::AUDIO_SPEECH_PATH
+            && (200..300).contains(&status)
+            && crate::middleware::speech::audio_content_type(&response.headers).is_some()
+        {
+            Self::append_speech_usage(&mut builder, received_body)?;
+        }
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {

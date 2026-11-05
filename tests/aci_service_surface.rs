@@ -128,6 +128,7 @@ struct RecordingUpstream {
     /// is a candidate for a constrained request (§5.3).
     is_tee: Option<bool>,
     response_body: Vec<u8>,
+    response_content_type: &'static str,
     stream_status: u16,
     stream_headers: HashMap<String, String>,
     stream_chunks: Vec<Bytes>,
@@ -143,6 +144,7 @@ impl Default for RecordingUpstream {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 200,
             stream_headers,
             stream_chunks: vec![
@@ -226,7 +228,10 @@ impl UpstreamBackend for RecordingUpstream {
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            self.response_content_type.to_string(),
+        );
         headers.insert(
             "x-typesafe-request-id".to_string(),
             "upstream-id".to_string(),
@@ -573,6 +578,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 400,
             stream_headers: headers,
             stream_chunks: vec![Bytes::from_static(
@@ -4788,5 +4794,110 @@ async fn image_upload_and_parse_rejections_increment_the_failure_metric() {
         metrics.contains("private_ai_gateway_image_failures_total{reason=\"upload_rejection\"} 2")
     );
     assert!(!metrics.contains("private_ai_gateway_audio_failures_total{reason="));
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    for content_type in ["audio/wav", "audio/mpeg", "Audio/WAV; rate=24000"] {
+        let h = harness_with_upstream(RecordingUpstream {
+            response_body: audio.to_vec(),
+            response_content_type: content_type,
+            ..Default::default()
+        });
+        let raw = serde_json::to_vec(&serde_json::json!({"model":"aci-model","input":"界🙂e\u{301}","voice":"ryan","stream_format":"audio"})).unwrap();
+        let response = h
+            .requester
+            .post(
+                "/v1/audio/speech",
+                &raw,
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.headers["content-type"], content_type);
+        assert_eq!(response.body, audio);
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("stream_format").is_none());
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/audio/speech");
+        assert_eq!(
+            payload_event(&payload, "usage.reported")["usage"],
+            serde_json::json!({"type":"characters","characters":4})
+        );
+        assert_eq!(
+            payload_event(&payload, "request.received")["body_hash"],
+            sha256_hex(&raw)
+        );
+        assert_eq!(
+            payload_event(&payload, "response.returned")["body_hash"],
+            sha256_hex(audio)
+        );
+    }
+}
+
+#[tokio::test]
+async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
+    for content_type in ["application/json", "text/event-stream", "text/plain"] {
+        let h = harness_with_upstream(RecordingUpstream {
+            response_body: b"private upstream data".to_vec(),
+            response_content_type: content_type,
+            ..Default::default()
+        });
+        let response = h
+            .requester
+            .post(
+                "/v1/audio/speech",
+                br#"{"model":"aci-model","input":"hello","voice":"ryan"}"#,
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers["content-type"], "application/json");
+        assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(
+            payload_event(&payload, "response.returned")["body_hash"],
+            sha256_hex(&response.body)
+        );
+        assert!(!payload["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "usage.reported"));
+    }
+}
+
+#[tokio::test]
+async fn speech_auth_and_e2ee_refuse_before_parsing() {
+    let h = harness();
+    for (headers, status) in [
+        (vec![], StatusCode::UNAUTHORIZED),
+        (
+            vec![
+                ("authorization", "Bearer tenant-key"),
+                ("x-e2ee-test", "true"),
+            ],
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = h
+            .requester
+            .post("/v1/audio/speech", b"not JSON", &headers)
+            .await;
+        assert_eq!(response.status, status);
+    }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }

@@ -17,9 +17,9 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
-    AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH,
-    SYSTEMONE_PATH,
+    AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    EMBEDDINGS_PATH, IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH,
+    RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -44,6 +44,7 @@ pub enum Endpoint {
     ImagesGenerations,
     ImagesEdits,
     AudioTranscriptions,
+    AudioSpeech,
 }
 
 impl Endpoint {
@@ -60,6 +61,7 @@ impl Endpoint {
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
             Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
             Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
+            Endpoint::AudioSpeech => AUDIO_SPEECH_PATH,
         }
     }
 
@@ -75,6 +77,7 @@ impl Endpoint {
             IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
             IMAGES_EDITS_PATH => Self::ImagesEdits,
             AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            AUDIO_SPEECH_PATH => Self::AudioSpeech,
             _ => return None,
         })
     }
@@ -84,7 +87,7 @@ impl Endpoint {
     }
 
     pub(crate) fn is_media(self) -> bool {
-        self.is_image() || self == Self::AudioTranscriptions
+        self.is_image() || matches!(self, Self::AudioTranscriptions | Self::AudioSpeech)
     }
 
     /// Native buffered endpoints require explicit candidate opt-in.
@@ -104,6 +107,7 @@ impl Endpoint {
             Endpoint::ImagesGenerations => "imagesGenerations",
             Endpoint::ImagesEdits => "imagesEdits",
             Endpoint::AudioTranscriptions => "audioTranscriptions",
+            Endpoint::AudioSpeech => "audioSpeech",
         }
     }
 }
@@ -249,6 +253,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
+            return Ok(super::speech::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
             return Ok(super::image_edits::upstream_fields(params));
         }
@@ -851,6 +858,7 @@ fn select_config(
         (Openai, Messages)
         | (Openai, CreateModelResponse)
         | (Openai, Rerank)
+        | (Openai, AudioSpeech)
         | (Openai, AudioTranscriptions)
         | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
@@ -859,6 +867,7 @@ fn select_config(
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioSpeech)
         | (Anthropic, AudioTranscriptions)
         | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {

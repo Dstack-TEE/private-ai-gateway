@@ -20,6 +20,7 @@ pub mod request_features;
 pub mod request_transform;
 pub mod rerank;
 pub mod response_transform;
+pub mod speech;
 pub mod sse;
 pub mod stream_transform;
 pub mod types;
@@ -55,6 +56,10 @@ pub(crate) fn validate_buffered(
         Endpoint::ImagesEdits => {
             image_edits::validate_request(params)?;
             image_edits::upstream_fields(params)
+        }
+        Endpoint::AudioSpeech => {
+            speech::validate_request(params)?;
+            speech::upstream_body(params)
         }
         Endpoint::Rerank => {
             rerank::validate_request(params)?;

@@ -527,6 +527,50 @@ async fn run_inner(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&upstream_status) {
+                let (status, body, content_type) =
+                    match super::speech::audio_content_type(&forward.upstream_headers) {
+                        Some(content_type) => {
+                            meter.success(
+                                upstream_status,
+                                attempt_index,
+                                Some(&forward.selected_route),
+                                super::speech::usage(&params),
+                                None,
+                            );
+                            (upstream_status, forward.upstream_body, content_type)
+                        }
+                        None => {
+                            meter.gateway_failure_at(
+                                attempt_index,
+                                Some(&forward.selected_route),
+                                502,
+                                ErrorSource::Upstream,
+                                ErrorClass::UpstreamMalformedResponse,
+                                false,
+                            );
+                            (
+                                502,
+                                errors::envelope_bytes(
+                                    surface,
+                                    errors::error_type(surface, 502),
+                                    "upstream returned a non-audio speech response",
+                                    Some(&request_id),
+                                ),
+                                "application/json",
+                            )
+                        }
+                    };
+                meter.failed_attempts(&forward.failed_attempts, false);
+                return finalize_buffered(
+                    forward.receipt,
+                    status,
+                    body,
+                    content_type,
+                    e2ee,
+                    outcome_ctx,
+                );
+            }
             // Looked up in the ORIGINAL list even though shaping may have
             // skipped candidates: a route id names one deployment and a
             // deployment has one format, so a repeated id (an ordered list
@@ -619,6 +663,7 @@ async fn run_inner(
                                 forward.receipt,
                                 502,
                                 body,
+                                "application/json",
                                 e2ee,
                                 outcome_ctx,
                             );
@@ -745,6 +790,7 @@ async fn run_inner(
                 forward.receipt,
                 client_status,
                 final_body,
+                "application/json",
                 e2ee,
                 outcome_ctx,
             )
@@ -1797,19 +1843,20 @@ fn finalize_buffered(
     draft: MiddlewareReceiptDraft,
     client_status: u16,
     final_body: Vec<u8>,
+    content_type: &str,
     e2ee: Option<E2eeRequestContext>,
     outcome: OutcomeCtx<'_>,
 ) -> Response {
     match outcome.service.finalize_middleware_receipt(
         draft,
         final_body,
-        Some("application/json"),
+        Some(content_type),
         outcome.requester.clone(),
         e2ee,
     ) {
         Ok(finalized) => {
             let status = StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
-            let mut headers = gateway_owned_headers("application/json");
+            let mut headers = gateway_owned_headers(content_type);
             insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
             insert_header(
                 &mut headers,

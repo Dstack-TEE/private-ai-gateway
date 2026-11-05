@@ -6345,3 +6345,141 @@ async fn rerank_aliases_share_canonical_opt_in_forwarding_receipts_and_metrics()
     assert!(!metrics.contains("endpoint=\"/v2/rerank\""));
     assert!(!metrics.contains("endpoint=\"/rerank\""));
 }
+
+fn speech_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","input":"界🙂e\u{301}","voice":"ryan","speed":1.2,"stream_format":"audio"});
+    CompletionInput {
+        endpoint: Endpoint::AudioSpeech,
+        endpoint_path: "/v1/audio/speech",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-speech".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}],
+        "pricing":{"speechCostPerCharacter":"0.01"}}))
+    .await;
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    let (service, requests) = build_recording_service(200, audio.to_vec(), "audio/wav; rate=24000");
+    let response = middleware(url)
+        .handle_completion(&service, speech_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "audio/wav; rate=24000");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), audio);
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/audio/speech");
+    assert!(!pres.lock().unwrap()[0].to_string().contains("input"));
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+        assert!(calls[0].body.get("stream_format").is_none());
+    }
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let usage = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "usage.reported")
+        .unwrap();
+    assert_eq!(usage["usage"], json!({"type":"characters","characters":4}));
+    let returned = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "response.returned")
+        .unwrap();
+    assert_eq!(
+        returned["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(audio)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
+    assert_eq!(report["usage"], json!({"type":"characters","characters":4}));
+    assert_eq!(report["pricing"]["speechCostPerCharacter"], "0.01");
+    assert_eq!(report["selectedRouteId"], "tts:model");
+}
+
+#[tokio::test]
+async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
+    let (url, pres, _) = spawn_control_capturing_pre(
+        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"audio".to_vec(), "audio/wav");
+    let (status, _, _) = response_parts(
+        middleware(url.clone())
+            .handle_completion(&service, speech_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 404);
+    for patch in [
+        json!({"stream_format":"sse"}),
+        json!({"voice":null}),
+        json!({"input":"🙂".repeat(4097)}),
+    ] {
+        let mut input = speech_input();
+        input
+            .params
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, _, _) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+    assert_eq!(pres.lock().unwrap().len(), 1);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn speech_failures_keep_receipts_without_billable_characters() {
+    for (upstream_status, content_type, expected) in [
+        (200, "text/event-stream", 502),
+        (200, "application/json", 502),
+        (400, "application/json", 400),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}]})).await;
+        let (service, _) = build_recording_service(
+            upstream_status,
+            br#"{"error":{"message":"bad voice private"}}"#.to_vec(),
+            content_type,
+        );
+        let (status, headers, _) = response_parts(
+            middleware(url)
+                .handle_completion(&service, speech_input())
+                .await,
+        )
+        .await;
+        assert_eq!(status, expected);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert!(!receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "usage.reported"));
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
+        assert_eq!(report["status"], expected);
+        assert!(report["usage"].is_null());
+    }
+}

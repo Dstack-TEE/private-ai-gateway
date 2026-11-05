@@ -442,7 +442,7 @@ pub struct PostReport {
     /// that carry a route.
     pub selected_route_id: Option<String>,
     pub request_model: String,
-    /// Raw upstream usage before any cost injection, or `null`.
+    /// Upstream usage before cost injection, gateway character usage for speech, or `null`.
     pub usage: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<super::images::ImageUsage>,

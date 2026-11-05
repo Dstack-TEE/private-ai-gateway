@@ -622,7 +622,7 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
         Endpoint::Rerank => super::rerank::canonicalize(body),
         Endpoint::SystemOne => canonicalize_systemone(body),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
-        Endpoint::AudioTranscriptions => {}
+        Endpoint::AudioTranscriptions | Endpoint::AudioSpeech => {}
         Endpoint::ImagesGenerations | Endpoint::ImagesEdits => super::images::canonicalize(body),
     }
 }
