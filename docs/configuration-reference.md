@@ -515,8 +515,3 @@ reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
 image edit upload and multipart parse rejections, including byte-budget, size,
 deadline, media-type and request-field validation failures. Like the audio
 counter, its labels contain no uploaded content, prompts or filenames.
-
-Speech synthesis shares the 16 AUDIO inference slots with transcription and uses
-the configured buffered upstream response limit. It accepts JSON, reserves no
-multipart upload bytes, and returns audio without a new cost header; character
-usage is signed in the receipt and reported to control for billing.

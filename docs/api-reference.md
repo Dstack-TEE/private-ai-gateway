@@ -417,83 +417,52 @@ are listed under [`POST /consult/post`](control-plane-contract.md#post-consultpo
 
 ### Reranking
 
-`POST /v2/rerank` and `POST /rerank` are aliases of `/v1/rerank`; upstream
-forwarding, candidate opt-in, receipts and metrics use `/v1/rerank` for all three.
-`POST /v1/rerank` requires Authorization and a JSON object with `model`, `query`
-(string), and `documents` (1–1000 strings or objects containing only `text`);
-`{text: s}` documents are normalized to strings before upstream forwarding.
-Optional `top_n` is an integer from 1 to the document count; `return_documents`
-is a boolean (provider default: true). `max_tokens_per_doc` and
-`truncate_prompt_tokens` are optional positive integers forwarded unchanged;
-`instruction` is an optional string of at most 32000 Unicode characters.
-`user` and the gateway `provider` routing
-block are accepted but never forwarded. Unknown parameters are rejected with
-`400 unknown_parameter`; streaming and E2EE are unsupported.
+`POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
+or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
+(1..document count), boolean `return_documents`, positive `max_tokens_per_doc`
+and `truncate_prompt_tokens`, and `instruction` (≤32000 Unicode scalars).
+`user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
+and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
 
-The buffered response contains only `id`, `model`, `results` (unique, in-range
-`index`, finite `relevance_score`, optional `document: {text}`), and `usage`
+Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
+`relevance_score`, optional `document: {text}`) and `usage`
 (`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
-exceed `top_n`. Null documents are treated as absent, and `return_documents: false`
-suppresses documents even if a provider returns them. Provider cost and billing
-extensions are removed before metering or direct response signing. Missing or malformed usage produces `502` with a receipt rather
-than a free request. Billing uses existing input-token pricing. Look up the
-receipt using `x-receipt-id`.
+exceed `top_n`; null documents are absent, and `return_documents: false`
+suppresses documents. Billing uses validated input-token usage; absent or
+malformed usage produces a receipted `502` instead of a free request.
 
 ### Image edits
 
-Send `multipart/form-data` to `POST /v1/images/edits` with `model`, `prompt`
-(up to 32000 Unicode characters), and exactly one `image` or `image[]` part
-(PNG/JPEG/WebP, recognized by magic bytes, at most 20 MiB). The body limit is 21 MiB, with
-at most 1 MiB aggregate text. Non-prompt string fields (`model`, `size`,
-`response_format`, `user`, and the compatibility fields below) are capped at
-1024 bytes each; oversized values receive `400 invalid_parameter` before routing.
-Optional fields are `size`, `response_format`
-(only `b64_json`, forced upstream), `user` (removed upstream), and `n`
-(only `1`, removed upstream). `quality=auto`, `background=auto`,
-`safety_identifier`, and `stream=false` are accepted and removed upstream; `output_format` uses generation validation and
-forwarding. Non-auto quality/background, `mask`, multiple images (including mixed
-`image`/`image[]` names), streaming, `partial_images`, unknown fields, duplicate
-parts, and invalid UTF-8 are rejected. Caller filenames and MIME headers never
-reach the provider.
+`POST /v1/images/edits` takes multipart `model`, `prompt` (≤32000 Unicode
+scalars), and one PNG/JPEG/WebP `image` or `image[]` part, detected by magic
+bytes. Multiple images or mixed names are rejected. Limits are 20 MiB/image,
+21 MiB/body, 1 MiB aggregate text, and 1024 bytes per non-prompt string field.
+Optional `size` and `output_format` use generation shaping; `response_format`
+is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
+`safety_identifier`, and `stream=false` are accepted no-ops. Routing/pinning uses
+`X-ACI-Provider`; caller filenames and MIME headers are replaced upstream.
 
-Use `X-ACI-Provider` for routing constraints as described above. The received
-multipart bytes and the exact encoded upstream bytes are independently hashed
-in the receipt. Edits and transcriptions share one process-wide 402 MiB upload byte budget
-and the 60-second upload deadline; edits share inference admission with image
-generations. Middleware candidates must opt into
-`/v1/images/edits` separately from generations. Successful responses use the
-same sanitized inline image schema and pricing as generations. Token components
-apply only when a provider reports usage and the model has token prices configured;
-FLUX/NEAR has neither and bills only returned images. A malformed 2xx
-(including multiple output images or URL-only output) becomes a receipted `502`
-without billable image usage. E2EE and missing-Authorization refusals precede
-parsing and admission. Desktop and verifier client support is delivered separately.
+Responses use the sanitized inline generation schema, with at most one image;
+URL-only or excess-image successes produce a receipted `502` without billable
+usage. Billing matches generations: returned image count plus token components
+only when usage and token prices exist (FLUX/NEAR bills returned images only).
+Edits share the 402 MiB upload-byte budget and 60-second deadline with
+transcriptions, and inference admission with generations.
 
 ### Speech synthesis
 
-`POST /v1/audio/speech` accepts JSON with required string `model`, `input`
-(at most 4096 Unicode scalars), and `voice`. Optional fields are
-`response_format` (`mp3`, `opus`, `aac`, `flac`, `wav`, or `pcm`), numeric `speed`
-from 0.25 through 4, and string `instructions` (at most 4096 Unicode scalars).
-`stream_format: "audio"` is accepted and removed upstream; `"sse"` and unknown
-fields are rejected with `400`. The JSON `provider` routing/pinning convention
-applies; routing metadata is never forwarded. Missing Authorization and E2EE
-refusals precede parsing and admission, as for the other buffered media routes.
+`POST /v1/audio/speech` takes JSON `model`, `input` (≤4096 Unicode scalars),
+and string `voice`. Optional fields are `response_format`
+(`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
+`stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
+routing/pinning. Tinfoil examples: `qwen3-tts`/`ryan`, `voxtral-tts`/`neutral_female`.
 
-The success body is the exact buffered audio bytes, with a validated lowercase
-`audio/<subtype>` content type and parameters removed; comma-separated or
-malformed media types are rejected. Non-audio 2xx replies become sanitized
-receipted `502`s; upstream errors use the existing OpenAI error mapping.
-Long input synthesized as `wav`/`pcm` at very low speed can exceed the default
-64 MiB buffered response cap and return `502`. Speech and transcriptions share
-the 16-slot AUDIO admission limit. Speech uses JSON and reserves no multipart
-upload bytes.
-
-Successful receipts include the signed §7.4 extension event
-`usage.reported: {usage: {type: "characters", characters: N}}`, where `N` is the
-Unicode scalar count of `input`, including spaces and punctuation. The receipt
-still hashes the exact binary response. Consult/post carries the same usage and
-pricing snapshot; only successful 2xx reports are billable. Audio bytes are not
-wrapped in JSON, and no new cost header is added. Tinfoil's `qwen3-tts` (for
-example voice `ryan`) and `voxtral-tts` (for example `neutral_female`) are the
-initial probed models; model listing requires the operator to confirm pricing.
+The body is exact buffered audio with a validated lowercase `audio/<subtype>`
+content type, parameters stripped; malformed/non-audio successes yield receipted
+`502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
+Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
+(`502`). Successful receipts sign a §7.4 `usage.reported` extension with
+`{usage: {type: "characters", characters: N}}`, counting Unicode scalars of
+`input`; consult/post carries the same usage, billable only for 2xx responses.
+Audio is not wrapped in JSON and has no new cost header; listing a Tinfoil speech
+model requires operator-confirmed pricing.
