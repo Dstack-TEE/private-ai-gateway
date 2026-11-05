@@ -598,6 +598,8 @@ async fn buffered_multimodal_endpoint(
                 Err(err) => {
                     if is_audio {
                         state.service.record_audio_failure("upload_rejection");
+                    } else {
+                        state.service.record_image_failure("upload_rejection");
                     }
                     return err.into_response();
                 }
@@ -613,6 +615,8 @@ async fn buffered_multimodal_endpoint(
             Err(err) => {
                 if is_audio {
                     state.service.record_audio_failure("upload_rejection");
+                } else {
+                    state.service.record_image_failure("upload_rejection");
                 }
                 return err.into_response();
             }

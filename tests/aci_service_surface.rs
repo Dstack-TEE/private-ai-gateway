@@ -4753,3 +4753,39 @@ async fn image_edits_auth_e2ee_and_invalid_carrier_refuse_before_parse() {
     }
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn image_upload_and_parse_rejections_increment_the_failure_metric() {
+    let h = harness();
+    let oversized = h
+        .requester
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/edits")
+                .header("authorization", "Bearer tenant-key")
+                .header(
+                    "content-length",
+                    private_ai_gateway::middleware::image_edits::MAX_BODY_BYTES + 1,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(oversized.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let malformed = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    let metrics = String::from_utf8(h.service.metrics().unwrap().body).unwrap();
+    assert!(
+        metrics.contains("private_ai_gateway_image_failures_total{reason=\"upload_rejection\"} 2")
+    );
+    assert!(!metrics.contains("private_ai_gateway_audio_failures_total{reason="));
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}

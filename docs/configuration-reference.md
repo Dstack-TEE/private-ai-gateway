@@ -508,3 +508,8 @@ returns `429 rate_limit_exceeded` with `Retry-After: 1`.
 `private_ai_gateway_audio_failures_total{reason}` uses fixed
 reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
 `response_size_failure`, without audio, prompts, or filenames.
+
+`private_ai_gateway_image_failures_total{reason="upload_rejection"}` counts
+image edit upload and multipart parse rejections, including byte-budget, size,
+deadline, media-type and request-field validation failures. Like the audio
+counter, its labels contain no uploaded content, prompts or filenames.

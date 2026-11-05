@@ -252,6 +252,10 @@ impl AciService {
         self.metrics.record_audio_failure(reason);
     }
 
+    pub fn record_image_failure(&self, reason: &str) {
+        self.metrics.record_image_failure(reason);
+    }
+
     pub fn metrics(&self) -> Result<MetricsSnapshot, ServiceError> {
         self.metrics
             .render()

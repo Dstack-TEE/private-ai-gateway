@@ -11,6 +11,7 @@ use crate::aci::receipt::UpstreamVerifiedEvent;
 pub struct ServiceMetrics {
     registry: Registry,
     audio_failures_total: IntCounterVec,
+    image_failures_total: IntCounterVec,
     requests_total: IntCounterVec,
     upstream_verifications_total: IntCounterVec,
     upstream_responses_total: IntCounterVec,
@@ -76,8 +77,17 @@ impl ServiceMetrics {
             &["reason"],
         )?;
         registry.register(Box::new(audio_failures_total.clone()))?;
+        let image_failures_total = IntCounterVec::new(
+            Opts::new(
+                "private_ai_gateway_image_failures_total",
+                "Image edit upload and parse rejections by fixed reason.",
+            ),
+            &["reason"],
+        )?;
+        registry.register(Box::new(image_failures_total.clone()))?;
         Ok(Self {
             audio_failures_total,
+            image_failures_total,
             registry,
             requests_total,
             upstream_verifications_total,
@@ -89,6 +99,10 @@ impl ServiceMetrics {
 
     pub fn record_audio_failure(&self, reason: &str) {
         self.audio_failures_total.with_label_values(&[reason]).inc();
+    }
+
+    pub fn record_image_failure(&self, reason: &str) {
+        self.image_failures_total.with_label_values(&[reason]).inc();
     }
 
     pub fn render(&self) -> Result<MetricsSnapshot, prometheus::Error> {
