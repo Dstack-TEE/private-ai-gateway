@@ -200,6 +200,7 @@ pub(crate) async fn collect_upload(
 /// Shared slices of the buffered upload; no caller filename or MIME is forwarded.
 #[derive(Debug, Clone)]
 pub struct MediaForm {
+    pub kind: FormKind,
     pub file: Bytes,
     pub extension: String,
 }
@@ -252,15 +253,8 @@ impl MediaForm {
         &self,
         params: &Value,
     ) -> Result<(Bytes, String), crate::aci::upstream::UpstreamError> {
-        self.encode_for(params, FormKind::Transcription).await
-    }
-
-    pub async fn encode_for(
-        &self,
-        params: &Value,
-        kind: FormKind,
-    ) -> Result<(Bytes, String), crate::aci::upstream::UpstreamError> {
         use crate::aci::upstream::UpstreamError;
+        let kind = self.kind;
         let mut form = reqwest::multipart::Form::new();
         for (key, value) in kind
             .upstream_fields(params)

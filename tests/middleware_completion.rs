@@ -5726,6 +5726,7 @@ fn audio_input() -> CompletionInput {
         params,
         received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
         audio_form: Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+            kind: private_ai_gateway::middleware::media::FormKind::Transcription,
             file: bytes::Bytes::from_static(b"sensitive audio"),
             extension: "wav".into(),
         })),
@@ -6120,6 +6121,7 @@ fn image_edits_input() -> CompletionInput {
         params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
         received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
         audio_form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
+            kind: private_ai_gateway::middleware::media::FormKind::ImageEdit,
             file: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
             extension: "jpg".into(),
         })),

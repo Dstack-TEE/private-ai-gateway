@@ -1052,6 +1052,7 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
                 path: Some("/v1/audio/transcriptions".into()),
                 form: audio.then(|| {
                     Arc::new(crate::middleware::audio::AudioForm {
+                        kind: crate::middleware::media::FormKind::Transcription,
                         file: Bytes::from_static(b"audio"),
                         extension: "wav".into(),
                     })

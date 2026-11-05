@@ -67,6 +67,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             let data = field.bytes().await.map_err(|_| KIND.large())?;
             let extension = image_extension(&data).ok_or_else(|| KIND.invalid("image"))?;
             image = Some(Arc::new(MediaForm {
+                kind: KIND,
                 file: data,
                 extension: extension.into(),
             }));
@@ -179,7 +180,7 @@ mod tests {
             let (mut params, form) = parse(raw, &ct).await.unwrap();
             assert_eq!(form.extension, extension);
             params["model"] = json!("upstream-model");
-            let (encoded, ct) = form.encode_for(&params, KIND).await.unwrap();
+            let (encoded, ct) = form.encode(&params).await.unwrap();
             assert!(!encoded.windows(11).any(|s| s == b"private.exe"));
             assert!(!encoded.windows(5).any(|s| s == b"alice"));
             let (forwarded, image) = parse(encoded, &ct).await.unwrap();

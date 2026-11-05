@@ -90,14 +90,7 @@ impl PreparedUpstreamRequest {
         if let Some(form) = self.request.form.take() {
             let params = serde_json::from_slice(&self.request.body)
                 .map_err(|_| UpstreamError::InvalidRequest("invalid media metadata".into()))?;
-            let kind = if self.request.path.as_deref()
-                == Some(crate::aggregator::service::IMAGES_EDITS_PATH)
-            {
-                crate::middleware::media::FormKind::ImageEdit
-            } else {
-                crate::middleware::media::FormKind::Transcription
-            };
-            let (body, content_type) = form.encode_for(&params, kind).await?;
+            let (body, content_type) = form.encode(&params).await?;
             self.request.body = body;
             self.request.content_type = Some(content_type);
         }
