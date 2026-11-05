@@ -206,6 +206,10 @@ impl AciService {
         request: &[u8],
         audio_metadata: Option<&Value>,
     ) -> Result<Vec<u8>, &'static str> {
+        if endpoint_path == super::RERANK_PATH {
+            return crate::middleware::rerank::response_body(response, request)
+                .ok_or("upstream returned a malformed success body");
+        }
         if endpoint_path == super::IMAGES_GENERATIONS_PATH {
             return crate::middleware::images::response_body(response, request)
                 .ok_or("upstream returned a malformed success body");
@@ -351,7 +355,9 @@ impl AciService {
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
             if matches!(
                 endpoint_path,
-                super::AUDIO_TRANSCRIPTIONS_PATH | super::IMAGES_GENERATIONS_PATH
+                super::RERANK_PATH
+                    | super::AUDIO_TRANSCRIPTIONS_PATH
+                    | super::IMAGES_GENERATIONS_PATH
             ) {
                 upstream_headers.insert("content-type".into(), "application/json".into());
                 match self.sanitize_media_success(

@@ -39,6 +39,7 @@ error behavior below.
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
+| `POST /v1/rerank` | Reranking | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON; explicit endpoint opt-in required. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
@@ -411,3 +412,19 @@ an early commit, are represented inside the stream where the protocol permits
 it. Receipt or E2EE finalization errors end the body without forcing a TCP
 reset. The statuses middleware reports to the control plane for these failures
 are listed under [`POST /consult/post`](control-plane-contract.md#post-consultpost).
+
+### Reranking
+
+`POST /v1/rerank` requires Authorization and a JSON object with `model`, `query`
+(string), and `documents` (1–1000 strings or objects containing only `text`).
+Optional `top_n` is an integer from 1 to the document count; `return_documents`
+is a boolean (provider default: true). `user` and the gateway `provider` routing
+block are accepted but never forwarded. Unknown parameters are rejected with
+`400 unknown_parameter`; streaming and E2EE are unsupported.
+
+The buffered response contains only `id`, `model`, `results` (unique, in-range
+`index`, finite `relevance_score`, optional `document: {text}`), and `usage`
+(`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
+exceed `top_n`. Missing or malformed usage produces `502` with a receipt rather
+than a free request. Billing uses existing input-token pricing. Look up the
+receipt using `x-receipt-id`.

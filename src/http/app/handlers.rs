@@ -500,6 +500,14 @@ pub(super) async fn systemone(
     openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
+pub(super) async fn rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::Rerank).await
+}
+
 pub(super) async fn images_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -629,6 +637,12 @@ async fn buffered_multimodal_endpoint(
             return err.into_response();
         }
         input.params = crate::middleware::images::upstream_body(&input.params);
+    }
+    if endpoint == Endpoint::Rerank {
+        if let Err(err) = crate::middleware::rerank::validate_request(&input.params) {
+            return err.into_response();
+        }
+        input.params = crate::middleware::rerank::upstream_body(&input.params);
     }
     // Uploads and invalid requests do not reserve generation capacity.
     // Middleware admission happens after its control-plane consult instead.
