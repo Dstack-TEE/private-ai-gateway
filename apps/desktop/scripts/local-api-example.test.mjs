@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,7 +19,8 @@ const model = `vendor/"model" \\ é`;
 const decisions = { model, state: { ticket: "App crashes on login after update" }, questions: { bug: { type: "noul", instructions: "Is this a bug report?" } } };
 const answers = { bug: { type: "noul", noul: 0.87 } };
 const image = { model, prompt: "A watercolor lighthouse at dawn", n: 1, size: "512x512" };
-const png = Buffer.from("\x89PNG stand-in").toString("base64");
+const png = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.from("PNG stand-in")]).toString("base64");
+const jpeg = Buffer.concat([Buffer.from("ffd8ffe0", "hex"), Buffer.from("JPEG stand-in")]).toString("base64");
 
 test("the curl example passes the URL and the key to curl as single words", { skip: process.platform === "win32" }, () => {
   const key = `sk-it's "$HOME" \`id\` \\ %`;
@@ -132,6 +133,7 @@ test("the images curl example posts the generation body", { skip: process.platfo
     "--fail-with-body", "--max-time", "60", "--request", "POST", "http://127.0.0.1:4190/v1/images/generations",
     "--header", `Authorization: Bearer ${key}`,
     "--header", "Content-Type: application/json",
+    "--output", "image.json",
     "--data", "@-",
   ]);
   assert.deepEqual(JSON.parse(example.slice(example.indexOf("<<'JSON'\n") + 9, -"\nJSON".length)), image);
@@ -150,21 +152,21 @@ test("the transcription curl example uploads the file and passes the model liter
 });
 
 // Runs an OpenAI SDK example in a directory with audio.wav, against a stand-in
-// for the SDK that records the calls. Returns the output lines and the directory files.
+// for the SDK that records the calls and returns the base64 image given.
+// Returns the output lines and the images the example saved.
 function runOpenAiExample(example, run) {
   const directory = mkdtempSync(join(tmpdir(), "local-api-example-"));
   try {
     writeFileSync(join(directory, "audio.wav"), "RIFF stand-in");
     const output = run(directory).trim().split("\n");
-    let saved;
-    try { saved = readFileSync(join(directory, "image.png")); } catch {}
+    const saved = Object.fromEntries(readdirSync(directory).filter((file) => file.startsWith("image.")).map((file) => [file, readFileSync(join(directory, file)).toString("base64")]));
     return { output, saved };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
-function runJavaScript(example) {
+function runJavaScript(example, b64 = png) {
   return runOpenAiExample(example, (directory) => {
     const sdk = join(directory, "node_modules", "openai");
     mkdirSync(sdk, { recursive: true });
@@ -174,7 +176,7 @@ const calls = [];
 process.on("exit", () => console.log(JSON.stringify(calls)));
 export default class OpenAI {
   constructor(config) { calls.push(config); }
-  images = { generate: async (request) => { calls.push(request); return { data: [{ b64_json: ${JSON.stringify(png)} }] }; } };
+  images = { generate: async (request) => { calls.push(request); return { data: [{ b64_json: ${JSON.stringify(b64)} }] }; } };
   audio = { transcriptions: { create: async ({ file, ...request }) => { calls.push({ ...request, file: file.path }); return { text: "Hello there" }; } } };
 }
 `);
@@ -183,7 +185,7 @@ export default class OpenAI {
   });
 }
 
-function runPython(example) {
+function runPython(example, b64 = png) {
   return runOpenAiExample(example, (directory) => {
     const harness = `
 import json, sys, types
@@ -195,7 +197,7 @@ class OpenAI:
         self.audio = types.SimpleNamespace(transcriptions=types.SimpleNamespace(create=self.transcribe))
     def generate(self, **kwargs):
         calls.append(kwargs)
-        return types.SimpleNamespace(data=[types.SimpleNamespace(b64_json=${JSON.stringify(png)})])
+        return types.SimpleNamespace(data=[types.SimpleNamespace(b64_json=${JSON.stringify(b64)})])
     def transcribe(self, file, **kwargs):
         calls.append({**kwargs, "file": file.name, "content": file.read().decode()})
         return types.SimpleNamespace(text="Hello there")
@@ -207,19 +209,20 @@ print(json.dumps(calls))
   });
 }
 
-test("the images JavaScript example generates an image and saves it", () => {
-  const { output, saved } = runJavaScript(localApiExample("images", "javascript", "http://127.0.0.1:4190", model, key));
-  assert.equal(output[0], "Saved image.png");
-  assert.deepEqual(JSON.parse(output[1]), [{ baseURL: "http://127.0.0.1:4190/v1", apiKey: key }, image]);
-  assert.equal(saved?.toString("base64"), png);
-});
-
-test("the images Python example generates an image and saves it", { skip: process.platform === "win32" }, () => {
-  const { output, saved } = runPython(localApiExample("images", "python", "http://127.0.0.1:4190", model, key));
-  assert.equal(output[0], "Saved image.png");
-  assert.deepEqual(JSON.parse(output[1]), [{ api_key: key, base_url: "http://127.0.0.1:4190/v1" }, image]);
-  assert.equal(saved?.toString("base64"), png);
-});
+for (const [language, run, call] of [
+  ["JavaScript", runJavaScript, { baseURL: "http://127.0.0.1:4190/v1", apiKey: key }],
+  ["Python", runPython, { api_key: key, base_url: "http://127.0.0.1:4190/v1" }],
+]) {
+  test(`the images ${language} example saves the image under the extension of its bytes`, { skip: language === "Python" && process.platform === "win32" }, () => {
+    const example = localApiExample("images", language.toLowerCase(), "http://127.0.0.1:4190", model, key);
+    for (const [b64, file] of [[png, "image.png"], [jpeg, "image.jpg"]]) {
+      const { output, saved } = run(example, b64);
+      assert.equal(output[0], `Saved ${file}`);
+      assert.deepEqual(JSON.parse(output[1]), [call, image]);
+      assert.deepEqual(saved, { [file]: b64 });
+    }
+  });
+}
 
 test("the transcription JavaScript example uploads audio.wav and prints the text", () => {
   const { output } = runJavaScript(localApiExample("transcription", "javascript", "http://127.0.0.1:4190", model, key));

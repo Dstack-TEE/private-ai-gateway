@@ -27,7 +27,9 @@ export function exampleModels(kind: ExampleKind, models: ModelSummary[]): ModelS
 
 const imagePrompt = "A watercolor lighthouse at dawn";
 const audioFile = "audio.wav";
-const imageFile = "image.png";
+// cURL saves the base64 response instead of printing it. The SDK examples name
+// the image by its bytes, since a provider may return JPEG whatever was asked.
+const imageResponse = "image.json";
 
 export function localApiExample(kind: ExampleKind, language: ExampleLanguage, endpoint: string, model: string, apiKey?: string): string {
   const url = new URL(paths[kind], endpoint);
@@ -46,7 +48,7 @@ export function localApiExample(kind: ExampleKind, language: ExampleLanguage, en
       ...kind === "transcription"
         // --form-string keeps the model id literal; curl would read ;type= or @ in --form.
         ? [`  ${join(["--form", `file=@${audioFile}`])} \\`, `  ${join(["--form-string", `model=${model}`])} \\`, `  ${join(["--form-string", "response_format=json"])}`]
-        : [`  ${join(["--header", "Content-Type: application/json"])} \\`, "  --data @- <<'JSON'", payload, "JSON"],
+        : [`  ${join(["--header", "Content-Type: application/json"])} \\`, ...kind === "images" ? [`  ${join(["--output", imageResponse])} \\`] : [], "  --data @- <<'JSON'", payload, "JSON"],
     ].join("\n");
   }
   const key = JSON.stringify(apiKey ?? "LOCAL_API_KEY");
@@ -60,12 +62,12 @@ export function localApiExample(kind: ExampleKind, language: ExampleLanguage, en
   const name = JSON.stringify(model);
   if (language === "python") {
     const client = `from openai import OpenAI\n\nclient = OpenAI(\n    api_key=${key},\n    base_url=${baseUrl},\n)\n\n`;
-    if (kind === "images") return `import base64\n\n${client}response = client.images.generate(\n    model=${name},\n    prompt=${JSON.stringify(imagePrompt)},\n    n=1,\n    size="512x512",\n)\nwith open("${imageFile}", "wb") as image:\n    image.write(base64.b64decode(response.data[0].b64_json))\nprint("Saved ${imageFile}")`;
+    if (kind === "images") return `import base64\n\n${client}response = client.images.generate(\n    model=${name},\n    prompt=${JSON.stringify(imagePrompt)},\n    n=1,\n    size="512x512",\n)\ndata = base64.b64decode(response.data[0].b64_json)\nname = "image.png" if data.startswith(b"\\x89PNG\\r\\n\\x1a\\n") else "image.jpg"\nwith open(name, "wb") as image:\n    image.write(data)\nprint("Saved", name)`;
     if (kind === "transcription") return `${client}with open("${audioFile}", "rb") as audio:\n    transcription = client.audio.transcriptions.create(\n        model=${name},\n        file=audio,\n        response_format="json",\n    )\nprint(transcription.text)`;
     return `${client}response = client.chat.completions.create(\n    model=${name},\n    messages=[{"role": "user", "content": "Hello"}],\n)\nprint(response.choices[0].message.content)`;
   }
   const client = `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: ${baseUrl},\n  apiKey: ${key},\n});\n\n`;
-  if (kind === "images") return `import { writeFile } from "node:fs/promises";\n${client}const response = await client.images.generate(${payload});\nawait writeFile("${imageFile}", Buffer.from(response.data[0].b64_json, "base64"));\nconsole.log("Saved ${imageFile}");`;
+  if (kind === "images") return `import { writeFile } from "node:fs/promises";\n${client}const response = await client.images.generate(${payload});\nconst data = Buffer.from(response.data[0].b64_json, "base64");\nconst name = data.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) ? "image.png" : "image.jpg";\nawait writeFile(name, data);\nconsole.log("Saved", name);`;
   if (kind === "transcription") return `import fs from "node:fs";\n${client}const transcription = await client.audio.transcriptions.create({\n  model: ${name},\n  file: fs.createReadStream("${audioFile}"),\n  response_format: "json",\n});\nconsole.log(transcription.text);`;
   return `${client}const response = await client.chat.completions.create(${payload});\nconsole.log(response.choices[0].message.content);`;
 }
