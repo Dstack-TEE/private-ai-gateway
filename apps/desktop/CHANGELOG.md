@@ -2,22 +2,16 @@
 
 ## [0.8.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.3...desktop-v0.8.4) (2026-11-05)
 
+Private AI Proxy 0.8.4 adds image generation and audio transcription examples to the Local API examples dialog.
 
 ### Features
 
-* **desktop:** add icons to the Local API example tabs ([#543](https://github.com/Dstack-TEE/private-ai-gateway/issues/543)) ([db32b31](https://github.com/Dstack-TEE/private-ai-gateway/commit/db32b31471ea66624c343d3163035cdc5e40b656))
-* **desktop:** add Images and Transcription Local API examples ([#541](https://github.com/Dstack-TEE/private-ai-gateway/issues/541)) ([af37d46](https://github.com/Dstack-TEE/private-ai-gateway/commit/af37d465ab0c252db8fdd5e0303c64f736f2ac92))
+* **Images and Transcription examples.** The Local API examples dialog has Images and Transcription tabs next to Chat and Decisions, with cURL, Python and JavaScript code using the OpenAI SDK. Image examples save the returned image with the right extension (PNG or JPEG); transcription examples upload `audio.wav`. A tab is disabled when the verified catalog has no model of that kind ([#541](https://github.com/Dstack-TEE/private-ai-gateway/pull/541)).
+* **Tab icons.** Each example tab shows an icon for its kind (text, image, microphone, decisions), hidden in very narrow windows ([#543](https://github.com/Dstack-TEE/private-ai-gateway/pull/543)).
 
+### Maintenance
 
-### Bug Fixes
-
-* **desktop:** wait for Finder to list the DMG and stop retrying after unmount ([#539](https://github.com/Dstack-TEE/private-ai-gateway/issues/539)) ([42c60bd](https://github.com/Dstack-TEE/private-ai-gateway/commit/42c60bdcd70b6c1adb1bc6f1a23629b831b6ba75))
-
-
-### Miscellaneous Chores
-
-* **desktop:** release 0.8.4 ([f8d579d](https://github.com/Dstack-TEE/private-ai-gateway/commit/f8d579d34ffcee777d5af880e76e1cbf6453b40c))
-* **desktop:** release 0.8.4 ([807297b](https://github.com/Dstack-TEE/private-ai-gateway/commit/807297ba1320ce571ef5d5ede6eeb3b5805c6eb0))
+* macOS packaging waits for Finder to list the DMG and stops retrying after it unmounts ([#539](https://github.com/Dstack-TEE/private-ai-gateway/pull/539)).
 
 ## [0.8.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.3) (2026-11-05)
 
