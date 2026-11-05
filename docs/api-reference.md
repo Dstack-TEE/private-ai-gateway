@@ -68,9 +68,9 @@ existing routing and ACI constraints. Any other field returns `400` with
 is not supported. Non-integer and out-of-range `n` values return
 `400 invalid_request_error` with `code: "invalid_parameter"` and `param: "n"`.
 
-The gateway forwards `output_format`, but NEAR does not document this option.
-For NEAR's FLUX model, requesting `"png"` can still return JPEG bytes. Check the
-decoded image format before choosing a filename or content type.
+The gateway forwards `output_format`. As of 2026-11, NEAR does not document this
+option, and its FLUX model can return JPEG bytes when `"png"` is requested.
+Check the decoded image format before choosing a filename or content type.
 
 `response_format: "url"`, any `stream` or `partial_images` field, invalid types,
 and out-of-range integers return `400`. Images allow 16 concurrent generations
@@ -174,7 +174,7 @@ preserves a supplied numeric value and omits the field when absent.
 Audio upstream responses, including error bodies, are capped at the smaller of
 `max_buffered_response_bytes` and 8 MiB (`502` on overflow).
 
-NEAR Whisper currently returns no word timestamps even when
+As of 2026-11, NEAR Whisper returns no word timestamps even when
 `timestamp_granularities[]=word` is requested. Segment timestamps are available
 in `verbose_json`; requesting word timestamps does not guarantee a `words` array.
 
