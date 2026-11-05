@@ -111,5 +111,20 @@
     "privatemode_manifest_log_path": "/run/privatemode/manifests.jsonl",
     "privatemode_proxy_image_digest": "sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
     "pending_verification": "Pinned v1.59.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
+  },
+  {
+    "name": "near-ai-live-rerank",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-rerank",
+    "upstream_model": "Qwen/Qwen3-Reranker-0.6B",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "rerank"
+    ]
   }
 ]

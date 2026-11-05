@@ -4585,3 +4585,53 @@ async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
     assert_eq!(json_body(&response)["text"], "hello");
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
+    let request =
+        br#"{"model":"aci-model","query":"q","documents":["a","b"],"top_n":1,"user":"alice"}"#;
+    for (upstream, status) in [
+        (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
+        (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+        (br#"{"results":[{"index":2,"relevance_score":0.9}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let response = h.requester.post("/v1/rerank", request, &[("authorization", "Bearer tenant-key")]).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        if status == StatusCode::OK {
+            assert_eq!(body["results"], serde_json::json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}]));
+            assert_eq!(body["usage"], serde_json::json!({"prompt_tokens":5,"total_tokens":5}));
+            assert!(body.get("provider").is_none());
+        } else {
+            assert!(body.get("usage").is_none());
+        }
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/rerank");
+        assert_eq!(payload_event(&payload, "response.returned")["body_hash"], sha256_hex(&response.body));
+        let calls = h.upstream_calls.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("user").is_none());
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+    }
+}
+
+#[tokio::test]
+async fn rerank_auth_and_e2ee_refuse_before_json_parse() {
+    let h = harness();
+    for (headers, status) in [
+        (vec![], StatusCode::UNAUTHORIZED),
+        (
+            vec![
+                ("authorization", "Bearer tenant-key"),
+                ("x-e2ee-test", "true"),
+            ],
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = h.requester.post("/v1/rerank", b"not json", &headers).await;
+        assert_eq!(response.status, status);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}

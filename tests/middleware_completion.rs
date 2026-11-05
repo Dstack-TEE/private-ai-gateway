@@ -6009,3 +6009,99 @@ async fn audio_requires_endpoint_opt_in() {
     assert_eq!(status, 404);
     assert!(requests.lock().unwrap().is_empty());
 }
+
+fn rerank_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","query":"q","documents":["a",{"text":"b"}],"top_n":1,"return_documents":true,"user":"alice"});
+    CompletionInput {
+        endpoint: Endpoint::Rerank,
+        endpoint_path: "/v1/rerank",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-rerank".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn rerank_opt_in_sanitizes_before_pricing_and_reporting() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}],
+        "pricing":{"inputCostPerToken":"0.01","outputCostPerToken":"99"}}))
+    .await;
+    let (service, requests) = build_recording_service(200, serde_json::to_vec(&json!({
+        "id":"private","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"private":true}],
+        "usage":{"prompt_tokens":5,"total_tokens":5,"completion_tokens":100,"cost":99,"private":"private"},"private":true
+    })).unwrap(), "application/json");
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, rerank_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["usage"],
+        json!({"prompt_tokens":5,"total_tokens":5,"cost":0.05})
+    );
+    assert_eq!(
+        body["results"],
+        json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}])
+    );
+    assert_eq!(body["model"], "gpt-test");
+    assert!(body.get("private").is_none());
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/rerank");
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+        assert!(calls[0].body.get("user").is_none());
+    }
+    assert!(service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .is_some());
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
+    assert_eq!(report["selectedRouteId"], "rank:model");
+    assert_eq!(report["usage"], json!({"prompt_tokens":5,"total_tokens":5}));
+}
+
+#[tokio::test]
+async fn rerank_malformed_usage_is_receipted_and_unbilled() {
+    let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}]})).await;
+    let (service, _) = build_recording_service(
+        200,
+        br#"{"results":[{"index":0,"relevance_score":1}]}"#.to_vec(),
+        "application/json",
+    );
+    let (status, headers, _) = response_parts(
+        middleware(url)
+            .handle_completion(&service, rerank_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert!(service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .is_some());
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
+    assert_eq!(report["status"], 502);
+    assert!(report.get("usage").is_none_or(Value::is_null));
+}
+
+#[tokio::test]
+async fn rerank_requires_explicit_endpoint_opt_in() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    let (status, _, _) = response_parts(
+        middleware(url)
+            .handle_completion(&service, rerank_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert!(requests.lock().unwrap().is_empty());
+}

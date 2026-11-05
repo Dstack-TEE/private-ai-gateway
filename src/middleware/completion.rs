@@ -156,6 +156,11 @@ async fn run_inner(
             return err.into_response();
         }
     }
+    if endpoint == Endpoint::Rerank {
+        if let Err(err) = super::rerank::validate_request(&params) {
+            return err.into_response();
+        }
+    }
     let started = Instant::now();
     let client_endpoint = endpoint;
     let validated = match endpoint {
@@ -570,6 +575,18 @@ async fn run_inner(
                             upstream_json = body;
                             meter.audio = Some(audio);
                         }
+                        if client_endpoint == Endpoint::Rerank {
+                            super::rerank::validate_response(&upstream_json, &params)
+                                .map_err(str::to_string)?;
+                            // Strip upstream billing extensions before pricing or reporting.
+                            super::rerank::canonicalize(&mut upstream_json);
+                            if let Some(usage) = upstream_json
+                                .get_mut("usage")
+                                .and_then(Value::as_object_mut)
+                            {
+                                usage.remove("cost");
+                            }
+                        }
                         if client_endpoint == Endpoint::ImagesGenerations {
                             super::images::validate_response(
                                 &upstream_json,
@@ -614,7 +631,9 @@ async fn run_inner(
                         // receipt draft and attest the sanitized error bytes.
                         if matches!(
                             client_endpoint,
-                            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+                            Endpoint::Rerank
+                                | Endpoint::ImagesGenerations
+                                | Endpoint::AudioTranscriptions
                         ) {
                             return finalize_buffered(
                                 forward.receipt,

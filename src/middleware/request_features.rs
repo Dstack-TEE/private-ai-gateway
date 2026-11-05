@@ -236,6 +236,7 @@ pub fn extract(
         Endpoint::Embed
         | Endpoint::CreateModelResponse
         | Endpoint::SystemOne
+        | Endpoint::Rerank
         | Endpoint::AudioTranscriptions
         | Endpoint::ImagesGenerations => return None,
     }
@@ -403,6 +404,7 @@ fn conversation_opening(endpoint: Endpoint, params: &Value) -> Option<Value> {
         Endpoint::Embed
         | Endpoint::CreateModelResponse
         | Endpoint::SystemOne
+        | Endpoint::Rerank
         | Endpoint::AudioTranscriptions
         | Endpoint::ImagesGenerations => None,
     }

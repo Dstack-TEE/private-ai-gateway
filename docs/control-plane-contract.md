@@ -117,7 +117,7 @@ An allow response:
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
-| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Rerank requests go only to OpenAI-format candidates listing `/v1/rerank`. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
@@ -462,3 +462,15 @@ route for those hostnames.
 small config-backed server for local integration tests. It implements the core
 `/models` and consult routes. It is not a production billing, TEE-catalog, or
 policy service.
+
+### Rerank routing and metering
+
+`/v1/rerank` is default-off: candidates must explicitly include `/v1/rerank` in
+`supportedEndpoints` and use `format: "openai"`. Consult pre receives that exact
+endpoint; no eligible candidate yields `404 model_not_found`. A valid response
+requires `usage.prompt_tokens` and `usage.total_tokens` as nonnegative integers
+(total at least prompt). Consult post receives the sanitized token usage; pricing
+uses `inputCostPerToken` with no generated tokens. Provider billing extensions
+and cost are removed before metering; the gateway computes display cost from the
+same reported usage. Malformed successes return a receipted `502` without usage.
+Existing candidates remain inert until the control plane opts them in.
