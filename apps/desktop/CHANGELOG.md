@@ -1,15 +1,21 @@
 # Changelog
 
-## [0.8.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.1) (2026-11-04)
+## [0.8.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.2) (2026-11-05)
 
-Private AI Proxy 0.8.1 shows every model the verified gateway lists. Changes since stable 0.8.0.
+Private AI Proxy 0.8.2 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 was not published.
 
 ### Bug Fixes
 
 * **New models appear right away.** On the RedPill and Phala presets, models missing from a hand-maintained compatibility list were hidden, so newly launched models such as `deepseek/deepseek-v4.1-flash-1017` never showed up in the app, the Local API model list, or agent pickers. The verified live catalog is now the only model list. Models that advertise no text output (decision, image, or transcription models) still stay out of coding agents ([#532](https://github.com/Dstack-TEE/private-ai-gateway/pull/532)).
 
+### Performance Improvements
+
+* **Smaller binaries.** Release builds use link-time optimization and strip symbols: the CLI shrinks by about 40% and the background service by about a third. The desktop shell drops a duplicate D-Bus library and the clipboard plugin; copying, including keeping secrets out of clipboard history, works as before ([#534](https://github.com/Dstack-TEE/private-ai-gateway/pull/534)).
+
 ### Maintenance
 
+* macOS packages and the Mac App Store build are built on macOS 27 with Xcode 27.1 ([#534](https://github.com/Dstack-TEE/private-ai-gateway/pull/534)).
+* The macOS package check retries unmounting the DMG while Finder releases it ([#536](https://github.com/Dstack-TEE/private-ai-gateway/pull/536)).
 * Update desktop npm dependencies ([#529](https://github.com/Dstack-TEE/private-ai-gateway/pull/529)).
 
 ## [0.8.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0-beta.1...desktop-v0.8.0) (2026-11-03)
