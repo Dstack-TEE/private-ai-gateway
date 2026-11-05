@@ -182,8 +182,12 @@ pub fn requested_count(request: &Value) -> usize {
 /// Validate and reduce a direct upstream success before signing its receipt.
 pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
     let request: Value = serde_json::from_slice(request).ok()?;
+    response_body_for_count(response, requested_count(&request))
+}
+
+pub fn response_body_for_count(response: &[u8], requested_count: usize) -> Option<Vec<u8>> {
     let mut body: Value = serde_json::from_slice(response).ok()?;
-    validate_response(&body, requested_count(&request)).ok()?;
+    validate_response(&body, requested_count).ok()?;
     canonicalize(&mut body);
     Some(serde_json::to_vec(&body).unwrap_or_default())
 }

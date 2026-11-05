@@ -28,7 +28,7 @@ pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
     pub(super) endpoint_path: &'static str,
     pub(super) received_body: axum::body::Bytes,
-    pub(super) audio_form: Option<Arc<crate::middleware::audio::AudioForm>>,
+    pub(super) audio_form: Option<Arc<crate::middleware::media::MediaForm>>,
     pub(super) forwarded_body: Option<Vec<u8>>,
     pub(super) aci_required: bool,
     pub(super) aci_session_ids: Vec<String>,

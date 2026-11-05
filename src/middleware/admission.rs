@@ -20,7 +20,9 @@ static AUDIO: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::ne
 
 pub fn try_acquire(endpoint: Endpoint) -> Result<Option<OwnedSemaphorePermit>, TryAcquireError> {
     match endpoint {
-        Endpoint::ImagesGenerations => IMAGES.clone().try_acquire_owned().map(Some),
+        Endpoint::ImagesGenerations | Endpoint::ImagesEdits => {
+            IMAGES.clone().try_acquire_owned().map(Some)
+        }
         Endpoint::AudioTranscriptions => AUDIO.clone().try_acquire_owned().map(Some),
         _ => Ok(None),
     }

@@ -2,7 +2,7 @@
 
 use crate::aggregator::service::{
     AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 /// A request endpoint. Selects which per-format config table applies.
@@ -16,6 +16,7 @@ pub enum Endpoint {
     CreateModelResponse,
     SystemOne,
     ImagesGenerations,
+    ImagesEdits,
     AudioTranscriptions,
 }
 
@@ -30,6 +31,7 @@ impl Endpoint {
             RESPONSES_PATH => Self::CreateModelResponse,
             SYSTEMONE_PATH => Self::SystemOne,
             IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
+            IMAGES_EDITS_PATH => Self::ImagesEdits,
             AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
             _ => Self::ChatComplete,
         }
@@ -56,6 +58,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
+            Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
             Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
         }
     }
@@ -70,6 +73,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",
             Endpoint::ImagesGenerations => "imagesGenerations",
+            Endpoint::ImagesEdits => "imagesEdits",
             Endpoint::AudioTranscriptions => "audioTranscriptions",
         }
     }

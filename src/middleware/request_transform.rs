@@ -172,6 +172,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
+            return Ok(super::image_edits::upstream_fields(params));
+        }
         (ProviderFormat::Openai, Endpoint::Rerank) => {
             return Ok(super::rerank::upstream_body(params));
         }
@@ -272,7 +275,10 @@ pub fn build_candidates(
         }
         if matches!(
             endpoint,
-            Endpoint::Rerank | Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+            Endpoint::Rerank
+                | Endpoint::ImagesGenerations
+                | Endpoint::ImagesEdits
+                | Endpoint::AudioTranscriptions
         ) && !candidate.supports_endpoint(endpoint.path())
         {
             continue;
@@ -791,6 +797,7 @@ fn select_config(
         | (Openai, CreateModelResponse)
         | (Openai, Rerank)
         | (Openai, AudioTranscriptions)
+        | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
         | (Anthropic, Rerank)
@@ -798,6 +805,7 @@ fn select_config(
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
         | (Anthropic, AudioTranscriptions)
+        | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }
