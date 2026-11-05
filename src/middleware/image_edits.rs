@@ -14,29 +14,20 @@ pub const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_BODY_BYTES: usize = 21 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = MAX_BODY_BYTES - MAX_FILE_BYTES;
 pub const MAX_METADATA_BYTES: usize = 1024;
+const FIELDS: &[&str] = &[
+    "model",
+    "prompt",
+    "size",
+    "response_format",
+    "n",
+    "user",
+    "provider",
+];
 const KIND: FormKind = FormKind::ImageEdit;
 
 pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
     if let Some(object) = params.as_object() {
-        for key in object.keys() {
-            if ![
-                "model",
-                "prompt",
-                "size",
-                "response_format",
-                "n",
-                "user",
-                "provider",
-            ]
-            .contains(&key.as_str())
-            {
-                return Err(images::RequestError {
-                    code: "unknown_parameter",
-                    param: key.clone(),
-                    message: format!("unknown parameter: {key}"),
-                });
-            }
-        }
+        images::reject_unknown(object, FIELDS)?;
     }
     images::validate_request(params)?;
     for key in ["model", "size", "response_format", "user"] {
@@ -45,19 +36,17 @@ pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
             .and_then(Value::as_str)
             .is_some_and(|value| value.len() > MAX_METADATA_BYTES)
         {
-            return Err(images::RequestError {
-                code: "invalid_parameter",
-                param: key.into(),
-                message: format!("parameter must be at most {MAX_METADATA_BYTES} bytes"),
-            });
+            return Err(images::RequestError::invalid(
+                key,
+                &format!("parameter must be at most {MAX_METADATA_BYTES} bytes"),
+            ));
         }
     }
     if params.get("n").is_some_and(|n| n.as_u64() != Some(1)) {
-        return Err(images::RequestError {
-            code: "invalid_parameter",
-            param: "n".into(),
-            message: "image edits support exactly one output image".into(),
-        });
+        return Err(images::RequestError::invalid(
+            "n",
+            "image edits support exactly one output image",
+        ));
     }
     Ok(())
 }
@@ -87,7 +76,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             }));
             continue;
         }
-        if !["model", "prompt", "size", "response_format", "user", "n"].contains(&name.as_str()) {
+        if name == "provider" || !FIELDS.contains(&name.as_str()) {
             return Err(MediaError {
                 code: "unknown_parameter",
                 ..KIND.invalid(&name)

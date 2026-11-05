@@ -20,47 +20,40 @@ pub enum FormKind {
     ImageEdit,
 }
 
+pub(crate) struct FormSpec {
+    label: &'static str,
+    file_field: &'static str,
+    filename_stem: &'static str,
+    max_file_bytes: usize,
+    pub(crate) max_body_bytes: usize,
+    max_text_bytes: usize,
+    upstream_fields: fn(&Value) -> Value,
+}
+
+const TRANSCRIPTION: FormSpec = FormSpec {
+    label: "transcription",
+    file_field: "file",
+    filename_stem: "audio",
+    max_file_bytes: super::audio::MAX_FILE_BYTES,
+    max_body_bytes: super::audio::MAX_BODY_BYTES,
+    max_text_bytes: super::audio::MAX_TEXT_BYTES,
+    upstream_fields: super::audio::upstream_fields,
+};
+const IMAGE_EDIT: FormSpec = FormSpec {
+    label: "image edit",
+    file_field: "image",
+    filename_stem: "image",
+    max_file_bytes: super::image_edits::MAX_FILE_BYTES,
+    max_body_bytes: super::image_edits::MAX_BODY_BYTES,
+    max_text_bytes: super::image_edits::MAX_TEXT_BYTES,
+    upstream_fields: super::image_edits::upstream_fields,
+};
+
 impl FormKind {
-    fn label(self) -> &'static str {
+    pub(crate) fn spec(self) -> &'static FormSpec {
         match self {
-            Self::Transcription => "transcription",
-            Self::ImageEdit => "image edit",
-        }
-    }
-    pub(crate) fn file_field(self) -> &'static str {
-        match self {
-            Self::Transcription => "file",
-            Self::ImageEdit => "image",
-        }
-    }
-    fn filename_stem(self) -> &'static str {
-        match self {
-            Self::Transcription => "audio",
-            Self::ImageEdit => "image",
-        }
-    }
-    fn max_file_bytes(self) -> usize {
-        match self {
-            Self::Transcription => super::audio::MAX_FILE_BYTES,
-            Self::ImageEdit => super::image_edits::MAX_FILE_BYTES,
-        }
-    }
-    pub(crate) fn max_body_bytes(self) -> usize {
-        match self {
-            Self::Transcription => super::audio::MAX_BODY_BYTES,
-            Self::ImageEdit => super::image_edits::MAX_BODY_BYTES,
-        }
-    }
-    pub(crate) fn max_text_bytes(self) -> usize {
-        match self {
-            Self::Transcription => super::audio::MAX_TEXT_BYTES,
-            Self::ImageEdit => super::image_edits::MAX_TEXT_BYTES,
-        }
-    }
-    fn upstream_fields(self, params: &Value) -> Value {
-        match self {
-            Self::Transcription => super::audio::upstream_fields(params),
-            Self::ImageEdit => super::image_edits::upstream_fields(params),
+            Self::Transcription => &TRANSCRIPTION,
+            Self::ImageEdit => &IMAGE_EDIT,
         }
     }
 }
@@ -85,7 +78,7 @@ impl FormKind {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_parameter",
             param: param.into(),
-            message: format!("invalid {} parameter: {param}", self.label()),
+            message: format!("invalid {} parameter: {param}", self.spec().label),
             error_type: "invalid_request_error",
         }
     }
@@ -96,7 +89,7 @@ impl FormKind {
             param: "body".into(),
             message: format!(
                 "{} upload byte capacity reached; retry shortly",
-                self.label()
+                self.spec().label
             ),
             error_type: "rate_limit_error",
         }
@@ -105,10 +98,10 @@ impl FormKind {
         MediaError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "request_too_large",
-            param: self.file_field().into(),
+            param: self.spec().file_field.into(),
             message: format!(
                 "{} upload exceeds the file or request size limit",
-                self.label()
+                self.spec().label
             ),
             error_type: "invalid_request_error",
         }
@@ -120,7 +113,7 @@ impl FormKind {
             param: "body".into(),
             message: format!(
                 "{} upload exceeded the 60-second read deadline",
-                self.label()
+                self.spec().label
             ),
             error_type: "invalid_request_error",
         }
@@ -158,7 +151,7 @@ pub async fn read_upload(
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|v| v > kind.max_body_bytes() as u64)
+        .is_some_and(|v| v > kind.spec().max_body_bytes as u64)
     {
         return Err(kind.large());
     }
@@ -183,7 +176,7 @@ pub(crate) async fn collect_upload(
     let mut bytes = bytes::BytesMut::new();
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk.map_err(|_| kind.invalid("body"))?;
-        if chunk.len() > kind.max_body_bytes() - bytes.len() {
+        if chunk.len() > kind.spec().max_body_bytes - bytes.len() {
             return Err(kind.large());
         }
         let count = u32::try_from(chunk.len()).map_err(|_| kind.large())?;
@@ -220,9 +213,9 @@ pub(crate) fn multipart(
     }
     let constraints = multer::Constraints::new().size_limit(
         multer::SizeLimit::new()
-            .whole_stream(kind.max_body_bytes() as u64)
-            .per_field(kind.max_text_bytes() as u64)
-            .for_field(kind.file_field(), kind.max_file_bytes() as u64),
+            .whole_stream(kind.spec().max_body_bytes as u64)
+            .per_field(kind.spec().max_text_bytes as u64)
+            .for_field(kind.spec().file_field, kind.spec().max_file_bytes as u64),
     );
     Ok(multer::Multipart::with_constraints(
         stream::once(async move { Ok::<_, std::convert::Infallible>(body) }),
@@ -256,8 +249,7 @@ impl MediaForm {
         use crate::aci::upstream::UpstreamError;
         let kind = self.kind;
         let mut form = reqwest::multipart::Form::new();
-        for (key, value) in kind
-            .upstream_fields(params)
+        for (key, value) in (kind.spec().upstream_fields)(params)
             .as_object()
             .into_iter()
             .flatten()
@@ -278,17 +270,17 @@ impl MediaForm {
         }
         let file =
             reqwest::multipart::Part::stream_with_length(self.file.clone(), self.file.len() as u64)
-                .file_name(format!("{}.{}", kind.filename_stem(), self.extension))
+                .file_name(format!("{}.{}", kind.spec().filename_stem, self.extension))
                 .mime_str("application/octet-stream")
                 .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
-        form = form.part(kind.file_field(), file);
+        form = form.part(kind.spec().file_field, file);
         let content_type = format!("multipart/form-data; boundary={}", form.boundary());
         let chunks = form.into_stream();
         futures_util::pin_mut!(chunks);
         let mut bytes = bytes::BytesMut::new();
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk.map_err(|e| UpstreamError::Transport(e.to_string()))?;
-            if chunk.len() > kind.max_body_bytes() - bytes.len() {
+            if chunk.len() > kind.spec().max_body_bytes - bytes.len() {
                 return Err(UpstreamError::InvalidRequest(
                     "encoded multipart body exceeds limit".into(),
                 ));

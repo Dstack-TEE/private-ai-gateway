@@ -63,6 +63,19 @@ impl Endpoint {
         }
     }
 
+    pub(crate) fn is_image(self) -> bool {
+        matches!(self, Self::ImagesGenerations | Self::ImagesEdits)
+    }
+
+    pub(crate) fn is_media(self) -> bool {
+        self.is_image() || self == Self::AudioTranscriptions
+    }
+
+    /// Native buffered endpoints require explicit candidate opt-in.
+    pub(crate) fn is_buffered_native(self) -> bool {
+        self.is_media() || self == Self::Rerank
+    }
+
     pub(crate) fn label(self) -> &'static str {
         match self {
             Endpoint::ChatComplete => "chatComplete",

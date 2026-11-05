@@ -4,19 +4,15 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use super::images::RequestError;
+use super::images::{reject_unknown, RequestError};
 
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
-    let invalid = |param: &str, message: &str| RequestError {
-        code: "invalid_parameter",
-        param: param.into(),
-        message: message.into(),
-    };
     let object = body
         .as_object()
-        .ok_or_else(|| invalid("body", "request body must be a JSON object"))?;
-    for key in object.keys() {
-        if ![
+        .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
+    reject_unknown(
+        object,
+        &[
             "model",
             "query",
             "documents",
@@ -24,34 +20,31 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "return_documents",
             "user",
             "provider",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(RequestError {
-                code: "unknown_parameter",
-                param: key.clone(),
-                message: format!("unknown parameter: {key}"),
-            });
-        }
-    }
+        ],
+    )?;
     for key in ["model", "query"] {
         if !body.get(key).is_some_and(Value::is_string) {
-            return Err(invalid(key, "required parameter must be a string"));
+            return Err(RequestError::invalid(
+                key,
+                "required parameter must be a string",
+            ));
         }
     }
     if body.get("user").is_some_and(|v| !v.is_string()) {
-        return Err(invalid("user", "parameter must be a string"));
+        return Err(RequestError::invalid("user", "parameter must be a string"));
     }
     let documents = body["documents"]
         .as_array()
         .filter(|v| (1..=1000).contains(&v.len()))
-        .ok_or_else(|| invalid("documents", "documents must contain 1 to 1000 entries"))?;
+        .ok_or_else(|| {
+            RequestError::invalid("documents", "documents must contain 1 to 1000 entries")
+        })?;
     if !documents.iter().all(|v| {
         v.is_string()
             || v.as_object()
                 .is_some_and(|v| v.len() == 1 && v.get("text").is_some_and(Value::is_string))
     }) {
-        return Err(invalid(
+        return Err(RequestError::invalid(
             "documents",
             "each document must be a string or an object containing only text",
         ));
@@ -60,7 +53,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         !v.as_u64()
             .is_some_and(|n| n >= 1 && n <= documents.len() as u64)
     }) {
-        return Err(invalid(
+        return Err(RequestError::invalid(
             "top_n",
             "top_n must be an integer from 1 to the document count",
         ));
@@ -69,7 +62,10 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         .get("return_documents")
         .is_some_and(|v| !v.is_boolean())
     {
-        return Err(invalid("return_documents", "parameter must be a boolean"));
+        return Err(RequestError::invalid(
+            "return_documents",
+            "parameter must be a boolean",
+        ));
     }
     Ok(())
 }

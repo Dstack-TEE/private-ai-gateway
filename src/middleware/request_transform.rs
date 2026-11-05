@@ -273,14 +273,7 @@ pub fn build_candidates(
             );
             continue;
         }
-        if matches!(
-            endpoint,
-            Endpoint::Rerank
-                | Endpoint::ImagesGenerations
-                | Endpoint::ImagesEdits
-                | Endpoint::AudioTranscriptions
-        ) && !candidate.supports_endpoint(endpoint.path())
-        {
+        if endpoint.is_buffered_native() && !candidate.supports_endpoint(endpoint.path()) {
             continue;
         }
         let bridge = match &messages_chat {

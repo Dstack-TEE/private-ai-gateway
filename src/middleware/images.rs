@@ -18,7 +18,7 @@ pub struct RequestError {
 }
 
 impl RequestError {
-    fn invalid(param: &str, message: &str) -> Self {
+    pub(crate) fn invalid(param: &str, message: &str) -> Self {
         Self {
             code: "invalid_parameter",
             param: param.into(),
@@ -38,13 +38,28 @@ impl RequestError {
     }
 }
 
+pub(crate) fn reject_unknown(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), RequestError> {
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(RequestError {
+            code: "unknown_parameter",
+            param: key.clone(),
+            message: format!("unknown parameter: {key}"),
+        });
+    }
+    Ok(())
+}
+
 /// Validate the complete client body before consulting or forwarding.
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
     let object = body
         .as_object()
         .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    for key in object.keys() {
-        if ![
+    reject_unknown(
+        object,
+        &[
             "model",
             "prompt",
             "n",
@@ -61,16 +76,8 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "provider",
             "stream",
             "partial_images",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(RequestError {
-                code: "unknown_parameter",
-                param: key.clone(),
-                message: format!("unknown parameter: {key}"),
-            });
-        }
-    }
+        ],
+    )?;
     for key in ["model", "prompt"] {
         if !object.get(key).is_some_and(Value::is_string) {
             return Err(RequestError::invalid(

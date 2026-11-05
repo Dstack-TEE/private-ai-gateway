@@ -1,12 +1,10 @@
 //! Bounded OpenAI multipart transcription input and sanitized JSON output.
 
-use axum::{
-    body::{Body, Bytes},
-    http::HeaderMap,
-};
+use axum::body::Bytes;
 #[cfg(test)]
 use axum::{
-    http::{header, StatusCode},
+    body::Body,
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
 };
 #[cfg(test)]
@@ -14,7 +12,6 @@ use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{collections::HashSet, sync::Arc};
-use tokio::sync::OwnedSemaphorePermit;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 
@@ -31,23 +28,6 @@ const UPSTREAM_FIELDS: &[&str] = &[
 ];
 use super::media::{self, FormKind};
 pub use super::media::{MediaError as AudioError, MediaForm as AudioForm};
-
-pub async fn read_upload(
-    headers: &HeaderMap,
-    body: Body,
-) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
-    media::read_upload(headers, body, FormKind::Transcription).await
-}
-
-#[cfg(test)]
-use super::media::UPLOAD_BYTES;
-#[cfg(test)]
-async fn collect_upload(
-    body: Body,
-    budget: Arc<Semaphore>,
-) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
-    media::collect_upload(body, budget, FormKind::Transcription).await
-}
 
 pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioForm>), AudioError> {
     let mut multipart = media::multipart(body, content_type, FormKind::Transcription)?;
@@ -456,17 +436,17 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
-        let available = UPLOAD_BYTES.available_permits();
+        let available = media::UPLOAD_BYTES.available_permits();
         let body = Body::from_stream(
             stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
                 .chain(stream::pending()),
         );
-        let result = read_upload(&HeaderMap::new(), body).await;
+        let result = media::read_upload(&HeaderMap::new(), body, FormKind::Transcription).await;
         let error = result.unwrap_err();
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(response.headers()[header::CONNECTION], "close");
-        assert_eq!(UPLOAD_BYTES.available_permits(), available);
+        assert_eq!(media::UPLOAD_BYTES.available_permits(), available);
     }
 
     #[tokio::test]
@@ -478,10 +458,16 @@ mod tests {
                 panic!("declared oversize upload must not be read")
             },
         ));
-        let declared = read_upload(&headers, unread).await.unwrap_err();
-        let received = read_upload(&HeaderMap::new(), Body::from(vec![0; MAX_BODY_BYTES + 1]))
+        let declared = media::read_upload(&headers, unread, FormKind::Transcription)
             .await
             .unwrap_err();
+        let received = media::read_upload(
+            &HeaderMap::new(),
+            Body::from(vec![0; MAX_BODY_BYTES + 1]),
+            FormKind::Transcription,
+        )
+        .await
+        .unwrap_err();
         for error in [declared, received] {
             let response = error.into_response();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -496,14 +482,17 @@ mod tests {
             Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
             Ok(Bytes::from_static(b"cde")),
         ]));
-        let (bytes, permit) = collect_upload(body, budget.clone()).await.unwrap();
+        let (bytes, permit) = media::collect_upload(body, budget.clone(), FormKind::Transcription)
+            .await
+            .unwrap();
         assert_eq!(bytes, "abcde");
         assert_eq!(permit.num_permits(), 5);
         assert_eq!(budget.available_permits(), 2);
 
-        let rejected = collect_upload(Body::from("xyz"), budget.clone())
-            .await
-            .unwrap_err();
+        let rejected =
+            media::collect_upload(Body::from("xyz"), budget.clone(), FormKind::Transcription)
+                .await
+                .unwrap_err();
         let response = rejected.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[header::RETRY_AFTER], "1");
@@ -520,7 +509,10 @@ mod tests {
             Err(std::io::Error::other("upload interrupted")),
         ]));
         assert_eq!(
-            collect_upload(body, budget.clone()).await.unwrap_err().code,
+            media::collect_upload(body, budget.clone(), FormKind::Transcription)
+                .await
+                .unwrap_err()
+                .code,
             "invalid_parameter"
         );
         assert_eq!(budget.available_permits(), 7);
@@ -537,7 +529,11 @@ mod tests {
                 }),
             ),
         );
-        let task = tokio::spawn(collect_upload(body, budget.clone()));
+        let task = tokio::spawn(media::collect_upload(
+            body,
+            budget.clone(),
+            FormKind::Transcription,
+        ));
         rx.await.unwrap();
         assert_eq!(budget.available_permits(), 5);
         task.abort();
