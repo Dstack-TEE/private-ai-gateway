@@ -94,6 +94,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                 return Err(FormKind::Transcription.invalid("file"));
             }
             file = Some(Arc::new(AudioForm {
+                kind: crate::middleware::media::FormKind::Transcription,
                 file: data,
                 extension: ext,
             }));
