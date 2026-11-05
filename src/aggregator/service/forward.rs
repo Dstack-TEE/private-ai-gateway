@@ -210,6 +210,10 @@ impl AciService {
             return crate::middleware::rerank::response_body(response, request)
                 .ok_or("upstream returned a malformed success body");
         }
+        if endpoint_path == super::IMAGES_EDITS_PATH {
+            return crate::middleware::images::response_body_for_count(response, 1)
+                .ok_or("upstream returned a malformed success body");
+        }
         if endpoint_path == super::IMAGES_GENERATIONS_PATH {
             return crate::middleware::images::response_body(response, request)
                 .ok_or("upstream returned a malformed success body");
@@ -280,7 +284,7 @@ impl AciService {
             target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
-        prepared.encode_audio().await?;
+        prepared.encode_media().await?;
         if aci_required && !attested_route_eligible(prepared.is_tee) {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(
@@ -333,7 +337,9 @@ impl AciService {
                 .or_else(|| {
                     (matches!(
                         endpoint_path,
-                        super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+                        super::IMAGES_GENERATIONS_PATH
+                            | super::IMAGES_EDITS_PATH
+                            | super::AUDIO_TRANSCRIPTIONS_PATH
                     ))
                     .then(|| prepared.model_id.clone())
                 });
@@ -358,6 +364,7 @@ impl AciService {
                 super::RERANK_PATH
                     | super::AUDIO_TRANSCRIPTIONS_PATH
                     | super::IMAGES_GENERATIONS_PATH
+                    | super::IMAGES_EDITS_PATH
             ) {
                 upstream_headers.insert("content-type".into(), "application/json".into());
                 match self.sanitize_media_success(

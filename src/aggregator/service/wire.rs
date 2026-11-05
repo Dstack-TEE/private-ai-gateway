@@ -370,7 +370,7 @@ pub struct LegacySignatureResult {
 /// forwards `requester: None`.
 pub struct ChatCompletionRequest<'a> {
     /// Buffered audio slice shared across attempted routes; never serialized as JSON.
-    pub audio_form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
+    pub audio_form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
     pub context: GatewayRequestContext,
     pub endpoint_path: &'a str,
     /// Bytes the service observed after TLS / E2EE termination.

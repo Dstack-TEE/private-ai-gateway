@@ -126,5 +126,20 @@
     "capabilities": [
       "rerank"
     ]
+  },
+  {
+    "name": "near-ai-live-images-edits",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-images-edits",
+    "upstream_model": "black-forest-labs/FLUX.2-klein-4B",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "images_edits"
+    ]
   }
 ]

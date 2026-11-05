@@ -15,6 +15,7 @@ if __package__ in (None, ""):
 from live_e2e.cases.rerank import run_rerank_case  # noqa: E402
 from live_e2e.cases.embeddings import run_embeddings_case  # noqa: E402
 from live_e2e.cases.audio_transcriptions import run_audio_transcriptions_case  # noqa: E402
+from live_e2e.cases.images_edits import run_images_edits_case  # noqa: E402
 from live_e2e.cases.images import run_images_case  # noqa: E402
 from live_e2e.cases.fidelity_structured_outputs import (  # noqa: E402
     run_structured_outputs_case,
@@ -135,6 +136,11 @@ def main() -> None:
                         artifact_dir=artifact_dir,
                     ))
             summary["phases"]["images"] = images
+
+            summary["phases"]["images_edits"] = [
+                run_images_edits_case(base_url=aggregator.base_url, provider=provider, artifact_dir=artifact_dir)
+                for provider in providers if provider.has_capability("images_edits")
+            ]
 
             audio = []
             for provider in providers:

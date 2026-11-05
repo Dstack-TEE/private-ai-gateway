@@ -278,7 +278,9 @@ impl AciService {
         let keyset = self.current_keyset();
         let chat_id = if matches!(
             endpoint_path,
-            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+            super::IMAGES_GENERATIONS_PATH
+                | super::IMAGES_EDITS_PATH
+                | super::AUDIO_TRANSCRIPTIONS_PATH
         ) {
             None
         } else {
@@ -474,7 +476,7 @@ impl AciService {
                 };
 
                 let mut prepared = prepared;
-                if let Err(err) = prepared.encode_audio().await {
+                if let Err(err) = prepared.encode_media().await {
                     abandon(&mut failed_attempts, 502);
                     upgrade_err(&mut aggregated_err, 2, err.into());
                     continue;
@@ -806,7 +808,9 @@ impl AciService {
                     .or_else(|| {
                         (matches!(
                             endpoint_path,
-                            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
+                            super::IMAGES_GENERATIONS_PATH
+                                | super::IMAGES_EDITS_PATH
+                                | super::AUDIO_TRANSCRIPTIONS_PATH
                         ))
                         .then(|| prepared.model_id.clone())
                     });

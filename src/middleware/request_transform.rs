@@ -18,7 +18,8 @@ use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
     AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH,
+    SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -41,6 +42,7 @@ pub enum Endpoint {
     CreateModelResponse,
     SystemOne,
     ImagesGenerations,
+    ImagesEdits,
     AudioTranscriptions,
 }
 
@@ -56,6 +58,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
+            Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
             Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
         }
     }
@@ -70,6 +73,7 @@ impl Endpoint {
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",
             Endpoint::ImagesGenerations => "imagesGenerations",
+            Endpoint::ImagesEdits => "imagesEdits",
             Endpoint::AudioTranscriptions => "audioTranscriptions",
         }
     }
@@ -216,6 +220,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
+            return Ok(super::image_edits::upstream_fields(params));
+        }
         (ProviderFormat::Openai, Endpoint::Rerank) => {
             return Ok(super::rerank::upstream_body(params));
         }
@@ -305,7 +312,10 @@ pub fn build_candidates(
         }
         if matches!(
             endpoint,
-            Endpoint::Rerank | Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+            Endpoint::Rerank
+                | Endpoint::ImagesGenerations
+                | Endpoint::ImagesEdits
+                | Endpoint::AudioTranscriptions
         ) && !candidate.supports_endpoint(endpoint.path())
         {
             continue;
@@ -820,6 +830,7 @@ fn select_config(
         | (Openai, CreateModelResponse)
         | (Openai, Rerank)
         | (Openai, AudioTranscriptions)
+        | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
         | (Anthropic, Rerank)
@@ -827,6 +838,7 @@ fn select_config(
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
         | (Anthropic, AudioTranscriptions)
+        | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }

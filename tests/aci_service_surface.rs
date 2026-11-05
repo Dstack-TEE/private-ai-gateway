@@ -4685,3 +4685,71 @@ async fn rerank_strips_provider_cost_and_honors_optional_documents_in_direct_mod
         );
     }
 }
+
+fn image_edit_request() -> Vec<u8> {
+    let mut raw = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.exe\"\r\nContent-Type: text/private\r\n\r\n".to_vec();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    raw
+}
+
+#[tokio::test]
+async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body() {
+    for (upstream, status) in [
+        (br#"{"id":"private","file_path":"private","peak_memory_mb":99,"data":[{"b64_json":"image","url":"private"}]}"#.as_slice(), StatusCode::OK),
+        (br#"{"data":[{"url":"private"}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+        (br#"{"data":[{"b64_json":"one"},{"b64_json":"two"}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let raw = image_edit_request();
+        let response = h.requester.call(Request::builder().method("POST").uri("/v1/images/edits")
+            .header("authorization", "Bearer tenant-key").header("content-type", "multipart/form-data; boundary=upload")
+            .header("x-aci-provider", r#"{"order":["near"]}"#).body(Body::from(raw.clone())).unwrap()).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        assert!(!body.to_string().contains("private"));
+        if status == StatusCode::OK { assert_eq!(body["data"], serde_json::json!([{"b64_json":"image"}])); }
+        let forwarded = h.upstream_calls.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+        assert!(!forwarded.headers.contains_key("x-aci-provider"));
+        let (params, image) = private_ai_gateway::middleware::image_edits::parse(forwarded.body.clone(), forwarded.content_type.as_deref().unwrap()).await.unwrap();
+        assert_eq!(params["model"], "aci-model");
+        assert_eq!(params["response_format"], "b64_json");
+        assert_eq!(image.file, b"\x89PNG\r\n\x1a\nimage".as_slice());
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/images/edits");
+        for (event, bytes) in [("request.received", raw.as_slice()), ("request.forwarded", forwarded.body.as_ref()), ("response.returned", response.body.as_ref())] {
+            assert_eq!(payload_event(&payload, event)["body_hash"], sha256_hex(bytes));
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_edits_auth_e2ee_and_invalid_carrier_refuse_before_parse() {
+    let h = harness();
+    for (headers, status) in [
+        (vec![], StatusCode::UNAUTHORIZED),
+        (
+            vec![
+                ("authorization", "Bearer tenant-key"),
+                ("x-e2ee-test", "true"),
+            ],
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            vec![
+                ("authorization", "Bearer tenant-key"),
+                ("x-aci-provider", "null"),
+            ],
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let response = h
+            .requester
+            .post("/v1/images/edits", b"not multipart", &headers)
+            .await;
+        assert_eq!(response.status, status);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}

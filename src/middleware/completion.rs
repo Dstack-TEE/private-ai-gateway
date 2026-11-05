@@ -48,7 +48,7 @@ use super::{pricing, response_transform, stream_transform};
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
 /// termination and JSON normalization.
 pub struct CompletionInput {
-    pub audio_form: Option<Arc<super::audio::AudioForm>>,
+    pub audio_form: Option<Arc<super::media::MediaForm>>,
     /// Byte-budget reservation for the buffered upload, held through consult.
     pub upload_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub endpoint: Endpoint,
@@ -153,6 +153,11 @@ async fn run_inner(
 
     if endpoint == Endpoint::ImagesGenerations {
         if let Err(err) = super::images::validate_request(&params) {
+            return err.into_response();
+        }
+    }
+    if endpoint == Endpoint::ImagesEdits {
+        if let Err(err) = super::image_edits::validate_request(&params) {
             return err.into_response();
         }
     }
@@ -579,7 +584,10 @@ async fn run_inner(
                             super::rerank::sanitize_response(&mut upstream_json, &params)
                                 .map_err(str::to_string)?;
                         }
-                        if client_endpoint == Endpoint::ImagesGenerations {
+                        if matches!(
+                            client_endpoint,
+                            Endpoint::ImagesGenerations | Endpoint::ImagesEdits
+                        ) {
                             super::images::validate_response(
                                 &upstream_json,
                                 super::images::requested_count(&params),
@@ -625,6 +633,7 @@ async fn run_inner(
                             client_endpoint,
                             Endpoint::Rerank
                                 | Endpoint::ImagesGenerations
+                                | Endpoint::ImagesEdits
                                 | Endpoint::AudioTranscriptions
                         ) {
                             return finalize_buffered(
@@ -641,8 +650,11 @@ async fn run_inner(
                 // Report usage before cost or image SDK defaults. Audio usage
                 // has already been normalized to duration only.
                 let raw_usage = transformed.get("usage").cloned();
-                meter.images = (client_endpoint == Endpoint::ImagesGenerations)
-                    .then(|| super::images::usage(&transformed, &params));
+                meter.images = (matches!(
+                    client_endpoint,
+                    Endpoint::ImagesGenerations | Endpoint::ImagesEdits
+                ))
+                .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
                         transformed,

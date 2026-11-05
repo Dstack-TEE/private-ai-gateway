@@ -85,10 +85,17 @@ impl UpstreamBackend for RecordingUpstream {
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let parsed = if let Some(content_type) = req.content_type.as_deref() {
-            private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
-                .await
-                .unwrap()
-                .0
+            if req.path.as_deref() == Some("/v1/images/edits") {
+                private_ai_gateway::middleware::image_edits::parse(req.body.clone(), content_type)
+                    .await
+                    .unwrap()
+                    .0
+            } else {
+                private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
+                    .await
+                    .unwrap()
+                    .0
+            }
         } else {
             serde_json::from_slice(&req.body).unwrap()
         };
@@ -6104,4 +6111,192 @@ async fn rerank_requires_explicit_endpoint_opt_in() {
     .await;
     assert_eq!(status, 404);
     assert!(requests.lock().unwrap().is_empty());
+}
+
+fn image_edits_input() -> CompletionInput {
+    CompletionInput {
+        endpoint: Endpoint::ImagesEdits,
+        endpoint_path: "/v1/images/edits",
+        params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
+        received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
+        audio_form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
+            file: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
+            extension: "jpg".into(),
+        })),
+        request_id: "req-edits".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"generation:model","format":"openai","supportedEndpoints":["/v1/images/generations"]},
+        {"routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}],
+        "pricing":{"imageCostPerImage":"0.012"}})).await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"id":"private","file_path":"private","data":[{"b64_json":"image","url":"private"}]}"#
+            .to_vec(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, image_edits_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["usage"]["cost"], 0.012);
+    assert!(!body.to_string().contains("private"));
+    let forwarded = requests.lock().unwrap()[0].clone();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+    let (params, image) = private_ai_gateway::middleware::image_edits::parse(
+        forwarded.raw_body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        params,
+        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","response_format":"b64_json"})
+    );
+    assert_eq!(image.file, b"\xff\xd8\xffimage".as_slice());
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/images/edits");
+    assert_eq!(
+        pres.lock().unwrap()[0]["provider"],
+        json!({"order":["near"]})
+    );
+    assert!(!pres.lock().unwrap()[0].to_string().contains("make it blue"));
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let forwarded_event = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "request.forwarded")
+        .unwrap();
+    assert_eq!(
+        forwarded_event["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(&forwarded.raw_body)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+    assert_eq!(report["selectedRouteId"], "edit:model");
+    assert_eq!(
+        report["images"],
+        json!({"count":1,"size":"512x512","quality":"auto"})
+    );
+    assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn image_edits_no_opt_in_or_malformed_success_never_bills() {
+    for (opt_in, status) in [(false, 404), (true, 502)] {
+        let endpoints = if opt_in {
+            json!(["/v1/images/edits"])
+        } else {
+            json!(["/v1/images/generations"])
+        };
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"edit:model","format":"openai","supportedEndpoints":endpoints}],"pricing":{"imageCostPerImage":"0.012"}})).await;
+        let (service, requests) = build_recording_service(
+            200,
+            br#"{"data":[{"url":"private"}]}"#.to_vec(),
+            "application/json",
+        );
+        let (actual, headers, _) = response_parts(
+            middleware(url)
+                .handle_completion(&service, image_edits_input())
+                .await,
+        )
+        .await;
+        assert_eq!(actual, status);
+        assert_eq!(requests.lock().unwrap().len(), usize::from(opt_in));
+        if opt_in {
+            assert!(service
+                .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+                .is_some());
+        }
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+        assert!(report.get("images").is_none());
+        assert!(report["usage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}]})).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingUpstream {
+        requests: requests.clone(),
+        status: 200,
+        body: br#"{"data":[{"b64_json":"image"}]}"#.to_vec(),
+        content_type: "application/json",
+    });
+    let mut router = ModelRouterBackend::new("image-edits-policy");
+    router
+        .add_route(
+            ModelRoute::new("gpt-test", "flux", backend, "near:model")
+                .unwrap()
+                .with_is_tee(Some(true)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    let mut raw = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-test\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.png\"\r\n\r\n".to_vec();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    let request = |provider: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/images/edits")
+            .header("authorization", "Bearer tenant-key")
+            .header("host", "gateway.example")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            .header("x-aci-provider", provider.to_string())
+            .body(axum::body::Body::from(raw.clone()))
+            .unwrap()
+    };
+    let (status, headers, _) = response_parts(
+        app.clone()
+            .oneshot(request(json!({"aci_verified":true})))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    let document = receipt.document_json().unwrap();
+    let session = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (pin, expected) in [(session, 200), ("ab".repeat(32), 412)] {
+        let provider = json!({"aci_session_ids":[pin]});
+        let (status, _, _) = response_parts(
+            app.clone()
+                .oneshot(request(provider.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected);
+        assert_eq!(pres.lock().unwrap().last().unwrap()["provider"], provider);
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    for request in requests.lock().unwrap().iter() {
+        assert!(!request.headers.contains_key("x-aci-provider"));
+        assert_eq!(request.body["model"], "flux");
+    }
 }

@@ -238,6 +238,7 @@ pub fn extract(
         | Endpoint::SystemOne
         | Endpoint::Rerank
         | Endpoint::AudioTranscriptions
+        | Endpoint::ImagesEdits
         | Endpoint::ImagesGenerations => return None,
     }
 
@@ -406,6 +407,7 @@ fn conversation_opening(endpoint: Endpoint, params: &Value) -> Option<Value> {
         | Endpoint::SystemOne
         | Endpoint::Rerank
         | Endpoint::AudioTranscriptions
+        | Endpoint::ImagesEdits
         | Endpoint::ImagesGenerations => None,
     }
 }

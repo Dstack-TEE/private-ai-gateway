@@ -61,7 +61,7 @@ pub const DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS: u64 = 600;
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamRequest {
     /// Shared file bytes, encoded once after route selection and model rewrite.
-    pub form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
+    pub form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
     /// Matches `body`; absent for JSON requests.
     pub content_type: Option<String>,
     pub body: Bytes,
@@ -86,12 +86,18 @@ pub struct PreparedUpstreamRequest {
 }
 
 impl PreparedUpstreamRequest {
-    pub(crate) async fn encode_audio(&mut self) -> Result<(), UpstreamError> {
+    pub(crate) async fn encode_media(&mut self) -> Result<(), UpstreamError> {
         if let Some(form) = self.request.form.take() {
-            let params = serde_json::from_slice(&self.request.body).map_err(|_| {
-                UpstreamError::InvalidRequest("invalid transcription metadata".into())
-            })?;
-            let (body, content_type) = form.encode(&params).await?;
+            let params = serde_json::from_slice(&self.request.body)
+                .map_err(|_| UpstreamError::InvalidRequest("invalid media metadata".into()))?;
+            let kind = if self.request.path.as_deref()
+                == Some(crate::aggregator::service::IMAGES_EDITS_PATH)
+            {
+                crate::middleware::media::FormKind::ImageEdit
+            } else {
+                crate::middleware::media::FormKind::Transcription
+            };
+            let (body, content_type) = form.encode_for(&params, kind).await?;
             self.request.body = body;
             self.request.content_type = Some(content_type);
         }

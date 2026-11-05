@@ -508,6 +508,14 @@ pub(super) async fn rerank(
     buffered_multimodal_endpoint(state, headers, body, Endpoint::Rerank).await
 }
 
+pub(super) async fn images_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesEdits).await
+}
+
 pub(super) async fn images_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -562,38 +570,53 @@ async fn buffered_multimodal_endpoint(
     }
     let request_id = generate_request_id();
     let is_audio = endpoint == Endpoint::AudioTranscriptions;
-    if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+    let is_multipart = is_audio || endpoint == Endpoint::ImagesEdits;
+    if !is_multipart && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let (received_body, parsed, audio_form, upload_permit) = if is_audio {
+    let media_kind = if is_audio {
+        crate::middleware::media::FormKind::Transcription
+    } else {
+        crate::middleware::media::FormKind::ImageEdit
+    };
+    let (received_body, parsed, audio_form, upload_permit) = if is_multipart {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
                     &headers,
                     body,
-                    crate::middleware::audio::MAX_BODY_BYTES,
+                    media_kind.max_body_bytes(),
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
                 )
                 .await;
             }
         };
-        let (bytes, permit) = match crate::middleware::audio::read_upload(&headers, body).await {
-            Ok(upload) => upload,
-            Err(err) => {
-                state.service.record_audio_failure("upload_rejection");
-                return err.into_response();
-            }
-        };
-        let content_type = header_str(&headers, "content-type").unwrap_or("");
-        let (mut params, form) =
-            match crate::middleware::audio::parse(bytes.clone(), content_type).await {
-                Ok(parsed) => parsed,
+        let (bytes, permit) =
+            match crate::middleware::media::read_upload(&headers, body, media_kind).await {
+                Ok(upload) => upload,
                 Err(err) => {
-                    state.service.record_audio_failure("upload_rejection");
+                    if is_audio {
+                        state.service.record_audio_failure("upload_rejection");
+                    }
                     return err.into_response();
                 }
             };
+        let content_type = header_str(&headers, "content-type").unwrap_or("");
+        let parsed_form = if is_audio {
+            crate::middleware::audio::parse(bytes.clone(), content_type).await
+        } else {
+            crate::middleware::image_edits::parse(bytes.clone(), content_type).await
+        };
+        let (mut params, form) = match parsed_form {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if is_audio {
+                    state.service.record_audio_failure("upload_rejection");
+                }
+                return err.into_response();
+            }
+        };
         if let Some(provider) = provider {
             params["provider"] = provider;
         }
@@ -637,6 +660,12 @@ async fn buffered_multimodal_endpoint(
             return err.into_response();
         }
         input.params = crate::middleware::images::upstream_body(&input.params);
+    }
+    if endpoint == Endpoint::ImagesEdits {
+        if let Err(err) = crate::middleware::image_edits::validate_request(&input.params) {
+            return err.into_response();
+        }
+        input.params = crate::middleware::image_edits::upstream_fields(&input.params);
     }
     if endpoint == Endpoint::Rerank {
         if let Err(err) = crate::middleware::rerank::validate_request(&input.params) {
@@ -920,7 +949,7 @@ async fn reject_json_provider_header(headers: &HeaderMap, body: Body) -> Respons
         error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "X-ACI-Provider is only supported on multipart transcription requests",
+            "X-ACI-Provider is only supported on multipart media requests",
         ),
     )
     .await

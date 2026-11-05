@@ -38,6 +38,7 @@ error behavior below.
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
+| `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | One input image; inline base64 output; separate endpoint opt-in and multipart constraints. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/rerank` | Reranking | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON; explicit endpoint opt-in required. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
@@ -111,7 +112,7 @@ follows the [control-plane pricing contract](control-plane-contract.md#image-gen
 
 ### Audio transcription
 
-Images and audio require an `Authorization` header in both direct and middleware
+Images, rerank and audio require an `Authorization` header in both direct and middleware
 modes. Requests missing it receive `401` before parsing, buffering, or admission,
 using the bounded discard described in the configuration reference. In middleware
 mode, credentials continue through the existing control-plane authorization.
@@ -134,7 +135,7 @@ removed; `stream=true` or any other value returns `400`. `provider` form fields,
 parts, and malformed multipart return `400`.
 
 Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
-255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Audio and image-edit uploads share a
 402 MiB byte budget (16 times the whole-body limit) and a 60-second whole-upload deadline
 (`408 upload_timeout`). A 25 MiB file needs about 3.5 Mbps to finish within
 that deadline. Each received chunk reserves only its actual bytes;
@@ -153,7 +154,7 @@ non-ASCII bytes, malformed/non-object JSON, invalid pins, and unknown `aci_`
 members return `400`.
 The header is consumed; it never reaches the upstream. JSON endpoints reject
 this carrier. The attestation report advertises support as
-`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions"]`.
+`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions", "/v1/images/edits"]`.
 Constrained clients must obtain this capability over their accepted pinned
 channel before uploading. Receipt body hashes do not commit to this header;
 clients retain their effective policy and check the cited session against it.
@@ -430,3 +431,26 @@ suppresses documents even if a provider returns them. Provider cost and billing
 extensions are removed before metering or direct response signing. Missing or malformed usage produces `502` with a receipt rather
 than a free request. Billing uses existing input-token pricing. Look up the
 receipt using `x-receipt-id`.
+
+### Image edits
+
+Send `multipart/form-data` to `POST /v1/images/edits` with `model`, `prompt`
+(up to 32000 Unicode characters), and exactly one `image` (PNG/JPEG/WebP,
+recognized by magic bytes, at most 20 MiB). The body limit is 21 MiB, with
+at most 1 MiB aggregate text. Optional fields are `size`, `response_format`
+(only `b64_json`, forced upstream), `user` (removed upstream), and `n`
+(only `1`, removed upstream). `mask`, `image[]`, streaming, `partial_images`,
+`quality`, `output_format`, unknown fields, duplicate parts, and invalid UTF-8
+are rejected. Caller filenames and MIME headers never reach the provider.
+
+Use `X-ACI-Provider` for routing constraints as described above. The received
+multipart bytes and the exact encoded upstream bytes are independently hashed
+in the receipt. Edits share upload accounting/deadlines with transcriptions and
+inference admission with image generations. Middleware candidates must opt into
+`/v1/images/edits` separately from generations. Successful responses use the
+same sanitized inline image schema and pricing as generations. Token components
+apply only when a provider reports usage and the model has token prices configured;
+FLUX/NEAR has neither and bills only returned images. A malformed 2xx
+(including multiple output images or URL-only output) becomes a receipted `502`
+without billable image usage. E2EE and missing-Authorization refusals precede
+parsing and admission. Desktop and verifier client support is delivered separately.
