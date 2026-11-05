@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,6 +45,21 @@ try {
   assert.deepEqual(await readFile(background), await readFile(path.join(appRoot, "src-tauri", layout.background)));
   console.log(`Verified DMG app/Applications centers, window and icon size: ${coordinates}`);
 } finally {
-  if (mounted) execFileSync("hdiutil", ["detach", mount], { timeout: 30_000, stdio: "pipe" });
+  if (mounted) await detach(mount);
   await rmdir(mount).catch((error) => { if (error.code !== "ENOENT") throw error; });
+}
+
+// Finder can keep the volume busy for a moment after closing its window, so
+// retry the unmount and force only the last attempt.
+async function detach(mount) {
+  for (let attempt = 1; ; attempt += 1) {
+    const force = attempt === 5 ? ["-force"] : [];
+    try {
+      execFileSync("hdiutil", ["detach", mount, ...force], { timeout: 30_000, stdio: "pipe" });
+      return;
+    } catch (error) {
+      if (force.length) throw error;
+      await sleep(1_000 * attempt);
+    }
+  }
 }
