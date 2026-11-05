@@ -220,12 +220,13 @@ impl AciService {
         response: &[u8],
         request: &[u8],
         audio_metadata: Option<&Value>,
-        headers: &std::collections::HashMap<String, String>,
+        headers: &mut std::collections::HashMap<String, String>,
     ) -> Result<Vec<u8>, &'static str> {
         if endpoint_path == super::AUDIO_SPEECH_PATH {
-            return crate::middleware::speech::audio_content_type(headers)
-                .map(|_| response.to_vec())
-                .ok_or("upstream returned a non-audio speech response");
+            let content_type = crate::middleware::speech::audio_content_type(headers)
+                .ok_or("upstream returned a non-audio speech response")?;
+            headers.insert("content-type".into(), content_type);
+            return Ok(response.to_vec());
         }
         if endpoint_path == super::RERANK_PATH {
             return crate::middleware::rerank::response_body(response, request)
@@ -381,7 +382,7 @@ impl AciService {
                     &upstream_response.body,
                     &forwarded_body,
                     audio_metadata.as_ref(),
-                    &upstream_headers,
+                    &mut upstream_headers,
                 );
                 if endpoint_path != super::AUDIO_SPEECH_PATH || sanitized.is_err() {
                     upstream_headers.insert("content-type".into(), "application/json".into());

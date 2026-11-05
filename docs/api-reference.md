@@ -480,11 +480,14 @@ fields are rejected with `400`. The JSON `provider` routing/pinning convention
 applies; routing metadata is never forwarded. Missing Authorization and E2EE
 refusals precede parsing and admission, as for the other buffered media routes.
 
-The success body is the exact buffered audio bytes, with the upstream `audio/*`
-content type preserved. Non-audio 2xx replies become sanitized receipted `502`s;
-upstream errors use the existing OpenAI error mapping. The configured buffered
-response cap applies. Speech and transcription share the 16-slot AUDIO admission
-semaphore; speech has no multipart upload or upload-byte reservation.
+The success body is the exact buffered audio bytes, with a validated lowercase
+`audio/<subtype>` content type and parameters removed; comma-separated or
+malformed media types are rejected. Non-audio 2xx replies become sanitized
+receipted `502`s; upstream errors use the existing OpenAI error mapping.
+Long input synthesized as `wav`/`pcm` at very low speed can exceed the default
+64 MiB buffered response cap and return `502`. Speech and transcriptions share
+the 16-slot AUDIO admission limit. Speech uses JSON and reserves no multipart
+upload bytes.
 
 Successful receipts include the signed §7.4 extension event
 `usage.reported: {usage: {type: "characters", characters: N}}`, where `N` is the

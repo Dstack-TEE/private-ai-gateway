@@ -490,8 +490,9 @@ has neither and bills only returned images.
 Successful binary responses report `usage: {type: "characters", characters: N}`,
 where `N` is the Unicode scalar count of `input` (integer 0..4096), rather than
 upstream token/duration usage. The signed receipt includes the same gateway-derived
-usage in a `usage.reported` extension event; audio bytes and their content type
-are preserved and no new client cost header is added.
+usage in a `usage.reported` extension event; audio bytes are preserved, the
+validated audio media type is lowercased with parameters removed, and no new
+client cost header is added.
 
 `pricing.speechCostPerCharacter` is a decimal string in USD per Unicode scalar;
 control bills `characters × speechCostPerCharacter` only for 2xx reports and

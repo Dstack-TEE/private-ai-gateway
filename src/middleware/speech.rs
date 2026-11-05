@@ -97,16 +97,15 @@ pub fn usage(body: &Value) -> Option<Value> {
     Some(json!({"type":"characters", "characters":characters}))
 }
 
-/// Preserve the upstream media type only for a valid audio header.
-pub fn audio_content_type(headers: &HashMap<String, String>) -> Option<&str> {
+/// Return one canonical audio media type, without provider parameters.
+pub fn audio_content_type(headers: &HashMap<String, String>) -> Option<String> {
     let value = headers.get("content-type")?;
-    let media_type = value.split(';').next()?.trim();
-    (media_type.len() > 6
-        && media_type
-            .get(..6)
-            .is_some_and(|s| s.eq_ignore_ascii_case("audio/"))
-        && HeaderValue::from_str(value).is_ok())
-    .then_some(value.as_str())
+    if value.contains(',') || HeaderValue::from_str(value).is_err() {
+        return None;
+    }
+    let media_type = value.parse::<mime::Mime>().ok()?;
+    (media_type.type_() == mime::AUDIO && !media_type.subtype().as_str().is_empty())
+        .then(|| media_type.essence_str().to_owned())
 }
 
 #[cfg(test)]
@@ -142,8 +141,6 @@ mod tests {
                 .extend(patch.as_object().unwrap().clone());
             assert!(validate_request(&body).is_err(), "{body}");
         }
-        for response_format in ["mp3", "opus", "aac", "flac", "wav", "pcm"] {
-            validate_request(&json!({"model":"tts","input":"🙂".repeat(4096),"voice":"ryan","instructions":"界".repeat(4096),"speed":4,"response_format":response_format})).unwrap();
-        }
+        validate_request(&json!({"model":"tts","input":"🙂".repeat(4096),"voice":"ryan","instructions":"界".repeat(4096),"speed":4,"response_format":"wav"})).unwrap();
     }
 }

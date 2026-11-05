@@ -4800,7 +4800,12 @@ async fn image_upload_and_parse_rejections_increment_the_failure_metric() {
 #[tokio::test]
 async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
     let audio = b"RIFF\0\xffWAVE\x80audio";
-    for content_type in ["audio/wav", "audio/mpeg", "Audio/WAV; rate=24000"] {
+    for (content_type, expected_type) in [
+        ("audio/wav", "audio/wav"),
+        ("audio/mpeg", "audio/mpeg"),
+        ("audio/wav; rate=24000", "audio/wav"),
+        ("Audio/WAV; rate=24000", "audio/wav"),
+    ] {
         let h = harness_with_upstream(RecordingUpstream {
             response_body: audio.to_vec(),
             response_content_type: content_type,
@@ -4816,7 +4821,7 @@ async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
             )
             .await;
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.headers["content-type"], content_type);
+        assert_eq!(response.headers["content-type"], expected_type);
         assert_eq!(response.body, audio);
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
@@ -4846,7 +4851,15 @@ async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
 
 #[tokio::test]
 async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
-    for content_type in ["application/json", "text/event-stream", "text/plain"] {
+    for content_type in [
+        "application/json",
+        "text/event-stream",
+        "text/plain",
+        "audio/wav, text/html",
+        "audio/wav/extra",
+        "audio/",
+        "audio/wav text/html",
+    ] {
         let h = harness_with_upstream(RecordingUpstream {
             response_body: b"private upstream data".to_vec(),
             response_content_type: content_type,
@@ -4860,7 +4873,7 @@ async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
                 &[("authorization", "Bearer tenant-key")],
             )
             .await;
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY, "{content_type}");
         assert_eq!(response.headers["content-type"], "application/json");
         assert!(!String::from_utf8_lossy(&response.body).contains("private"));
         let receipt = h

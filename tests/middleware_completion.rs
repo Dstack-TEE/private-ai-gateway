@@ -6372,7 +6372,7 @@ async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
         .await;
     assert_eq!(response.status(), 200);
     let headers = response.headers().clone();
-    assert_eq!(headers["content-type"], "audio/wav; rate=24000");
+    assert_eq!(headers["content-type"], "audio/wav");
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
@@ -6454,6 +6454,8 @@ async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
 async fn speech_failures_keep_receipts_without_billable_characters() {
     for (upstream_status, content_type, expected) in [
         (200, "text/event-stream", 502),
+        (200, "audio/wav, text/html", 502),
+        (200, "audio/wav/extra", 502),
         (200, "application/json", 502),
         (400, "application/json", 400),
     ] {
