@@ -447,8 +447,9 @@ are rejected. Caller filenames and MIME headers never reach the provider.
 
 Use `X-ACI-Provider` for routing constraints as described above. The received
 multipart bytes and the exact encoded upstream bytes are independently hashed
-in the receipt. Edits share upload accounting/deadlines with transcriptions and
-inference admission with image generations. Middleware candidates must opt into
+in the receipt. Edits and transcriptions share one process-wide 402 MiB upload byte budget
+and the 60-second upload deadline; edits share inference admission with image
+generations. Middleware candidates must opt into
 `/v1/images/edits` separately from generations. Successful responses use the
 same sanitized inline image schema and pricing as generations. Token components
 apply only when a provider reports usage and the model has token prices configured;

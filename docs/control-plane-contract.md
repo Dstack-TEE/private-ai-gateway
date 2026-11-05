@@ -491,5 +491,7 @@ reports usage and the model has token prices configured, as for generations;
 FLUX/NEAR has neither and bills only returned images. Its `usage` is absent in
 the report and token cost is zero. The gateway supplies SDK-compatible usage defaults only in the client
 response. Failed or malformed responses report no billable image usage. Edits
-and generations share the existing IMAGES admission semaphore. This endpoint
+and generations share the existing IMAGES admission semaphore. Audio and image
+uploads share one process-wide 402 MiB upload byte budget and the same 60-second
+read deadline. This endpoint
 ships with the next gateway deploy; candidates remain inert until opted in.
