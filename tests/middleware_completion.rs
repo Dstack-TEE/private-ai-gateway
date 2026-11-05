@@ -5623,25 +5623,6 @@ async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report()
 }
 
 #[tokio::test]
-async fn images_no_opt_in_candidate_returns_model_not_found() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    let (status, _, body) = response_parts(
-        middleware(url)
-            .handle_completion(&service, images_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert_eq!(body["error"]["type"], "model_not_found");
-    assert!(requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn images_malformed_2xx_is_not_billed_and_never_returns_url() {
     for (requested, upstream) in [
         (Some(1), json!({"data":[{"url":"https://private"}]})),
@@ -5994,30 +5975,6 @@ async fn audio_invalid_duration_is_502_without_billing_or_retranscription() {
     }
 }
 
-#[tokio::test]
-async fn audio_requires_endpoint_opt_in() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[
-            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
-        ]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(
-        200,
-        br#"{"text":"hello","duration":2.1}"#.to_vec(),
-        "application/json",
-    );
-    let (status, _, _) = response_parts(
-        middleware(url)
-            .handle_completion(&service, audio_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert!(requests.lock().unwrap().is_empty());
-}
-
 fn rerank_input() -> CompletionInput {
     let params = json!({"model":"gpt-test","query":"q","documents":["a",{"text":"b"}],"top_n":1,"return_documents":true,"user":"alice"});
     CompletionInput {
@@ -6095,24 +6052,6 @@ async fn rerank_malformed_usage_is_receipted_and_unbilled() {
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
     assert_eq!(report["status"], 502);
     assert!(report.get("usage").is_none_or(Value::is_null));
-}
-
-#[tokio::test]
-async fn rerank_requires_explicit_endpoint_opt_in() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    let (status, _, _) = response_parts(
-        middleware(url)
-            .handle_completion(&service, rerank_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert!(requests.lock().unwrap().is_empty());
 }
 
 fn image_edits_input() -> CompletionInput {
@@ -6484,4 +6423,28 @@ async fn speech_failures_keep_receipts_without_billable_characters() {
         assert_eq!(report["status"], expected);
         assert!(report["usage"].is_null());
     }
+}
+
+#[tokio::test]
+async fn buffered_native_endpoints_require_explicit_opt_in() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[
+            {"routeId":"plain:model","format":"openai"},
+            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
+        ]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for input in [images_input(), audio_input(), rerank_input()] {
+        let (status, _, body) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["type"], "model_not_found");
+    }
+    assert!(requests.lock().unwrap().is_empty());
 }

@@ -4625,25 +4625,6 @@ async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
 }
 
 #[tokio::test]
-async fn rerank_auth_and_e2ee_refuse_before_json_parse() {
-    let h = harness();
-    for (headers, status) in [
-        (vec![], StatusCode::UNAUTHORIZED),
-        (
-            vec![
-                ("authorization", "Bearer tenant-key"),
-                ("x-e2ee-test", "true"),
-            ],
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let response = h.requester.post("/v1/rerank", b"not json", &headers).await;
-        assert_eq!(response.status, status);
-    }
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn rerank_strips_provider_cost_and_honors_optional_documents_in_direct_mode() {
     for (return_documents, document) in [
         (None, Value::Null),
@@ -4730,35 +4711,6 @@ async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body
             assert_eq!(payload_event(&payload, event)["body_hash"], sha256_hex(bytes));
         }
     }
-}
-
-#[tokio::test]
-async fn image_edits_auth_e2ee_and_invalid_carrier_refuse_before_parse() {
-    let h = harness();
-    for (headers, status) in [
-        (vec![], StatusCode::UNAUTHORIZED),
-        (
-            vec![
-                ("authorization", "Bearer tenant-key"),
-                ("x-e2ee-test", "true"),
-            ],
-            StatusCode::BAD_REQUEST,
-        ),
-        (
-            vec![
-                ("authorization", "Bearer tenant-key"),
-                ("x-aci-provider", "null"),
-            ],
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let response = h
-            .requester
-            .post("/v1/images/edits", b"not multipart", &headers)
-            .await;
-        assert_eq!(response.status, status);
-    }
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -4894,23 +4846,34 @@ async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
 }
 
 #[tokio::test]
-async fn speech_auth_and_e2ee_refuse_before_parsing() {
+async fn buffered_auth_e2ee_and_carrier_refusals_precede_parsing() {
     let h = harness();
-    for (headers, status) in [
-        (vec![], StatusCode::UNAUTHORIZED),
-        (
-            vec![
-                ("authorization", "Bearer tenant-key"),
-                ("x-e2ee-test", "true"),
-            ],
-            StatusCode::BAD_REQUEST,
-        ),
-    ] {
-        let response = h
-            .requester
-            .post("/v1/audio/speech", b"not JSON", &headers)
-            .await;
-        assert_eq!(response.status, status);
+    for path in ["/v1/rerank", "/v1/images/edits", "/v1/audio/speech"] {
+        for (headers, status) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("authorization", "Bearer tenant-key"),
+                    ("x-e2ee-test", "true"),
+                ],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = h.requester.post(path, b"not a request", &headers).await;
+            assert_eq!(response.status, status, "{path}");
+        }
     }
+    let response = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[
+                ("authorization", "Bearer tenant-key"),
+                ("x-aci-provider", "null"),
+            ],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
