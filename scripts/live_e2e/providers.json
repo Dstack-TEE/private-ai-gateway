@@ -109,7 +109,7 @@
       "audio_transcriptions"
     ],
     "privatemode_manifest_log_path": "/run/privatemode/manifests.jsonl",
-    "privatemode_proxy_image_digest": "sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
-    "pending_verification": "Pinned v1.59.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
+    "privatemode_proxy_image_digest": "sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b",
+    "pending_verification": "Pinned v1.62.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
   }
 ]

@@ -1,6 +1,6 @@
 # Deploy with the Privatemode proxy
 
-`compose.privatemode.yaml` runs the gateway and the official v1.59.0, digest-pinned
+`compose.privatemode.yaml` runs the gateway and the official v1.62.0, digest-pinned
 [Privatemode](../docs/providers/privatemode/verification.md) proxy in one
 measured dstack workload. The proxy owns Privatemode attestation, secret
 exchange, and E2EE; the gateway pins the proxy image, credential digest, and
@@ -8,6 +8,11 @@ internal origin. Everything else follows the
 [git-launcher deployment](README.md).
 
 Clients call the gateway exactly as they would with any other provider.
+
+The proxy keeps its existing command flags. Its new timeout flags retain the
+v1.59.0 defaults and allow long buffered and streaming inference responses;
+see [Proxy timeouts](../docs/providers/privatemode/verification.md#proxy-timeouts)
+for source analysis and the v1.62.0 local verification.
 
 ## Testing and quota operations
 
@@ -219,7 +224,7 @@ jq -e '
 credential_sha256="$(
   printf %s "$PRIVATEMODE_API_KEY" | sha256sum | cut -d' ' -f1
 )"
-proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff"
+proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b"
 
 # Require the signed receipt's cited session to describe the measured
 # Privatemode deployment that handled this request.

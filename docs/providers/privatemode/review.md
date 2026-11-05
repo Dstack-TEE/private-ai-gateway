@@ -5,7 +5,8 @@ Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
 traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
+reference deployment pins v1.62.0, rechecked locally on 2026-11-05 PST;
+production rollout remains pending.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
@@ -96,6 +97,29 @@ current deployment pins v1.59.0, rechecked on 2026-10-13 PDT.
 > [worker][v159-worker] verifies its MAC and enforces it against driver, GPU,
 > and VBIOS statuses. The image digest and credential policy are unchanged.
 
+> **Status (2026-11-05 PST, v1.62.0 local recheck):** the independently verified
+> official OCI index digest is
+> `sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b`.
+> The [v1.59.0..v1.62.0 source comparison][v162-source-compare] preserves the
+> manifest-history path and format, startup attestation/secret exchange before
+> listening, `/readyz`, and encrypted chat, completions, and embeddings. Contrast
+> moves from v1.25.0 to v1.26.0; Go moves from 1.26 to 1.27. The proxy now carries
+> strict OCSP policy in authenticated encrypted-request metadata, which workers
+> verify before model forwarding. A downstream `Connection: close` no longer
+> forces an upstream connection to be single-use. These changes are not an
+> established fix for the observed HTTP/2 stalls.
+> The exact Compose arguments plus `--help` passed on the pinned image with
+> `--network none`, exit 0, empty stderr, and no deprecation warnings. The
+> incoming timeout defaults are unchanged from v1.59.0; controlled real-image
+> tests passed delayed headers and streaming at 130 seconds, including two
+> 65-second stream gaps. See [Proxy timeouts](verification.md#proxy-timeouts).
+> Minimal local live calls with the test key passed attestation/secret exchange,
+> buffered `glm-5.3` chat (HTTP 200), and streaming chat (HTTP 200 with `[DONE]`),
+> using 16 maximum output tokens each. No Phala test CVM was created; production
+> rollout and any effect on the incident remain unverified.
+
+[v162-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.59.0...v1.62.0
+
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
 [v159-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.58.0...v1.59.0
 [v159-cli]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
@@ -127,7 +151,7 @@ Deployment conditions:
 - Bind the accepted credential digest in measured static policy and require a
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
-- Expose only the gateway listener from the workload network. Version 1.59 of
+- Expose only the gateway listener from the workload network. Version 1.62 of
   the official proxy supports `--listen-address` and defaults to `0.0.0.0`;
   the Compose keeps that default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
@@ -192,7 +216,7 @@ Open or conditional:
 - Privatemode does not expose a per-worker TLS SPKI or public E2EE key for the
   gateway to pin directly. Its binding is transitive through the manifest,
   attested Coordinator/Mesh CA, and secret-release protocol.
-- Version 1.59 does not expose which manifest produced the active inference
+- Version 1.62 does not expose which manifest produced the active inference
   secret. Its manifest history is written before attestation and secret
   exchange complete. The gateway therefore reports the latest fetched digest
   but does not use it for manifest-specific claims.
