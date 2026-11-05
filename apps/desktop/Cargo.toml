@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.3"
+version = "0.8.4"
 
 # Shipped binaries, after Tauri's app size guide
 # (https://v2.tauri.app/concept/size/): whole-program optimization and no
