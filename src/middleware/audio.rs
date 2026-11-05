@@ -408,12 +408,16 @@ fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
         if usage.get("type").and_then(Value::as_str) != Some("duration") {
             return Err("invalid duration usage type");
         }
-        usage.get("seconds")
+        usage.get("seconds").and_then(Value::as_f64)
     } else {
-        body.get("duration")
+        // vLLM returns verbose_json duration as a numeric string.
+        body.get("duration").and_then(|duration| {
+            duration
+                .as_f64()
+                .or_else(|| duration.as_str()?.parse::<f64>().ok())
+        })
     };
     let raw = duration
-        .and_then(Value::as_f64)
         .filter(|v| v.is_finite() && *v > 0.0 && *v <= u32::MAX as f64)
         .ok_or("missing or invalid transcription duration")?;
     Ok(AudioUsage {
@@ -791,6 +795,56 @@ mod tests {
             assert_eq!(verbose["usage"], json!({"type":"duration","seconds":3}));
             let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
             assert_eq!(reduced, json!({"text":"hello","usage":verbose["usage"]}));
+        }
+    }
+
+    #[test]
+    fn numeric_string_duration_is_normalized_and_rounded_up() {
+        for (duration, raw_duration, seconds) in [
+            ("2.965", 2.965, 3),
+            ("2", 2.0, 2),
+            ("4294967295", u32::MAX as f64, u32::MAX as u64),
+        ] {
+            let (body, audio) = sanitize_response(
+                json!({"text":"hello","duration":duration,"language":"en"}),
+                &json!({"response_format":"verbose_json"}),
+            )
+            .unwrap();
+            assert_eq!(
+                audio,
+                AudioUsage {
+                    seconds,
+                    raw_duration
+                }
+            );
+            assert_eq!(
+                body,
+                json!({"text":"hello","duration":raw_duration,"language":"en","usage":{"type":"duration","seconds":seconds}})
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_string_durations_are_rejected() {
+        for duration in [
+            "",
+            "garbage",
+            "-1",
+            "0",
+            "NaN",
+            "inf",
+            "-inf",
+            "1e999",
+            "4294967296",
+        ] {
+            assert_eq!(
+                sanitize_response(
+                    json!({"text":"hello","duration":duration}),
+                    &json!({"response_format":"verbose_json"})
+                ),
+                Err("missing or invalid transcription duration"),
+                "duration: {duration}"
+            );
         }
     }
 

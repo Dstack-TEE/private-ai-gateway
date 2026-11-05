@@ -180,6 +180,9 @@ in `verbose_json`; requesting word timestamps does not guarantee a `words` array
 
 A successful response requires string `text` and a positive numeric duration:
 `usage.seconds` with `usage.type == "duration"`, otherwise top-level `duration`.
+Top-level `duration` also accepts a numeric string, as returned by vLLM
+`verbose_json`; the gateway normalizes it to a JSON number in verbose output.
+`usage.seconds` must remain a JSON number.
 An invalid preferred duration never falls back. Zero, negative, missing,
 nonfinite, and durations above `4294967295` seconds become `502`; the transcript
 is withheld and no audio usage is billed. The forwarded receipt is retained.
