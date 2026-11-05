@@ -3,6 +3,8 @@ set -euo pipefail
 : "${GATEWAY_URL:?set the verified gateway URL}"
 : "${GATEWAY_API_KEY:?set the gateway API key}"
 : "${AUDIO_FILE:?set a supported local audio file}"
+# whisper-large-v3 is the local upstreams.json alias; the public API model ID is
+# openai/whisper-large-v3 (set AUDIO_MODEL when using the public API).
 : "${AUDIO_MODEL:=whisper-large-v3}"
 # Use a verifying client in production. The endpoint capability must be accepted
 # over the pinned channel; keep the effective policy for the receipt audit.
