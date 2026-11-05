@@ -4589,7 +4589,7 @@ async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
 #[tokio::test]
 async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
     let request =
-        br#"{"model":"aci-model","query":"q","documents":["a","b"],"top_n":1,"user":"alice"}"#;
+        br#"{"model":"aci-model","query":"q","documents":["a",{"text":"b"}],"top_n":1,"user":"alice"}"#;
     for (upstream, status) in [
         (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
         (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
@@ -4613,6 +4613,7 @@ async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
         let calls = h.upstream_calls.lock().unwrap();
         let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
         assert!(forwarded.get("user").is_none());
+        assert_eq!(forwarded["documents"], serde_json::json!(["a", "b"]));
         assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
     }
 }

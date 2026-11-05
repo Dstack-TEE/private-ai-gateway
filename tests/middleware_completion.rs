@@ -6064,6 +6064,7 @@ async fn rerank_opt_in_sanitizes_before_pricing_and_reporting() {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
         assert!(calls[0].body.get("user").is_none());
+        assert_eq!(calls[0].body["documents"], json!(["a", "b"]));
     }
     assert!(service
         .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
