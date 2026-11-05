@@ -1,7 +1,7 @@
 //! Typed operation selected while shaping a gateway request.
 
 use crate::aggregator::service::{
-    AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
+    AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
     IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
@@ -18,6 +18,7 @@ pub enum Endpoint {
     ImagesGenerations,
     ImagesEdits,
     AudioTranscriptions,
+    AudioSpeech,
 }
 
 impl Endpoint {
@@ -33,6 +34,7 @@ impl Endpoint {
             IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
             IMAGES_EDITS_PATH => Self::ImagesEdits,
             AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            AUDIO_SPEECH_PATH => Self::AudioSpeech,
             _ => Self::ChatComplete,
         }
     }
@@ -60,6 +62,7 @@ impl Endpoint {
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
             Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
             Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
+            Endpoint::AudioSpeech => AUDIO_SPEECH_PATH,
         }
     }
 
@@ -68,7 +71,7 @@ impl Endpoint {
     }
 
     pub(crate) fn is_media(self) -> bool {
-        self.is_image() || self == Self::AudioTranscriptions
+        self.is_image() || matches!(self, Self::AudioTranscriptions | Self::AudioSpeech)
     }
 
     /// Native buffered endpoints require explicit candidate opt-in.
@@ -88,6 +91,7 @@ impl Endpoint {
             Endpoint::ImagesGenerations => "imagesGenerations",
             Endpoint::ImagesEdits => "imagesEdits",
             Endpoint::AudioTranscriptions => "audioTranscriptions",
+            Endpoint::AudioSpeech => "audioSpeech",
         }
     }
 }

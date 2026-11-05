@@ -666,7 +666,7 @@ fn canonicalize_body(
         }
         Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
-        Endpoint::AudioTranscriptions => false,
+        Endpoint::AudioTranscriptions | Endpoint::AudioSpeech => false,
         Endpoint::ImagesGenerations | Endpoint::ImagesEdits => {
             super::images::canonicalize(body);
             true

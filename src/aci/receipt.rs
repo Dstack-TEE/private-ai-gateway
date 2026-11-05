@@ -22,10 +22,11 @@ pub const EVENT_UPSTREAM_VERIFIED: &str = "upstream.verified";
 pub const EVENT_RESPONSE_RETURNED: &str = "response.returned";
 
 // Reference-implementation extension events (§7.4: verifiers ignore unknown
-// types). They record routing decisions and the upstream's response bytes.
+// types). They record routing, upstream response bytes and gateway usage.
 pub const EVENT_MIDDLEWARE_FORWARDED: &str = "middleware.forwarded";
 pub const EVENT_ROUTE_SELECTED: &str = "route.selected";
 pub const EVENT_RESPONSE_RECEIVED: &str = "response.received";
+pub const EVENT_USAGE_REPORTED: &str = "usage.reported";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {

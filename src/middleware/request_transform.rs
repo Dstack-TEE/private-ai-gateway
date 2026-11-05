@@ -172,6 +172,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
+            return Ok(super::speech::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
             return Ok(super::image_edits::upstream_fields(params));
         }
@@ -789,6 +792,7 @@ fn select_config(
         (Openai, Messages)
         | (Openai, CreateModelResponse)
         | (Openai, Rerank)
+        | (Openai, AudioSpeech)
         | (Openai, AudioTranscriptions)
         | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
@@ -797,6 +801,7 @@ fn select_config(
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioSpeech)
         | (Anthropic, AudioTranscriptions)
         | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
