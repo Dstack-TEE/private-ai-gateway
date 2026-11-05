@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { exampleModels, localApiExample } from "../src/renderer/lib/local-api-example.ts";
 
 // The arguments a POSIX shell passes to curl, read by running the example
-// with printf in its place and without the heredoc body.
+// with printf in its place and without the heredoc body, if any.
 function curlArguments(example) {
-  const command = example.slice(0, example.indexOf(" <<'JSON'")).replace(/^curl /, "printf '%s\\0' ");
+  const heredoc = example.indexOf(" <<'JSON'");
+  const command = example.slice(0, heredoc < 0 ? undefined : heredoc).replace(/^curl /, "printf '%s\\0' ");
   return execFileSync("sh", ["-c", command], { encoding: "utf8", env: { PATH: process.env.PATH, PAP_API_KEY: "sk-env" } }).split("\0").slice(0, -1);
 }
 
@@ -17,6 +18,8 @@ const key = `sk-it's "$HOME" \`id\` \\ %\u2028`;
 const model = `vendor/"model" \\ é`;
 const decisions = { model, state: { ticket: "App crashes on login after update" }, questions: { bug: { type: "noul", instructions: "Is this a bug report?" } } };
 const answers = { bug: { type: "noul", noul: 0.87 } };
+const image = { model, prompt: "A watercolor lighthouse at dawn", n: 1, size: "512x512" };
+const png = Buffer.from("\x89PNG stand-in").toString("base64");
 
 test("the curl example passes the URL and the key to curl as single words", { skip: process.platform === "win32" }, () => {
   const key = `sk-it's "$HOME" \`id\` \\ %`;
@@ -45,14 +48,20 @@ test("without a key, the curl example reads it from PAP_API_KEY", { skip: proces
   assert.ok(curlArguments(example).includes("Authorization: Bearer sk-env"));
 });
 
-test("chat examples offer models with chat completions, decisions examples models that output decisions", () => {
+test("each example kind offers the models the Local API routes to its endpoint", () => {
   const models = [
     { id: "any", supportedEndpoints: undefined, outputModalities: ["text"] },
     { id: "chat", supportedEndpoints: ["/v1/chat/completions"], outputModalities: ["text"] },
     { id: "responses", supportedEndpoints: ["/v1/responses"], outputModalities: ["text"] },
     { id: "decisions", supportedEndpoints: [], outputModalities: ["decisions"] },
+    { id: "image", supportedEndpoints: [], outputModalities: ["image"] },
+    { id: "text-and-image", supportedEndpoints: undefined, outputModalities: ["text", "image"] },
+    { id: "transcription", supportedEndpoints: [], inputModalities: ["audio"], outputModalities: ["transcription"] },
+    { id: "audio-in", supportedEndpoints: undefined, inputModalities: ["text", "audio", "image"], outputModalities: ["text"] },
   ].map((entry) => ({ name: entry.id, inputModalities: ["text"], capabilities: [], ...entry }));
-  assert.deepEqual(exampleModels("chat", models).map((entry) => entry.id), ["any", "chat"]);
+  assert.deepEqual(exampleModels("chat", models).map((entry) => entry.id), ["any", "chat", "text-and-image", "audio-in"]);
+  assert.deepEqual(exampleModels("images", models).map((entry) => entry.id), ["image", "text-and-image"]);
+  assert.deepEqual(exampleModels("transcription", models).map((entry) => entry.id), ["transcription"]);
   assert.deepEqual(exampleModels("decisions", models).map((entry) => entry.id), ["decisions"]);
   assert.deepEqual(exampleModels("decisions", models.slice(0, 3)), []);
 });
@@ -115,4 +124,111 @@ print(json.dumps(calls))
   const [answerLine, callsLine] = execFileSync("python3", ["-c", harness, example], { encoding: "utf8" }).trim().split("\n");
   assert.equal(answerLine, "0.87");
   assert.deepEqual(JSON.parse(callsLine), [{ api_key: key, base_url: "http://127.0.0.1:4190" }, decisions, "closed"]);
+});
+
+test("the images curl example posts the generation body", { skip: process.platform === "win32" }, () => {
+  const example = localApiExample("images", "curl", "http://127.0.0.1:4190", model, key);
+  assert.deepEqual(curlArguments(example), [
+    "--fail-with-body", "--max-time", "60", "--request", "POST", "http://127.0.0.1:4190/v1/images/generations",
+    "--header", `Authorization: Bearer ${key}`,
+    "--header", "Content-Type: application/json",
+    "--data", "@-",
+  ]);
+  assert.deepEqual(JSON.parse(example.slice(example.indexOf("<<'JSON'\n") + 9, -"\nJSON".length)), image);
+});
+
+test("the transcription curl example uploads the file and passes the model literally", { skip: process.platform === "win32" }, () => {
+  const example = localApiExample("transcription", "curl", "http://127.0.0.1:4190", `${model};type=text/plain`, key);
+  assert.deepEqual(curlArguments(example), [
+    "--fail-with-body", "--max-time", "60", "--request", "POST", "http://127.0.0.1:4190/v1/audio/transcriptions",
+    "--header", `Authorization: Bearer ${key}`,
+    "--form", "file=@audio.wav",
+    "--form-string", `model=${model};type=text/plain`,
+    "--form-string", "response_format=json",
+  ]);
+  assert.ok(curlArguments(localApiExample("transcription", "curl", "http://127.0.0.1:4190", model)).includes("Authorization: Bearer sk-env"));
+});
+
+// Runs an OpenAI SDK example in a directory with audio.wav, against a stand-in
+// for the SDK that records the calls. Returns the output lines and the directory files.
+function runOpenAiExample(example, run) {
+  const directory = mkdtempSync(join(tmpdir(), "local-api-example-"));
+  try {
+    writeFileSync(join(directory, "audio.wav"), "RIFF stand-in");
+    const output = run(directory).trim().split("\n");
+    let saved;
+    try { saved = readFileSync(join(directory, "image.png")); } catch {}
+    return { output, saved };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function runJavaScript(example) {
+  return runOpenAiExample(example, (directory) => {
+    const sdk = join(directory, "node_modules", "openai");
+    mkdirSync(sdk, { recursive: true });
+    writeFileSync(join(sdk, "package.json"), JSON.stringify({ name: "openai", type: "module", exports: "./index.js" }));
+    writeFileSync(join(sdk, "index.js"), `
+const calls = [];
+process.on("exit", () => console.log(JSON.stringify(calls)));
+export default class OpenAI {
+  constructor(config) { calls.push(config); }
+  images = { generate: async (request) => { calls.push(request); return { data: [{ b64_json: ${JSON.stringify(png)} }] }; } };
+  audio = { transcriptions: { create: async ({ file, ...request }) => { calls.push({ ...request, file: file.path }); return { text: "Hello there" }; } } };
+}
+`);
+    writeFileSync(join(directory, "example.mjs"), example);
+    return execFileSync(process.execPath, ["example.mjs"], { cwd: directory, encoding: "utf8" });
+  });
+}
+
+function runPython(example) {
+  return runOpenAiExample(example, (directory) => {
+    const harness = `
+import json, sys, types
+calls = []
+class OpenAI:
+    def __init__(self, **kwargs):
+        calls.append(kwargs)
+        self.images = types.SimpleNamespace(generate=self.generate)
+        self.audio = types.SimpleNamespace(transcriptions=types.SimpleNamespace(create=self.transcribe))
+    def generate(self, **kwargs):
+        calls.append(kwargs)
+        return types.SimpleNamespace(data=[types.SimpleNamespace(b64_json=${JSON.stringify(png)})])
+    def transcribe(self, file, **kwargs):
+        calls.append({**kwargs, "file": file.name, "content": file.read().decode()})
+        return types.SimpleNamespace(text="Hello there")
+sys.modules["openai"] = types.SimpleNamespace(OpenAI=OpenAI)
+exec(sys.argv[1])
+print(json.dumps(calls))
+`;
+    return execFileSync("python3", ["-c", harness, example], { cwd: directory, encoding: "utf8" });
+  });
+}
+
+test("the images JavaScript example generates an image and saves it", () => {
+  const { output, saved } = runJavaScript(localApiExample("images", "javascript", "http://127.0.0.1:4190", model, key));
+  assert.equal(output[0], "Saved image.png");
+  assert.deepEqual(JSON.parse(output[1]), [{ baseURL: "http://127.0.0.1:4190/v1", apiKey: key }, image]);
+  assert.equal(saved?.toString("base64"), png);
+});
+
+test("the images Python example generates an image and saves it", { skip: process.platform === "win32" }, () => {
+  const { output, saved } = runPython(localApiExample("images", "python", "http://127.0.0.1:4190", model, key));
+  assert.equal(output[0], "Saved image.png");
+  assert.deepEqual(JSON.parse(output[1]), [{ api_key: key, base_url: "http://127.0.0.1:4190/v1" }, image]);
+  assert.equal(saved?.toString("base64"), png);
+});
+
+test("the transcription JavaScript example uploads audio.wav and prints the text", () => {
+  const { output } = runJavaScript(localApiExample("transcription", "javascript", "http://127.0.0.1:4190", model, key));
+  assert.equal(output[0], "Hello there");
+  assert.deepEqual(JSON.parse(output[1]), [{ baseURL: "http://127.0.0.1:4190/v1", apiKey: key }, { model, response_format: "json", file: "audio.wav" }]);
+});
+
+test("the transcription Python example uploads audio.wav and prints the text", { skip: process.platform === "win32" }, () => {
+  const { output } = runPython(localApiExample("transcription", "python", "http://127.0.0.1:4190", model, key));
+  assert.equal(output[0], "Hello there");
+  assert.deepEqual(JSON.parse(output[1]), [{ api_key: key, base_url: "http://127.0.0.1:4190/v1" }, { model, response_format: "json", file: "audio.wav", content: "RIFF stand-in" }]);
 });
