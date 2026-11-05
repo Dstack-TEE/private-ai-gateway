@@ -3369,6 +3369,7 @@ dependencies = [
  "hyper-util",
  "k256",
  "libc",
+ "mime",
  "ml-kem",
  "multer",
  "prometheus",

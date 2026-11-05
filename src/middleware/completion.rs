@@ -580,7 +580,7 @@ async fn run_inner(
                                     "upstream returned a non-audio speech response",
                                     Some(&request_id),
                                 ),
-                                "application/json",
+                                "application/json".into(),
                             )
                         }
                     };
@@ -589,7 +589,7 @@ async fn run_inner(
                     forward.receipt,
                     status,
                     body,
-                    content_type,
+                    &content_type,
                     e2ee,
                     outcome_ctx,
                 );
