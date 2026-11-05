@@ -261,8 +261,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: macos-arm64, os: macos-26, target: aarch64-apple-darwin, bundle_dir: aarch64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: arm64 }
-          - { platform: macos-x64, os: macos-26, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
+          - { platform: macos-arm64, os: xcode-27, target: aarch64-apple-darwin, bundle_dir: aarch64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: arm64 }
+          - { platform: macos-x64, os: xcode-27, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
           - { platform: windows-x64, os: windows-2025, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: x64 }
           - { platform: windows-arm64, os: windows-11-arm, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: arm64 }
           - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: deb, cli_platform: linux, cli_arch: x64 }
