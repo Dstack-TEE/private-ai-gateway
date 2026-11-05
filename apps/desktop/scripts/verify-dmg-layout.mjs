@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rmdir } from "node:fs/promises";
+import { mkdtemp, readFile, rmdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
@@ -26,6 +26,11 @@ try {
       tell application "Finder"
         open volumeFolder
         delay 1
+        -- Finder can list a fresh volume's items a moment after opening it.
+        repeat 20 times
+          if exists item appName of volumeFolder then exit repeat
+          delay 0.5
+        end repeat
         set appPoint to position of item appName of volumeFolder
         set folderPoint to position of item "Applications" of volumeFolder
         set windowBounds to bounds of container window of volumeFolder
@@ -58,8 +63,16 @@ async function detach(mount) {
       execFileSync("hdiutil", ["detach", mount, ...force], { timeout: 30_000, stdio: "pipe" });
       return;
     } catch (error) {
+      // A failed attempt can still finish the unmount.
+      if (!(await isMounted(mount))) return;
       if (force.length) throw error;
       await sleep(1_000 * attempt);
     }
   }
+}
+
+// A mount point is on a different device than the folder that contains it.
+async function isMounted(mount) {
+  const [inner, outer] = await Promise.all([stat(mount), stat(path.dirname(mount))]);
+  return inner.dev !== outer.dev;
 }
