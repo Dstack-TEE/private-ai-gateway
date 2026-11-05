@@ -484,7 +484,7 @@ Middleware audio candidates must explicitly list `/v1/audio/transcriptions` in
 rejected for Chutes, 0G Private Computer, and
 Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
 blocked until multipart encryption/decryption is verified in the exact pinned
-v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`).
+v1.62.0 proxy image (`sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b`).
 Public source refs did not establish that support; do not add an unencrypted
 fallback. NEAR's launch model is `openai/whisper-large-v3`. Its native `json`
 response contains only `text`, without the duration needed for billing. The
