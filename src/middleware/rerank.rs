@@ -109,6 +109,13 @@ pub fn upstream_body(body: &Value) -> Value {
             output.insert(key.into(), value.clone());
         }
     }
+    if let Some(documents) = output.get_mut("documents").and_then(Value::as_array_mut) {
+        for document in documents {
+            if let Some(text) = document.get("text").and_then(Value::as_str) {
+                *document = Value::String(text.into());
+            }
+        }
+    }
     Value::Object(output)
 }
 
@@ -216,6 +223,7 @@ mod tests {
         let request = json!({"model":"reranker","query":"q","documents":["a",{"text":"b"}],"top_n":2,"return_documents":true,"provider":{},"user":"alice","max_tokens_per_doc":4096,"instruction":"Rank by relevance.","truncate_prompt_tokens":8192});
         validate_request(&request).unwrap();
         let upstream = upstream_body(&request);
+        assert_eq!(upstream["documents"], json!(["a", "b"]));
         assert!(upstream.get("provider").is_none());
         assert!(upstream.get("user").is_none());
         for key in [
