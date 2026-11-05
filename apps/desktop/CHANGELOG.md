@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.3...desktop-v0.8.4) (2026-11-05)
+
+Private AI Proxy 0.8.4 adds image generation and audio transcription examples to the Local API examples dialog.
+
+### Features
+
+* **Images and Transcription examples.** The Local API examples dialog has Images and Transcription tabs next to Chat and Decisions, with cURL, Python and JavaScript code using the OpenAI SDK. Image examples save the returned image with the right extension (PNG or JPEG); transcription examples upload `audio.wav`. A tab is disabled when the verified catalog has no model of that kind ([#541](https://github.com/Dstack-TEE/private-ai-gateway/pull/541)).
+* **Tab icons.** Each example tab shows an icon for its kind (text, image, microphone, decisions), hidden in very narrow windows ([#543](https://github.com/Dstack-TEE/private-ai-gateway/pull/543)).
+
+### Maintenance
+
+* macOS packaging waits for Finder to list the DMG and stops retrying after it unmounts ([#539](https://github.com/Dstack-TEE/private-ai-gateway/pull/539)).
+
 ## [0.8.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.3) (2026-11-05)
 
 Private AI Proxy 0.8.3 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 and 0.8.2 were not published.
