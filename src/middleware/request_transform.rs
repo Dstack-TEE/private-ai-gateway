@@ -172,6 +172,9 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::Rerank) => {
+            return Ok(super::rerank::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
             return Ok(super::audio::upstream_fields(params));
         }
@@ -269,7 +272,7 @@ pub fn build_candidates(
         }
         if matches!(
             endpoint,
-            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
+            Endpoint::Rerank | Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
         ) && !candidate.supports_endpoint(endpoint.path())
         {
             continue;
@@ -786,9 +789,11 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, Rerank)
         | (Openai, AudioTranscriptions)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
+        | (Anthropic, Rerank)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)

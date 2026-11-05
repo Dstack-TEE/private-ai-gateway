@@ -17,6 +17,7 @@ pub mod pricing;
 pub mod reasoning;
 pub mod request_features;
 pub mod request_transform;
+pub mod rerank;
 pub mod response_transform;
 pub(crate) mod sse;
 pub mod stream_transform;

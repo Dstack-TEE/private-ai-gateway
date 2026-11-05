@@ -2,7 +2,7 @@
 
 use crate::aggregator::service::{
     AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 /// A request endpoint. Selects which per-format config table applies.
@@ -11,6 +11,7 @@ pub enum Endpoint {
     ChatComplete,
     Complete,
     Embed,
+    Rerank,
     Messages,
     CreateModelResponse,
     SystemOne,
@@ -24,6 +25,7 @@ impl Endpoint {
         match path {
             COMPLETIONS_PATH => Self::Complete,
             EMBEDDINGS_PATH => Self::Embed,
+            RERANK_PATH => Self::Rerank,
             MESSAGES_PATH => Self::Messages,
             RESPONSES_PATH => Self::CreateModelResponse,
             SYSTEMONE_PATH => Self::SystemOne,
@@ -49,6 +51,7 @@ impl Endpoint {
             Endpoint::ChatComplete => CHAT_COMPLETIONS_PATH,
             Endpoint::Complete => COMPLETIONS_PATH,
             Endpoint::Embed => EMBEDDINGS_PATH,
+            Endpoint::Rerank => RERANK_PATH,
             Endpoint::Messages => MESSAGES_PATH,
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
@@ -62,6 +65,7 @@ impl Endpoint {
             Endpoint::ChatComplete => "chatComplete",
             Endpoint::Complete => "complete",
             Endpoint::Embed => "embed",
+            Endpoint::Rerank => "rerank",
             Endpoint::Messages => "messages",
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",

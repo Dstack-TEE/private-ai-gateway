@@ -660,6 +660,10 @@ fn canonicalize_body(
         Endpoint::CreateModelResponse => canonicalize_responses(body, filter_usage_fields),
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => false,
+        Endpoint::Rerank => {
+            super::rerank::canonicalize(body);
+            true
+        }
         Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
         Endpoint::AudioTranscriptions => false,
