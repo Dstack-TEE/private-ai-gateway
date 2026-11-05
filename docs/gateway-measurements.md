@@ -42,8 +42,11 @@ This tool checks measurement consistency over HTTPS. It does not verify the
 quote signature, collateral, TCB status, ACI nonce binding, or TLS key custody.
 Approving a release still requires the
 [deployment verification policy](../deploy/README.md#verify-the-deployment).
-VM image labels, CPU and memory sizes, and TLS fingerprints are taken from the
-report; this tool does not independently authenticate their hardware binding.
+VM image labels and CPU and memory sizes are taken from the report; this tool
+does not independently authenticate their hardware binding. The live check
+compares the peer certificate's SPKI on the attestation HTTPS connection with
+the matching release snapshot's TLS fingerprint. This establishes the served
+key's identity; key custody remains part of deployment review.
 
 ## Asset schema
 
@@ -83,13 +86,16 @@ uv run --locked python scripts/gateway_measurements.py check
 ```
 
 The check selects the newest published production release by `published_at`
-and all open production prereleases. It loads each `measurements.json`, then
+and open production prereleases published after that release. Stale prereleases
+cannot extend acceptance of an earlier deployment. It loads each `measurements.json`, then
 fetches public `/v1/aci/attestation` evidence from every domain in those assets.
 Each domain must match one complete accepted snapshot, comparing every schema
-field except `release`; domain ordering is ignored. A rollout can serve the old
+field except `release`; domain ordering is ignored. The SPKI observed in the TLS
+handshake on that same connection must also match that snapshot's value for
+the domain. Missing peer-certificate evidence fails closed. A rollout can serve the old
 snapshot on one domain and a prerelease snapshot on another. Individual fields
 from different releases cannot be combined to pass. Publishing the new release
-and removing obsolete prereleases ends that acceptance window.
+automatically ends the acceptance window for older prereleases.
 
 A mismatch prints a unified JSON diff and exits 1. Missing assets, malformed
 evidence, and network failures also fail the check. `GITHUB_TOKEN` is optional

@@ -8,16 +8,23 @@ or private evidence are used.
 
 import copy
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import requests
 import yaml
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.x509.oid import NameOID
 
 from scripts import gateway_measurements as gm
 
@@ -27,11 +34,11 @@ EXPECTED = gm.read_json(FIXTURES / "gateway-measurements.json")
 RELEASE = EXPECTED["release"]
 
 
-def release(snapshot=EXPECTED, *, prerelease=False, published_at="2026-11-05T00:58:29Z"):
+def release(snapshot=EXPECTED, *, prerelease=False, published_at=None):
     tag = snapshot["release"]
     return {
         "tag_name": tag, "draft": False, "prerelease": prerelease,
-        "published_at": published_at,
+        "published_at": published_at or ("2026-11-06T00:00:00Z" if prerelease else "2026-11-05T00:58:29Z"),
         "assets": [{"name": "measurements.json", "browser_download_url": f"https://fixture.invalid/{tag}.json"}],
     }
 
@@ -173,13 +180,67 @@ class MeasurementsTests(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_fetch_reads_peer_spki_from_same_connection_before_reading_body(self):
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "tee.redpill.ai")])
+        now = datetime.now(timezone.utc)
+        certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                       .public_key(key.public_key()).serial_number(1)
+                       .not_valid_before(now - timedelta(minutes=1))
+                       .not_valid_after(now + timedelta(minutes=1)).sign(key, hashes.SHA256()))
+        der = certificate.public_bytes(Encoding.DER)
+        expected = hashlib.sha256(key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+        observed = []
+        def getpeercert(*, binary_form):
+            self.assertTrue(binary_form)
+            observed.append("peer certificate")
+            return der
+        def read_body():
+            self.assertEqual(observed, ["peer certificate"])
+            return REPORT
+        response = requests.Response()
+        response.status_code = 200
+        response._content_consumed = True
+        response.raw = SimpleNamespace(connection=SimpleNamespace(sock=SimpleNamespace(getpeercert=getpeercert)),
+                                       release_conn=lambda: None)
+        with patch.object(requests.Session, "get", return_value=response) as get, patch.object(response, "json", read_body):
+            report, actual = gm.fetch_attestation("https://tee.redpill.ai", "tee.redpill.ai:192.0.2.1")
+        self.assertIs(report, REPORT)
+        self.assertEqual(actual, expected)
+        self.assertEqual(get.call_count, 1)
+        self.assertTrue(get.call_args.kwargs["stream"])
+        with self.assertRaisesRegex(ValueError, "TLS peer certificate unavailable"):
+            gm.peer_spki(SimpleNamespace(raw=None))
+
+    def test_malformed_event_struct_is_clean_error_on_extract(self):
+        report = copy.deepcopy(REPORT)
+        event = next(event for event in report["attestation"]["evidence"]["event_log"] if event.get("event") == "compose-hash")
+        event["event_type"] = -1
+        with tempfile.TemporaryDirectory() as out:
+            attestation = Path(out) / "malformed.json"
+            attestation.write_text(json.dumps(report))
+            error = io.StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(gm.main(["extract", "--attestation", str(attestation), "--release", RELEASE, "--out", out]), 1)
+            self.assertIn("error:", error.getvalue())
+            self.assertNotIn("Traceback", error.getvalue())
+
 
 class CheckTests(unittest.TestCase):
-    def run_check(self, releases=None, assets=None, reports=None, *, paginated=False):
+    def run_check(self, releases=None, assets=None, reports=None, *, paginated=False, served_spkis=None):
         releases = releases if releases is not None else [release()]
         assets = assets if assets is not None else {RELEASE: EXPECTED}
         reports = reports if reports is not None else {}
         calls = []
+        def peer_spki(response):
+            hostname = response.url.split("/")[2]
+            if served_spkis and hostname in served_spkis:
+                return served_spkis[hostname]
+            report = reports.get(hostname, REPORT)
+            if not report:
+                return EXPECTED["tls"][hostname]
+            return next(key["spki_sha256"] for key in report["attestation"]["workload_keyset"]["tls_public_keys"]
+                        if key["domain"] == hostname)
         def get(_session, url, **kwargs):
             calls.append(url)
             response = requests.Response()
@@ -197,9 +258,10 @@ class CheckTests(unittest.TestCase):
                 payload = reports.get(hostname, REPORT)
                 self.assertRegex(kwargs["params"]["nonce"], r"^[0-9a-f]{64}$")
             response._content = json.dumps(payload).encode()
+            response._content_consumed = True
             return response
         output, error = io.StringIO(), io.StringIO()
-        with patch.object(requests.Session, "get", get), redirect_stdout(output), redirect_stderr(error):
+        with patch.object(requests.Session, "get", get), patch.object(gm, "peer_spki", peer_spki), redirect_stdout(output), redirect_stderr(error):
             result = gm.main(["check", "--repo", "fixture/repo"])
         return result, output.getvalue(), error.getvalue(), calls
 
@@ -248,6 +310,48 @@ class CheckTests(unittest.TestCase):
         )
         self.assertEqual(result, 1)
         self.assertIn("no accepted release matches", error)
+
+    def test_stale_prerelease_cannot_authorize_rollback(self):
+        published = copy.deepcopy(EXPECTED)
+        published["tls"]["tee.redpill.ai"] = "ff" * 32
+        old = copy.deepcopy(EXPECTED)
+        old["release"] = "gateway-prod-2026-11-03"
+        for timestamp in ("2026-11-04T00:00:00Z", release()["published_at"]):
+            with self.subTest(published_at=timestamp):
+                result, _, error, calls = self.run_check(
+                    releases=[release(old, prerelease=True, published_at=timestamp), release(published)],
+                    assets={RELEASE: published, old["release"]: old},
+                )
+                self.assertEqual(result, 1)
+                self.assertIn("no accepted release matches", error)
+                self.assertNotIn(f"https://fixture.invalid/{old['release']}.json", calls)
+
+    def test_served_tls_key_must_match_same_release_as_attestation(self):
+        result, output, error, _ = self.run_check(served_spkis={"tee.redpill.ai": "ff" * 32})
+        self.assertEqual(result, 1)
+        self.assertIn("served TLS SPKI SHA-256=" + "ff" * 32, error)
+        self.assertIn(EXPECTED["tls"]["tee.redpill.ai"], error)
+        self.assertIn(f"api.redpill.ai: matches {RELEASE}", output)
+        scheduled = copy.deepcopy(EXPECTED)
+        scheduled["release"] = "gateway-prod-2026-11-06"
+        scheduled["tls"]["tee.redpill.ai"] = "ff" * 32
+        result, _, error, _ = self.run_check(
+            releases=[release(), release(scheduled, prerelease=True)],
+            assets={RELEASE: EXPECTED, scheduled["release"]: scheduled},
+            served_spkis={"tee.redpill.ai": "ff" * 32},
+        )
+        self.assertEqual(result, 1)
+        self.assertIn("tee.redpill.ai: no accepted release matches", error)
+
+    def test_malformed_struct_fails_domain_cleanly_and_continues(self):
+        report = copy.deepcopy(REPORT)
+        event = next(event for event in report["attestation"]["evidence"]["event_log"] if event.get("event") == "compose-hash")
+        event["event_type"] = -1
+        result, output, error, _ = self.run_check(reports={"api.redpill.ai": report})
+        self.assertEqual(result, 1)
+        self.assertIn("api.redpill.ai:", error)
+        self.assertNotIn("Traceback", error)
+        self.assertIn("tee.redpill.ai: matches", output)
 
     def test_latest_selection_ignores_other_release_families_and_drafts(self):
         old = copy.deepcopy(EXPECTED)

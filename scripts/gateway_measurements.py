@@ -2,7 +2,7 @@
 """Extract release measurements, render release notes, and check live drift.
 
 This is a measurement consistency tool, not a cryptographic quote verifier.
-Run with the repository's locked uv environment (requests and PyYAML).
+Run with the repository's locked uv environment (requests, PyYAML, cryptography).
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from urllib.parse import urlsplit
 
 import requests
 import yaml
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 SCHEMA = "gateway-measurements/v1"
 DEFAULT_REPO = "Dstack-TEE/private-ai-gateway"
@@ -87,6 +89,16 @@ class ResolveAdapter(requests.adapters.HTTPAdapter):
         request.headers["Host"] = urlsplit(request.url).netloc
 
 
+def peer_spki(response):
+    # Read before consuming the streamed response, which releases its connection.
+    connection = getattr(response.raw, "connection", None)
+    sock = getattr(connection, "sock", None)
+    require(sock is not None, "TLS peer certificate unavailable on attestation connection")
+    certificate = x509.load_der_x509_certificate(sock.getpeercert(binary_form=True))
+    spki = certificate.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(spki).hexdigest()
+
+
 def fetch_attestation(url, resolve=None):
     parsed = urlsplit(url)
     require(parsed.scheme == "https" and parsed.hostname and not parsed.username
@@ -100,12 +112,14 @@ def fetch_attestation(url, resolve=None):
             # An explicit address must bypass environment proxies; TLS remains verified.
             session.trust_env = False
             session.mount("https://", ResolveAdapter(hostname, address))
-        response = session.get(
+        with session.get(
             f"https://{parsed.netloc}/v1/aci/attestation",
             params={"nonce": secrets.token_hex(32)}, timeout=(10, 60), allow_redirects=False,
-        )
-        require(response.status_code == 200, f"{parsed.hostname}: attestation HTTP {response.status_code}")
-        return response.json()
+            stream=True,
+        ) as response:
+            require(response.status_code == 200, f"{parsed.hostname}: attestation HTTP {response.status_code}")
+            served_spki = peer_spki(response)
+            return response.json(), served_spki
 
 
 def measured_evidence(report):
@@ -293,7 +307,8 @@ def release_measurements(repo):
         published = [release for release in releases if not release["prerelease"]]
         require(published, "no published gateway-prod release found")
         latest = max(published, key=lambda release: release["published_at"])
-        accepted = [latest] + [release for release in releases if release["prerelease"]]
+        accepted = [latest] + [release for release in releases
+                               if release["prerelease"] and release["published_at"] > latest["published_at"]]
         snapshots = []
         for release in accepted:
             assets = [asset for asset in release["assets"] if asset["name"] == "measurements.json"]
@@ -320,19 +335,23 @@ def check(repo):
     for hostname in domains:
         candidates = [snapshot for snapshot in snapshots if hostname in snapshot["domains"]]
         try:
-            live, _, _ = extract(fetch_attestation(f"https://{hostname}"), candidates[0]["release"])
-            match = next((snapshot for snapshot in candidates if stable(live) == stable(snapshot)), None)
+            report, served_spki = fetch_attestation(f"https://{hostname}")
+            live, _, _ = extract(report, candidates[0]["release"])
+            match = next((snapshot for snapshot in candidates
+                          if stable(live) == stable(snapshot) and served_spki == snapshot["tls"][hostname]), None)
             if match:
                 print(f"{hostname}: matches {match['release']}")
                 continue
-            failures.append(f"{hostname}: no accepted release matches\n" + "\n".join(
+            expected_spkis = ", ".join(f"{snapshot['release']}={snapshot['tls'][hostname]}" for snapshot in candidates)
+            failures.append(f"{hostname}: no accepted release matches\n"
+                            f"served TLS SPKI SHA-256={served_spki}; expected {expected_spkis}\n" + "\n".join(
                 "".join(difflib.unified_diff(
                     json.dumps(stable(snapshot), sort_keys=True, indent=2).splitlines(keepends=True),
                     json.dumps(stable(live), sort_keys=True, indent=2).splitlines(keepends=True),
                     fromfile=snapshot["release"], tofile=f"live/{hostname}",
                 )) for snapshot in candidates
             ))
-        except (ValueError, KeyError, TypeError, requests.RequestException, yaml.YAMLError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, struct.error, requests.RequestException, yaml.YAMLError) as exc:
             failures.append(f"{hostname}: {exc}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
@@ -359,7 +378,7 @@ def main(argv=None):
     try:
         if args.command == "extract":
             require(not args.resolve or args.url, "--resolve requires --url")
-            report = fetch_attestation(args.url, args.resolve) if args.url else read_json(args.attestation)
+            report = fetch_attestation(args.url, args.resolve)[0] if args.url else read_json(args.attestation)
             compose = args.compose.read_text(encoding="utf-8") if args.compose else None
             measurements, app_compose, docker_compose = extract(report, args.release, compose)
             args.out.mkdir(parents=True, exist_ok=True)
@@ -375,7 +394,7 @@ def main(argv=None):
             print(render(read_json(args.measurements)), end="")
             return 0
         return check(args.repo)
-    except (OSError, ValueError, KeyError, TypeError, requests.RequestException, yaml.YAMLError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, struct.error, requests.RequestException, yaml.YAMLError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
