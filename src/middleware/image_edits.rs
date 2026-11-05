@@ -63,6 +63,11 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
         .map_err(|_| KIND.invalid("multipart"))?
     {
         let name = media::field_name(&field, KIND)?;
+        let name = if name == "image[]" {
+            "image".into()
+        } else {
+            name
+        };
         if !seen.insert(name.clone()) {
             return Err(KIND.invalid(&name));
         }
@@ -164,10 +169,10 @@ mod tests {
 
     #[tokio::test]
     async fn encodes_image_magic_with_safe_filename_and_allowlisted_fields() {
-        for (data, extension) in [
-            (b"\x89PNG\r\n\x1a\nimage".as_slice(), "png"),
-            (b"\xff\xd8\xffimage", "jpg"),
-            (b"RIFF0000WEBPimage", "webp"),
+        for (part, data, extension) in [
+            ("image", b"\x89PNG\r\n\x1a\nimage".as_slice(), "png"),
+            ("image[]", b"\xff\xd8\xffimage", "jpg"),
+            ("image[]", b"RIFF0000WEBPimage", "webp"),
         ] {
             let (raw, ct) = request(
                 &[
@@ -177,7 +182,7 @@ mod tests {
                     ("size", "auto"),
                     ("n", "1"),
                 ],
-                &[("image", Bytes::copy_from_slice(data))],
+                &[(part, Bytes::copy_from_slice(data))],
             )
             .await;
             let (mut params, form) = parse(raw, &ct).await.unwrap();
@@ -199,7 +204,6 @@ mod tests {
     async fn rejects_unsupported_fields_duplicates_and_invalid_files() {
         for patch in [
             ("mask", "x"),
-            ("image[]", "x"),
             ("n", "2"),
             ("stream", "false"),
             ("partial_images", "1"),
@@ -217,6 +221,18 @@ mod tests {
             assert!(parse(raw, &ct).await.is_err(), "{patch:?}");
         }
         for images in [
+            vec![
+                ("image[]", Bytes::from_static(b"\xff\xd8\xff")),
+                ("image[]", Bytes::from_static(b"\xff\xd8\xff")),
+            ],
+            vec![
+                ("image", Bytes::from_static(b"\xff\xd8\xff")),
+                ("image[]", Bytes::from_static(b"\xff\xd8\xff")),
+            ],
+            vec![
+                ("image[]", Bytes::from_static(b"\xff\xd8\xff")),
+                ("image", Bytes::from_static(b"\xff\xd8\xff")),
+            ],
             vec![],
             vec![("image", Bytes::from_static(b"not an image"))],
             vec![
@@ -231,15 +247,17 @@ mod tests {
 
     #[tokio::test]
     async fn enforces_file_body_and_unicode_prompt_limits() {
-        for (len, valid) in [(MAX_FILE_BYTES, true), (MAX_FILE_BYTES + 1, false)] {
-            let mut data = vec![0; len];
-            data[..3].copy_from_slice(b"\xff\xd8\xff");
-            let (raw, ct) = request(
-                &[("model", "alias"), ("prompt", "edit")],
-                &[("image", data.into())],
-            )
-            .await;
-            assert_eq!(parse(raw, &ct).await.is_ok(), valid);
+        for part in ["image", "image[]"] {
+            for (len, valid) in [(MAX_FILE_BYTES, true), (MAX_FILE_BYTES + 1, false)] {
+                let mut data = vec![0; len];
+                data[..3].copy_from_slice(b"\xff\xd8\xff");
+                let (raw, ct) = request(
+                    &[("model", "alias"), ("prompt", "edit")],
+                    &[(part, data.into())],
+                )
+                .await;
+                assert_eq!(parse(raw, &ct).await.is_ok(), valid);
+            }
         }
         for (len, valid) in [(32000, true), (32001, false)] {
             let (raw, ct) = request(

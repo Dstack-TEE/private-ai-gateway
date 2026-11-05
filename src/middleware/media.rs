@@ -211,12 +211,15 @@ pub(crate) fn multipart(
     {
         return Err(kind.invalid("boundary"));
     }
-    let constraints = multer::Constraints::new().size_limit(
-        multer::SizeLimit::new()
-            .whole_stream(kind.spec().max_body_bytes as u64)
-            .per_field(kind.spec().max_text_bytes as u64)
-            .for_field(kind.spec().file_field, kind.spec().max_file_bytes as u64),
-    );
+    let spec = kind.spec();
+    let mut limits = multer::SizeLimit::new()
+        .whole_stream(spec.max_body_bytes as u64)
+        .per_field(spec.max_text_bytes as u64)
+        .for_field(spec.file_field, spec.max_file_bytes as u64);
+    if kind == FormKind::ImageEdit {
+        limits = limits.for_field("image[]", spec.max_file_bytes as u64);
+    }
+    let constraints = multer::Constraints::new().size_limit(limits);
     Ok(multer::Multipart::with_constraints(
         stream::once(async move { Ok::<_, std::convert::Infallible>(body) }),
         boundary,
