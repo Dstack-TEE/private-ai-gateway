@@ -66,6 +66,10 @@ A session contains an establishing-evidence snapshot. A reused session does not 
 
 ## Current limits
 
+- **Bounded HTTP artifacts.** Attestation, receipt, and session JSON responses
+  are limited to 32 MiB before decoding. Their HTTP deadlines cover headers and
+  body and default to 10 seconds; set `timeoutMs` in `verifyService` or
+  `connectAci` options to override.
 - **No dstack boot-measurement reconstruction.** Quote verification
   authenticates the quote's RTMR fields, and this package replays RTMR3 only.
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not

@@ -69,6 +69,8 @@ parsing, decryption, and canonicalization can retain additional copies, so this
 is not a total process-memory budget. Audio transcription responses are capped at the
 smaller of this setting and 8 MiB.
 
+Canonical ACI service attestation fetches use this same configured limit.
+
 The default remains 64 MiB. Very large float-format embedding batches can exceed
 it: raising the limit permits those responses at a higher per-request memory
 cost. Select a value using the deployment's memory and concurrency budget.

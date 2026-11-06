@@ -110,6 +110,10 @@ configuration with an independent dstack verifier.
 
 ### Offline audit
 
+Report, receipt, and session files use the same size limits as live artifact
+fetches: 4 MiB, 64 KiB, and 32 MiB respectively. Oversized files are rejected
+before JSON parsing.
+
 `pap audit` receipt-only options (`--request-body`, `--response-body`,
 `--session`, `--require-claim`, `--pin`, and `--require-verified`) require
 `--receipt`; using one without it is a usage error (exit 2).
