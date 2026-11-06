@@ -260,3 +260,47 @@ fn server_name_string(name: &ServerName<'_>) -> String {
         other => format!("{other:?}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn c8s_front_door_spki_pin_rejects_a_different_key() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/c8s/v0.16.5.json")).unwrap();
+        let leaf = CertificateDer::from(
+            base64::engine::general_purpose::STANDARD
+                .decode(fixture["serving_leaf_der_base64"].as_str().unwrap())
+                .unwrap(),
+        );
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .unwrap();
+        let matching = leaf_spki_sha256_hex(&leaf).unwrap();
+        let name = ServerName::try_from("api.confidential.ai").unwrap();
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(
+            fixture["verified_at_unix"].as_u64().unwrap(),
+        ));
+        let verifier = SpkiPinVerifier {
+            inner: inner.clone(),
+            accepted: HashSet::from([matching]),
+        };
+        assert!(verifier
+            .verify_server_cert(&leaf, &[], &name, &[], now)
+            .is_ok());
+        let verifier = SpkiPinVerifier {
+            inner,
+            accepted: HashSet::from(["00".repeat(32)]),
+        };
+        assert!(matches!(
+            verifier.verify_server_cert(&leaf, &[], &name, &[], now),
+            Err(RustlsError::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure
+            ))
+        ));
+    }
+}

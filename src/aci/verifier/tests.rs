@@ -1354,3 +1354,35 @@ fn subject_anchor_requires_the_measured_app_id() {
     keyset.subject = Some(format!("app-id:0x{}", hex::encode(unlisted)));
     assert!(!policy.accepts_measured(&keyset, &provenance, &unlisted));
 }
+
+#[tokio::test]
+async fn confidential_ai_passes_typed_pins_and_declares_router_scope() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/c8s/v0.16.5.json")).unwrap();
+    let pins = serde_json::from_value(fixture["pins"].clone()).unwrap();
+    let script = r#"import sys,json,hashlib
+request=json.load(sys.stdin)
+pins=json.loads(request['provider_options']['confidential_ai'])
+assert pins['release']=='v0.16.5'
+assert pins['workload']=='c8s-router-7210bdeb078b'
+assert len(pins['rtmr3'])==96
+print(json.dumps({'result':'verified','verifier_id':'private-ai-verifier/confidential-ai/v1',
+    'attested_scope':'router','evidence':{'digest':'sha256:'+hashlib.sha256(b'{}').hexdigest(),
+    'data':'data:application/json;base64,e30='},'channel_bindings':[{'type':'tls_spki_sha256',
+    'origin':'https://provider.example','spki_sha256':'aa'*32}]}))"#;
+    let verifier = ConfidentialAiProviderVerifier::with_command(
+        vec!["python3".into(), "-c".into(), script.into()],
+        5,
+    )
+    .unwrap()
+    .with_pins(&pins)
+    .unwrap();
+    let event = verifier.verify(armet_ai_request()).await;
+    assert_eq!(
+        event.result,
+        VerificationResult::Verified,
+        "{:?}",
+        event.reason
+    );
+    assert_eq!(event.provider_type.as_deref(), Some("confidential-ai"));
+}

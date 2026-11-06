@@ -66,6 +66,11 @@ pub(super) fn verification_refresh_seconds(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
 ) -> Option<u64> {
+    if cfg.provider == UpstreamProvider::ConfidentialAi
+        && cfg.verification_refresh_seconds.is_none()
+    {
+        return Some(240);
+    }
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
@@ -252,6 +257,35 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                     upstream.name
                 )));
             }
+        }
+        if upstream.provider == UpstreamProvider::ConfidentialAi {
+            if !valid_root_https_origin(&upstream.base_url) {
+                return Err(UpstreamConfigError::InvalidConfig(
+                    "confidential-ai requires a root HTTPS base_url".into(),
+                ));
+            }
+            upstream
+                .confidential_ai
+                .as_ref()
+                .ok_or_else(|| {
+                    UpstreamConfigError::InvalidConfig(
+                        "confidential-ai requires confidential_ai pins".into(),
+                    )
+                })?
+                .validate(&upstream.models)?;
+            if upstream.verifier_cache_seconds.is_some_and(|s| s > 300)
+                || upstream
+                    .verification_refresh_seconds
+                    .is_some_and(|s| s > 240)
+            {
+                return Err(UpstreamConfigError::InvalidConfig(
+                    "confidential-ai cache must be <=300s and refresh <=240s".into(),
+                ));
+            }
+        } else if upstream.confidential_ai.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(
+                "confidential_ai pins require provider confidential-ai".into(),
+            ));
         }
         if upstream.basic_auth {
             if upstream.bearer_token.is_none() {

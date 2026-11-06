@@ -24,6 +24,7 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
+        Some("confidential-ai") => &ConfidentialAiClaims,
         Some("armet-ai") => &ArmetAiClaims,
         Some("near-ai") | Some("chutes") | Some("phala-direct") | Some("0g-private-computer") => {
             &IntelTdxClaims
@@ -224,6 +225,19 @@ impl ProviderClaimMapper for IntelTdxClaims {
             tcb_up_to_date: tcb_up_to_date_claim(event),
             os_known_good: os_known_good_claim(event),
             gpu_attested: gpu_attested_claim(event),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+/// Only the front door's CPU identity at verification time is established.
+struct ConfidentialAiClaims;
+impl ProviderClaimMapper for ConfidentialAiClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: Claim::asserted(ClaimSource::HardwareProven,
+                "Nonce-bound TDX evidence attested the c8s front door at verification time; cached forwarding pins its TLS SPKI"),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
             ..SessionClaims::default()
         }
     }
@@ -542,6 +556,25 @@ mod claim_mapping_tests {
             "../../../tests/fixtures/session_material.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn confidential_ai_claims_only_the_front_door_at_verification_time() {
+        let claims = session_claims_for_event(&event(
+            Some("confidential-ai"),
+            VerificationResult::Verified,
+            Some(json!({"tcb_status": "UpToDate", "gpu_verified": false,
+                "continuous_policy_enforcement": false, "worker_identity_verified": false})),
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
     }
 
     #[test]

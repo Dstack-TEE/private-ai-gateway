@@ -537,6 +537,77 @@ impl UpstreamVerifier for ArmetAiProviderVerifier {
     }
 }
 
+/// Attests the c8s front door at verification time; forwarding pins its TLS SPKI.
+#[derive(Debug, Clone)]
+pub struct ConfidentialAiProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl ConfidentialAiProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "confidential-ai",
+                UpstreamProvider::ConfidentialAi.attestation_scope(),
+                timeout_seconds,
+                cache_ttl_seconds.min(300),
+            ),
+        }
+    }
+
+    pub fn with_pins(
+        mut self,
+        pins: &crate::aggregator::upstream_config::ConfidentialAiConfig,
+    ) -> Result<Self, serde_json::Error> {
+        self.verifier = self
+            .verifier
+            .with_option("confidential_ai", serde_json::to_string(pins)?);
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "confidential-ai",
+                UpstreamProvider::ConfidentialAi.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for ConfidentialAiProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
 struct RoutedUpstreamVerifier {
     origin: String,
     verifier: Arc<dyn UpstreamVerifier>,

@@ -1,6 +1,7 @@
 """Provider-verifier bridge package (split from private_ai_provider_verifier.py)."""
 
 from .armet_ai import verify_armet_ai
+from .c8s import verify_c8s
 from .chutes import verify_chutes
 from .nearai import verify_nearai
 from .phala_direct import verify_phala_direct
@@ -9,6 +10,7 @@ from .tinfoil import verify_tinfoil
 
 __all__ = [
     "verify_armet_ai",
+    "verify_c8s",
     "verify_chutes",
     "verify_nearai",
     "verify_phala_direct",
