@@ -196,6 +196,11 @@ explains why this review is part of the trust decision.
 
 ## Verify the deployment
 
+Production `gateway-prod-*` releases publish a `measurements.json` asset alongside
+the measured app compose and Docker Compose files. See
+[Gateway release measurements](../docs/gateway-measurements.md) to extract values,
+render release-note tables, and monitor every released domain for drift.
+
 Before accepting inference, a relying party should check:
 
 | Layer | Required comparison |
