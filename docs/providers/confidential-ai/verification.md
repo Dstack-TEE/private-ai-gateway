@@ -1,7 +1,7 @@
 # Confidential AI verification
 
-Admission remains **not acceptable**: see [review.md](review.md) and the
-[round-4 admission review, PR #554](https://github.com/Dstack-TEE/private-ai-gateway/pull/554).
+Admission remains **not acceptable**: see the
+[round-4 admission review](review.md#round-4-2026-11-05-pst).
 Do not add this provider to production configuration. Implementing a verifier
 does not resolve the operator's ability to change CDS policy briefly and admit
 an unreviewed worker behind the front door. Re-review the provider's fix before

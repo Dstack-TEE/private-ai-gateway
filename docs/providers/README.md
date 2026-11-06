@@ -12,7 +12,7 @@ Each provider has a living `verification.md` page for the current adapter and, o
 | ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
 | ArmetAI | Per-model Intel TDX + NVIDIA CC GPU endpoint (non-dstack), measurement-pinned | `tls_spki_sha256` | [Verification](armet-ai/verification.md) | Not yet audited; [self-assessment](armet-ai/review.md), 2026-09-29 |
 | Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Accepted for limited traffic](chutes/review.md), 2026-05-18 |
-| Confidential AI | c8s TDX front door at verification time | `tls_spki_sha256` | [Verification](confidential-ai/verification.md) | [Not acceptable](confidential-ai/review.md); [round 4, PR #554](https://github.com/Dstack-TEE/private-ai-gateway/pull/554). Keep out of production config. |
+| Confidential AI | c8s TDX front door at verification time | `tls_spki_sha256` | [Verification](confidential-ai/verification.md) | [Not acceptable](confidential-ai/review.md), 2026-11-05 PST (round 4). Keep out of production config. |
 | NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Acceptable with conditions](near-ai/review.md), 2026-05-18 |
 | Phala direct | Per-model dstack-vllm-proxy endpoint | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md), 2026-06-10 |
 | Privatemode | Official proxy co-deployed in the gateway's measured Compose | `proxy_image_sha256` | [Verification](privatemode/verification.md) | [Acceptable with conditions](privatemode/review.md), 2026-05-26 |
