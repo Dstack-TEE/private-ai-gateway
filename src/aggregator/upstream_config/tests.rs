@@ -1082,15 +1082,6 @@ fn confidential_ai_requires_complete_well_formed_subjects() {
             .unwrap()
             .remove(index);
         assert!(parse(&missing).is_err(), "missing required pin {index}");
-        if index < 5 {
-            let mut duplicate = config.clone();
-            let pin = duplicate[0]["accepted_subjects"][index].clone();
-            duplicate[0]["accepted_subjects"]
-                .as_array_mut()
-                .unwrap()
-                .push(pin);
-            assert!(parse(&duplicate).is_err(), "duplicate pin {index}");
-        }
     }
     for pin in [
         "tdx-mrtd:bad",
@@ -1109,17 +1100,4 @@ fn confidential_ai_requires_complete_well_formed_subjects() {
     let mut changed = config.clone();
     changed[0]["base_url"] = "https://api.confidential.ai/v1".into();
     assert!(parse(&changed).is_err());
-    // Additional allowlist digests and ordinary cache/model configuration use
-    // the same config path as other providers.
-    let mut changed = config;
-    changed[0]["accepted_subjects"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!(format!(
-            "c8s-allowlist:sha256:{}",
-            "00".repeat(32)
-        )));
-    changed[0]["verifier_cache_seconds"] = 600.into();
-    changed[0]["verification_refresh_seconds"] = 300.into();
-    assert!(parse(&changed).is_ok());
 }

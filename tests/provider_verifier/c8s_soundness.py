@@ -317,7 +317,7 @@ def _check_fetch_policy(failures: list[str]) -> None:
 
         return Connection
 
-    endpoint = c8s.parse_root_https_origin(ORIGIN, "Confidential AI")
+    endpoint = c8s._parse_origin(ORIGIN)
     original = c8s.http.client.HTTPSConnection
     try:
         log: list[str] = []
@@ -456,12 +456,24 @@ def check():
         ("mesh chain", "not issued by", _synthetic(leaf_issuer="other")),
         ("CA", "not a certificate-signing CA", _synthetic(committed_is_ca=False)),
         ("missing pins", "accepted_subjects requires", {"subjects": lambda p: p.clear()}),
+        ("partial pins", "accepted_subjects requires", {"subjects": lambda p: p.pop(0)}),
+        ("duplicate pins", "duplicate mrtd pins", {"subjects": lambda p: p.append("tdx-mrtd:" + "00" * 48)}),
+        ("unknown pin prefix", "accepted_subjects contains an invalid pin", {"subjects": lambda p: p.append("unknown:pin")}),
     ]
     for register, field in [("mrtd", "mr_td"), ("rtmr1", "rt_mr1"), ("rtmr2", "rt_mr2")]:
         cases.append((register, register.upper() + " does not match", {"verified": _td(field, "11" * 48)}))
+    nibble_reasons = {
+        "tdx-mrtd": "MRTD does not match configured pin",
+        "tdx-rtmr1": "RTMR1 does not match configured pin",
+        "tdx-rtmr2": "RTMR2 does not match configured pin",
+        "tdx-rtmr3": "RTMR3 does not match configured pin",
+        "c8s-workload": "mesh leaf is stamped for workload",
+        "c8s-allowlist": f"allowlist {ALLOWLIST_SHA256} is not in accepted_subjects",
+    }
     for index, subject in enumerate(SUBJECTS):
         changed = subject[:-1] + ("0" if subject[-1] != "0" else "1")
-        cases.append(("one-nibble " + subject.split(":", 1)[0], "Confidential AI", {
+        kind = subject.split(":", 1)[0]
+        cases.append(("one-nibble " + kind, nibble_reasons[kind], {
             "subjects": lambda pins, i=index, value=changed: pins.__setitem__(i, value),
         }))
     for name, reason, kwargs in cases:

@@ -130,7 +130,7 @@ bundle. Review the launch operator key separately and derive RTMR3 as
 `SHA384(zero[48] || SHA384(exact launch-key PEM bytes))`; the key is not included
 in this release bundle. Review the expected router workload as well. Live
 evidence alone is not authority to change pins. The fixture records the
-Cosign-verified v0.16.5 bundle digest and public capture/collateral.
+public v0.16.5 capture and collateral.
 
 ```sh
 uv run --frozen python tests/provider_verifier/c8s_soundness.py

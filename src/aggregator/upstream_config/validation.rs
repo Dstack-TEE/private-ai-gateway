@@ -118,27 +118,30 @@ fn valid_root_https_origin(value: &str) -> bool {
         && origin.fragment().is_none()
 }
 
+fn valid_lowercase_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// `tdx-measurement:sha256:<64 lowercase hex>`, the pin format the armet-ai
 /// bridge derives from the verified MRTD, RTMR0-3 and TD launch configuration.
 pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
     value
         .strip_prefix("tdx-measurement:sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .is_some_and(|hex| valid_lowercase_hex(hex, 64))
 }
 
 fn valid_confidential_ai_subject(value: &str) -> bool {
     let Some((kind, pin)) = value.split_once(':') else {
         return false;
     };
-    let valid_hex =
-        |v: &str, len| v.len() == len && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     match kind {
-        "tdx-mrtd" | "tdx-rtmr1" | "tdx-rtmr2" | "tdx-rtmr3" => valid_hex(pin, 96),
+        "tdx-mrtd" | "tdx-rtmr1" | "tdx-rtmr2" | "tdx-rtmr3" => valid_lowercase_hex(pin, 96),
         "c8s-allowlist" => pin
             .strip_prefix("sha256:")
-            .is_some_and(|v| valid_hex(v, 64)),
+            .is_some_and(|v| valid_lowercase_hex(v, 64)),
         "c8s-workload" => {
             !pin.is_empty()
                 && pin.len() <= 63
@@ -156,9 +159,7 @@ fn valid_confidential_ai_subject(value: &str) -> bool {
 fn valid_tdx_boot_chain_subject(value: &str) -> bool {
     value
         .strip_prefix("tdx-boot-chain:sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .is_some_and(|hex| valid_lowercase_hex(hex, 64))
 }
 
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {

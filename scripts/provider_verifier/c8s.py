@@ -1,7 +1,7 @@
 """Confidential AI front-door verification using c8s attest-lb.
 
-Pins are supplied by typed upstream configuration. Evidence describes the front
-door at verification time; forwarding uses a cached TLS SPKI pin for <=300s.
+Pins are supplied through accepted_subjects. Evidence describes the front door
+at verification time; forwarding uses the standard TLS SPKI verifier cache.
 Protocol references: MIT TEErminator and c8s-verify-js; see verification.md.
 """
 
@@ -46,7 +46,6 @@ _LABEL = "Confidential AI"
 _ATTEST_LB_PATH = "/.well-known/c8s/attest-lb"
 _ATTEST_LB_VERSION = "c8s/attest-lb/v1"
 _IDENTITY_PROOF_ALGORITHM = "ecdsa-sha384"
-# This adapter accepts only acme, the reviewed production serving mode.
 # TEErminator's single clock-skew allowance, on NotBefore only.
 _NOT_BEFORE_SKEW = timedelta(minutes=5)
 _NONCE_BYTES = 32
@@ -132,33 +131,22 @@ def _require_dict(value: Any, what: str) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class RootOrigin:
+class _Origin:
     origin: str
     host: str
     port: int
 
 
-def parse_root_https_origin(value: Any, label: str) -> RootOrigin:
-    """Parse a root HTTPS origin with no userinfo, path, query, or fragment."""
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{label} upstream is missing url_origin")
-    parsed = urlsplit(value)
-    if parsed.scheme != "https":
-        raise ValueError(f"{label} url_origin must use https://")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError(f"{label} url_origin must not contain userinfo")
-    if parsed.hostname is None:
-        raise ValueError(f"{label} url_origin must include a host")
-    if parsed.path not in ("", "/"):
-        raise ValueError(f"{label} url_origin must not include a path")
-    if parsed.query or parsed.fragment:
-        raise ValueError(f"{label} url_origin must not include a query or fragment")
-    try:
-        port = parsed.port or 443
-    except ValueError as exc:
-        raise ValueError(f"{label} url_origin has an invalid port") from exc
-    origin = value[:-1] if parsed.path == "/" else value
-    return RootOrigin(origin=origin, host=parsed.hostname, port=port)
+def _parse_origin(value: Any) -> _Origin:
+    origin = _require_str(value, "url_origin")
+    parsed = urlsplit(origin)
+    if (
+        parsed.scheme != "https" or not parsed.hostname
+        or parsed.username is not None or parsed.password is not None
+        or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+    ):
+        raise ValueError(f"{_LABEL} url_origin must be a root HTTPS origin without userinfo, query or fragment")
+    return _Origin(origin.rstrip("/"), parsed.hostname, parsed.port or 443)
 
 
 def _load_pin(request: dict[str, Any]) -> _Pins:
@@ -221,7 +209,7 @@ def _verify_routes(raw: bytes, route_digest: bytes, host: str) -> int:
     return revision
 
 
-def _fetch(endpoint: RootOrigin, nonce: str, timeout: int) -> _Capture:
+def _fetch(endpoint: _Origin, nonce: str, timeout: int) -> _Capture:
     """GET attest-lb, /allowlist, and routes over one WebPKI-validated TLS connection.
 
     The default context verifies the chain and the hostname. ``auto_open = 0``
@@ -474,7 +462,7 @@ def _td_report(verified: dict[str, Any]) -> dict[str, str]:
 def _check_report(
     verified: dict[str, Any], transcript_digest: bytes, pin: _Pins
 ) -> tuple[str, dict[str, str]]:
-    """Apply the TCB, debug, report_data, and release-pin policy to the verified quote."""
+    """Check TCB, debug mode, report_data and configured measurements in the verified quote."""
     tcb_status = verified.get("status")
     if tcb_status != "UpToDate":
         raise ValueError(f"{_LABEL} TDX TCB status is {tcb_status!r}, expected 'UpToDate'")
@@ -500,7 +488,7 @@ async def verify_c8s(request: dict[str, Any]) -> None:
     verifier_id = verifier_id_for(_PROVIDER)
     evidence = None
     try:
-        endpoint = parse_root_https_origin(request.get("url_origin"), _LABEL)
+        endpoint = _parse_origin(request.get("url_origin"))
         timeout = request_timeout_seconds(request, 60)
         pin = _load_pin(request)
 
@@ -594,7 +582,7 @@ async def verify_c8s(request: dict[str, Any]) -> None:
             )
         _check_allowlist(allowlist_raw, workload)
 
-        # (e') Hardware evidence: DCAP with online collateral, then the release pins.
+        # (e') Hardware evidence: DCAP with online collateral, then the configured pins.
         evidence_fields = _require_dict(receipt.get("evidence"), "attest-lb evidence")
         quote = _decode_quote(evidence_fields.get("quote"))
         try:
