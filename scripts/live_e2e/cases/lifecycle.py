@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..common import Provider, json_bytes, request_json, run_pap_audit, write_bytes, write_json
 from .attested_sessions import assert_upstream_attested_sessions
@@ -150,3 +150,70 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
         hashes.get("request.forwarded") in (None, hashes.get("request.received"))
     ):
         raise RuntimeError(f"{provider.name} receipt records no request.forwarded rewrite")
+
+
+def verify_served_request(
+    *, base_url: str, provider: Provider, endpoint: str, headers: dict[str, str],
+    provider_dir: Path, request_path: Path, response_path: Path, status: int,
+    requester_token: str,
+    receipt_check: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    receipt_id = headers.get("x-receipt-id")
+    if not receipt_id:
+        raise RuntimeError(f"{provider.name} response missing x-receipt-id")
+
+    # A nonce is exactly 64 lowercase hex characters (spec §3.2).
+    nonce = secrets.token_hex(32)
+    report_status, _, report_body, report_json = request_json(
+        "GET",
+        f"{base_url}/v1/aci/attestation?nonce={nonce}",
+        timeout=120,
+    )
+    report_path = provider_dir / "report.json"
+    write_bytes(report_path, report_body)
+    if report_status != 200 or not isinstance(report_json, dict):
+        raise RuntimeError(f"{provider.name} attestation report fetch failed: {report_status}")
+
+    # Fetch the receipt by its gateway-owned identifier (spec §7.1).
+    receipt_status, _, receipt_body, receipt = request_json(
+        "GET",
+        f"{base_url}/v1/aci/receipts/{receipt_id}",
+        headers={"Authorization": f"Bearer {requester_token}"},
+        timeout=120,
+    )
+    receipt_path = provider_dir / "receipt.json"
+    write_bytes(receipt_path, receipt_body)
+    if receipt_status != 200 or not isinstance(receipt, dict):
+        raise RuntimeError(
+            f"{provider.name} receipt fetch failed: HTTP {receipt_status}"
+        )
+
+    if receipt.get("endpoint") != endpoint:
+        raise RuntimeError(f"{provider.name} receipt endpoint must be {endpoint}, got {receipt.get('endpoint')!r}")
+    assert_receipt_log(provider, receipt)
+    if receipt_check is not None:
+        receipt_check(receipt)
+    attested_sessions = assert_upstream_attested_sessions(
+        base_url=base_url,
+        provider=provider,
+        receipt=receipt,
+        artifact_dir=provider_dir,
+    )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    verifier_summary = run_pap_audit(
+        report_path,
+        receipt_path,
+        provider_dir / "attested-session-0.json",
+        nonce,
+        request_path,
+        response_path,
+    )
+    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
+    return {
+        "provider": provider.name,
+        "receipt_id": receipt_id,
+        "status": status,
+        "verified": (verifier_summary.get("verdict") or {}).get("verified") is True,
+        "attested_sessions": attested_sessions,
+    }

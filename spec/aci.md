@@ -398,7 +398,7 @@ other freshness metadata.
   },
   "service_capabilities": {
     "supported_e2ee_versions": ["2"],
-    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions"],
+    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions", "/v1/images/edits"],
     "serving": "direct"
   }
 }
@@ -466,8 +466,11 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
+| `POST /v1/rerank` | OPTIONAL (buffered JSON; unique in-range result indices, finite relevance scores, required token usage; no E2EE) |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
+| `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, exactly one PNG/JPEG/WebP image, non-streaming, inline base64 output; constraints via §5.3; charges use returned image count) |
 | `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output; request up to `n` images, 1..10, default 1; providers may return fewer; image charges use the returned count) |
+| `POST /v1/audio/speech` | OPTIONAL (buffered binary `audio/*`; JSON input at most 4096 Unicode scalars; character usage; no streaming or E2EE) |
 | `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
@@ -540,7 +543,9 @@ For `multipart/form-data`, the carrier is a single HTTP header
 `X-ACI-Provider: <JSON>`. Its value MUST be a JSON object using exactly the
 same schema and semantics as the JSON `provider` field above, including
 non-empty session lists, boolean `aci_verified`, and rejection of unknown
-`aci_` members. The v1 multipart path is `POST /v1/audio/transcriptions`.
+`aci_` members. The v1 multipart paths are `POST /v1/audio/transcriptions` and
+`POST /v1/images/edits`; clients MUST use only paths advertised in
+`service_capabilities.supported_multipart_constraint_endpoints`.
 The field value MUST contain only US-ASCII bytes for HTTP
 field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
 surrogate pairs where needed, for non-ASCII characters in strings.
@@ -666,7 +671,11 @@ receipt hashes.
 Services MAY add events with implementation-specific types (the reference
 implementation records routing decisions, for example), but MUST NOT reuse
 the required types. Verifiers ignore event types they don't recognize
-unless local policy cares.
+unless local policy cares. The reference speech endpoint adds a signed
+`usage.reported` extension event on success with
+`{"usage":{"type":"characters","characters":N}}`, derived from the request's
+Unicode scalar count; this does not alter the exact audio `response.returned`
+body hash and is absent for failed speech requests.
 
 ### 7.5 `upstream.verified`
 

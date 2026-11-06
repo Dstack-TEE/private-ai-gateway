@@ -47,6 +47,7 @@ async fn middleware_capacity_refusal_reports_gateway_failure_with_request_id() {
     let permits: Vec<_> = (0..admission::MAX_IN_FLIGHT)
         .map(|_| admission::try_acquire(Endpoint::ImagesGenerations).unwrap())
         .collect();
+    assert!(admission::try_acquire(Endpoint::ImagesEdits).is_err());
     let response = app
         .oneshot(
             Request::builder()

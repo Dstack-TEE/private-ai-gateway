@@ -128,6 +128,7 @@ struct RecordingUpstream {
     /// is a candidate for a constrained request (§5.3).
     is_tee: Option<bool>,
     response_body: Vec<u8>,
+    response_content_type: &'static str,
     stream_status: u16,
     stream_headers: HashMap<String, String>,
     stream_chunks: Vec<Bytes>,
@@ -143,6 +144,7 @@ impl Default for RecordingUpstream {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 200,
             stream_headers,
             stream_chunks: vec![
@@ -226,7 +228,10 @@ impl UpstreamBackend for RecordingUpstream {
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            self.response_content_type.to_string(),
+        );
         headers.insert(
             "x-typesafe-request-id".to_string(),
             "upstream-id".to_string(),
@@ -573,6 +578,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 400,
             stream_headers: headers,
             stream_chunks: vec![Bytes::from_static(
@@ -4584,4 +4590,290 @@ async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(json_body(&response)["text"], "hello");
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
+    let request =
+        br#"{"model":"aci-model","query":"q","documents":["a",{"text":"b"}],"top_n":1,"user":"alice"}"#;
+    for (upstream, status) in [
+        (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
+        (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+        (br#"{"results":[{"index":2,"relevance_score":0.9}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let response = h.requester.post("/v1/rerank", request, &[("authorization", "Bearer tenant-key")]).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        if status == StatusCode::OK {
+            assert_eq!(body["results"], serde_json::json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}]));
+            assert_eq!(body["usage"], serde_json::json!({"prompt_tokens":5,"total_tokens":5}));
+            assert!(body.get("provider").is_none());
+        } else {
+            assert!(body.get("usage").is_none());
+        }
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/rerank");
+        assert_eq!(payload_event(&payload, "response.returned")["body_hash"], sha256_hex(&response.body));
+        let calls = h.upstream_calls.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("user").is_none());
+        assert_eq!(forwarded["documents"], serde_json::json!(["a", "b"]));
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+    }
+}
+
+#[tokio::test]
+async fn rerank_strips_provider_cost_and_honors_optional_documents_in_direct_mode() {
+    for (return_documents, document) in [
+        (None, Value::Null),
+        (Some(false), Value::Null),
+        (
+            Some(false),
+            serde_json::json!({"text":"private text","url":"private"}),
+        ),
+        (Some(false), serde_json::json!("private")),
+    ] {
+        let upstream = serde_json::to_vec(&serde_json::json!({
+            "results":[{"index":0,"relevance_score":0.9,"document":document}],
+            "usage":{"prompt_tokens":5,"total_tokens":5,"cost":99,"completion_tokens":100}
+        }))
+        .unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let mut request = serde_json::json!({"model":"aci-model","query":"q","documents":["a"]});
+        if let Some(return_documents) = return_documents {
+            request["return_documents"] = return_documents.into();
+        }
+        let response = h
+            .requester
+            .post(
+                "/v1/rerank",
+                &serde_json::to_vec(&request).unwrap(),
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let body = json_body(&response);
+        assert_eq!(
+            body["results"],
+            serde_json::json!([{"index":0,"relevance_score":0.9}])
+        );
+        assert_eq!(
+            body["usage"],
+            serde_json::json!({"prompt_tokens":5,"total_tokens":5})
+        );
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&response.body)
+        );
+    }
+}
+
+fn image_edit_request() -> Vec<u8> {
+    let mut raw = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.exe\"\r\nContent-Type: text/private\r\n\r\n".to_vec();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    raw
+}
+
+#[tokio::test]
+async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body() {
+    for (upstream, status) in [
+        (br#"{"id":"private","file_path":"private","peak_memory_mb":99,"data":[{"b64_json":"image","url":"private"}]}"#.as_slice(), StatusCode::OK),
+        (br#"{"data":[{"url":"private"}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+        (br#"{"data":[{"b64_json":"one"},{"b64_json":"two"}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let raw = image_edit_request();
+        let response = h.requester.call(Request::builder().method("POST").uri("/v1/images/edits")
+            .header("authorization", "Bearer tenant-key").header("content-type", "multipart/form-data; boundary=upload")
+            .header("x-aci-provider", r#"{"order":["near"]}"#).body(Body::from(raw.clone())).unwrap()).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        assert!(!body.to_string().contains("private"));
+        if status == StatusCode::OK { assert_eq!(body["data"], serde_json::json!([{"b64_json":"image"}])); }
+        let forwarded = h.upstream_calls.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+        assert!(!forwarded.headers.contains_key("x-aci-provider"));
+        let (params, image) = private_ai_gateway::middleware::image_edits::parse(forwarded.body.clone(), forwarded.content_type.as_deref().unwrap()).await.unwrap();
+        assert_eq!(params["model"], "aci-model");
+        assert_eq!(params["response_format"], "b64_json");
+        assert_eq!(image.file, b"\x89PNG\r\n\x1a\nimage".as_slice());
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/images/edits");
+        for (event, bytes) in [("request.received", raw.as_slice()), ("request.forwarded", forwarded.body.as_ref()), ("response.returned", response.body.as_ref())] {
+            assert_eq!(payload_event(&payload, event)["body_hash"], sha256_hex(bytes));
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_upload_and_parse_rejections_increment_the_failure_metric() {
+    let h = harness();
+    let oversized = h
+        .requester
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/edits")
+                .header("authorization", "Bearer tenant-key")
+                .header(
+                    "content-length",
+                    private_ai_gateway::middleware::image_edits::MAX_BODY_BYTES + 1,
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(oversized.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let malformed = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    let metrics = String::from_utf8(h.service.metrics().unwrap().body).unwrap();
+    assert!(
+        metrics.contains("private_ai_gateway_image_failures_total{reason=\"upload_rejection\"} 2")
+    );
+    assert!(!metrics.contains("private_ai_gateway_audio_failures_total{reason="));
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    for (content_type, expected_type) in [
+        ("audio/wav", "audio/wav"),
+        ("audio/mpeg", "audio/mpeg"),
+        ("audio/wav; rate=24000", "audio/wav"),
+        ("Audio/WAV; rate=24000", "audio/wav"),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream {
+            response_body: audio.to_vec(),
+            response_content_type: content_type,
+            ..Default::default()
+        });
+        let raw = serde_json::to_vec(&serde_json::json!({"model":"aci-model","input":"界🙂e\u{301}","voice":"ryan","stream_format":"audio"})).unwrap();
+        let response = h
+            .requester
+            .post(
+                "/v1/audio/speech",
+                &raw,
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.headers["content-type"], expected_type);
+        assert_eq!(response.body, audio);
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("stream_format").is_none());
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/audio/speech");
+        assert_eq!(
+            payload_event(&payload, "usage.reported")["usage"],
+            serde_json::json!({"type":"characters","characters":4})
+        );
+        assert_eq!(
+            payload_event(&payload, "request.received")["body_hash"],
+            sha256_hex(&raw)
+        );
+        assert_eq!(
+            payload_event(&payload, "response.returned")["body_hash"],
+            sha256_hex(audio)
+        );
+    }
+}
+
+#[tokio::test]
+async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
+    for content_type in [
+        "application/json",
+        "text/event-stream",
+        "text/plain",
+        "audio/wav, text/html",
+        "audio/wav/extra",
+        "audio/",
+        "audio/wav text/html",
+    ] {
+        let h = harness_with_upstream(RecordingUpstream {
+            response_body: b"private upstream data".to_vec(),
+            response_content_type: content_type,
+            ..Default::default()
+        });
+        let response = h
+            .requester
+            .post(
+                "/v1/audio/speech",
+                br#"{"model":"aci-model","input":"hello","voice":"ryan"}"#,
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY, "{content_type}");
+        assert_eq!(response.headers["content-type"], "application/json");
+        assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(
+            payload_event(&payload, "response.returned")["body_hash"],
+            sha256_hex(&response.body)
+        );
+        assert!(!payload["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "usage.reported"));
+    }
+}
+
+#[tokio::test]
+async fn buffered_auth_e2ee_and_carrier_refusals_precede_parsing() {
+    let h = harness();
+    for path in ["/v1/rerank", "/v1/images/edits", "/v1/audio/speech"] {
+        for (headers, status) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("authorization", "Bearer tenant-key"),
+                    ("x-e2ee-test", "true"),
+                ],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = h.requester.post(path, b"not a request", &headers).await;
+            assert_eq!(response.status, status, "{path}");
+        }
+    }
+    let response = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[
+                ("authorization", "Bearer tenant-key"),
+                ("x-aci-provider", "null"),
+            ],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
