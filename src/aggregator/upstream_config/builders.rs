@@ -16,9 +16,10 @@ use crate::aci::upstream::{
 };
 use crate::aci::verifier::{
     AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ArmetAiProviderVerifier,
-    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
-    PreverifiedUpstreamVerifier, PrivatemodeProviderVerifier, RoutingUpstreamVerifier,
-    SecretAiProviderVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
+    ChutesProviderVerifier, ConfidentialAiProviderVerifier, NearAiProviderVerifier,
+    PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier, PrivatemodeProviderVerifier,
+    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    ZeroGProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -83,6 +84,7 @@ pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Chutes
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
+        | UpstreamProvider::ConfidentialAi
         | UpstreamProvider::SecretAi
         | UpstreamProvider::Privatemode
         | UpstreamProvider::PhalaDirect
@@ -166,6 +168,7 @@ fn build_provider_backend(
         | UpstreamProvider::AciService
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
+        | UpstreamProvider::ConfidentialAi
         | UpstreamProvider::SecretAi
         | UpstreamProvider::PhalaDirect
         | UpstreamProvider::ArmetAi => {
@@ -293,6 +296,13 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
+            UpstreamProvider::ConfidentialAi => Arc::new(
+                ConfidentialAiProviderVerifier::new_with_cache(
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default()),
+            ),
             UpstreamProvider::SecretAi => {
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,

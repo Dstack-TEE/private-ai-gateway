@@ -186,6 +186,8 @@ pub enum UpstreamProvider {
     Tinfoil,
     NearAi,
     SecretAi,
+    /// c8s attest-lb front door, pinned at verification time.
+    ConfidentialAi,
     Privatemode,
     PhalaDirect,
     /// A per-model Intel TDX endpoint outside dstack, pinned by its measured TD
@@ -205,6 +207,7 @@ impl UpstreamProvider {
         match self {
             UpstreamProvider::NearAi
             | UpstreamProvider::Tinfoil
+            | UpstreamProvider::ConfidentialAi
             | UpstreamProvider::SecretAi
             | UpstreamProvider::Privatemode => AttestationScope::PerRouter,
             UpstreamProvider::Chutes | UpstreamProvider::ZeroGPrivateComputer => {

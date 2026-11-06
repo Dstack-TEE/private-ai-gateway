@@ -1063,3 +1063,41 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
         assert_eq!(fields["response_format"], expected_format);
     }
 }
+
+#[test]
+fn confidential_ai_requires_complete_well_formed_subjects() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/c8s/v0.16.5.json")).unwrap();
+    let config = serde_json::json!([{
+        "name": "confidential-ai", "provider": "confidential-ai",
+        "base_url": "https://api.confidential.ai", "models": {"public": "provider-model"},
+        "accepted_subjects": fixture["accepted_subjects"],
+    }]);
+    let parse = |value: &serde_json::Value| parse_config_text(&value.to_string());
+    assert!(parse(&config).is_ok());
+    for index in 0..6 {
+        let mut missing = config.clone();
+        missing[0]["accepted_subjects"]
+            .as_array_mut()
+            .unwrap()
+            .remove(index);
+        assert!(parse(&missing).is_err(), "missing required pin {index}");
+    }
+    for pin in [
+        "tdx-mrtd:bad",
+        "tdx-rtmr2:ABC",
+        "c8s-workload:-invalid",
+        "c8s-allowlist:sha256:bad",
+        "unknown:pin",
+    ] {
+        let mut changed = config.clone();
+        changed[0]["accepted_subjects"]
+            .as_array_mut()
+            .unwrap()
+            .push(pin.into());
+        assert!(parse(&changed).is_err(), "invalid pin {pin}");
+    }
+    let mut changed = config.clone();
+    changed[0]["base_url"] = "https://api.confidential.ai/v1".into();
+    assert!(parse(&changed).is_err());
+}
