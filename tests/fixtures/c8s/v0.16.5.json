@@ -19,20 +19,13 @@
     "qe_identity": "{\"id\":\"TD_QE\",\"version\":2,\"issueDate\":\"2026-11-06T00:14:43Z\",\"nextUpdate\":\"2026-12-06T00:14:43Z\",\"tcbEvaluationDataNumber\":20,\"miscselect\":\"00000000\",\"miscselectMask\":\"FFFFFFFF\",\"attributes\":\"11000000000000000000000000000000\",\"attributesMask\":\"FBFFFFFFFFFFFFFF0000000000000000\",\"mrsigner\":\"DC9E2A7C6F948F17474E34A7FC43ED030F7C1563F1BABDDF6340C82E0E54A8C5\",\"isvprodid\":2,\"tcbLevels\":[{\"tcb\":{\"isvsvn\":4},\"tcbDate\":\"2025-08-13T00:00:00Z\",\"tcbStatus\":\"UpToDate\"}]}",
     "qe_identity_signature": "16abac21244b0a4050a4c5c78a9273e3f206bbd1b0313866f915c4bf02f594e814e2e2a38a51c7fc8485360929e07bbe04ac958f4909a087823ded5ba52c5698"
   },
-  "pins": {
-    "mrtd": "9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1",
-    "rtmr1": "9301c6e6b644e4dbc013c2bc8bceedd4158438a19ee0dc07b960c9b0bd9357c4b15a15957119397d3cb35c59744399d1",
-    "rtmr2": "ec87b28b559c36944c1cab451114370d33c05a5278b7e1ae03b0d9e667ca03cd9d10a6cbd4296ec50d222e3124f6c582",
-    "release": "v0.16.5",
-    "rtmr3": "256e9368dbd9aff2e28044988a756d4554c1ec5880fa4ea829cd5bc854f62842b61ab7c25c55327d048fa5c9e1666ba8",
-    "operator_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEdd2OvT2CGea9fPJpD6OZhyT4F7gL\nuz4qupEMI/HNXmLhcT5o/P64an4pnEyRz1SQ///59EXsSKIE67/twmhCDw==\n-----END PUBLIC KEY-----\n",
-    "workload": "c8s-router-7210bdeb078b",
-    "allowlist_sha256": [
-      "sha256:bdf3ccceaa4b85cb9b2f10ff15d7c9e3226d226db1759db8eefdcdb1b561e2af"
-    ],
-    "accepted_models": [
-      "deepseek-ai/DeepSeek-V4.1-Flash"
-    ]
-  },
-  "release_bundle_sha256": "2cd8d47f2dc29a9a837d294c0e508909431751e23a43420a91fc104b57871eaf"
+  "release_bundle_sha256": "2cd8d47f2dc29a9a837d294c0e508909431751e23a43420a91fc104b57871eaf",
+  "accepted_subjects": [
+    "tdx-mrtd:9309eaae9c151e766de0f97b1d1aaeb76b8c8c366080803943fb566521c8f0cf00a142d8b7b0683ed1d42c5a27198ba1",
+    "tdx-rtmr1:9301c6e6b644e4dbc013c2bc8bceedd4158438a19ee0dc07b960c9b0bd9357c4b15a15957119397d3cb35c59744399d1",
+    "tdx-rtmr2:ec87b28b559c36944c1cab451114370d33c05a5278b7e1ae03b0d9e667ca03cd9d10a6cbd4296ec50d222e3124f6c582",
+    "tdx-rtmr3:256e9368dbd9aff2e28044988a756d4554c1ec5880fa4ea829cd5bc854f62842b61ab7c25c55327d048fa5c9e1666ba8",
+    "c8s-workload:c8s-router-7210bdeb078b",
+    "c8s-allowlist:sha256:bdf3ccceaa4b85cb9b2f10ff15d7c9e3226d226db1759db8eefdcdb1b561e2af"
+  ]
 }

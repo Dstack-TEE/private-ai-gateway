@@ -66,11 +66,6 @@ pub(super) fn verification_refresh_seconds(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
 ) -> Option<u64> {
-    if cfg.provider == UpstreamProvider::ConfidentialAi
-        && cfg.verification_refresh_seconds.is_none()
-    {
-        return Some(240);
-    }
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
@@ -131,6 +126,29 @@ pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
         .is_some_and(|hex| {
             hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         })
+}
+
+fn valid_confidential_ai_subject(value: &str) -> bool {
+    let Some((kind, pin)) = value.split_once(':') else {
+        return false;
+    };
+    let valid_hex =
+        |v: &str, len| v.len() == len && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match kind {
+        "tdx-mrtd" | "tdx-rtmr1" | "tdx-rtmr2" | "tdx-rtmr3" => valid_hex(pin, 96),
+        "c8s-allowlist" => pin
+            .strip_prefix("sha256:")
+            .is_some_and(|v| valid_hex(v, 64)),
+        "c8s-workload" => {
+            !pin.is_empty()
+                && pin.len() <= 63
+                && pin.as_bytes()[0].is_ascii_alphanumeric()
+                && pin
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        }
+        _ => false,
+    }
 }
 
 /// `tdx-boot-chain:sha256:<64 lowercase hex>`: SHA-256 over a dstack OS
@@ -259,33 +277,25 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             }
         }
         if upstream.provider == UpstreamProvider::ConfidentialAi {
-            if !valid_root_https_origin(&upstream.base_url) {
-                return Err(UpstreamConfigError::InvalidConfig(
-                    "confidential-ai requires a root HTTPS base_url".into(),
-                ));
-            }
-            upstream
-                .confidential_ai
-                .as_ref()
-                .ok_or_else(|| {
-                    UpstreamConfigError::InvalidConfig(
-                        "confidential-ai requires confidential_ai pins".into(),
-                    )
-                })?
-                .validate(&upstream.models)?;
-            if upstream.verifier_cache_seconds.is_some_and(|s| s > 300)
-                || upstream
-                    .verification_refresh_seconds
-                    .is_some_and(|s| s > 240)
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            let required = [
+                "tdx-mrtd:",
+                "tdx-rtmr1:",
+                "tdx-rtmr2:",
+                "tdx-rtmr3:",
+                "c8s-workload:",
+            ];
+            if !valid_root_https_origin(&upstream.base_url)
+                || !subjects.iter().all(|s| valid_confidential_ai_subject(s))
+                || required
+                    .iter()
+                    .any(|prefix| subjects.iter().filter(|s| s.starts_with(prefix)).count() != 1)
+                || !subjects.iter().any(|s| s.starts_with("c8s-allowlist:"))
             {
                 return Err(UpstreamConfigError::InvalidConfig(
-                    "confidential-ai cache must be <=300s and refresh <=240s".into(),
+                    "confidential-ai requires a root HTTPS base_url and accepted_subjects: exactly one each of tdx-mrtd, tdx-rtmr1, tdx-rtmr2, tdx-rtmr3 (96 lowercase hex) and c8s-workload, plus c8s-allowlist:sha256:<64 lowercase hex> pins".into(),
                 ));
             }
-        } else if upstream.confidential_ai.is_some() {
-            return Err(UpstreamConfigError::InvalidConfig(
-                "confidential_ai pins require provider confidential-ai".into(),
-            ));
         }
         if upstream.basic_auth {
             if upstream.bearer_token.is_none() {

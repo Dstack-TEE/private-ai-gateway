@@ -30,7 +30,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import provider_verifier.c8s as c8s
 
 FIXTURE = json.loads((ROOT / "tests/fixtures/c8s/v0.16.5.json").read_text())
-PINS = FIXTURE["pins"]
+SUBJECTS = FIXTURE["accepted_subjects"]
+WORKLOAD = next(s.removeprefix("c8s-workload:") for s in SUBJECTS if s.startswith("c8s-workload:"))
 ORIGIN = FIXTURE["origin"]
 LEAF = base64.b64decode(FIXTURE["serving_leaf_der_base64"])
 BODIES = {name: base64.b64decode(body) for name, body in FIXTURE["responses"].items()}
@@ -44,14 +45,14 @@ Mutation = Callable[[dict[str, Any]], None]
 
 def _run(*, origin=ORIGIN, client_nonce=None, serving_leaf=LEAF,
          receipt=None, allowlist=ALLOWLIST, routes=BODIES["routes"],
-         verified=None, quote_bytes=None, pins=None, model=PINS["accepted_models"][0],
+         verified=None, quote_bytes=None, subjects=None,
          clock_offset=timedelta(0)):
     attest_lb = copy.deepcopy(ATTEST_LB)
     if receipt:
         receipt(attest_lb)
-    config = copy.deepcopy(PINS)
-    if pins:
-        pins(config)
+    pins = SUBJECTS.copy()
+    if subjects:
+        subjects(pins)
     collateral = dcap_qvl.QuoteCollateralV3.from_json(json.dumps(FIXTURE["dcap_collateral"]))
 
     async def fetch_collateral(quote):
@@ -76,7 +77,8 @@ def _run(*, origin=ORIGIN, client_nonce=None, serving_leaf=LEAF,
                         _dcap_verify=dcap_verify, _now=lambda: CAPTURED_AT + clock_offset):
         with redirect_stdout(output):
             asyncio.run(c8s.verify_c8s({"provider": "confidential-ai", "url_origin": origin,
-                "model_id": model, "provider_options": {"confidential_ai": json.dumps(config)}}))
+                "model_id": "provider-model", "provider_options": {
+                    "confidential_ai_accepted_subject:" + pin: "true" for pin in pins}}))
     return json.loads(output.getvalue())
 
 
@@ -108,7 +110,7 @@ def _tlv(tag: int, value: bytes) -> bytes:
 
 
 def _stamp(
-    name: bytes = PINS["workload"].encode(),
+    name: bytes = WORKLOAD.encode(),
     version: bytes = b"5",
     digest: bytes = bytes.fromhex(ALLOWLIST_SHA256[7:]),
     format_version: bytes = b"\x01",
@@ -355,53 +357,39 @@ def _check_fetch_policy(failures: list[str]) -> None:
         c8s.http.client.HTTPSConnection = original
 
 
-def _check_signed_routes(failures):
-    import jwt
-    from dataclasses import replace
-
-    private_key = ec.generate_private_key(ec.SECP256R1())
-    public_key = private_key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
-    request = {"model_id": PINS["accepted_models"][0], "provider_options": {"confidential_ai": json.dumps(PINS)}}
-    pin = replace(c8s._load_pin(request), operator_key_pem=public_key)
-    original_manifest = json.loads(base64.b64decode(json.loads(BODIES["routes"])["manifest"]))
-
-    def envelope(*, mutation=None, claims_mutation=None, headers=None):
-        manifest = copy.deepcopy(original_manifest)
-        if mutation:
-            mutation(manifest)
+def _check_routes(failures):
+    manifest = json.loads(base64.b64decode(json.loads(BODIES["routes"])["manifest"]))
+    def publication(manifest):
         raw = json.dumps(manifest).encode()
-        digest = hashlib.sha256(raw).digest()
-        claims = {"iat": 1, "exp": 301, "htm": "PUT", "htu": "/routes", "pbh": c8s._b64url(digest)}
-        if claims_mutation:
-            claims_mutation(claims)
-        token = jwt.encode(claims, private_key, algorithm="ES256", headers=headers)
-        return json.dumps({"manifest": base64.b64encode(raw).decode(), "token": token}).encode(), digest
-
-    body, digest = envelope()
-    assert c8s._verify_routes(body, digest, pin, "api.confidential.ai") == original_manifest["revision"]
-    for name, kwargs in [
-        ("wrong write method", {"claims_mutation": _set("htm", "POST")}),
-        ("wrong write path", {"claims_mutation": _set("htu", "/allowlist")}),
-        ("wrong write digest", {"claims_mutation": _set("pbh", c8s._b64url(bytes(32)))}),
-        ("long write validity", {"claims_mutation": _set("exp", 302)}),
-        ("critical header", {"headers": {"crit": ["unknown"]}}),
-        ("unrouted host", {"mutation": _set("hosts", {})}),
-        ("unrouted path", {"mutation": lambda m: m["hosts"]["api.confidential.ai"].update(routes=[])}),
-        ("wrong schema", {"mutation": _set("schema", "c8s.routes/v2")}),
+        return json.dumps({"manifest": base64.b64encode(raw).decode()}).encode(), hashlib.sha256(raw).digest()
+    body, digest = publication(manifest)
+    assert c8s._verify_routes(body, digest, "api.confidential.ai") == manifest["revision"]
+    for name, mutation in [
+        ("unrouted host", _set("hosts", {})),
+        ("unrouted path", lambda m: m["hosts"]["api.confidential.ai"].update(routes=[])),
+        ("wrong schema", _set("schema", "c8s.routes/v2")),
     ]:
-        body, digest = envelope(**kwargs)
+        changed = copy.deepcopy(manifest)
+        mutation(changed)
+        body, digest = publication(changed)
         try:
-            c8s._verify_routes(body, digest, pin, "api.confidential.ai")
+            c8s._verify_routes(body, digest, "api.confidential.ai")
         except ValueError:
             continue
-        failures.append(f"routes {name}: accepted invalid signed publication")
+        failures.append(f"routes {name}: accepted invalid publication")
+
+
+def _subject(kind, value):
+    def replace(subjects):
+        subjects[:] = [kind + ":" + value if s.startswith(kind + ":") else s for s in subjects]
+    return replace
 
 
 def check():
     failures = []
     _check_stamp_parser(failures)
     _check_fetch_policy(failures)
-    _check_signed_routes(failures)
+    _check_routes(failures)
     for name, kwargs in [("live fixture", {}), ("synthetic", _synthetic())]:
         out = _run(**kwargs)
         if out.get("result") != "verified":
@@ -446,17 +434,12 @@ def check():
     six["verified"] = lambda result: result["report"]["TD10"].update(
         report_data=(six["digest"] + bytes(16)).hex())
 
-    other_key = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
-        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
-    def change_operator(config):
-        config.update(operator_key_pem=other_key, rtmr3=c8s.operator_key_rtmr3(other_key))
-
     cases = [
         ("nonce", "nonce does not match", {"receipt": _set("nonce", "wrong")} ),
         ("serving leaf", "does not name the TLS leaf", {"serving_leaf": b"wrong"}),
         ("six fields", "report_data does not match", six),
         ("wrong RTMR3", "RTMR3 does not match", {"verified": _td("rt_mr3", "00" * 48)}),
-        ("allowlist pin", "is not accepted", {"pins": _set("allowlist_sha256", ["sha256:" + "00" * 32])}),
+        ("allowlist pin", "is not in accepted_subjects", {"subjects": _subject("c8s-allowlist", "sha256:" + "00" * 32)}),
         ("allowlist bytes", "does not match the /allowlist bytes", {"allowlist": ALLOWLIST + b" "}),
         ("stamp missing", "no single matched-workload stamp", _synthetic(include_stamp=False)),
         ("stamp duplicate", "duplicate matched-workload stamps", _synthetic(duplicate_stamp=True)),
@@ -466,20 +449,21 @@ def check():
         ("SWHardeningNeeded", "expected 'UpToDate'", {"verified": _set("status", "SWHardeningNeeded")}),
         ("webpki", "must be acme", {"receipt": _set("front_door_mode", "webpki")}),
         ("cds", "must be acme", {"receipt": _set("front_door_mode", "cds")}),
-        ("model", "not allowed", {"model": "deepseek-ai/DeepSeek-V4-Flash-0731"}),
         ("identity signature", "signature does not verify", {"receipt": bad_signature}),
         ("route digest", "route digest does not match", {"routes": json.dumps({
             **json.loads(BODIES["routes"]), "manifest": base64.b64encode(b"{}").decode()}).encode()}),
-        ("route wrong key", "route token does not verify", {"pins": change_operator,
-            "verified": _td("rt_mr3", c8s.operator_key_rtmr3(other_key))}),
         ("quote tamper", "DCAP verification", {"quote_bytes": flip_quote}),
         ("mesh chain", "not issued by", _synthetic(leaf_issuer="other")),
         ("CA", "not a certificate-signing CA", _synthetic(committed_is_ca=False)),
-        ("missing config", "release is missing", {"pins": lambda p: p.clear()}),
-        ("seed mismatch", "does not equal the operator-key seed", {"pins": _set("rtmr3", "00" * 48)}),
+        ("missing pins", "accepted_subjects requires", {"subjects": lambda p: p.clear()}),
     ]
     for register, field in [("mrtd", "mr_td"), ("rtmr1", "rt_mr1"), ("rtmr2", "rt_mr2")]:
         cases.append((register, register.upper() + " does not match", {"verified": _td(field, "11" * 48)}))
+    for index, subject in enumerate(SUBJECTS):
+        changed = subject[:-1] + ("0" if subject[-1] != "0" else "1")
+        cases.append(("one-nibble " + subject.split(":", 1)[0], "Confidential AI", {
+            "subjects": lambda pins, i=index, value=changed: pins.__setitem__(i, value),
+        }))
     for name, reason, kwargs in cases:
         out = _run(**kwargs)
         if out.get("result") != "failed" or reason not in out.get("reason", ""):

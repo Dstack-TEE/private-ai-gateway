@@ -25,8 +25,6 @@ use crate::aci::upstream::{
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
-mod confidential_ai;
-pub use confidential_ai::ConfidentialAiConfig;
 mod dynamic;
 mod pull;
 #[cfg(test)]
@@ -69,8 +67,6 @@ pub struct UpstreamConfig {
     pub basic_auth: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_subjects: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidential_ai: Option<ConfidentialAiConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,8 +116,6 @@ pub struct PublicUpstreamConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_subjects: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub confidential_ai: Option<ConfidentialAiConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_image_digests: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_dstack_kms_root_public_keys: Option<Vec<String>>,
@@ -161,7 +155,6 @@ impl UpstreamConfig {
             bearer_token_configured: self.bearer_token.is_some(),
             basic_auth: self.basic_auth,
             accepted_subjects: self.accepted_subjects.clone(),
-            confidential_ai: self.confidential_ai.clone(),
             accepted_image_digests: self.accepted_image_digests.clone(),
             accepted_dstack_kms_root_public_keys: self.accepted_dstack_kms_root_public_keys.clone(),
             pccs_url: self.pccs_url.clone(),
@@ -564,12 +557,9 @@ impl UpstreamConfigManager {
                     let Some(period) = verification_refresh_seconds(cfg, &self.options) else {
                         continue;
                     };
-                    let cache_seconds = if cfg.provider == UpstreamProvider::ConfidentialAi {
-                        cfg.verifier_cache_seconds.unwrap_or(300)
-                    } else {
-                        cfg.verifier_cache_seconds
-                            .unwrap_or(self.options.verifier_cache_seconds)
-                    };
+                    let cache_seconds = cfg
+                        .verifier_cache_seconds
+                        .unwrap_or(self.options.verifier_cache_seconds);
                     let mut targets = verification_targets(std::slice::from_ref(cfg));
                     if cfg.provider == UpstreamProvider::AciService
                         || (matches!(

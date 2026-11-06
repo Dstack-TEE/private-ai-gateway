@@ -296,19 +296,13 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            UpstreamProvider::ConfidentialAi => {
-                let pins = cfg.confidential_ai.as_ref().ok_or_else(|| {
-                    UpstreamConfigError::InvalidConfig("missing confidential_ai pins".into())
-                })?;
-                Arc::new(
-                    ConfidentialAiProviderVerifier::new_with_cache(
-                        request_timeout_seconds,
-                        cfg.verifier_cache_seconds.unwrap_or(300),
-                    )
-                    .with_pins(pins)
-                    .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+            UpstreamProvider::ConfidentialAi => Arc::new(
+                ConfidentialAiProviderVerifier::new_with_cache(
+                    request_timeout_seconds,
+                    cache_seconds,
                 )
-            }
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default()),
+            ),
             UpstreamProvider::SecretAi => {
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,

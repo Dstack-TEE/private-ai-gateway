@@ -29,7 +29,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
     PublicFormat,
-    load_pem_public_key,
 )
 
 from .common import (
@@ -86,13 +85,11 @@ class _Capture:
 
 
 @dataclass(frozen=True)
-class _ReleasePin:
-    release: str
+class _Pins:
     mrtd: str
     rtmr1: str
     rtmr2: str
     rtmr3: str
-    operator_key_pem: str
     workload: str
     allowlist_sha256: tuple[str, ...]
 
@@ -134,16 +131,6 @@ def _require_dict(value: Any, what: str) -> dict[str, Any]:
     return value
 
 
-def operator_key_rtmr3(public_key_pem: str) -> str:
-    """RTMR3 of a node launched with this operator key and no measured policies.
-
-    attestation-go ``runtimemeasure.Seed``: SHA-384(0^48 ‖ SHA-384(anchor)),
-    where the anchor is the exact PEM bytes.
-    """
-    anchor = hashlib.sha384(public_key_pem.encode("ascii")).digest()
-    return hashlib.sha384(bytes(48) + anchor).hexdigest()
-
-
 @dataclass(frozen=True)
 class RootOrigin:
     origin: str
@@ -174,71 +161,44 @@ def parse_root_https_origin(value: Any, label: str) -> RootOrigin:
     return RootOrigin(origin=origin, host=parsed.hostname, port=port)
 
 
-def _load_pin(request: dict[str, Any]) -> _ReleasePin:
-    options = provider_options(request)
-    config = _require_dict(json.loads(options.get("confidential_ai", "null")), "configuration")
-    fields = {
-        name: _require_str(config.get(name), name)
-        for name in ("release", "mrtd", "rtmr1", "rtmr2", "rtmr3", "operator_key_pem", "workload")
-    }
-    for name in ("mrtd", "rtmr1", "rtmr2", "rtmr3"):
-        if not _HEX_48_RE.fullmatch(fields[name]):
-            raise ValueError(f"{_LABEL} {name} must be 96 lowercase hex")
-    key = load_pem_public_key(fields["operator_key_pem"].encode("ascii"))
-    if not isinstance(key, ec.EllipticCurvePublicKey) or not isinstance(key.curve, ec.SECP256R1):
-        raise ValueError(f"{_LABEL} operator key must be P-256 for ES256 routes")
-    if fields["rtmr3"] != operator_key_rtmr3(fields["operator_key_pem"]):
-        raise ValueError(f"{_LABEL} RTMR3 does not equal the operator-key seed")
-    allowlists = config.get("allowlist_sha256")
-    if not isinstance(allowlists, list) or not allowlists or any(
-        not isinstance(v, str) or not _SHA256_TAG_RE.fullmatch(v) for v in allowlists
-    ):
-        raise ValueError(f"{_LABEL} allowlist_sha256 must contain sha256:<64 lowercase hex> pins")
-    models = config.get("accepted_models")
-    if models != ["deepseek-ai/DeepSeek-V4.1-Flash"] or request.get("model_id") not in models:
-        raise ValueError(f"{_LABEL} model is not allowed by accepted_models")
-    if not _WORKLOAD_NAME_RE.fullmatch(fields["workload"]):
-        raise ValueError(f"{_LABEL} workload is invalid")
-    return _ReleasePin(**fields, allowlist_sha256=tuple(allowlists))
+def _load_pin(request: dict[str, Any]) -> _Pins:
+    fields: dict[str, str] = {}
+    allowlists: set[str] = set()
+    prefix = "confidential_ai_accepted_subject:"
+    for option, enabled in provider_options(request).items():
+        if not option.startswith(prefix) or enabled != "true":
+            continue
+        kind, _, value = option[len(prefix):].partition(":")
+        if kind == "c8s-allowlist" and _SHA256_TAG_RE.fullmatch(value):
+            allowlists.add(value)
+            continue
+        if kind in ("tdx-mrtd", "tdx-rtmr1", "tdx-rtmr2", "tdx-rtmr3") and _HEX_48_RE.fullmatch(value):
+            name = kind[4:]
+        elif kind == "c8s-workload" and _WORKLOAD_NAME_RE.fullmatch(value):
+            name = "workload"
+        else:
+            raise ValueError(f"{_LABEL} accepted_subjects contains an invalid pin")
+        if name in fields:
+            raise ValueError(f"{_LABEL} accepted_subjects has duplicate {name} pins")
+        fields[name] = value
+    if set(fields) != {"mrtd", "rtmr1", "rtmr2", "rtmr3", "workload"} or not allowlists:
+        raise ValueError(f"{_LABEL} accepted_subjects requires four measurement pins, workload and allowlist")
+    return _Pins(**fields, allowlist_sha256=tuple(sorted(allowlists)))
 
 
-def _verify_routes(raw: bytes, route_digest: bytes, pin: _ReleasePin, host: str) -> int:
-    """Verify the stored PUT authorization, not a token for the current time.
+def _verify_routes(raw: bytes, route_digest: bytes, host: str) -> int:
+    """Match the published manifest to the digest committed by the attested router.
 
-    As in the reference clients, exp/iat bound its original write authorization
-    to <=300s; an applied manifest remains usable after that token expires.
-    Freshness here comes from the quote's nonce and route_digest commitment.
+    The pinned node image's router verifies manifests with the RTMR3-bound
+    launch operator key; see c8s operator.md#route-manifest. No client key or
+    duplicate signature verification is needed for this baked-node profile.
     """
-    import jwt
-
     envelope = _require_dict(json.loads(raw), "routes envelope")
     manifest_raw = base64.b64decode(
         _require_str(envelope.get("manifest"), "routes manifest"), validate=True
     )
-    digest = hashlib.sha256(manifest_raw).digest()
-    if not hmac.compare_digest(digest, route_digest):
+    if not hmac.compare_digest(hashlib.sha256(manifest_raw).digest(), route_digest):
         raise ValueError(f"{_LABEL} route digest does not match the attested route_digest")
-    token = _require_str(envelope.get("token"), "routes token")
-    try:
-        header = jwt.get_unverified_header(token)
-        if "crit" in header:
-            raise ValueError(f"{_LABEL} routes token has unsupported crit header")
-        claims = jwt.decode(
-            token, pin.operator_key_pem, algorithms=["ES256"],
-            options={
-                "verify_exp": False, "verify_iat": False, "verify_nbf": False,
-                "verify_aud": False, "require": ["iat", "exp", "htm", "htu", "pbh"],
-            },
-        )
-    except jwt.PyJWTError as exc:
-        raise ValueError(f"{_LABEL} route token does not verify under the operator key") from exc
-    iat, exp = claims["iat"], claims["exp"]
-    if (
-        type(iat) is not int or type(exp) is not int or not 0 < exp - iat <= 300
-        or claims["htm"] != "PUT" or claims["htu"] != "/routes"
-        or claims["pbh"] != _b64url(digest)
-    ):
-        raise ValueError(f"{_LABEL} route token does not authorize these manifest bytes")
     manifest = _require_dict(json.loads(manifest_raw), "route manifest")
     if manifest.get("schema") != "c8s.routes/v1":
         raise ValueError(f"{_LABEL} unsupported route manifest schema")
@@ -512,7 +472,7 @@ def _td_report(verified: dict[str, Any]) -> dict[str, str]:
 
 
 def _check_report(
-    verified: dict[str, Any], transcript_digest: bytes, pin: _ReleasePin
+    verified: dict[str, Any], transcript_digest: bytes, pin: _Pins
 ) -> tuple[str, dict[str, str]]:
     """Apply the TCB, debug, report_data, and release-pin policy to the verified quote."""
     tcb_status = verified.get("status")
@@ -530,7 +490,7 @@ def _check_report(
         ("MRTD", "mr_td"), ("RTMR1", "rt_mr1"), ("RTMR2", "rt_mr2"), ("RTMR3", "rt_mr3")
     ):
         if not hmac.compare_digest(report[field], getattr(pin, name.lower())):
-            raise ValueError(f"{_LABEL} {name} does not match reviewed release {pin.release!r}")
+            raise ValueError(f"{_LABEL} {name} does not match configured pin")
     return tcb_status, report
 
 
@@ -630,8 +590,7 @@ async def verify_c8s(request: dict[str, Any]) -> None:
             )
         if allowlist_sha256 not in pin.allowlist_sha256:
             raise ValueError(
-                f"{_LABEL} allowlist {allowlist_sha256} is not accepted for release "
-                f"{pin.release!r}"
+                f"{_LABEL} allowlist {allowlist_sha256} is not in accepted_subjects"
             )
         _check_allowlist(allowlist_raw, workload)
 
@@ -645,7 +604,7 @@ async def verify_c8s(request: dict[str, Any]) -> None:
             raise ValueError(f"{_LABEL} quote failed DCAP verification: {exc}") from exc
         tcb_status, report = _check_report(verified, transcript_digest, pin)
         route_revision = _verify_routes(
-            capture.responses["routes"].body, route_digest, pin, endpoint.host
+            capture.responses["routes"].body, route_digest, endpoint.host
         )
 
         tls_spki = hashlib.sha256(
@@ -673,7 +632,6 @@ async def verify_c8s(request: dict[str, Any]) -> None:
                     "tls_spki_sha256": tls_spki,
                     "serving_leaf_sha256": hashlib.sha256(capture.serving_leaf_der).hexdigest(),
                     "front_door_mode": front_door_mode,
-                    "release_id": pin.release,
                     "mesh_ca_sha256": _sha256_tag(mesh_ca_der),
                     "front_door_workload": workload,
                     "allowlist_sha256": allowlist_sha256,
@@ -684,11 +642,6 @@ async def verify_c8s(request: dict[str, Any]) -> None:
                     "rtmr1": report["rt_mr1"],
                     "rtmr2": report["rt_mr2"],
                     "rtmr3": report["rt_mr3"],
-                    "operator_key_spki_sha256": hashlib.sha256(
-                        load_pem_public_key(pin.operator_key_pem.encode("ascii")).public_bytes(
-                            Encoding.DER, PublicFormat.SubjectPublicKeyInfo
-                        )
-                    ).hexdigest(),
                     "route_digest": route_digest_hex,
                     "route_revision": route_revision,
                     "verification_scope": "front door at verification time",

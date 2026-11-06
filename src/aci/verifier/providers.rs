@@ -554,19 +554,19 @@ impl ConfidentialAiProviderVerifier {
                 "confidential-ai",
                 UpstreamProvider::ConfidentialAi.attestation_scope(),
                 timeout_seconds,
-                cache_ttl_seconds.min(300),
+                cache_ttl_seconds,
             ),
         }
     }
 
-    pub fn with_pins(
-        mut self,
-        pins: &crate::aggregator::upstream_config::ConfidentialAiConfig,
-    ) -> Result<Self, serde_json::Error> {
-        self.verifier = self
-            .verifier
-            .with_option("confidential_ai", serde_json::to_string(pins)?);
-        Ok(self)
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        for subject in subjects {
+            self.verifier = self.verifier.with_option(
+                format!("confidential_ai_accepted_subject:{subject}"),
+                "true",
+            );
+        }
+        self
     }
 
     #[cfg(test)]

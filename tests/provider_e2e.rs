@@ -800,7 +800,6 @@ fn privatemode_upstream_config(base_url: String, verifier_cache_seconds: u64) ->
         chutes_e2ee_discovery_rounds: None,
         chutes_e2ee_discovery_interval_seconds: None,
         zg_chain_rpc_url: None,
-        confidential_ai: None,
         zg_serving_contract: None,
     }
 }
@@ -1014,7 +1013,6 @@ async fn openai_compatible_provider_supports_basic_auth_via_runtime_config() {
             chutes_e2ee_discovery_rounds: None,
             chutes_e2ee_discovery_interval_seconds: None,
             zg_chain_rpc_url: None,
-            confidential_ai: None,
             zg_serving_contract: None,
         }])
         .unwrap();
@@ -1064,7 +1062,6 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
             chutes_e2ee_discovery_rounds: None,
             chutes_e2ee_discovery_interval_seconds: None,
             zg_chain_rpc_url: None,
-            confidential_ai: None,
             zg_serving_contract: None,
         }])
         .unwrap();
@@ -1680,7 +1677,6 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
             chutes_e2ee_discovery_rounds: None,
             chutes_e2ee_discovery_interval_seconds: None,
             zg_chain_rpc_url: None,
-            confidential_ai: None,
             zg_serving_contract: None,
         }])
         .unwrap();
@@ -1771,7 +1767,6 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
             chutes_e2ee_discovery_rounds: None,
             chutes_e2ee_discovery_interval_seconds: None,
             zg_chain_rpc_url: None,
-            confidential_ai: None,
             zg_serving_contract: None,
         }])
         .unwrap();

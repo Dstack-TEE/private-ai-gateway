@@ -40,7 +40,6 @@ fn test_upstream_config(
         chutes_e2ee_discovery_rounds: None,
         chutes_e2ee_discovery_interval_seconds: None,
         zg_chain_rpc_url: None,
-        confidential_ai: None,
         zg_serving_contract: None,
     }
 }
@@ -1066,82 +1065,61 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
 }
 
 #[test]
-fn confidential_ai_requires_complete_consistent_release_pins() {
+fn confidential_ai_requires_complete_well_formed_subjects() {
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../../../tests/fixtures/c8s/v0.16.5.json")).unwrap();
     let config = serde_json::json!([{
         "name": "confidential-ai", "provider": "confidential-ai",
-        "base_url": "https://api.confidential.ai",
-        "models": {"deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-ai/DeepSeek-V4.1-Flash"},
-        "confidential_ai": fixture["pins"],
+        "base_url": "https://api.confidential.ai", "models": {"public": "provider-model"},
+        "accepted_subjects": fixture["accepted_subjects"],
     }]);
     let parse = |value: &serde_json::Value| parse_config_text(&value.to_string());
-    let parsed = parse(&config).unwrap();
-    assert_eq!(
-        parsed[0].provider.attestation_scope(),
-        AttestationScope::PerRouter
-    );
-    assert_eq!(
-        parsed[0].redacted().confidential_ai,
-        parsed[0].confidential_ai
-    );
-    assert_eq!(
-        verification_refresh_seconds(&parsed[0], &runtime_options(UpstreamVerifierMode::None)),
-        Some(240)
-    );
-    for field in [
-        "release",
-        "mrtd",
-        "rtmr1",
-        "rtmr2",
-        "rtmr3",
-        "operator_key_pem",
-        "workload",
-        "allowlist_sha256",
-        "accepted_models",
-    ] {
-        let mut changed = config.clone();
-        changed[0]["confidential_ai"]
-            .as_object_mut()
+    assert!(parse(&config).is_ok());
+    for index in 0..6 {
+        let mut missing = config.clone();
+        missing[0]["accepted_subjects"]
+            .as_array_mut()
             .unwrap()
-            .remove(field);
-        assert!(parse(&changed).is_err(), "missing {field}");
+            .remove(index);
+        assert!(parse(&missing).is_err(), "missing required pin {index}");
+        if index < 5 {
+            let mut duplicate = config.clone();
+            let pin = duplicate[0]["accepted_subjects"][index].clone();
+            duplicate[0]["accepted_subjects"]
+                .as_array_mut()
+                .unwrap()
+                .push(pin);
+            assert!(parse(&duplicate).is_err(), "duplicate pin {index}");
+        }
     }
-    for (field, value) in [
-        ("release", serde_json::json!("")),
-        ("mrtd", serde_json::json!("bad")),
-        ("rtmr1", serde_json::json!("AA".repeat(48))),
-        ("rtmr3", serde_json::json!("00".repeat(48))),
-        ("operator_key_pem", serde_json::json!("not a public key")),
-        ("allowlist_sha256", serde_json::json!([])),
-        ("allowlist_sha256", serde_json::json!(["not a digest"])),
-        (
-            "accepted_models",
-            serde_json::json!(["deepseek-ai/DeepSeek-V4-Flash-0731"]),
-        ),
-        ("workload", serde_json::json!("-invalid")),
+    for pin in [
+        "tdx-mrtd:bad",
+        "tdx-rtmr2:ABC",
+        "c8s-workload:-invalid",
+        "c8s-allowlist:sha256:bad",
+        "unknown:pin",
     ] {
         let mut changed = config.clone();
-        changed[0]["confidential_ai"][field] = value;
-        assert!(parse(&changed).is_err(), "invalid {field}");
+        changed[0]["accepted_subjects"]
+            .as_array_mut()
+            .unwrap()
+            .push(pin.into());
+        assert!(parse(&changed).is_err(), "invalid pin {pin}");
     }
-    for (field, value) in [
-        ("confidential_ai", serde_json::Value::Null),
-        ("verifier_cache_seconds", serde_json::json!(301)),
-        ("verification_refresh_seconds", serde_json::json!(241)),
-        (
-            "base_url",
-            serde_json::json!("https://api.confidential.ai/v1"),
-        ),
-        ("models", serde_json::json!({"public": "unreviewed/model"})),
-        (
-            "models",
-            serde_json::json!({"DeepSeek-V4-Flash-0731": "deepseek-ai/DeepSeek-V4.1-Flash"}),
-        ),
-        ("provider", serde_json::json!("openai-compatible")),
-    ] {
-        let mut changed = config.clone();
-        changed[0][field] = value;
-        assert!(parse(&changed).is_err(), "invalid {field}");
-    }
+    let mut changed = config.clone();
+    changed[0]["base_url"] = "https://api.confidential.ai/v1".into();
+    assert!(parse(&changed).is_err());
+    // Additional allowlist digests and ordinary cache/model configuration use
+    // the same config path as other providers.
+    let mut changed = config;
+    changed[0]["accepted_subjects"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!(format!(
+            "c8s-allowlist:sha256:{}",
+            "00".repeat(32)
+        )));
+    changed[0]["verifier_cache_seconds"] = 600.into();
+    changed[0]["verification_refresh_seconds"] = 300.into();
+    assert!(parse(&changed).is_ok());
 }
