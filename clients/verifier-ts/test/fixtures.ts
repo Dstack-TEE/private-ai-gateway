@@ -126,7 +126,27 @@ export async function makeMeasuredComposeReport(
   appCompose = 'services:\n  gateway:\n    image: demo\n',
 ): Promise<{ report: AttestationReport; composeHash: string }> {
   const composeHash = await sha256Hex(enc.encode(appCompose));
-  const digests = ['11'.repeat(48), '22'.repeat(48)];
+  const names = ['compose-hash', 'system-ready'];
+  const payloads = [composeHash, ''];
+  const events = await Promise.all(
+    names.map(async (event, i) => {
+      const name = enc.encode(event);
+      const payload = fromHex(payloads[i] ?? '');
+      const preimage = new Uint8Array(6 + name.length + payload.length);
+      preimage.set([1, 0, 0, 8, 58]);
+      preimage.set(name, 5);
+      preimage[5 + name.length] = 58;
+      preimage.set(payload, 6 + name.length);
+      return {
+        imr: 3,
+        event_type: 0x08000001,
+        digest: toHex(await sha384(preimage)),
+        event,
+        event_payload: payloads[i],
+      };
+    }),
+  );
+  const digests = events.map((event) => event.digest);
   let rtmr3: Uint8Array = new Uint8Array(48);
   for (const digest of digests) {
     const input = new Uint8Array(96);
@@ -138,10 +158,7 @@ export async function makeMeasuredComposeReport(
   quote.set(rtmr3, 520);
   const report = structuredClone(REPORT) as AttestationReport;
   report.attestation.evidence = {
-    event_log: JSON.stringify([
-      { imr: 3, digest: digests[0], event: 'compose-hash', event_payload: composeHash },
-      { imr: 3, digest: digests[1], event: 'system-ready', event_payload: '' },
-    ]),
+    event_log: JSON.stringify(events),
     app_compose: appCompose,
     quote: toHex(quote),
   };
