@@ -1,17 +1,169 @@
 # Confidential AI Review
 
-Date: 2026-10-27 PDT (round 3).
+Date: 2026-11-05 PST (round 4).
 
 > [!NOTE]
 > This is a dated admission record; see [Documentation conventions](../../README.md#documentation-conventions).
-> Currency check, 2026-10-27 PDT: [round 3](#round-3-2026-10-27-pdt) reviews
-> deployed Confidential Inference `v0.15.15`, which pins c8s `v0.59.1`
-> (`4c916ece`). c8s `v0.74.1` was also read but is not deployed. This corrects
-> the 2026-10-26 currency note: the deployed c8s version is `v0.59.1`, not
-> `v0.74.1`. The [round-2 record](#round-2-2026-10-15-pdt) is retained below.
+> Currency check, 2026-11-05 PST: [round 4](#round-4-2026-11-05-pst) reviews
+> deployed Confidential Inference `v0.16.2`, which pins c8s `v0.80.10`
+> (`cd68ff62`). `v0.16.4` was published on 2026-11-05 but was not yet live.
+> The [round-3](#round-3-2026-10-27-pdt) and
+> [round-2](#round-2-2026-10-15-pdt) records are retained below.
 
 Operator: Inexorable, Inc. d/b/a Confidential AI. Product: Confidential Inference.
 Endpoint: `https://api.confidential.ai`.
+
+## Round 4 (2026-11-05 PST)
+
+Reviewed Confidential Inference [`v0.16.2`](https://github.com/confidential-dot-ai/confidential-inference/releases/tag/v0.16.2)
+(`1791ce2b395ff37fb221ae94b05843e898233c25`, deployed), which pins c8s
+[`v0.80.10`](https://github.com/confidential-dot-ai/C8s/tree/cd68ff62791ffc792ecf45583151a278e7291512)
+(`cd68ff62`) and serves `deepseek-ai/DeepSeek-V4.1-Flash` at revision
+`5254448103b6254fc646dacbca1cbbf20e9216c1`. Also read the `v0.16.4` diff
+(`#271`, `#275`, `#277`, `#278`). The provider reported on 2026-11-03 that
+the round-3 concerns are addressed.
+
+### Verdict
+
+Still **not acceptable**, with one hard reject: a CDS policy write can
+briefly admit an unreviewed worker while a client pinned to the release
+allowlist still verifies (new this round). The provider confirmed it on
+2026-11-06 PST and said the fix ships in the next deploy.
+
+Host server enrollment (round-2 finding 2) is downgraded to residual after
+the provider's 2026-11-06 PST response; see Open Findings. The round-2
+fake-worker path through the static allowlist is closed.
+
+### Live Check (2026-11-05 PST)
+
+- Cosign v3.0.2 returned `Verified OK` for `release-bundle.json` against
+  the `release-bundle.yml@refs/tags/v0.16.2` identity. The bundle binds
+  `allowlist.sha256 = 65306c56…058b`.
+- The raw live `/allowlist` bytes hash to `65306c56…058b`.
+- TEErminator `v0.0.4` returned `Verified` for `attest-lb` with
+  `--image-manifest release-bundle.json`, workload
+  `c8s-router-7210bdeb078b`, the operator key `cea9208d…eb02`
+  (`docs/operator-keys/cea9208dbb615c4e.pem`), `--expected-rtmr3 256e9368…`
+  (the bare seed of that key, recomputed locally), `UpToDate`, and the
+  pinned allowlist. The route manifest is operator-signed.
+- `/allowlist/history` has two entries since boot: version 2, the unsigned
+  platform seed (no application entries), and version 3, the signed
+  release allowlist (2026-10-31 19:21 UTC).
+- `/attestation` returns 401 `missing_signature`; the endpoint was deleted
+  (`67bac14`).
+
+### Resolved or Improved
+
+- **Fake-worker path closed in the allowlist.** `busybox` is gone. No entry
+  mounts a ConfigMap or has `any` mounts. The two nginx entries run the
+  node-image script `/usr/lib/c8s/router-nginx/serve.sh` with args `deny`.
+  The gateway, `sglang-router`, and `inference-pd-0` entries are `exact` on
+  command, args, env, and mounts. The remaining `any` args are on the
+  injected `/c8s get-cert` and `/c8s get-secret` sidecars, with exact
+  emptyDir mounts.
+- **Static routing.** `sglang-router` lists its prefill and decode workers in
+  pinned args (`http://inference-pd-0.inference-pd:8041`–`8044`). Gateway
+  settings, including `routerService`, are in pinned env, and runtime reload
+  was removed (`c8cc7b4`, `4885c6b`, `72229ba`).
+- **Per-pod mesh and sandbox.** Member-pod TCP crosses armTLS, node packet
+  rules deny other egress, and the #608 sandbox is `enforce`
+  (`image-policy.yaml.in:1482`). `fail-closed` with `enforce_existing`
+  kills running containers that a newly applied policy no longer admits.
+- **Usage and logs.** Usage events carry request id, key id, model, outcome,
+  and token counts (`services/gateway/src/usage.rs`). Gateway audit logs
+  carry request id, route, status, and key id (`lib.rs:74`). The collector
+  keeps only `service.name` and redacts bearer tokens. Off-TEE egress is
+  only `172.173.67.102:443` for the gateway and the collector.
+- **Model weights.** `wait-for-model` requires a c8s dm-verity mount and a
+  read-only probe, then hashes every file against a byte manifest whose
+  SHA-256 is pinned in the exact args, at the pinned repository and
+  revision.
+- **Namespace.** The production profile is rendered into the namespace
+  `confidential-inference-staging` (`release/allowlist-policy.json`);
+  `v0.16.4` renames it (#277). This name had no security effect.
+- **Client docs.** `docs/verification.md` on `main` and `v0.16.4` now has a
+  `v0.16.2` profile with the workload, operator key, and RTMR3 (#271).
+- Workers dropped `--trust-remote-code`; non-serving SGLang HTTP routes are
+  removed at build time.
+
+### Open Findings
+
+1. **Host server enrollment (residual).** RKE2 join tokens are plaintext in
+   the signed, unencrypted `launch.yaml` on the `opkeydata` disk (c8s
+   `docs/launch-configuration.md`). The mesh wraps neither `9345` nor
+   `6443`, so a token holder can enroll with no C8s evidence
+   (`docs/operator.md:166-168`), and a server join yields the cluster CA.
+   The provider's position (2026-11-06 PST) is that C8s treats Kubernetes as
+   untrusted. The c8s docs support it: the mesh CA key and CDS secrets live
+   only in CDS memory, never in a Kubernetes object (`docs/guarantees.md`,
+   `docs/security-model.md:89`); policy writes need an operator signature
+   made outside the cluster; and node-local NRI enforcement and packet
+   capture admit only allowlisted code and mesh-CA peers. A rogue server
+   therefore reaches Kubernetes metadata and availability, not plaintext.
+   This rests on documentation review; it was not tested.
+2. **Policy swap behind the front door (hard reject).**
+   - The operator key authorizes `PUT /allowlist` and per-workload writes on
+     CDS. Nodes apply a new document within 5 s.
+   - `measure_policies` is off on the baked node image
+     (`image-policy.yaml.in:1409`). The live RTMR3 is the bare key seed, so
+     evidence carries no policy history.
+   - The client sees only the front door's matched-workload stamp. The front
+     door re-issues when the policy changes after a 1-minute watch plus up
+     to 30 s of jitter (`getcert/run.go:156,581`; router
+     `caWatchInterval: "1m"`).
+   - The front door checks the gateway's stamp (`docs/routes-evidence.md`).
+     Gateway → `sglang-router` → `inference-pd-0` hops admit any mesh-CA
+     leaf (`docs/armtls.md`, "The mesh endpoint profile").
+   - Path: the operator writes a policy that adds an entry. It creates a pod
+     with hostname `inference-pd-0` and subdomain `inference-pd`, or repoints
+     the `inference-pd` Service. That pod receives prompts and writes them to
+     stdout for `pods/log`. Reverting the policy within the watch window
+     kills the pod and leaves the front-door stamp unchanged. The only
+     trace is `/allowlist/history`, which is in-memory CDS state lost on
+     reboot.
+   - This is from source review; it was not exploited.
+3. **Operator RBAC (residual).** `c8s-node-operator` keeps full CRUD on pods,
+   `pods/log`, Services, Endpoints, ConfigMaps, and Secrets in non-system
+   namespaces. Under the pinned allowlist alone, a retarget reaches only
+   allowlisted workloads; this was not tested.
+4. **RTMR3 not in the signed release.** `release-bundle.json` pins MRTD,
+   RTMR1, and RTMR2 only. The operator key and RTMR3 are published in
+   `docs/` on `main`.
+5. **Model alias.** `CI_ROUTER_MODEL_ROUTES` serves the legacy id
+   `deepseek-ai/DeepSeek-V4-Flash-0731` with V4.1 (#268). An adapter must
+   expose only `deepseek-ai/DeepSeek-V4.1-Flash`.
+
+### Requests To The Provider
+
+1. Keep server join tokens out of host-readable launch media, or put
+   `9345`/`6443` behind attested mTLS, and rotate the tokens.
+   *Done when:* the launch disk plus network access cannot complete a join
+   from a non-TEE machine.
+2. Bind every hop that carries plaintext to the front door's allowlist
+   digest: the gateway dials `sglang-router`, and the router dials workers,
+   only to a peer whose leaf names the expected workload under that digest.
+   Alternatively, or in addition, turn on `measurePolicies` so evidence
+   carries the policy history.
+   *Done when:* a policy write followed by a revert either never routes a
+   request to the added workload or leaves evidence that a pinned client
+   rejects.
+3. Put the operator public key or the expected RTMR3 in the signed release
+   bundle.
+
+### Adapter Requirements
+
+- Verify `attest-lb` per lease with the release image manifest, workload,
+  exact RTMR3, `UpToDate`, and the pinned allowlist bytes, as TEErminator
+  does above.
+- Expose only `deepseek-ai/DeepSeek-V4.1-Flash`.
+
+### Not Verified
+
+- Both hard rejects are from source review; neither was exploited.
+- Rekor inclusion was checked only through Cosign's bundle verification.
+- SGLang worker and router stdout was not audited for request content; the
+  operator can read it through `pods/log`. `v0.16.4` #275 adds exported
+  failure diagnostics, which were not reviewed.
 
 ## Round 3 (2026-10-27 PDT)
 
