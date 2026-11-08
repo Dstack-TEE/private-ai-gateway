@@ -80,7 +80,7 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
     assert!(!balance.can_top_up);
     assert_eq!(
         organization_url(Some("research-team")).unwrap(),
-        "https://redpill.ai/research-team"
+        "https://redpill.ai/orgs/research-team"
     );
     for field in ["organization_id", "organization_slug", "can_top_up"] {
         let mut incomplete = data.clone();
@@ -95,7 +95,7 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
             balance.scope.organization_slug.as_deref()
         )
         .unwrap(),
-        "https://redpill.ai/research-team/credits"
+        "https://redpill.ai/orgs/research-team/credits"
     );
     for id in [
         None,
