@@ -594,12 +594,20 @@ GET /v1/aci/receipts/{id}
 
 `{id}` is the `X-Receipt-Id` header value (preferred), or the
 OpenAI-compatible response `id` when the response body contains one.
-`X-Receipt-Id` arrives with the response, so the client holds the id before
-the receipt is queryable. A receipt is finalized when the response
-completes: a streamed response has no in-flight receipt (its hashes cover
-the whole stream). Receipts are retained for a bounded,
+`X-Receipt-Id` reserves an id; the receipt is published only when response
+finalization runs. A streamed response has no in-flight receipt (its hashes
+cover the whole stream). If the HTTP body is abandoned before finalization,
+including on client disconnect, that id can remain permanently unpublished.
+An SSE terminal event, such as `[DONE]`, is not the end of the HTTP body.
+Usage records, billing, and request status do not establish that a receipt
+was issued. In the reference implementation's middleware mode, a provider
+read failure also leaves the receipt unpublished because no complete provider
+draft reaches the finalizer.
+
+Published receipts are retained for a bounded,
 implementation-defined period. Clients SHOULD fetch receipts promptly. An
-unknown or expired id returns `not_found`.
+unavailable id returns `not_found`, including an unpublished, unknown, or
+expired id.
 
 ### 7.2 Document and signature
 

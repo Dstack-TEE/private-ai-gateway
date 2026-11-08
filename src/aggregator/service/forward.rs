@@ -628,6 +628,7 @@ impl AciService {
             self,
             upstream_response.body,
             builder,
+            receipt_id.clone(),
             selected.lease,
             req.requester,
             endpoint_path.to_string(),

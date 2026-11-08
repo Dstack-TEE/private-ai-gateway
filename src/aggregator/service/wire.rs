@@ -289,6 +289,11 @@ impl MiddlewareReceiptJournal {
             .receipt_id
             .clone()
     }
+
+    /// Drop diagnostics must remain safe even when another journal user panicked.
+    pub(super) fn diagnostic_receipt_id(&self) -> Option<String> {
+        self.inner.lock().ok()?.receipt_id.clone()
+    }
 }
 
 pub struct MiddlewareReceiptFinalization {

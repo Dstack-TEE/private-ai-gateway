@@ -20,6 +20,7 @@ use crate::aci::keys::{
 use crate::aci::types::{
     AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
+use crate::aggregator::metrics::ReceiptLookupOutcome;
 use crate::aggregator::service::{
     E2eeRequestContext, E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError,
     CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
@@ -34,8 +35,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
-    unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, invalid_signing_algo_response, receipt_unavailable_response,
+    unknown_downstream_host_response, unsupported_e2ee_response, upstream_config_error_response,
 };
 use super::rejected_body::discard_before_reply;
 use super::util::{
@@ -1093,20 +1094,23 @@ pub(super) async fn aci_receipt(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    const ENDPOINT: &str = "/v1/aci/receipts/{id}";
     let Some(receipt) = state
         .service
         .get_receipt_by_receipt_id(&id)
         .or_else(|| state.service.get_receipt_by_chat_id(&id))
     else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "receipt id (receipt_id or chat_id) not found or expired",
-        );
+        state
+            .service
+            .record_receipt_lookup(ENDPOINT, &id, ReceiptLookupOutcome::LocalMiss);
+        return receipt_unavailable_response();
     };
-    if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
+    if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id, ENDPOINT) {
         return resp;
     }
+    state
+        .service
+        .record_receipt_lookup(ENDPOINT, &id, ReceiptLookupOutcome::Hit);
     // The §7.2 receipt document, served as its stored bytes (any encoding
     // of the same document verifies; ours is the JCS form).
     (
@@ -1192,20 +1196,23 @@ pub(super) async fn receipt_by_chat_id(
     Path(id): Path<String>,
     Query(q): Query<SignatureQuery>,
 ) -> Response {
+    const ENDPOINT: &str = "/v1/signature/{id}";
     let Some(receipt) = state
         .service
         .get_receipt_by_chat_id(&id)
         .or_else(|| state.service.get_receipt_by_receipt_id(&id))
     else {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "receipt id (chat_id or receipt_id) not found or expired",
-        );
+        state
+            .service
+            .record_receipt_lookup(ENDPOINT, &id, ReceiptLookupOutcome::LocalMiss);
+        return receipt_unavailable_response();
     };
-    if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id) {
+    if let Some(resp) = enforce_owner(&state, &headers, &receipt.receipt_id, ENDPOINT) {
         return resp;
     }
+    state
+        .service
+        .record_receipt_lookup(ENDPOINT, &id, ReceiptLookupOutcome::Hit);
     match state
         .service
         .legacy_signature_for_receipt(&receipt, q.signing_algo.as_deref())

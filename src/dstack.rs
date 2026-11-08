@@ -248,6 +248,18 @@ fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, KeyError> {
 }
 
 impl DstackAciProvider {
+    /// Best-effort identity for diagnostics; unavailable outside dstack.
+    pub async fn serving_instance_id(&self) -> Option<String> {
+        // Optional metadata must not hold startup open if the info RPC stalls.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), self.client.info()).await {
+            Ok(Ok(info)) => (!info.instance_id.is_empty()).then_some(info.instance_id),
+            Ok(Err(_)) | Err(_) => {
+                tracing::warn!("dstack instance identity unavailable for diagnostics");
+                None
+            }
+        }
+    }
+
     /// Derive the middleware's prefix-hash HMAC key. It stays inside the TEE,
     /// so the control plane cannot test guessed prefixes against `prefixHash`.
     pub async fn prefix_hash_key(&self) -> Result<[u8; 32], KeyError> {
@@ -475,7 +487,44 @@ fn key_evidence_json(evidence: &KmsKeyEvidence) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_dstack_endpoint;
+    use super::{normalize_dstack_endpoint, DstackAciProvider, DstackAciProviderConfig};
+
+    #[tokio::test]
+    async fn diagnostic_instance_identity_is_optional() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        use serde_json::json;
+
+        for instance_id in [Some("fixture-instance"), Some(""), None] {
+            let app = Router::new()
+                .route("/GetKey", post(|| async {
+                    Json(json!({"key": hex::encode([1; 32]), "signature_chain": []}))
+                }))
+                .route("/Info", post(move || async move {
+                    let status = if instance_id.is_some() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+                    (status, Json(json!({
+                        "app_id": "fixture-app", "instance_id": instance_id.unwrap_or_default(),
+                        "app_cert": "", "app_name": "fixture", "device_id": "",
+                        "key_provider_info": "", "compose_hash": "",
+                        "tcb_info": {"mrtd": "", "rtmr0": "", "rtmr1": "", "rtmr2": "", "rtmr3": "", "compose_hash": "", "device_id": "", "app_compose": "", "event_log": []}
+                    })))
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let provider = DstackAciProvider::new(
+                Some(format!("http://{address}")),
+                DstackAciProviderConfig::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                provider.serving_instance_id().await.as_deref(),
+                instance_id.filter(|id| !id.is_empty())
+            );
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+    }
 
     #[test]
     fn normalizes_unix_scheme_for_dstack_sdk() {

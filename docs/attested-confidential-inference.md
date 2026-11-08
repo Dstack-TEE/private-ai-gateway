@@ -150,8 +150,13 @@ authorizes another. The steps, caching, and re-verification are in
 
 ### 3. After the response
 
-The gateway signs a per-request receipt under a key from its attested keyset.
-The receipt commits to:
+When response finalization runs, the gateway signs a per-request receipt under
+a key from its attested keyset. `X-Receipt-Id` reserves an id before publication.
+If the HTTP body is abandoned before finalization, including on client
+disconnect, the id can remain permanently unpublished. An SSE terminal event
+is not HTTP body completion, and usage records, billing, or request status do
+not prove receipt issuance. In middleware mode, a provider read failure also
+leaves the receipt unpublished. A published receipt commits to:
 
 - the request body the gateway processed;
 - the body forwarded after any gateway rewrite;

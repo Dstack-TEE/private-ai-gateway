@@ -616,7 +616,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         receipt_store,
         config,
         Arc::new(SystemClock),
-    )?;
+    )?
+    .with_serving_instance_id(provider.serving_instance_id().await);
     let session_store = Arc::new(
         JsonlSessionStore::open(&session_log_path, SystemClock.now_secs()).map_err(|err| {
             invalid_input(format!(

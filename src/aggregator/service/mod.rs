@@ -83,6 +83,7 @@ pub struct AciService {
     config: AciServiceConfig,
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
+    serving_instance_id: Option<String>,
     e2ee_replay: RwLock<std::collections::HashMap<E2eeReplayKey, u64>>,
 }
 
@@ -186,6 +187,7 @@ impl AciService {
                 ServiceMetrics::new().map_err(|e| ServiceError::Metrics(e.to_string()))?,
             ),
             e2ee_replay: RwLock::new(std::collections::HashMap::new()),
+            serving_instance_id: None,
         })
     }
 
@@ -193,6 +195,12 @@ impl AciService {
     /// Defaults to an in-memory store, which keeps the prior no-persistence behavior.
     pub fn with_session_store(mut self, session_store: Arc<dyn SessionStore>) -> Self {
         self.session_store = session_store;
+        self
+    }
+
+    /// Attach the optional dstack instance identity to local diagnostics.
+    pub fn with_serving_instance_id(mut self, instance_id: Option<String>) -> Self {
+        self.serving_instance_id = instance_id;
         self
     }
 

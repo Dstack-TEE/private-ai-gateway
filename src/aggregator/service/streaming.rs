@@ -17,7 +17,9 @@ use super::{
 use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
-use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
+use crate::aggregator::metrics::{
+    ReceiptFinalizationOutcome, RequestMode, ServiceMetrics, StreamErrorKind,
+};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
 
 pub(super) struct MiddlewareProviderResponseDraftingStream {
@@ -146,15 +148,17 @@ struct FinalizerShared {
     sse_parser: SseFramingObserver,
     e2ee_transformer: Option<E2eeSseTransformer>,
     request_id: Option<String>,
+    serving_instance_id: Option<String>,
+    polled: bool,
+    content_committed: bool,
+    outcome_recorded: bool,
     upstream_ended: bool,
     finished: bool,
     /// Set once the clean-EOF check has run, so the tail is considered exactly
     /// once however many times the terminal branch is polled.
     error_tail_settled: bool,
-    /// The gateway appended bytes the upstream never sent (a success
-    /// terminator, or a client-visible error).
-    /// The stream feeding this finalizer failed, rather than ending. Nothing is
-    /// signed for it, and nothing buffered may be flushed.
+    /// The stream feeding this finalizer failed, rather than ending. E2EE
+    /// buffers may not be flushed; receipt publication depends on the draft.
     broken: bool,
 }
 
@@ -187,6 +191,10 @@ impl FinalizerShared {
             endpoint_path,
             e2ee_transformer,
             request_id,
+            serving_instance_id: service.serving_instance_id.clone(),
+            polled: false,
+            content_committed: false,
+            outcome_recorded: false,
             upstream_ended: false,
             finished: false,
             error_tail_settled: false,
@@ -276,6 +284,27 @@ impl FinalizerShared {
             lease,
         )
     }
+
+    fn record_outcome(&mut self, outcome: ReceiptFinalizationOutcome, receipt_id: Option<&str>) {
+        if std::mem::replace(&mut self.outcome_recorded, true) {
+            return;
+        }
+        self.metrics
+            .record_receipt_finalization(&self.endpoint_path, outcome);
+        if outcome != ReceiptFinalizationOutcome::Published {
+            tracing::warn!(
+                target: "receipt_finalization",
+                request_id = self.request_id.as_deref(),
+                receipt_id,
+                outcome = outcome.as_str(),
+                terminal_observed = self.sse_parser.saw_terminal(),
+                at_event_boundary = self.sse_parser.at_event_boundary(),
+                upstream_ended = self.upstream_ended,
+                serving_instance_id = self.serving_instance_id.as_deref(),
+                "streaming receipt was not published"
+            );
+        }
+    }
 }
 
 /// Per-stream behavior the shared [`poll_finalizing_stream`] loop needs: access
@@ -284,7 +313,25 @@ impl FinalizerShared {
 trait FinalizingStream {
     fn shared(&mut self) -> &mut FinalizerShared;
     fn poll_inner(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, ServiceError>>>;
-    fn finalize_receipt(&mut self) -> Result<(), ServiceError>;
+    fn finalize_receipt(&mut self) -> Result<ReceiptFinalizationOutcome, ServiceError>;
+    fn receipt_id(&self) -> Option<String>;
+}
+
+fn record_finalization_outcome<F: FinalizingStream>(
+    f: &mut F,
+    outcome: ReceiptFinalizationOutcome,
+) {
+    if !f.shared().outcome_recorded {
+        let receipt_id = f.receipt_id();
+        f.shared().record_outcome(outcome, receipt_id.as_deref());
+    }
+}
+
+fn record_abandoned_stream<F: FinalizingStream>(f: &mut F) {
+    let s = f.shared();
+    if !s.outcome_recorded && (s.polled || s.content_committed) {
+        record_finalization_outcome(f, ReceiptFinalizationOutcome::DroppedBeforeFinalization);
+    }
 }
 
 /// Drive a finalizing stream: hash each cleartext chunk, optionally re-encrypt
@@ -298,6 +345,7 @@ fn poll_finalizing_stream<F: FinalizingStream>(
     if f.shared().finished {
         return Poll::Ready(None);
     }
+    f.shared().polled = true;
 
     loop {
         if f.shared().upstream_ended {
@@ -312,6 +360,10 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                             s.metrics
                                 .record_stream_error(&s.endpoint_path, StreamErrorKind::E2ee);
                             s.finished = true;
+                            record_finalization_outcome(
+                                f,
+                                ReceiptFinalizationOutcome::FinalizeFailed,
+                            );
                             return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
                         }
                     },
@@ -338,6 +390,7 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                         s.metrics
                             .record_stream_error(&s.endpoint_path, StreamErrorKind::E2ee);
                         s.finished = true;
+                        record_finalization_outcome(f, ReceiptFinalizationOutcome::FinalizeFailed);
                         return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
                     }
                 };
@@ -347,16 +400,20 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                 }
             }
             f.shared().finished = true;
-            // A broken stream is signed too: §7.4's `response.returned` covers
-            // the exact bytes emitted on the wire — including the synthesized
-            // error tail — and E2EE v2 §7's truncation check needs precisely this
-            // signature. A receipt attests bytes, not completeness.
+            // ReceiptFinalizingStream can sign after a read failure, covering
+            // the emitted bytes and any synthesized tail. In middleware mode
+            // the provider draft stays in its drafting stream until EOF, so a
+            // provider read failure leaves no draft to sign here.
             return match f.finalize_receipt() {
-                Ok(()) => Poll::Ready(None),
+                Ok(outcome) => {
+                    record_finalization_outcome(f, outcome);
+                    Poll::Ready(None)
+                }
                 Err(err) => {
                     let s = f.shared();
                     s.metrics
                         .record_stream_error(&s.endpoint_path, StreamErrorKind::ReceiptFinalize);
+                    record_finalization_outcome(f, ReceiptFinalizationOutcome::FinalizeFailed);
                     Poll::Ready(Some(Err(err)))
                 }
             };
@@ -375,6 +432,10 @@ fn poll_finalizing_stream<F: FinalizingStream>(
                             s.metrics
                                 .record_stream_error(&s.endpoint_path, StreamErrorKind::E2ee);
                             s.finished = true;
+                            record_finalization_outcome(
+                                f,
+                                ReceiptFinalizationOutcome::FinalizeFailed,
+                            );
                             return Poll::Ready(Some(Err(ServiceError::E2ee(err))));
                         }
                     };
@@ -421,6 +482,12 @@ pub(super) struct MiddlewareResponseFinalizingStream {
 
 impl Unpin for MiddlewareResponseFinalizingStream {}
 
+impl Drop for MiddlewareResponseFinalizingStream {
+    fn drop(&mut self) {
+        record_abandoned_stream(self);
+    }
+}
+
 impl Stream for MiddlewareResponseFinalizingStream {
     type Item = Result<Bytes, ServiceError>;
 
@@ -439,9 +506,13 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
         self.inner.as_mut().poll_next(cx)
     }
 
-    fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
+    fn receipt_id(&self) -> Option<String> {
+        self.journal.diagnostic_receipt_id()
+    }
+
+    fn finalize_receipt(&mut self) -> Result<ReceiptFinalizationOutcome, ServiceError> {
         let Some(mut draft) = self.journal.take() else {
-            return Ok(());
+            return Ok(ReceiptFinalizationOutcome::NoDraft);
         };
         if self.shared.sse_parser.chat_id().is_some() {
             draft.builder.set_chat_id(self.shared.sse_parser.chat_id());
@@ -457,7 +528,7 @@ impl FinalizingStream for MiddlewareResponseFinalizingStream {
             draft.request_mode,
             draft.response_model.as_deref(),
         );
-        Ok(())
+        Ok(ReceiptFinalizationOutcome::Published)
     }
 }
 
@@ -473,17 +544,20 @@ impl MiddlewareResponseFinalizingStream {
         request_id: Option<String>,
         is_sse: bool,
     ) -> Self {
+        let content_committed = journal.early_response_keyset().is_some();
+        let mut shared = FinalizerShared::new(
+            service,
+            requester,
+            endpoint_path,
+            e2ee_transformer,
+            request_id,
+            is_sse,
+        );
+        shared.content_committed = content_committed;
         Self {
             inner,
             journal,
-            shared: FinalizerShared::new(
-                service,
-                requester,
-                endpoint_path,
-                e2ee_transformer,
-                request_id,
-                is_sse,
-            ),
+            shared,
         }
     }
 }
@@ -491,11 +565,18 @@ impl MiddlewareResponseFinalizingStream {
 pub(super) struct ReceiptFinalizingStream {
     inner: UpstreamBodyStream,
     builder: Option<ReceiptBuilder>,
+    receipt_id: String,
     session_lease: Option<SessionLease>,
     shared: FinalizerShared,
 }
 
 impl Unpin for ReceiptFinalizingStream {}
+
+impl Drop for ReceiptFinalizingStream {
+    fn drop(&mut self) {
+        record_abandoned_stream(self);
+    }
+}
 
 impl Stream for ReceiptFinalizingStream {
     type Item = Result<Bytes, ServiceError>;
@@ -520,7 +601,11 @@ impl FinalizingStream for ReceiptFinalizingStream {
         }
     }
 
-    fn finalize_receipt(&mut self) -> Result<(), ServiceError> {
+    fn receipt_id(&self) -> Option<String> {
+        Some(self.receipt_id.clone())
+    }
+
+    fn finalize_receipt(&mut self) -> Result<ReceiptFinalizationOutcome, ServiceError> {
         let mut builder = self.builder.take().ok_or(ReceiptError::EmptyReceipt)?;
         builder.set_chat_id(self.shared.sse_parser.chat_id());
         builder.set_upstream_verified_model_id(self.shared.sse_parser.model_id());
@@ -540,7 +625,7 @@ impl FinalizingStream for ReceiptFinalizingStream {
             self.shared.sse_parser.model_id().as_deref(),
         );
 
-        Ok(())
+        Ok(ReceiptFinalizationOutcome::Published)
     }
 }
 
@@ -550,6 +635,7 @@ impl ReceiptFinalizingStream {
         service: &AciService,
         inner: UpstreamBodyStream,
         builder: ReceiptBuilder,
+        receipt_id: String,
         session_lease: Option<SessionLease>,
         requester: Option<ReceiptOwner>,
         endpoint_path: String,
@@ -560,6 +646,7 @@ impl ReceiptFinalizingStream {
         Self {
             inner,
             builder: Some(builder),
+            receipt_id,
             session_lease,
             shared: FinalizerShared::new(
                 service,

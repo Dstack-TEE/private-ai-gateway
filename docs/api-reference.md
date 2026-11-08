@@ -211,15 +211,24 @@ The normal provider-backed response path adds:
 
 | Header | Meaning |
 | --- | --- |
-| `X-Receipt-Id` | Preferred identifier for the signed receipt. |
+| `X-Receipt-Id` | Reserved receipt id; preferred lookup identifier after publication. |
 | `X-E2EE-Applied` | `true` when the gateway encrypted the response under ACI or legacy E2EE, otherwise `false` on normal completed inference responses. |
 | `X-E2EE-Version` | E2EE wire version when encryption was applied. |
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
 For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
-is complete and stores the receipt after the finalizer observes the terminal
-body. An upstream non-2xx returned before streaming begins is buffered and does
-not receive a receipt.
+is complete. The header reserves an id; publication happens only when response
+finalization runs. If the HTTP body is abandoned before finalization, including
+on client disconnect, the id can remain permanently unpublished. An SSE
+terminal event such as `[DONE]` is not the end of the HTTP body. Usage records,
+billing, and request status do not prove that a receipt was issued. In
+middleware mode, a provider read failure leaves no complete provider draft for
+the finalizer and the receipt stays unpublished. Lookup returns `404 not_found`
+with `receipt unavailable` for a local miss or a wrong owner; that response
+does not identify why the receipt is unavailable.
+
+An upstream non-2xx returned before streaming begins is buffered and does not
+receive a receipt.
 
 In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
 `200` before the upstream answers, and that response omits `X-Receipt-Id`; see
@@ -362,6 +371,16 @@ session reference.
 
 [Admin API](configuration-reference.md#admin-api) defines the admin response,
 validation, and authentication statuses.
+
+Receipt diagnostics expose two counters with fixed `endpoint` and `outcome`
+labels. `private_ai_gateway_receipt_finalizations_total` counts streaming
+outcomes: `published`, `finalize_failed`, `no_draft`, and
+`dropped_before_finalization`. An unpolled stream that has not committed content
+does not count as abandoned. `private_ai_gateway_receipt_lookups_total` counts
+`hit`, `local_miss`, `owner_mismatch`, and `unauthorized` on the canonical and
+legacy lookup routes. A local miss describes only the serving instance's store.
+Diagnostic logs include the dstack serving instance id when available; lookup
+logs hash the id instead of logging caller-supplied values.
 
 ## Middleware failover behavior
 
