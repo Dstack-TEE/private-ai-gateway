@@ -32,7 +32,7 @@ pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Resul
     let slug = validated_scope_slug(scope_slug)?;
     let (base, page) = match provider {
         ServiceProvider::Phala => ("https://cloud.phala.com", "billing"),
-        ServiceProvider::Redpill => ("https://redpill.ai", "credits"),
+        ServiceProvider::Redpill => ("https://redpill.ai/orgs", "credits"),
         ServiceProvider::Custom => {
             return Err("Billing is only available for Phala and RedPill".into())
         }
@@ -51,7 +51,7 @@ pub const fn api_key_page(provider: ServiceProvider) -> Option<&'static str> {
 
 pub fn organization_url(organization_slug: Option<&str>) -> Result<String, String> {
     let slug = validated_scope_slug(organization_slug)?;
-    Ok(crate::endpoint("https://redpill.ai", &[slug])?.into())
+    Ok(crate::endpoint("https://redpill.ai/orgs", &[slug])?.into())
 }
 
 fn validated_scope_slug(slug: Option<&str>) -> Result<&str, String> {
