@@ -413,7 +413,8 @@ no-route result, or the summary after the candidate chain failed.
 Streaming and cancellation do not erase accounting:
 
 - a client disconnect before the first upstream byte produces status `499`,
-  names the route in flight, and omits `ttftMs`;
+  names the route in flight, carries `client_disconnected`, and omits `ttftMs`,
+  including while the forward is pending after early commit;
 - a gateway-enforced connect or read deadline produces status `504` for the
   attempt and request outcome;
 - attempts already completed during failover are reported even if the client
@@ -429,6 +430,12 @@ intermediate cancellation report. Named protocol errors retain their failure
 when bridged or sanitized, even when followed by a terminal event. Usage in
 multiline SSE data is read as one payload. Invalid UTF-8 in a recognized SSE field
 is an upstream transport failure.
+
+If receipt signing or persistence fails at EOF, that owner emits one `502`
+report with `errorSource: gateway`, `errorMessage: downstream_finalizer_failed`
+and the usage already observed. It does not emit a success report first. The
+upstream-response metric still records the source's EOF, and the publication
+failure increments the receipt-finalize stream-error metric.
 
 `errorMessage` takes one of these values:
 

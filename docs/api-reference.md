@@ -253,16 +253,22 @@ produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments.
 
 Protocol event names and `[DONE]` data are matched exactly, including whitespace.
 Known control names that contradict the payload type fail the upstream stream.
-A bridge emits its destination's error and terminal events for an upstream error;
-the terminal cannot turn that failure into a successful usage report. Multiline
+A bridge uses the protocol meaning assigned at ingress and emits its destination's
+error and terminal events for an upstream error. Failure remains part of the
+response outcome even if a later stage filters the record; the terminal cannot
+turn it into a successful usage report. Multiline
 JSON data is interpreted and metered once as one payload.
 
 Application blocks are limited to 16 MiB. A clean EOF between events retains the
 existing completion policy: Chat gets a missing `data: [DONE]` marker, while
 Messages and Responses receive no fabricated success terminal. Legacy Anthropic
 completion conversion emits exactly one typed `data: [DONE]` marker. A body that
-explicitly declares a non-SSE content type follows the JSON path and gets no SSE
-heartbeat, blank-line suffix or sentinel. Streaming E2EE still requires SSE.
+explicitly declares a non-SSE content type follows an unbilled byte path: valid
+JSON objects receive identity rewriting and sanitization, while invalid JSON and
+non-object bodies pass through. It gets no SSE blank-line suffix or sentinel.
+If early commit already emitted a heartbeat before upstream headers arrived,
+that comment precedes the non-SSE body. Normal non-SSE responses have no heartbeat.
+Streaming E2EE still requires SSE.
 
 Receipt `response.received` hashes the provider adapter's application bytes before
 framing normalization or payload edits. `response.returned` hashes the exact bytes
