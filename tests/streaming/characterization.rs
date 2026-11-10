@@ -1,0 +1,553 @@
+//! Exact entity-byte and settlement snapshots, recorded against 0edde219.
+//! Run with UPDATE_STREAMING_CORPUS=1 only when intentionally recording a baseline.
+use crate::common;
+
+use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use axum::{routing::post, Json, Router};
+use bytes::Bytes;
+use futures_util::{task::AtomicWaker, FutureExt, Stream, StreamExt};
+use serde_json::{json, Value};
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
+
+use super::*;
+use crate::aci::keys::verify_receipt_signature;
+use crate::aci::receipt::receipt_signing_input;
+use crate::aci::upstream::{
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
+};
+use crate::middleware::errors::Surface;
+use crate::middleware::request_transform::Endpoint;
+use crate::middleware::{CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey};
+use crate::streaming_test_support::FixedInputs;
+
+#[derive(Default)]
+struct Gate {
+    eof: AtomicBool,
+    waker: AtomicWaker,
+    headers: Notify,
+}
+
+struct CheckpointStream {
+    chunks: VecDeque<Bytes>,
+    gate: Arc<Gate>,
+}
+
+impl Stream for CheckpointStream {
+    type Item = Result<Bytes, UpstreamError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(bytes) = self.chunks.pop_front() {
+            return Poll::Ready(Some(Ok(bytes)));
+        }
+        self.gate.waker.register(cx.waker());
+        if self.gate.eof.load(Ordering::Acquire) {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[derive(Default)]
+struct TrackingSessions {
+    inner: crate::aggregator::session_store::InMemorySessionStore,
+    id: Mutex<Option<String>>,
+}
+impl crate::aggregator::session_store::SessionStore for TrackingSessions {
+    fn get_session(
+        &self,
+        id: &str,
+        now: u64,
+    ) -> Option<crate::aggregator::session::AttestedSession> {
+        self.inner.get_session(id, now)
+    }
+    fn current_or_seal(
+        &self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+        seal: &mut dyn FnMut() -> std::io::Result<crate::aggregator::session::AttestedSession>,
+    ) -> std::io::Result<crate::aggregator::session_store::SessionLease> {
+        let lease = self
+            .inner
+            .current_or_seal(fingerprint, retention_until, now, seal)?;
+        *self.id.lock().unwrap() = Some(lease.session_id().to_string());
+        Ok(lease)
+    }
+    fn extend_retention(
+        &self,
+        lease: &crate::aggregator::session_store::SessionLease,
+        deadline: u64,
+    ) -> std::io::Result<()> {
+        self.inner.extend_retention(lease, deadline)
+    }
+}
+
+struct Backend {
+    source: Vec<u8>,
+    content_type: &'static str,
+    gate: Arc<Gate>,
+    early: bool,
+}
+
+#[async_trait]
+impl UpstreamBackend for Backend {
+    fn name(&self) -> &str {
+        "characterization"
+    }
+    fn url_origin(&self) -> Option<&str> {
+        Some("https://upstream.test")
+    }
+    async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        Ok(UpstreamResponse {
+            status_code: 200,
+            body: self.source.clone(),
+            headers: HashMap::from([("content-type".into(), self.content_type.into())]),
+            served_instance_id: None,
+        })
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _: &crate::aci::receipt::UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.forward_prepared(req).await
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        _: PreparedUpstreamRequest,
+        _: &crate::aci::receipt::UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if self.early {
+            self.gate.headers.notified().await;
+        }
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers: HashMap::from([("content-type".into(), self.content_type.into())]),
+            body: Box::pin(CheckpointStream {
+                chunks: self.source.chunks(7).map(Bytes::copy_from_slice).collect(),
+                gate: self.gate.clone(),
+            }),
+            served_instance_id: None,
+        })
+    }
+}
+
+struct Verifier;
+#[async_trait]
+impl UpstreamVerifier for Verifier {
+    async fn verify(
+        &self,
+        req: UpstreamVerificationRequest,
+    ) -> crate::aci::receipt::UpstreamVerifiedEvent {
+        common::event_from_request(&req, crate::aci::receipt::VerificationResult::Verified)
+    }
+}
+
+struct Case {
+    name: String,
+    endpoint: Endpoint,
+    source: String,
+    format: &'static str,
+    buffered: bool,
+    early: bool,
+    disconnect: bool,
+    e2ee: bool,
+    non_sse: bool,
+    lease_handoff: bool,
+}
+
+impl Case {
+    fn new(name: &str, endpoint: Endpoint, source: &str, format: &'static str) -> Self {
+        Self {
+            name: name.into(),
+            endpoint,
+            source: source.into(),
+            format,
+            buffered: false,
+            early: false,
+            disconnect: false,
+            e2ee: false,
+            non_sse: false,
+            lease_handoff: false,
+        }
+    }
+}
+
+async fn capture(case: &Case) -> Value {
+    let _fixed = FixedInputs::enter();
+    let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let path = match case.endpoint {
+        Endpoint::Messages => MESSAGES_PATH,
+        Endpoint::CreateModelResponse => RESPONSES_PATH,
+        Endpoint::Complete => COMPLETIONS_PATH,
+        _ => CHAT_COMPLETIONS_PATH,
+    };
+    let candidate = if case.endpoint == Endpoint::CreateModelResponse
+        && case.name == "native_responses"
+    {
+        json!({"routeId":"fixture:model", "format":case.format, "supportedEndpoints":[RESPONSES_PATH]})
+    } else {
+        json!({"routeId":"fixture:model", "format":case.format})
+    };
+    let pre = json!({"allow":true,"candidates":[candidate],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}});
+    let app = Router::new()
+        .route(
+            "/consult/pre",
+            post(move || {
+                let pre = pre.clone();
+                async move { Json(pre) }
+            }),
+        )
+        .route(
+            "/consult/post",
+            post(move |Json(body): Json<Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(body).unwrap();
+                    axum::http::StatusCode::OK
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let gate = Arc::new(Gate::default());
+    let sessions = Arc::new(TrackingSessions::default());
+    let clock = Arc::new(common::admission::TestClock(
+        std::sync::atomic::AtomicU64::new(1_700_000_000),
+    ));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(common::StaticKeyProvider::default()),
+            Arc::new(common::StubQuoter::default()),
+            Arc::new(Backend {
+                source: case.source.as_bytes().to_vec(),
+                content_type: if case.non_sse || case.buffered {
+                    "application/json"
+                } else {
+                    "text/event-stream"
+                },
+                gate: gate.clone(),
+                early: case.early,
+            }),
+            Arc::new(Verifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            clock.clone(),
+        )
+        .unwrap()
+        .with_session_store(sessions.clone()),
+    );
+    let config = MiddlewareConfig {
+        control_url: format!("http://{addr}"),
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: Some(if case.early { 1 } else { 0 }),
+        send_request_features: Some(false),
+        tee_only_domains: vec![],
+    };
+    let mw = Middleware::new(PrefixHashKey::new([7; 32]), &config).unwrap();
+    let params = match case.endpoint {
+        Endpoint::CreateModelResponse => {
+            json!({"model":"fixture-model","input":"hi","stream":!case.buffered})
+        }
+        Endpoint::Complete => {
+            json!({"model":"fixture-model","prompt":"hi","stream":!case.buffered})
+        }
+        _ => {
+            json!({"model":"fixture-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":!case.buffered})
+        }
+    };
+    let e2ee = case.e2ee.then(|| E2eeRequestContext {
+        version: "2".into(),
+        algo: crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM.into(),
+        aad_mode: wire::E2eeAadMode::AciV2,
+        request_model: "fixture-model".into(),
+        client_public_key_hex: crate::aci::e2ee::x25519_public_key_hex(
+            &crate::aci::e2ee::x25519_secret_key_from_bytes(&[0x37; 32]).unwrap(),
+        ),
+        nonce: Some("01".repeat(32)),
+        timestamp: Some(1_700_000_000),
+    });
+    let response = mw
+        .handle_completion(
+            &service,
+            CompletionInput {
+                audio_form: None,
+                upload_permit: None,
+                endpoint: case.endpoint,
+                endpoint_path: path,
+                surface: if case.endpoint == Endpoint::Messages {
+                    Surface::Anthropic
+                } else {
+                    Surface::Openai
+                },
+                received_body: serde_json::to_vec(&params).unwrap().into(),
+                params,
+                api_key_hash: Some("fixture-key-hash".into()),
+                requester: None,
+                e2ee,
+                aci_required: false,
+                aci_session_ids: vec![],
+                request_id: "req-fixture".into(),
+                user_model: Some("fixture-model".into()),
+                stream: !case.buffered,
+                tee_only: false,
+            },
+        )
+        .await;
+    let status = response.status().as_u16();
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    if case.early {
+        // The initial comment is emitted before forwarding resolves.
+        wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+        gate.headers.notify_one();
+    }
+    while let Some(Some(chunk)) = body.next().now_or_never() {
+        wire.extend_from_slice(&chunk.unwrap());
+    }
+    let buffered_report = if case.buffered {
+        Some(
+            tokio::time::timeout(Duration::from_secs(3), reports.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    if case.lease_handoff {
+        clock.set(1_700_003_601);
+        assert!(
+            service
+                .get_attested_session(sessions.id.lock().unwrap().as_deref().unwrap())
+                .is_some(),
+            "in-flight source must own its lease"
+        );
+    }
+    let before = json!({"receipt":service.get_receipt_by_receipt_id("rcpt-characterization").is_some(),"report":buffered_report.is_some()});
+    if case.disconnect {
+        drop(body);
+    } else {
+        gate.eof.store(true, Ordering::Release);
+        gate.waker.wake();
+        while let Some(chunk) = body.next().await {
+            wire.extend_from_slice(&chunk.unwrap());
+        }
+    }
+    let report = match buffered_report {
+        Some(report) => report,
+        None => tokio::time::timeout(Duration::from_secs(3), reports.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    };
+    let mut all_reports = vec![report];
+    while let Ok(report) = reports.try_recv() {
+        all_reports.push(report);
+    }
+    if case.e2ee {
+        let value: Value = String::from_utf8_lossy(&wire)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l.strip_prefix("data: ")?).ok())
+            .next()
+            .unwrap();
+        let aad=crate::aci::digest::jcs_bytes(&json!({"purpose":"aci.e2ee.response.v2","algo":crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM,"model":"fixture-model","id":"req-fixture","field":"choices.0.delta.content","nonce":"01".repeat(32),"ts":1_700_000_000})).unwrap();
+        let secret = crate::aci::e2ee::x25519_secret_key_from_bytes(&[0x37; 32]).unwrap();
+        let ciphertext = value["choices"][0]["delta"]["content"].as_str().unwrap();
+        assert_eq!(
+            crate::aci::e2ee::decrypt_x25519_with_secret_key(&secret, ciphertext, &aad).unwrap(),
+            b"hi"
+        );
+        assert!(crate::aci::e2ee::decrypt_x25519_with_secret_key(
+            &secret,
+            ciphertext,
+            b"tampered AAD"
+        )
+        .is_err());
+    }
+    if case.lease_handoff {
+        assert!(
+            service
+                .get_attested_session(sessions.id.lock().unwrap().as_deref().unwrap())
+                .is_some(),
+            "receipt handoff extends the lease retention"
+        );
+    }
+    let receipt = service.get_receipt_by_receipt_id("rcpt-characterization");
+    let (receipt, signature_valid) = receipt.map_or((Value::Null, false), |r| {
+        let value = r.document_json().unwrap();
+        let key = service
+            .keyset()
+            .receipt_signing_keys
+            .into_iter()
+            .find(|k| k.key_id == r.key_id)
+            .unwrap();
+        let valid = verify_receipt_signature(
+            &key,
+            &receipt_signing_input(&value).unwrap(),
+            &hex::decode(r.signature_hex).unwrap(),
+        );
+        (value, valid)
+    });
+    server.abort();
+    let _ = server.await;
+    json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports})
+}
+
+async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
+    let _fixed = FixedInputs::enter();
+    let service = AciService::new(
+        Arc::new(common::StaticKeyProvider::default()),
+        Arc::new(common::StubQuoter::default()),
+        Arc::new(Backend {
+            source: vec![],
+            content_type: "text/event-stream",
+            gate: Arc::new(Gate::default()),
+            early: false,
+        }),
+        Arc::new(InMemoryReceiptStore::default()),
+        AciServiceConfig::for_test(),
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+    .unwrap();
+    let mut builder = crate::aci::receipt::ReceiptBuilder::new(
+        "rcpt-characterization".into(),
+        None,
+        Some("fixture-model".into()),
+        service.workload_keyset_digest(),
+        CHAT_COMPLETIONS_PATH.into(),
+        "POST".into(),
+        1_700_000_000,
+    );
+    builder.add_request_received(b"{}").unwrap();
+    builder.add_request_forwarded(b"{}").unwrap();
+    builder.add_response_received(source.as_bytes()).unwrap();
+    let draft = MiddlewareReceiptDraft {
+        session_lease: None,
+        receipt_id: "rcpt-characterization".into(),
+        builder,
+        endpoint_path: CHAT_COMPLETIONS_PATH.into(),
+        request_mode: crate::aggregator::metrics::RequestMode::Buffered,
+        response_model: None,
+    };
+    let ctx = encrypted.then(|| E2eeRequestContext {
+        version: "2".into(),
+        algo: crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM.into(),
+        aad_mode: wire::E2eeAadMode::AciV2,
+        request_model: "fixture-model".into(),
+        client_public_key_hex: crate::aci::e2ee::x25519_public_key_hex(
+            &crate::aci::e2ee::x25519_secret_key_from_bytes(&[0x37; 32]).unwrap(),
+        ),
+        nonce: Some("01".repeat(32)),
+        timestamp: Some(1_700_000_000),
+    });
+    let result = service
+        .finalize_middleware_receipt(
+            draft,
+            source.as_bytes().to_vec(),
+            Some("text/event-stream"),
+            None,
+            ctx,
+        )
+        .unwrap();
+    let receipt = result.receipt.document_json().unwrap();
+    let signature_valid = verify_receipt_signature(
+        &service.keyset().receipt_signing_keys[0],
+        &receipt_signing_input(&receipt).unwrap(),
+        &hex::decode(result.receipt.signature_hex).unwrap(),
+    );
+    json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid})
+}
+
+#[tokio::test]
+async fn exact_wire_characterization_corpus() {
+    const CHAT:&str="data: {\"id\":\"upstream-id\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n";
+    let mut cases = vec![
+        Case::new("native_chat", Endpoint::ChatComplete, CHAT, "openai"),
+        Case::new("chat_messages", Endpoint::Messages, CHAT, "openai"),
+        Case::new(
+            "chat_responses",
+            Endpoint::CreateModelResponse,
+            CHAT,
+            "openai",
+        ),
+    ];
+    let mut lease = Case::new("lease_handoff", Endpoint::ChatComplete, CHAT, "openai");
+    lease.lease_handoff = true;
+    cases.push(lease);
+    let mut e2ee = Case::new("e2ee_chat", Endpoint::ChatComplete, CHAT, "openai");
+    e2ee.e2ee = true;
+    cases.push(e2ee);
+    let mut early = Case::new("early_commit", Endpoint::ChatComplete, CHAT, "openai");
+    early.early = true;
+    cases.push(early);
+    let mut disconnect = Case::new(
+        "partial_usage_disconnect",
+        Endpoint::ChatComplete,
+        CHAT,
+        "openai",
+    );
+    disconnect.disconnect = true;
+    cases.push(disconnect);
+    let mut buffered = Case::new(
+        "buffered_json",
+        Endpoint::ChatComplete,
+        r#"{"id":"upstream-id","model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#,
+        "openai",
+    );
+    buffered.buffered = true;
+    cases.push(buffered);
+    let mut non_sse = Case::new(
+        "declared_non_sse",
+        Endpoint::ChatComplete,
+        r#"{"id":"upstream-id","model":"upstream-model","choices":[]}"#,
+        "openai",
+    );
+    non_sse.non_sse = true;
+    cases.push(non_sse);
+    let messages="event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    for (name, endpoint) in [
+        ("native_messages", Endpoint::Messages),
+        ("messages_chat", Endpoint::ChatComplete),
+        ("messages_responses", Endpoint::CreateModelResponse),
+    ] {
+        cases.push(Case::new(name, endpoint, messages, "anthropic"));
+    }
+    cases.push(Case::new("legacy_completion",Endpoint::Complete,"data: {\"log_id\":\"upstream-id\",\"model\":\"upstream-model\",\"completion\":\"hi\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\n","anthropic"));
+    cases.push(Case::new("native_responses",Endpoint::CreateModelResponse,"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n","openai"));
+    for (name, source) in crate::aci::upstream::characterization_provider_sources().await {
+        cases.push(Case::new(name, Endpoint::ChatComplete, &source, "openai"));
+    }
+    let mut actual = Vec::new();
+    for case in cases {
+        actual.push(capture(&case).await);
+    }
+    actual.push(capture_buffered_sse(CHAT, false).await);
+    actual.push(capture_buffered_sse(CHAT, true).await);
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/streaming_wire.json");
+    if std::env::var_os("UPDATE_STREAMING_CORPUS").is_some() {
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&actual).unwrap()),
+        )
+        .unwrap();
+    } else {
+        let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(Value::Array(actual), expected);
+    }
+}

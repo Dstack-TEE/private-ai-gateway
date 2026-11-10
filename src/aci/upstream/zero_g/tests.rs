@@ -666,3 +666,13 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
     rewritten["max_tokens"] = 4096.into();
     assert!(open_request(&fixture.broker.secret, &rewritten).is_none());
 }
+
+pub(crate) async fn characterization_source() -> String {
+    Fixture::new(Mode::Ok)
+        .await
+        .stream()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect()
+}

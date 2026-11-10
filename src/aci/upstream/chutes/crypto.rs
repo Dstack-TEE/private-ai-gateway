@@ -372,3 +372,28 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+pub(crate) async fn characterization_source() -> String {
+    use futures_util::StreamExt;
+    let (sk, pk) = MlKem768::generate_keypair();
+    let (ct, shared) = pk.encapsulate();
+    let key = chutes_derive_key(shared.as_slice(), ct.as_slice(), CHUTES_INFO_STREAM).unwrap();
+    let plaintext = br#"data: {"id":"chutes-fixture","model":"fixture-model","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
+    let nonce = [0x31; 12];
+    let mut sealed = nonce.to_vec();
+    sealed.extend(chacha_encrypt(&key, &nonce, plaintext).unwrap());
+    let envelope = format!("data: {}\n\ndata: {}\n\ndata: {{\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}}}\n\ndata: [DONE]\n\n", json!({"e2e_init":BASE64.encode(ct.as_slice())}), json!({"e2e":BASE64.encode(sealed)}));
+    let chunks: Vec<_> = envelope
+        .as_bytes()
+        .chunks(7)
+        .map(|b| Ok(Bytes::copy_from_slice(b)))
+        .collect();
+    let mut stream =
+        ChutesE2eeDecryptingStream::new(Box::pin(futures_util::stream::iter(chunks)), sk);
+    let mut result = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        result.extend_from_slice(&chunk.unwrap());
+    }
+    String::from_utf8(result).unwrap()
+}

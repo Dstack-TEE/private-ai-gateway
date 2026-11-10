@@ -690,3 +690,6 @@ fn chutes_binding_matches(
                 .eq_ignore_ascii_case(public_key_sha256)
     })
 }
+
+#[cfg(test)]
+pub(super) use crypto::characterization_source;

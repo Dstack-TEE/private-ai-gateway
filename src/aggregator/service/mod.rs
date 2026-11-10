@@ -336,3 +336,7 @@ fn validate_keyset(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/streaming/characterization.rs"]
+mod characterization;

@@ -289,3 +289,11 @@ pub trait UpstreamBackend: Send + Sync {
         )))
     }
 }
+
+#[cfg(test)]
+pub(crate) async fn characterization_provider_sources() -> [(&'static str, String); 2] {
+    [
+        ("chutes_envelope", chutes::characterization_source().await),
+        ("zero_g_envelope", zero_g::characterization_source().await),
+    ]
+}

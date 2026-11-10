@@ -920,7 +920,7 @@ async fn run_inner(
                                 // so record the client-visible failure here.
                                 if meter_settled.load(Ordering::Relaxed) {
                                     let mut report = late_failure.clone();
-                                    report.duration_ms = started.elapsed().as_millis() as u64;
+                                    report.duration_ms = response_transform::elapsed_ms(started);
                                     spawn_report(&late_failure_control, report);
                                 }
                                 None
@@ -1303,7 +1303,7 @@ fn build_early_streaming_response(
                     let attempt_index = in_flight.as_ref().map_or(0, |a| a.attempt_index);
                     let selected_route = in_flight.map(|a| a.route_id);
                     let mut report = late_failure.clone();
-                    report.duration_ms = started.elapsed().as_millis() as u64;
+                    report.duration_ms = response_transform::elapsed_ms(started);
                     report.attempt_index = Some(attempt_index);
                     report.selected_route_id = selected_route;
                     spawn_report(&late_failure_control, report);
@@ -1499,7 +1499,7 @@ impl Meter {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint_path.to_string(),
             status: 0,
-            duration_ms: self.started.elapsed().as_millis() as u64,
+            duration_ms: response_transform::elapsed_ms(self.started),
             ttft_ms: None,
             is_streaming: Some(false),
             attempt_index: Some(0),

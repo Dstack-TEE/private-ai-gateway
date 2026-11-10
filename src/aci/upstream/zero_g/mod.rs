@@ -415,3 +415,6 @@ fn is_empty(value: &Value) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) use tests::characterization_source;

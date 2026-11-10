@@ -159,7 +159,7 @@ impl StreamReport {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint.clone(),
             status: metered_status(outcome, self.upstream_status, failure.status),
-            duration_ms: self.started.elapsed().as_millis() as u64,
+            duration_ms: response_transform::elapsed_ms(self.started),
             ttft_ms,
             is_streaming: Some(true),
             attempt_index: Some(self.attempt_index),
@@ -429,7 +429,7 @@ impl MeterStream {
                     // comment (`:`-prefixed) split across chunks can't have its
                     // tail fragment counted as content.
                     if self.ttft_ms.is_none() && !line.trim().is_empty() && !line.starts_with(':') {
-                        self.ttft_ms = Some(self.report.started.elapsed().as_millis() as u64);
+                        self.ttft_ms = Some(response_transform::elapsed_ms(self.report.started));
                     }
                     // SSE allows `data:{...}` as well as `data: {...}` (at most
                     // one space after the colon is stripped). Match the field, not

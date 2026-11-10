@@ -1,0 +1,1283 @@
+[
+  {
+    "name": "native_chat",
+    "wire": "data: {\"id\":\"req-fixture\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:9f6c6c2ae3483fef6f490e6498bbde7919f9435641aa96ce63d8bf63d726d093",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:9f6c6c2ae3483fef6f490e6498bbde7919f9435641aa96ce63d8bf63d726d093",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "ca2aeda4f41b97b418b4be28461f47557858ae30aff764c5f4c04fc2445e6f0bf76d661bfd137ee7d9510ad422d0d0e2bc63ec60bb61afd064a0c68667350800",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "chat_messages",
+    "wire": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"req-fixture\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cost\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "wire_hash": "sha256:02a01619fbb1fa9de92ac189ba8aab8126c506445a722216064a6c2de88e920c",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "upstream-id",
+      "endpoint": "/v1/messages",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:02a01619fbb1fa9de92ac189ba8aab8126c506445a722216064a6c2de88e920c",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "fefb3b978164b3fba4a343408539975e24485644c953e78a038afc79675751a1dbc734ab590d3c5cf17d439b6b066669fe72773c27e73d0e66522379e0d27307",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/messages",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 3
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "chat_responses",
+    "wire": "event: response.created\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"in_progress\",\"incomplete_details\":null,\"error\":null,\"output\":[],\"usage\":null},\"type\":\"response.created\",\"sequence_number\":0}\n\nevent: response.in_progress\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"in_progress\",\"incomplete_details\":null,\"error\":null,\"output\":[],\"usage\":null},\"type\":\"response.in_progress\",\"sequence_number\":1}\n\nevent: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]},\"type\":\"response.output_item.added\",\"sequence_number\":2}\n\nevent: response.content_part.added\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]},\"type\":\"response.content_part.added\",\"sequence_number\":3}\n\nevent: response.output_text.delta\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\",\"logprobs\":[],\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\nevent: response.output_text.done\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"text\":\"hi\",\"logprobs\":[],\"type\":\"response.output_text.done\",\"sequence_number\":5}\n\nevent: response.content_part.done\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]},\"type\":\"response.content_part.done\",\"sequence_number\":6}\n\nevent: response.output_item.done\ndata: {\"output_index\":0,\"item\":{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]}]},\"type\":\"response.output_item.done\",\"sequence_number\":7}\n\nevent: response.completed\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"completed\",\"incomplete_details\":null,\"error\":null,\"output\":[{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":5,\"cost\":8}},\"type\":\"response.completed\",\"sequence_number\":8}\n\n",
+    "wire_hash": "sha256:1c2a777c7f0f17c76eab8f7efa5606c8f1c1b16797cb9a52b360dbf3209e09e6",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "upstream-id",
+      "endpoint": "/v1/responses",
+      "event_log": [
+        {
+          "body_hash": "sha256:71ab1f4efdda4c3cc4e35dbb587bd6d98858e0fc0853b00ac356f4744b3d2693",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:94b1b546f6c32db0fd12055b4d2f6de1a034f56900c8eaabfe64ce67504a5dea",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:94b1b546f6c32db0fd12055b4d2f6de1a034f56900c8eaabfe64ce67504a5dea",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:1c2a777c7f0f17c76eab8f7efa5606c8f1c1b16797cb9a52b360dbf3209e09e6",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "878fb59d11ac5f1a97b1747dc5a5b87e4e8a07ab573d4f396d55af17957072dcd1b2adc855e55c8505990776eb53c3b9f814dadef6f82b90c710b0a24d74710c",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/responses",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "lease_handoff",
+    "wire": "data: {\"id\":\"req-fixture\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:9f6c6c2ae3483fef6f490e6498bbde7919f9435641aa96ce63d8bf63d726d093",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:9f6c6c2ae3483fef6f490e6498bbde7919f9435641aa96ce63d8bf63d726d093",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "ca2aeda4f41b97b418b4be28461f47557858ae30aff764c5f4c04fc2445e6f0bf76d661bfd137ee7d9510ad422d0d0e2bc63ec60bb61afd064a0c68667350800",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "e2ee_chat",
+    "wire": "data: {\"id\":\"req-fixture\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"f13fef3efa9598a2a23fc756bf688fe8bbd7f6cf9528bbaef3b4442688f0ab312929292929292929292929295f9102c3516d3212580fb8be8c8c2c161608\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:fd64ca1c47f00319b7701b6ab996d8c22748ea2cf7ea04e29b7188afb5856458",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:fd64ca1c47f00319b7701b6ab996d8c22748ea2cf7ea04e29b7188afb5856458",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "cbf0332217356b83fc756c2c2322b03e565f5a33dd8f88a9368a8517bd8a5418c9b4237867e399b6a8c07da50f4ae3950baabef1454a23c64d35bf916347dc0a",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "early_commit",
+    "wire": ": PROCESSING\n\ndata: {\"id\":\"req-fixture\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:3e383fdea291eda3a36cc0f0cd970f378e04f4edd08c292b64ba84502ee8ec1f",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:3e383fdea291eda3a36cc0f0cd970f378e04f4edd08c292b64ba84502ee8ec1f",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "bc141dcb88891bf96a2fea8bdc5fff2a5693aae6a5894962f5c1186f5450469d4168359a925e089c158c225d458c2f5bdf4e3107d129d1070efcc94058b2970b",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "partial_usage_disconnect",
+    "wire": "data: {\"id\":\"req-fixture\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:9f6c6c2ae3483fef6f490e6498bbde7919f9435641aa96ce63d8bf63d726d093",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": null,
+    "signature_valid": false,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 499,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "buffered_json",
+    "wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}",
+    "wire_hash": "sha256:3edca9cf7519ed64351f828c272ed32956d5b8d64ac0836545ea057deaec82cc",
+    "source_hash": "sha256:11c3ae5df382ef14427885c4eb57fdb117b941d7ffa2392dd01be3bc0ea17510",
+    "status": 200,
+    "before_eof": {
+      "receipt": true,
+      "report": true
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:50812f56584bedddc3fbf69a9ab404c1d66e0f3c33ffa9643d6b14321a876fc1",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:50812f56584bedddc3fbf69a9ab404c1d66e0f3c33ffa9643d6b14321a876fc1",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:50812f56584bedddc3fbf69a9ab404c1d66e0f3c33ffa9643d6b14321a876fc1",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:11c3ae5df382ef14427885c4eb57fdb117b941d7ffa2392dd01be3bc0ea17510",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:3edca9cf7519ed64351f828c272ed32956d5b8d64ac0836545ea057deaec82cc",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "66e317029331cc8590064762f73c8d0b4f31727c89678c07873a0f025ddbe6dbe4142ab567cf46c766b64e0ccd6740e90ea375e70db3c3c1edf4416efb326b0f",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "isStreaming": false,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "declared_non_sse",
+    "wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[]}\n\n",
+    "wire_hash": "sha256:da28e348f438dc3f0e2debd756f9978a36d51fb0c5d13daaf769fd2eeecd23bf",
+    "source_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:da28e348f438dc3f0e2debd756f9978a36d51fb0c5d13daaf769fd2eeecd23bf",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "590082245907246364f0a962d136fd1e05ada3daa45dd3f9082833f57ef565e4a78ff7b4d94639eb8c68f16e6074acf711f71a6129e99a6659f12964bd656305",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": null,
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "native_messages",
+    "wire": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3,\"cost\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    "wire_hash": "sha256:f13d7802b9fbc667c396b627837f4a5642aa5368247d6200e2c53353b4c618ed",
+    "source_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/messages",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:f13d7802b9fbc667c396b627837f4a5642aa5368247d6200e2c53353b4c618ed",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "3bfa454cfa851d59e792beddf340c591dffee9e58e72bc27d2f03737a699eec74886078c73bec7b21d8cebf334edd138a2e21c9b30ceffa42d49d536cefe5102",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/messages",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 3
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "messages_chat",
+    "wire": "data: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"delta\":{\"content\":\"\"},\"index\":0,\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"index\":0,\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":3,\"prompt_tokens\":2,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:b72beeb10f70ac38f052c84f2ec33e18623917203fcd40c291409e0d14046c93",
+    "source_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:b72beeb10f70ac38f052c84f2ec33e18623917203fcd40c291409e0d14046c93",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "f895c4b6fc643c7b25b89c49bd019ad97ec9c49851d2198352cf9c2c1dcd1b920de9681c6d548ccbcce1f0f24501f0a55cab2d71bc75444b85b8c3781012fc0f",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 2,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "messages_responses",
+    "wire": "event: response.created\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"in_progress\",\"incomplete_details\":null,\"error\":null,\"output\":[],\"usage\":null},\"type\":\"response.created\",\"sequence_number\":0}\n\nevent: response.in_progress\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"in_progress\",\"incomplete_details\":null,\"error\":null,\"output\":[],\"usage\":null},\"type\":\"response.in_progress\",\"sequence_number\":1}\n\nevent: response.output_item.added\ndata: {\"output_index\":0,\"item\":{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]},\"type\":\"response.output_item.added\",\"sequence_number\":2}\n\nevent: response.content_part.added\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]},\"type\":\"response.content_part.added\",\"sequence_number\":3}\n\nevent: response.output_text.delta\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\",\"logprobs\":[],\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\nevent: response.output_text.done\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"text\":\"hi\",\"logprobs\":[],\"type\":\"response.output_text.done\",\"sequence_number\":5}\n\nevent: response.content_part.done\ndata: {\"item_id\":\"msg_req-fixture_0\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]},\"type\":\"response.content_part.done\",\"sequence_number\":6}\n\nevent: response.output_item.done\ndata: {\"output_index\":0,\"item\":{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]}]},\"type\":\"response.output_item.done\",\"sequence_number\":7}\n\nevent: response.completed\ndata: {\"response\":{\"store\":false,\"id\":\"req-fixture\",\"object\":\"response\",\"created_at\":1700000000,\"model\":\"fixture-model\",\"status\":\"completed\",\"incomplete_details\":null,\"error\":null,\"output\":[{\"id\":\"msg_req-fixture_0\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":5,\"cost\":8}},\"type\":\"response.completed\",\"sequence_number\":8}\n\n",
+    "wire_hash": "sha256:1c2a777c7f0f17c76eab8f7efa5606c8f1c1b16797cb9a52b360dbf3209e09e6",
+    "source_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/responses",
+      "event_log": [
+        {
+          "body_hash": "sha256:71ab1f4efdda4c3cc4e35dbb587bd6d98858e0fc0853b00ac356f4744b3d2693",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:96a2038a2a2be63364622b24048e99e94b8ba00f232485ff73ce57b79c79bc99",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:96a2038a2a2be63364622b24048e99e94b8ba00f232485ff73ce57b79c79bc99",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:a5f92b46b4df39815bf51e941b70e473369b75e30a7dcf6c75891e16aafeb055",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:1c2a777c7f0f17c76eab8f7efa5606c8f1c1b16797cb9a52b360dbf3209e09e6",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "c8ce3ef20ddb4a757666b47f137700f49c95ce1aa70643b14a1717332f4432a7425cbb2c1fe2ca6adb69c8a479e3a06d17899163c9f6375aa6721b1bdf172206",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/responses",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 2,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "legacy_completion",
+    "wire": "data: {\"id\":\"req-fixture\",\"object\":\"text_completion\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"text\":\"hi\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop_sequence\"}]}\n\n[DONE]\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:6ba7f8c6afc5e3aa91808cbffb090b0c4fc916be86794b2e5471880bebe2b7c1",
+    "source_hash": "sha256:d90e770df325af312dcafbcaad93ef1dff01f1bcb60615e387b4fdf32f338a6d",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:4e917ca0883ddd705870653704447814ba496549db3d84b16733865e834e98e0",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:041380f1deb1038dab20c8fa7f3a02b229cac2d9aa17a968c038b75bb5da2686",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:041380f1deb1038dab20c8fa7f3a02b229cac2d9aa17a968c038b75bb5da2686",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:d90e770df325af312dcafbcaad93ef1dff01f1bcb60615e387b4fdf32f338a6d",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:6ba7f8c6afc5e3aa91808cbffb090b0c4fc916be86794b2e5471880bebe2b7c1",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "9ab27f6d871499f78025822bb17c3080dc15d6f319a77c898f845c3609ab47fc5bf8315ea70375cb30c2f46879882c181e8fee8f703bd7f04976c6fa64464d0d",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": null,
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "native_responses",
+    "wire": "event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5,\"cost\":8}}}\n\n",
+    "wire_hash": "sha256:7748b162037e5ae391488f00df1ff2f07c7aab221cfccea55b355b11fb22aad7",
+    "source_hash": "sha256:0612cbf075a2ea539f3fcd0338f2fec84c98c898133a20fe71bb691cdafb42a0",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/responses",
+      "event_log": [
+        {
+          "body_hash": "sha256:71ab1f4efdda4c3cc4e35dbb587bd6d98858e0fc0853b00ac356f4744b3d2693",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:71ab1f4efdda4c3cc4e35dbb587bd6d98858e0fc0853b00ac356f4744b3d2693",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:71ab1f4efdda4c3cc4e35dbb587bd6d98858e0fc0853b00ac356f4744b3d2693",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:0612cbf075a2ea539f3fcd0338f2fec84c98c898133a20fe71bb691cdafb42a0",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:7748b162037e5ae391488f00df1ff2f07c7aab221cfccea55b355b11fb22aad7",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "0e3c05c1bb3fd2c3f71bab8dfd16fae8e1d48d903ce7583b91eb9ddacb7c5dba86bc9a238a7d059f3e727a60efd19451c9f24f833608fd7175ddee8d7be7480c",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/responses",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "chutes_envelope",
+    "wire": "data: {\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:759af78ecbfcc4ed6515e711d364841ed9f4cc94a8c218dd8ea64c045ecde9fc",
+    "source_hash": "sha256:ce0c950db0ae34407ecdd4fa7fd8d8936c72c95ba17da19a1b89a6972cc3c328",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:ce0c950db0ae34407ecdd4fa7fd8d8936c72c95ba17da19a1b89a6972cc3c328",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:759af78ecbfcc4ed6515e711d364841ed9f4cc94a8c218dd8ea64c045ecde9fc",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "0d0da7c65f94979ae170806b441b29111231749053d09c15d4b39fb9f540bea34ddc9b1cbe0a26a17759b45b96e8b0569057ddb921c9b930920448d81d86d401",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "zero_g_envelope",
+    "wire": "data: {\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"o\"}}]}\n\ndata: {\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"k\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"usage\":{\"total_tokens\":5,\"cost\":0},\"choices\":[]}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:b84770fd997917d4f4c856a8138bd2c4ed6c43a9f4d0119a339a2c94917951a6",
+    "source_hash": "sha256:a3bb5a9da0ca36a43f0995a2607e93dc458f51a92864c2fb4411c05450133bb4",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "glm-5.3",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:a3bb5a9da0ca36a43f0995a2607e93dc458f51a92864c2fb4411c05450133bb4",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:b84770fd997917d4f4c856a8138bd2c4ed6c43a9f4d0119a339a2c94917951a6",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "02d2368642bc8f0f1266b94b21cf27f6a4bd665ed3fbbf50c559921ee01293b0c4fc034114c5925a1a6b2187c69110f5686e141a667fdcdd04cc267427a03308",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "buffered_sse",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "wire_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "wire": "data: {\"id\":\"upstream-id\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "upstream-id",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "type": "request.forwarded"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "13a17df39f35bcc7eb7f2fc4e37144e8638c1c0232e5e904a11f8f0c86deea819f7402465c695f5d7a41a6d6438f3143123a6ddec603d63925db80669e11290c",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true
+  },
+  {
+    "name": "buffered_sse_e2ee",
+    "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+    "wire_hash": "sha256:1daf12badcb78d7096bac8bce9f8d68f132691c457ee9d5c6dfb779011becb84",
+    "wire": "data: {\"id\":\"upstream-id\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"f13fef3efa9598a2a23fc756bf688fe8bbd7f6cf9528bbaef3b4442688f0ab312929292929292929292929295f91f10f7907a15aa71fcac387a97c8632fb\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "upstream-id",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "type": "request.forwarded"
+        },
+        {
+          "body_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:1daf12badcb78d7096bac8bce9f8d68f132691c457ee9d5c6dfb779011becb84",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "0dc3dfd7b2f4fdd273a38deb7385bbe950f3844b67ade876fda6542dc042109975b416c6f0721410af7e95c8b12040fc0165b7d7e8641f38eb2a7bf291e42d0e",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true
+  }
+]

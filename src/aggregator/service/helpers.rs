@@ -20,6 +20,10 @@ pub(super) async fn collect_upstream_body(
 }
 
 pub(super) fn generate_receipt_id() -> String {
+    #[cfg(test)]
+    if crate::streaming_test_support::active() {
+        return "rcpt-characterization".to_string();
+    }
     let mut rng = rand::rngs::OsRng;
     let mut bytes = [0u8; 12];
     rng.fill_bytes(&mut bytes);
