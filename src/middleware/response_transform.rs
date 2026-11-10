@@ -648,7 +648,7 @@ fn canonicalize_systemone(body: &mut Value) {
 /// The Messages surface is left as the upstream (or the format conversion)
 /// shaped it, except for the in-band `error` event, which carries
 /// upstream-controlled kind and prose. It is rebuilt in the shape
-/// `stream_error_tail` emits for this protocol, dropping everything beside
+/// the response owner emits for this protocol, dropping everything beside
 /// `type`/`message` by construction; the rebuilt event keeps `type: "error"`
 /// and a non-null `error` member, which the meter and the framing observer
 /// classify a failed stream by.
@@ -747,7 +747,7 @@ fn canonicalize_responses(body: &mut Value) {
 /// Rebuild a Responses in-band `error` event as the gateway's own.
 ///
 /// This is the one non-`response.*` event with a gateway-side canonical shape:
-/// `stream_error_tail` already emits it when the gateway ends a broken
+/// The response owner already emits it when the gateway ends a broken
 /// Responses stream itself, and a client should not be able to tell the two
 /// apart. Two upstream shapes arrive — the documented flat event, and an
 /// `error` object nested under the envelope — and both collapse into that one

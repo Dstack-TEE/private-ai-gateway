@@ -11,7 +11,7 @@
 use serde_json::{json, Value};
 
 use crate::aggregator::service::{MESSAGES_PATH, RESPONSES_PATH};
-use crate::error_payload::{envelope, error_type, upstream_message, Surface};
+use crate::error_payload::{error_type, upstream_message, Surface};
 
 /// Streaming protocol of a downstream endpoint. Narrower than [`Surface`],
 /// which groups all OpenAI-compatible endpoints together: the chat/completions
@@ -95,77 +95,6 @@ pub fn responses_error_event(
         event["sequence_number"] = json!(sequence_number);
     }
     event
-}
-
-/// SSE bytes that end a broken response stream visibly to the client.
-///
-/// A broken stream is ended gracefully rather than failed — a body `Err` would
-/// make hyper abort the connection — but a graceful end alone reads as a
-/// complete response. These events say it failed, in the shape the protocol
-/// defines. Only the chat stream has a `[DONE]` sentinel to follow with; on the
-/// other two the error event is itself terminal.
-///
-/// The message is the generic 502 text; the underlying error is only logged.
-pub fn stream_error_tail(
-    protocol: SseProtocol,
-    request_id: Option<&str>,
-    last_sequence_number: Option<u64>,
-) -> String {
-    stream_error_event(protocol, 502, request_id, last_sequence_number)
-}
-
-/// Like [`stream_error_tail`], but for a chosen status. Used where the gateway
-/// commits a 200 stream before the upstream answers (the pre-first-byte
-/// keep-alive) and then has to deliver the real failure in-band: the client
-/// reads `code`/`type` as the status the request would otherwise have had.
-pub fn stream_error_event(
-    protocol: SseProtocol,
-    status: u16,
-    request_id: Option<&str>,
-    last_sequence_number: Option<u64>,
-) -> String {
-    let message = upstream_message(status);
-    // The leading blank line dispatches an event written but not yet dispatched
-    // (a `data:` line with no blank line after it), so these start their own
-    // event instead of folding into it as extra `data:` lines. Two newlines,
-    // not one: after a `\r` a single `\n` completes a CRLF, which is one line
-    // terminator, and the next `data:` line would join the same event. Against
-    // an already dispatched stream the extra blank lines are ignored.
-    match protocol {
-        SseProtocol::AnthropicMessages => {
-            let body = envelope(
-                Surface::Anthropic,
-                error_type(Surface::Anthropic, status),
-                message,
-                request_id,
-            );
-            format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
-        }
-        SseProtocol::OpenaiResponses => {
-            // The protocol numbers its events, so the error continues the
-            // sequence rather than restarting it. A caller with no view of the
-            // stream has none to continue from. The code is the one the
-            // gateway emits for any unattributed failure: a null here would
-            // let a client tell a gateway-detected break from an
-            // upstream-reported error, which are deliberately
-            // indistinguishable.
-            let body = responses_error_event(
-                Some(responses_gateway_code(status)),
-                message,
-                None,
-                Some(last_sequence_number.map_or(0, |last| last.saturating_add(1))),
-            );
-            format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
-        }
-        SseProtocol::OpenaiChat => {
-            let body = json!({ "error": chat_gateway_error(status) });
-            format!("\n\ndata: {}\n\ndata: [DONE]\n\n", json_str(&body))
-        }
-    }
-}
-
-fn json_str(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
 }
 
 /// Protocol meaning is assigned at application ingress and survives all edits.

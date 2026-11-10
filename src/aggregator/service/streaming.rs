@@ -20,7 +20,7 @@ use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
-use crate::middleware::sse::{Accounting, MeterEvents, StreamReport};
+use crate::middleware::sse::Accounting;
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, EventKind, EventMeaning,
@@ -529,37 +529,31 @@ pub(super) fn direct_response(
     Box::pin(owner)
 }
 
-/// A standalone metered response uses the same response owner as receipt paths.
-/// Kept as the existing public byte-stream entry point for service consumers.
-pub struct MeterStream(ResponseOwner);
-impl MeterStream {
-    pub fn new(inner: ServiceResponseStream, report: StreamReport, protocol: SseProtocol) -> Self {
-        let accounting = Accounting::new(report, None);
-        let events = Box::pin(MeterEvents::new(
-            Box::pin(DecodedStream::new(inner, Some(protocol))),
-            accounting.handle.clone(),
-        ));
-        Self(ResponseOwner::new(
-            ResponseInput::Events(events),
-            Some(accounting),
-            None,
-            String::new(),
-            Some(protocol),
-            None,
-        ))
-    }
-}
-impl Stream for MeterStream {
-    type Item = Result<Bytes, ServiceError>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().0).poll_next(cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::wire::E2eeAadMode;
     use super::*;
+
+    #[test]
+    fn generated_error_frames_use_canonical_framing_without_leading_blank_lines() {
+        for protocol in [
+            SseProtocol::OpenaiChat,
+            SseProtocol::AnthropicMessages,
+            SseProtocol::OpenaiResponses,
+        ] {
+            let bytes: Vec<_> = error_records(protocol, 502, Some("fixture"), None)
+                .iter()
+                .flat_map(|record| serialize(record).unwrap())
+                .collect();
+            assert!(!bytes.starts_with(b"\n"));
+            assert!(bytes.ends_with(b"\n\n"));
+            if protocol == SseProtocol::OpenaiChat {
+                assert_eq!(bytes, b"data: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n");
+            } else {
+                assert!(bytes.starts_with(b"event: error\ndata: "));
+            }
+        }
+    }
 
     #[tokio::test]
     async fn e2ee_only_passes_the_exact_done_marker_and_discards_pending_data() {
@@ -605,3 +599,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/streaming/accounting.rs"]
+mod accounting_tests;

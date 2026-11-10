@@ -3,7 +3,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -25,7 +24,7 @@ use super::types::{ErrorClass, ErrorSource, PostReport, SpendMode, TenantIdentit
 
 /// Terminal classification of a stream: how the response body actually ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+enum Outcome {
     Completed,
     Failed,
     ClientClosed,
@@ -94,7 +93,7 @@ impl StreamFailure {
 }
 
 /// Fixed fields for the post-stream usage report; `settle` fills in the rest.
-pub struct StreamReport {
+pub(crate) struct StreamReport {
     pub control: ControlClient,
     pub request_id: String,
     pub endpoint: String,
@@ -110,11 +109,6 @@ pub struct StreamReport {
     pub prefix_hash: Option<String>,
     pub session_kind: Option<SessionKind>,
     pub started: Instant,
-    /// A standalone consumer may mark an externally initiated gateway abort.
-    /// The response owner attributes abandonment to that failure when set.
-    pub downstream_abort: Arc<AtomicBool>,
-    /// Set once the response owner emits its sole terminal report.
-    pub settled: Arc<AtomicBool>,
 }
 
 impl StreamReport {
@@ -125,18 +119,7 @@ impl StreamReport {
         ttft_ms: Option<u64>,
         failure: StreamFailure,
     ) {
-        self.settled.store(true, Ordering::Relaxed);
-        // A Failed settle caused by the downstream finalizer is a gateway
-        // failure, not the upstream's: attribute it so health scoring does not
-        // count it against the serving route.
-        let downstream =
-            matches!(outcome, Outcome::Failed) && self.downstream_abort.load(Ordering::Relaxed);
-        let (error_source, error_class) = if downstream {
-            (
-                Some(ErrorSource::Gateway),
-                Some(ErrorClass::DownstreamFinalizerFailed),
-            )
-        } else if matches!(outcome, Outcome::Failed) {
+        let (error_source, error_class) = if outcome == Outcome::Failed {
             (failure.source, failure.class)
         } else {
             (None, None)
@@ -269,12 +252,7 @@ impl Drop for Accounting {
                 state.report.selected_route_id = in_flight.map(|a| a.route_id);
             }
         }
-        let outcome = if state.report.downstream_abort.load(Ordering::Relaxed) {
-            Outcome::Failed
-        } else {
-            Outcome::ClientClosed
-        };
-        state.emit(outcome);
+        state.emit(Outcome::ClientClosed);
     }
 }
 impl AccountingState {
@@ -495,5 +473,3 @@ impl Stream for KeepAliveStream {
         }
     }
 }
-
-pub use crate::aggregator::service::MeterStream;

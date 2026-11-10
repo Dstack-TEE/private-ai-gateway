@@ -18,7 +18,7 @@ pub mod reasoning;
 pub mod request_features;
 pub mod request_transform;
 pub mod response_transform;
-pub mod sse;
+pub(crate) mod sse;
 pub mod stream_transform;
 pub mod types;
 

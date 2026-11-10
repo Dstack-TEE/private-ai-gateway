@@ -1408,45 +1408,23 @@ impl Stream for EventTransformStream {
     }
 }
 
-/// Public byte-stream API adapter. Application middleware uses
-/// `EventTransformStream` directly and keeps typed events between its stages.
-#[cfg(test)]
-struct SseTransformStream {
-    wire: crate::sse::SerializedStream,
-}
-
-#[cfg(test)]
-impl SseTransformStream {
-    pub fn new(inner: ServiceResponseStream, transform: StreamTransform) -> Self {
-        let protocol = match &transform {
-            StreamTransform::AnthropicToOpenaiChat => SseProtocol::AnthropicMessages,
-            StreamTransform::SanitizeResponse(_, endpoint) => match endpoint {
-                Endpoint::Messages => SseProtocol::AnthropicMessages,
-                Endpoint::CreateModelResponse => SseProtocol::OpenaiResponses,
-                _ => SseProtocol::OpenaiChat,
-            },
-            _ => SseProtocol::OpenaiChat,
-        };
-        let decoded = Box::pin(crate::sse::DecodedStream::new(inner, Some(protocol)));
-        Self {
-            wire: crate::sse::SerializedStream::new(Box::pin(EventTransformStream::new(
-                decoded, transform,
-            ))),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Stream for SseTransformStream {
-    type Item = Result<Bytes, ServiceError>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().wire).poll_next(cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wire(
+        stream: impl Stream<Item = Result<Record, ServiceError>> + Send + 'static,
+    ) -> ServiceResponseStream {
+        Box::pin(stream.filter_map(|item| {
+            std::future::ready(match item {
+                Ok(record) => match crate::sse::serialize(&record) {
+                    Ok(bytes) if bytes.is_empty() => None,
+                    result => Some(result),
+                },
+                Err(error) => Some(Err(error)),
+            })
+        }))
+    }
 
     fn decode_record(text: &str) -> Record {
         crate::sse::decode_buffered(Bytes::from(format!("{text}\n\n")), None)
@@ -1500,8 +1478,9 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(
             collected.last().expect("stream yielded items").is_err(),
             "a malformed event ends the stream as an error, not a clean EOF"
@@ -1534,8 +1513,9 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1566,8 +1546,9 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1594,8 +1575,9 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1683,8 +1665,9 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert_eq!(collected.len(), 1, "no payload, only the failure");
         assert!(collected[0].is_err(), "and not a clean EOF");
     }
@@ -1705,7 +1688,8 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let converted = Box::pin(SseTransformStream::new(inner, messages_transform()));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let converted = Box::pin(EventTransformStream::new(inner, messages_transform()));
         let identity = Arc::new(ResponseIdentity {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
@@ -1713,11 +1697,11 @@ mod tests {
         // Messages surface: canonicalize touches only an in-band `error` event
         // on this unschematized surface, so the anthropic events here are left
         // intact and only id/model are rewritten.
-        let sanitized = SseTransformStream::new(
+        let sanitized = EventTransformStream::new(
             converted,
             StreamTransform::SanitizeResponse(identity, Endpoint::Messages),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
 
         let wire: String = collected
             .into_iter()
@@ -1743,15 +1727,16 @@ mod tests {
         );
         let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
         let identity = Arc::new(ResponseIdentity {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
         });
-        let sanitized = SseTransformStream::new(
+        let sanitized = EventTransformStream::new(
             inner,
             StreamTransform::SanitizeResponse(identity, Endpoint::CreateModelResponse),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
         let wire: String = collected
             .into_iter()
             .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
@@ -1954,11 +1939,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(chunks));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
         let identity = Arc::new(ResponseIdentity {
             request_id: "resp_fixture".to_string(),
             user_model: Some("gpt-test".to_string()),
         });
-        let stream = SseTransformStream::new(
+        let stream = EventTransformStream::new(
             inner,
             StreamTransform::OpenaiChatToResponses(
                 Arc::new(json!({})),
@@ -1966,7 +1952,7 @@ mod tests {
                 UpstreamUsage::default(),
             ),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         let mut events = Vec::new();
         let mut wire = String::new();
         let mut error = None;
@@ -2509,7 +2495,8 @@ mod tests {
         let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n";
         let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let converted = Box::pin(SseTransformStream::new(
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let converted = Box::pin(EventTransformStream::new(
             inner,
             StreamTransform::AnthropicToOpenaiChat,
         ));
@@ -2517,11 +2504,11 @@ mod tests {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
         });
-        let sanitized = SseTransformStream::new(
+        let sanitized = EventTransformStream::new(
             converted,
             StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
         let wire: String = collected
             .into_iter()
             .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
@@ -2546,8 +2533,9 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let text: String = stream
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let text: String = wire(stream)
             .collect::<Vec<_>>()
             .await
             .iter()
@@ -2581,8 +2569,9 @@ mod tests {
             ))),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected
             .iter()
@@ -2604,8 +2593,9 @@ mod tests {
             Ok(Bytes::from("data: {\"choices\":[")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected
@@ -2625,8 +2615,9 @@ mod tests {
             "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
         ))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected

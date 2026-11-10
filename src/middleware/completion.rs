@@ -6,7 +6,6 @@
 //! response, inject cost, post the usage report, and finalize through the
 //! existing receipt/E2EE finalizers.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -807,8 +806,6 @@ async fn run_inner(
                 forward.selected_route.clone(),
                 attempt_index,
                 upstream_status,
-                Arc::new(AtomicBool::new(false)),
-                Arc::new(AtomicBool::new(false)),
             );
             let accounting = Accounting::new(report, None);
             let inputs = StreamPipelineInputs {
@@ -1122,13 +1119,7 @@ fn build_early_streaming_response(
     // Its receipt must cite this snapshot rather than a later renewal.
     let keyset = service.current_keyset();
     journal.set_early_response_keyset(keyset.clone());
-    let mut pending_report = meter.clone().into_stream_report(
-        String::new(),
-        0,
-        200,
-        Arc::new(AtomicBool::new(false)),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let mut pending_report = meter.clone().into_stream_report(String::new(), 0, 200);
     pending_report.selected_route_id = None;
     meter.disarm();
     let accounting = Accounting::new(pending_report, Some(journal.clone()));
@@ -1372,15 +1363,12 @@ impl Meter {
         self.armed = None;
     }
 
-    /// Hand the request's outcome over to the stream meter. From here on the
-    /// `MeterStream` settles exactly once, so this guard stands down.
+    /// Hand accounting to the response owner; the pending-forward guard stands down.
     fn into_stream_report(
         mut self,
         selected_route_id: String,
         attempt_index: u32,
         upstream_status: u16,
-        downstream_abort: Arc<AtomicBool>,
-        settled: Arc<AtomicBool>,
     ) -> StreamReport {
         self.armed = None;
         StreamReport {
@@ -1398,8 +1386,6 @@ impl Meter {
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
             started: self.started,
-            downstream_abort,
-            settled,
         }
     }
 
@@ -1534,7 +1520,7 @@ impl Drop for Meter {
         // the forward's return: hyper cancels the handler when the client
         // connection closes, so this is the client giving up before the
         // upstream answered — the same client-attributed 499 that
-        // `MeterStream` records for a disconnect mid-stream, with no TTFT
+        // response owner records for a disconnect mid-stream, with no TTFT
         // because no byte ever arrived. The route is the candidate the
         // forwarder was waiting on, when it had reached one.
         let Some(journal) = self.armed.take() else {

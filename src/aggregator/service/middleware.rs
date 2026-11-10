@@ -12,12 +12,12 @@ use super::streaming::{
     ResponseOwner,
 };
 use super::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    FailedAttempt, ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult,
-    MiddlewareForwarded, MiddlewareGeneratedFinalization, MiddlewareReceiptDraft,
-    MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
-    MiddlewareStreamingForwarded, MiddlewareUpstreamError, ReceiptOwner, ServiceError,
-    ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
+    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, FailedAttempt,
+    ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
+    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
+    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
+    MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
+    StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::{
@@ -26,7 +26,7 @@ use crate::aci::upstream::{
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::middleware::sse::Accounting;
-use crate::sse::{DecodedStream, EventStream};
+use crate::sse::EventStream;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -1018,50 +1018,6 @@ impl AciService {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn finalize_middleware_response_stream(
-        &self,
-        journal: MiddlewareReceiptJournal,
-        cleartext_stream: ServiceResponseStream,
-        endpoint_path: &str,
-        content_type: Option<&str>,
-        requester: Option<ReceiptOwner>,
-        e2ee: Option<E2eeRequestContext>,
-        request_id: Option<String>,
-    ) -> Result<MiddlewareStreamFinalization, ServiceError> {
-        let is_sse = is_sse_content_type(content_type);
-        if e2ee.is_some() && !is_sse {
-            return Err(E2eeError::EncryptionFailed.into());
-        }
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
-            version: ctx.version.clone(),
-            algo: ctx.algo.clone(),
-        });
-        let inner = if is_sse {
-            ResponseInput::Events(Box::pin(DecodedStream::new(
-                cleartext_stream,
-                Some(crate::sse_protocol::sse_protocol(endpoint_path)),
-            )))
-        } else {
-            ResponseInput::Bytes(cleartext_stream)
-        };
-        let body = ResponseOwner::middleware(
-            self,
-            inner,
-            journal,
-            ResponseContext {
-                requester,
-                endpoint: endpoint_path.into(),
-                e2ee,
-                request_id,
-            },
-            None,
-        );
-        Ok(MiddlewareStreamFinalization {
-            body: Box::pin(body),
-            e2ee: e2ee_response,
-        })
-    }
     pub(crate) fn finalize_middleware_events(
         &self,
         journal: MiddlewareReceiptJournal,

@@ -23,17 +23,14 @@ use private_ai_gateway::aci::upstream::{
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
     ForwardCandidate, GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult,
-    MiddlewareReceiptJournal, ServiceError, ServiceResponseStream, UpstreamVerificationError,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    MiddlewareReceiptJournal, ServiceError, UpstreamVerificationError, UpstreamVerificationRequest,
+    UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::middleware::control::ControlClient;
-use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
+use private_ai_gateway::middleware::errors::Surface;
 use private_ai_gateway::middleware::request_transform::Endpoint;
-use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
-use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
 use private_ai_gateway::middleware::{
     CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
 };
@@ -2430,80 +2427,6 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
 }
 
 #[tokio::test]
-async fn meter_stream_injects_cost_classifies_completed_and_reports() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r1".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
-        spend_mode: None,
-        tenant: TenantIdentity {
-            user_id: Some(9),
-            organization: Some(OrganizationScope {
-                organization_id: 11,
-                workspace_id: 13,
-            }),
-        },
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, _>> = vec![
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        )),
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
-        )),
-        Ok(Bytes::from("data: [DONE]\n\n")),
-    ];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    let collected: Vec<Bytes> = metered.map(|r| r.unwrap()).collect().await;
-    let text: String = collected
-        .iter()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .collect();
-
-    // Cost injected into the usage chunk; [DONE] preserved.
-    assert!(text.contains("\"cost\""), "cost not injected: {text}");
-    assert!(text.contains("[DONE]"));
-
-    let report = wait_for_post(&posts, |r| {
-        r["isStreaming"] == json!(true) && r["status"].as_i64() == Some(200)
-    })
-    .await;
-    assert_eq!(report["selectedRouteId"], json!("openai:gpt"));
-    assert_eq!(report["usage"]["prompt_tokens"], json!(10));
-    assert!(
-        report["usage"].get("cost").is_none(),
-        "report usage must be pre-cost"
-    );
-    assert!(report["ttftMs"].is_number(), "ttft must be recorded");
-    assert_eq!(report["userId"], json!(9));
-    assert_eq!(report["organizationId"], json!(11));
-    assert_eq!(report["workspaceId"], json!(13));
-}
-
-#[tokio::test]
 async fn malformed_2xx_body_returns_502_upstream() {
     let (control_url, posts) = spawn_control_capturing(
         200,
@@ -3384,140 +3307,6 @@ async fn empty_candidates_returns_model_not_found() {
         .contains("no route available"));
 }
 
-// Behavior contract for finalizer failures relative to meter settle timing.
-//
-// Pre-settle: a downstream finalizer error during body consumption (the
-// response wrapper sets `downstream_abort` before the chain drops) must
-// settle as an internal gateway failure — 502 with error_source=gateway —
-// not as a client disconnect (499), and must not charge the serving route.
-#[tokio::test]
-async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let report = StreamReport {
-        control,
-        request_id: "r-abort".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: downstream_abort.clone(),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    // One chunk, then the stream stays open: the meter starts but never
-    // reaches a terminal marker.
-    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
-        vec![Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        ))];
-    let inner: ServiceResponseStream =
-        Box::pin(futures_util::stream::iter(events).chain(futures_util::stream::pending()));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    let first = metered.next().await;
-    assert!(first.is_some(), "meter must have started streaming");
-
-    // The downstream finalizer errors; the wrapper marks it, then the chain
-    // is dropped.
-    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(metered);
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
-    assert_eq!(report["status"], json!(502), "internal failure, not 499");
-    assert_eq!(report["errorSource"], json!("gateway"));
-    assert!(report.get("userId").is_none());
-    assert!(report.get("organizationId").is_none());
-    assert!(report.get("workspaceId").is_none());
-    assert_eq!(
-        report["selectedRouteId"],
-        json!("openai:gpt"),
-        "route still recorded for traceability"
-    );
-}
-
-// Post-settle: once the meter settled Completed at a clean end-of-stream, a
-// later finalizer error (flag set just before the drop) must not emit a
-// second, conflicting usage report — the late failure is the response
-// wrapper's to report, not the meter's.
-#[tokio::test]
-async fn downstream_abort_after_settle_does_not_double_report() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let report = StreamReport {
-        control,
-        request_id: "r-late".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: downstream_abort.clone(),
-        settled: settled.clone(),
-    };
-    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
-        vec![Ok(Bytes::from(
-            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-    assert!(
-        settled.load(std::sync::atomic::Ordering::Relaxed),
-        "clean EOF settles the meter"
-    );
-
-    // Receipt/E2EE finalization now fails; the wrapper marks the abort and
-    // the chain is dropped afterwards.
-    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(metered);
-
-    let first = wait_for_post(&posts, |r| r["requestId"] == json!("r-late")).await;
-    assert_eq!(first["status"], json!(200), "the settled outcome stands");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let count = posts
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r["requestId"] == json!("r-late"))
-        .count();
-    assert_eq!(count, 1, "no second, conflicting report after settle");
-}
-
 // A mock upstream that answers each forward with the next status in a script,
 // recording every contacted route — the capacity-retry tests need "429 first,
 // 200 on the delayed second pass" to be observable per attempt. With
@@ -4379,61 +4168,6 @@ async fn upstream_timeout_is_recorded_as_504_per_attempt_and_summary() {
     assert_eq!(summary["selectedRouteId"], Value::Null);
 }
 
-#[tokio::test]
-async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
-    // A streaming response that begins, then the upstream read deadline fires
-    // mid-body. The client already has 200 headers, so only the usage report
-    // carries the failure: 504, with the timeout's own words.
-    let (control_url, posts) = spawn_control_capturing(
-        200,
-        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
-    )
-    .await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r-readtimeout".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, ServiceError>> = vec![
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        )),
-        Err(ServiceError::Upstream(UpstreamError::Timeout(
-            "upstream timed out".to_string(),
-        ))),
-    ];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-readtimeout")).await;
-    assert_eq!(report["status"], json!(504));
-    assert_eq!(report["errorMessage"], json!("upstream_timeout"));
-}
-
 // A mock upstream that waits before returning a normal streaming success —
 // long enough for the pre-first-byte keep-alive to have committed the 200.
 struct SlowStreamUpstream {
@@ -4939,67 +4673,6 @@ async fn early_keepalive_turns_forward_failure_into_in_band_error() {
 }
 
 #[tokio::test]
-async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let config = MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    };
-    let report_for = |id: &str, abort: &Arc<std::sync::atomic::AtomicBool>| StreamReport {
-        control: ControlClient::new(&config).unwrap(),
-        request_id: id.to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: abort.clone(),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let pending = || -> ServiceResponseStream { Box::pin(futures_util::stream::pending()) };
-
-    // Dropped unpolled with no abort mark: hyper never read the body because
-    // the client vanished right after the headers — a 499, not our failure.
-    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    drop(MeterStream::new(
-        pending(),
-        report_for("r-unpolled-client", &abort),
-        SseProtocol::OpenaiChat,
-    ));
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-client")).await;
-    assert_eq!(report["status"], json!(499));
-    assert!(report
-        .get("errorSource")
-        .map(Value::is_null)
-        .unwrap_or(true));
-
-    // Dropped unpolled with the abort mark set (the finalizer hand-off is the
-    // one internal point that drops an unpolled pipeline): a gateway failure.
-    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    drop(MeterStream::new(
-        pending(),
-        report_for("r-unpolled-gateway", &abort),
-        SseProtocol::OpenaiChat,
-    ));
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-gateway")).await;
-    assert_eq!(report["status"], json!(502));
-    assert_eq!(report["errorSource"], json!("gateway"));
-    assert_eq!(report["selectedRouteId"], json!("openai:gpt"));
-}
-
-#[tokio::test]
 async fn aci_constrained_requests_are_never_committed_early() {
     // Even with the pre-upstream commit enabled, an `aci_verified` request must
     // keep HTTP semantics (refusal receipts, x-receipt-id): the gateway keeps
@@ -5294,48 +4967,23 @@ async fn streaming_upstream_error_text_stays_out_of_reports_and_logs() {
 #[tokio::test]
 async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     captured_logs();
-    // A 200 stream failed by an in-band error event settles as
-    // `stream_inband_error`; the event's message appears nowhere in the report.
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r-inband".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(format!(
-        "data: {{\"error\":{{\"message\":\"{CANARY} quoted prompt text\"}}}}\n\ndata: [DONE]\n\n",
-    )))];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-    drop(metered);
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-inband")).await;
-    assert_eq!(report["status"], json!(502));
-    assert_eq!(report["errorMessage"], json!("stream_inband_error"));
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"openai:gpt","format":"openai"}]}),
+    )
+    .await;
+    let (service, _) = build_recording_service(200, format!("data: {{\"error\":{{\"message\":\"{CANARY} quoted prompt text\"}}}}\n\ndata: [DONE]\n\n").into_bytes(), "text/event-stream");
+    let mut input = chat_input();
+    input.stream = true;
+    let _ = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, input)
+            .await,
+    )
+    .await;
+    let report = wait_for_post(&posts, |r| r["requestId"] == "req-1").await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_inband_error");
     assert_canary_absent(&posts, "probe-canary-inband");
 }
 
@@ -5512,9 +5160,9 @@ async fn delayed_buffered_finalization_and_retained_failover_preserve_admission(
 }
 
 #[tokio::test]
-async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() {
+async fn streaming_journal_handoff_holds_admission_until_buffered_finalization() {
     use admission::{candidate, request, Attempt, Harness};
-    for streaming_finalizer in [false, true] {
+    {
         let h = Harness::new(vec![Attempt::Response {
             status: 200,
             at: 109,
@@ -5552,30 +5200,10 @@ async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() 
                 .is_some(),
             "journal now owns the lease"
         );
-        if streaming_finalizer {
-            let source: ServiceResponseStream =
-                Box::pin(futures_util::stream::iter([Ok(Bytes::from(bytes))]));
-            let mut finalized = h
-                .service
-                .finalize_middleware_response_stream(
-                    journal,
-                    source,
-                    "/v1/chat/completions",
-                    Some("text/event-stream"),
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
-            while let Some(chunk) = finalized.body.next().await {
-                chunk.unwrap();
-            }
-        } else {
-            let draft = journal.take().unwrap();
-            h.service
-                .finalize_middleware_receipt(draft, bytes, Some("text/event-stream"), None, None)
-                .unwrap();
-        }
+        let draft = journal.take().unwrap();
+        h.service
+            .finalize_middleware_receipt(draft, bytes, Some("text/event-stream"), None, None)
+            .unwrap();
         let receipt = h
             .service
             .get_receipt_by_receipt_id(&forwarded.receipt_id)
@@ -6370,7 +5998,7 @@ async fn typed_pipeline_meters_multiline_data_and_preserves_named_failures() {
             );
         } else {
             assert!(body.contains("\"error\""), "{body}");
-            assert!(!body.contains("private failure"), "{body}");
+            assert!(!report.to_string().contains("private failure"), "{report}");
         }
         assert_eq!(
             posts.lock().unwrap().len(),

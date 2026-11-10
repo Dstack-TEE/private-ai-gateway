@@ -432,35 +432,6 @@ pub(crate) fn decode_buffered(
 }
 
 #[cfg(test)]
-pub(crate) struct SerializedStream {
-    inner: EventStream,
-}
-#[cfg(test)]
-impl SerializedStream {
-    pub fn new(inner: EventStream) -> Self {
-        Self { inner }
-    }
-}
-#[cfg(test)]
-impl Stream for SerializedStream {
-    type Item = Result<Bytes, ServiceError>;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            match this.inner.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(record))) => match serialize(&record) {
-                    Ok(bytes) if bytes.is_empty() => {}
-                    other => return Poll::Ready(Some(other)),
-                },
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     #[tokio::test]
@@ -488,6 +459,59 @@ mod tests {
                 assert!(serialize(&records[1]).unwrap().is_empty());
             }
         }
+    }
+    #[tokio::test]
+    async fn bom_and_complete_comment_lines_leave_a_clean_eof() {
+        for input in [
+            "\u{feff}",
+            "\u{feff}\n",
+            ": upstream comment\n",
+            "\u{feff}: comment\r\n",
+        ] {
+            for split in 0..=input.len() {
+                let chunks = [
+                    Ok(Bytes::copy_from_slice(&input.as_bytes()[..split])),
+                    Ok(Bytes::copy_from_slice(&input.as_bytes()[split..])),
+                ];
+                let records: Vec<_> =
+                    DecodedStream::new(Box::pin(futures_util::stream::iter(chunks)), None)
+                        .collect()
+                        .await;
+                assert!(records.is_empty(), "{input:?} split {split}: {records:?}");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn cap_counts_a_block_instead_of_each_line_or_input_chunk() {
+        let records: Vec<_> = DecodedStream::with_limit(
+            Box::pin(futures_util::stream::iter([Ok(Bytes::from(
+                "data: {}\r\n\r\n".repeat(1000),
+            ))])),
+            None,
+            32,
+        )
+        .collect()
+        .await;
+        assert_eq!(records.len(), 1000);
+        assert!(records.iter().all(Result::is_ok));
+        let records: Vec<_> = DecodedStream::with_limit(
+            Box::pin(futures_util::stream::iter([Ok(Bytes::from(
+                "data: x\n".repeat(20),
+            ))])),
+            None,
+            32,
+        )
+        .collect()
+        .await;
+        assert!(records.last().unwrap().is_err());
+    }
+    #[test]
+    fn contradictory_named_control_types_are_an_upstream_failure() {
+        let result = decode_buffered(
+            Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"error\"}\n\n"),
+            Some(SseProtocol::AnthropicMessages),
+        );
+        assert!(matches!(result, Err(ServiceError::Upstream(_))));
     }
     #[tokio::test]
     async fn invalid_utf8_is_an_upstream_failure() {
