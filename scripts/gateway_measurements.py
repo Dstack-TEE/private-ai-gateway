@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 SCHEMA = "gateway-measurements/v1"
 DEFAULT_REPO = "Dstack-TEE/private-ai-gateway"
-RELEASE_PATTERN = r"gateway-prod-\d{4}-\d{2}-\d{2}"
+RELEASE_PATTERN = r"gateway-prod-\d{4}-\d{2}-\d{2}(?:-[1-9]\d*)?"
 FIELDS = {
     "app": ("compose_hash", "app_id", "repo_url", "repo_commit", "launcher_image"),
     "kms": ("root_key",),
@@ -367,7 +367,7 @@ def main(argv=None):
     source.add_argument("--url", help="HTTPS gateway base URL")
     source.add_argument("--attestation", type=Path, help="captured public attestation JSON")
     extraction.add_argument("--resolve", help="host:ip (direct connection, retaining SNI and certificate validation)")
-    extraction.add_argument("--release", required=True, help="gateway-prod-YYYY-MM-DD")
+    extraction.add_argument("--release", required=True, help="gateway-prod-YYYY-MM-DD[-N]")
     extraction.add_argument("--compose", type=Path, help="predict compose/source/image from new Docker Compose YAML")
     extraction.add_argument("--out", type=Path, default=Path("."))
     rendering = commands.add_parser("render", help="render a release-note Markdown values table")

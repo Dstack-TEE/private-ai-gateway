@@ -311,6 +311,18 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("no accepted release matches", error)
 
+    def test_same_day_suffixed_release_is_the_latest(self):
+        suffixed = copy.deepcopy(EXPECTED)
+        suffixed["release"] = f"{RELEASE}-2"
+        older = copy.deepcopy(EXPECTED)
+        older["tls"]["tee.redpill.ai"] = "ee" * 32
+        result, output, error, _ = self.run_check(
+            releases=[release(suffixed, published_at="2026-11-06T00:00:00Z"), release(older)],
+            assets={RELEASE: older, suffixed["release"]: suffixed},
+        )
+        self.assertEqual((result, error), (0, ""))
+        self.assertIn(f"tee.redpill.ai: matches {RELEASE}-2", output)
+
     def test_stale_prerelease_cannot_authorize_rollback(self):
         published = copy.deepcopy(EXPECTED)
         published["tls"]["tee.redpill.ai"] = "ff" * 32

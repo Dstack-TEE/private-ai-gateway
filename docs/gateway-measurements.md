@@ -1,6 +1,7 @@
 # Gateway release measurements
 
-Production deployment releases use `gateway-prod-YYYY-MM-DD` tags in
+Production deployment releases use `gateway-prod-YYYY-MM-DD` tags (with a `-N` suffix for a second
+release on the same date) in
 [Dstack-TEE/private-ai-gateway](https://github.com/Dstack-TEE/private-ai-gateway/releases).
 Each release carries `measurements.json`, `app_compose.json`, and
 `docker-compose.yml` assets. The JSON asset is the source of release measurement
