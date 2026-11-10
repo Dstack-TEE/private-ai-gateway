@@ -191,10 +191,9 @@ fn gzip_decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, UpstreamE
 }
 
 pub(super) struct ChutesE2eeDecryptingStream {
-    inner: UpstreamBodyStream,
+    inner: crate::sse::EnvelopeStream,
     response_sk: MlKemDecapsulationKey768,
     stream_key: Option<Vec<u8>>,
-    buffer: Vec<u8>,
     pending: VecDeque<Bytes>,
     finished: bool,
 }
@@ -202,47 +201,30 @@ pub(super) struct ChutesE2eeDecryptingStream {
 impl ChutesE2eeDecryptingStream {
     pub(super) fn new(inner: UpstreamBodyStream, response_sk: MlKemDecapsulationKey768) -> Self {
         Self {
-            inner,
+            inner: crate::sse::decode_envelope(inner, crate::sse::MAX_EVENT_BYTES),
             response_sk,
             stream_key: None,
-            buffer: Vec::new(),
             pending: VecDeque::new(),
             finished: false,
         }
     }
 
-    fn process_buffer(&mut self) -> Result<(), UpstreamError> {
-        while let Some(pos) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.buffer.drain(..=pos).collect::<Vec<_>>();
-            if line.ends_with(b"\n") {
-                line.pop();
-            }
-            if line.ends_with(b"\r") {
-                line.pop();
-            }
-            self.process_sse_line(&line)?;
-        }
-        Ok(())
-    }
-
-    fn process_sse_line(&mut self, line: &[u8]) -> Result<(), UpstreamError> {
-        let Some(data) = line.strip_prefix(b"data: ") else {
+    fn process_event(&mut self, record: crate::sse::Record) -> Result<(), UpstreamError> {
+        let Some(event) = record.event else {
             return Ok(());
         };
-        let raw = String::from_utf8(data.to_vec()).map_err(|_| {
-            UpstreamError::Transport("Chutes E2EE stream line is not UTF-8".to_string())
-        })?;
-        let raw = raw.trim();
+        let raw = event.data;
         if raw.is_empty() {
             return Ok(());
         }
         if raw == "[DONE]" {
-            self.pending
-                .push_back(Bytes::from_static(b"data: [DONE]\n\n"));
+            self.pending.push_back(encode_application_data(raw)?);
             return Ok(());
         }
-        let event: Value = serde_json::from_str(raw)
-            .map_err(|e| UpstreamError::Transport(format!("invalid Chutes E2EE SSE event: {e}")))?;
+        let event = event
+            .payload
+            .json()
+            .ok_or_else(|| UpstreamError::Transport("invalid Chutes E2EE SSE event".into()))?;
         if let Some(init) = event.get("e2e_init").and_then(Value::as_str) {
             self.stream_key = Some(decrypt_chutes_stream_init(&self.response_sk, init)?);
             return Ok(());
@@ -259,24 +241,23 @@ impl ChutesE2eeDecryptingStream {
             return Ok(());
         }
         if event.get("usage").is_some() {
-            let mut line = Vec::with_capacity(raw.len() + 8);
-            line.extend_from_slice(b"data: ");
-            line.extend_from_slice(raw.as_bytes());
-            line.extend_from_slice(b"\n\n");
-            self.pending.push_back(Bytes::from(line));
+            self.pending.push_back(encode_application_data(raw)?);
             return Ok(());
         }
         if let Some(error) = event.get("e2e_error") {
-            let body = serde_json::to_vec(&json!({ "error": error }))
-                .map_err(|e| UpstreamError::Transport(e.to_string()))?;
-            let mut line = Vec::with_capacity(body.len() + 8);
-            line.extend_from_slice(b"data: ");
-            line.extend_from_slice(&body);
-            line.extend_from_slice(b"\n\n");
-            self.pending.push_back(Bytes::from(line));
+            let data = serde_json::to_string(&json!({ "error": error }))
+                .map_err(|_| UpstreamError::Transport("Chutes error encoding failed".into()))?;
+            self.pending.push_back(encode_application_data(data)?);
         }
         Ok(())
     }
+}
+
+fn encode_application_data(data: String) -> Result<Bytes, UpstreamError> {
+    sse_stream::Sse::default()
+        .data(data)
+        .encode()
+        .map_err(|_| UpstreamError::Transport("Chutes application SSE encoding failed".into()))
 }
 
 impl Unpin for ChutesE2eeDecryptingStream {}
@@ -297,8 +278,7 @@ impl Stream for ChutesE2eeDecryptingStream {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(chunk))) => {
-                    this.buffer.extend_from_slice(&chunk);
-                    if let Err(err) = this.process_buffer() {
+                    if let Err(err) = this.process_event(chunk) {
                         this.finished = true;
                         return Poll::Ready(Some(Err(err)));
                     }
@@ -311,13 +291,6 @@ impl Stream for ChutesE2eeDecryptingStream {
                     return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(None) => {
-                    if !this.buffer.is_empty() {
-                        let line = std::mem::take(&mut this.buffer);
-                        if let Err(err) = this.process_sse_line(&line) {
-                            this.finished = true;
-                            return Poll::Ready(Some(Err(err)));
-                        }
-                    }
                     this.finished = true;
                     if let Some(chunk) = this.pending.pop_front() {
                         return Poll::Ready(Some(Ok(chunk)));
@@ -327,6 +300,31 @@ impl Stream for ChutesE2eeDecryptingStream {
             }
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn characterization_source() -> String {
+    use futures_util::StreamExt;
+    let (sk, pk) = MlKem768::generate_keypair();
+    let (ct, shared) = pk.encapsulate();
+    let key = chutes_derive_key(shared.as_slice(), ct.as_slice(), CHUTES_INFO_STREAM).unwrap();
+    let plaintext = br#"data: {"id":"chutes-fixture","model":"fixture-model","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
+    let nonce = [0x31; 12];
+    let mut sealed = nonce.to_vec();
+    sealed.extend(chacha_encrypt(&key, &nonce, plaintext).unwrap());
+    let envelope = format!("data: {}\n\ndata: {}\n\ndata: {{\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}}}\n\ndata: [DONE]\n\n", json!({"e2e_init":BASE64.encode(ct.as_slice())}), json!({"e2e":BASE64.encode(sealed)}));
+    let chunks: Vec<_> = envelope
+        .as_bytes()
+        .chunks(7)
+        .map(|b| Ok(Bytes::copy_from_slice(b)))
+        .collect();
+    let mut stream =
+        ChutesE2eeDecryptingStream::new(Box::pin(futures_util::stream::iter(chunks)), sk);
+    let mut result = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        result.extend_from_slice(&chunk.unwrap());
+    }
+    String::from_utf8(result).unwrap()
 }
 
 #[cfg(test)]
@@ -371,29 +369,4 @@ mod tests {
             Err(UpstreamError::Transport(_))
         ));
     }
-}
-
-#[cfg(test)]
-pub(crate) async fn characterization_source() -> String {
-    use futures_util::StreamExt;
-    let (sk, pk) = MlKem768::generate_keypair();
-    let (ct, shared) = pk.encapsulate();
-    let key = chutes_derive_key(shared.as_slice(), ct.as_slice(), CHUTES_INFO_STREAM).unwrap();
-    let plaintext = br#"data: {"id":"chutes-fixture","model":"fixture-model","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#;
-    let nonce = [0x31; 12];
-    let mut sealed = nonce.to_vec();
-    sealed.extend(chacha_encrypt(&key, &nonce, plaintext).unwrap());
-    let envelope = format!("data: {}\n\ndata: {}\n\ndata: {{\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}}}\n\ndata: [DONE]\n\n", json!({"e2e_init":BASE64.encode(ct.as_slice())}), json!({"e2e":BASE64.encode(sealed)}));
-    let chunks: Vec<_> = envelope
-        .as_bytes()
-        .chunks(7)
-        .map(|b| Ok(Bytes::copy_from_slice(b)))
-        .collect();
-    let mut stream =
-        ChutesE2eeDecryptingStream::new(Box::pin(futures_util::stream::iter(chunks)), sk);
-    let mut result = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        result.extend_from_slice(&chunk.unwrap());
-    }
-    String::from_utf8(result).unwrap()
 }
