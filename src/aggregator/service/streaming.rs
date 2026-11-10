@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::e2ee_crypto::encrypt_e2ee_record;
 use super::{
     AciService, Clock, E2eeRequestContext, MiddlewareReceiptDraft, MiddlewareReceiptJournal,
-    ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
+    ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream, CHAT_COMPLETIONS_PATH,
 };
 use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
@@ -337,29 +337,20 @@ impl ResponseOwner {
             .event
             .as_ref()
             .is_some_and(|event| event.meaning.failure.is_some());
-        if failure && self.accounting.is_some() {
-            if let Some(source) = record
-                .event
-                .as_ref()
-                .and_then(|event| event.source_protocol)
-            {
-                // Failed events bypass the content transforms; apply the same
-                // usage allowlist here before the report captures it.
-                record.edit_json(|body| {
-                    response_transform::filter_usage(body.get_mut("usage"), source);
-                    response_transform::filter_usage(
-                        body.get_mut("response").and_then(|r| r.get_mut("usage")),
-                        source,
-                    );
-                });
-            }
-        }
         let usage = self
             .accounting
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
         let Some(event) = record.event.as_ref().filter(|_| failure) else {
-            return if self.accounting.is_some() && self.failure.is_some() {
+            // A native Chat error is not its [DONE] marker. Main forwards
+            // subsequent chunks, including any final usage before [DONE].
+            let native_chat = self.native_chat(
+                record
+                    .event
+                    .as_ref()
+                    .and_then(|event| event.source_protocol),
+            );
+            return if self.accounting.is_some() && self.failure.is_some() && !native_chat {
                 Ok(Bytes::new())
             } else {
                 self.encode(record)
@@ -392,6 +383,10 @@ impl ResponseOwner {
         Ok(Bytes::new())
     }
 
+    fn native_chat(&self, source: Option<SseProtocol>) -> bool {
+        self.endpoint == CHAT_COMPLETIONS_PATH && source == Some(SseProtocol::OpenaiChat)
+    }
+
     fn canonical_failure(
         &mut self,
         mut record: Record,
@@ -421,7 +416,7 @@ impl ResponseOwner {
                     self.ids.chat_id = self.request_id.clone();
                 }
                 let mut records = error_records(protocol, 502, request_id, None);
-                if protocol == SseProtocol::OpenaiChat && late {
+                if protocol == SseProtocol::OpenaiChat && (late || self.native_chat(source)) {
                     records.truncate(1);
                 }
                 if let Some(first) = records.first_mut() {
@@ -633,6 +628,7 @@ impl Stream for ResponseOwner {
 }
 impl ResponseOwner {
     fn stream_error(&mut self, error: &ServiceError) {
+        let already_failed = self.failure.is_some();
         let upstream = matches!(error, ServiceError::Upstream(_));
         if !upstream || (!self.saw_terminal && self.failure.is_none()) {
             self.failure = Some(StreamFailure::from_error(error));
@@ -649,7 +645,7 @@ impl ResponseOwner {
         }
         tracing::warn!(target: "stream_abort", request_id = self.request_id.as_deref().unwrap_or_default(), error = %error, "response stream failed; ending the body gracefully");
         self.ended = true;
-        if !self.saw_terminal && !self.truncated {
+        if !self.saw_terminal && !self.truncated && !already_failed {
             if let Some(protocol) = self.protocol {
                 self.tail.extend(error_records(
                     protocol,

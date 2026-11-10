@@ -32,11 +32,12 @@ refactoring differences: preserve the original snapshot and explicitly identify
 any approved parsing correction with its old and new expectation.
 
 `streaming_corrections.json` records every approved difference with the original
-wire bytes and the corrected snapshot. Of the 41 cases, 29 match main exactly.
+wire bytes and the corrected snapshot. Of the 42 cases, 30 match main exactly.
 The failure cases cover each destination and bridge. Native failures retain
 their canonical output, including rate-limit codes on Chat, Messages and both
 Responses terminal forms. Failed Chat usage keeps public token counts and cost
-without copying provider fields into the client body or report. Bridge failures
+without copying provider fields into the client body or report, including when
+the usage arrives after the error and before `[DONE]`. Bridge failures
 omit startup events or the Chat chunk wrapper that existed only to carry an error.
 Legacy Anthropic completion reports a source failure instead of success.
 

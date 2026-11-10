@@ -643,13 +643,22 @@ const SYSTEMONE_USAGE: &[&str] = &["input_tokens", "output_tokens", "cost"];
 /// event — the gateway's error tail carries it, and a rebuilt upstream error
 /// must be indistinguishable from it (and stay correlatable with the receipt).
 pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&str>) {
+    canonicalize_body(body, endpoint, request_id, true);
+}
+
+fn canonicalize_body(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+    filter_usage_fields: bool,
+) {
     match endpoint {
-        Endpoint::ChatComplete => canonicalize_chat_completion(body),
-        Endpoint::Complete => canonicalize_text_completion(body),
+        Endpoint::ChatComplete => canonicalize_chat_completion(body, filter_usage_fields),
+        Endpoint::Complete => canonicalize_text_completion(body, filter_usage_fields),
         Endpoint::CreateModelResponse => canonicalize_responses(body),
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => {}
-        Endpoint::SystemOne => canonicalize_systemone(body),
+        Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
         Endpoint::AudioTranscriptions => {}
         Endpoint::ImagesGenerations => super::images::canonicalize(body),
@@ -658,6 +667,7 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
 
 /// Sanitation changes representation; protocol identity and outcome come from
 /// ingress metadata rather than the payload's optional type field.
+/// Streaming usage is filtered by accounting, including on failed turns.
 pub(crate) fn canonicalize_stream(
     body: &mut Value,
     endpoint: Endpoint,
@@ -678,17 +688,17 @@ pub(crate) fn canonicalize_stream(
                 | EventKind::ResponseIncomplete
                 | EventKind::ResponseFailed => {
                     if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                        canonicalize_responses_object(inner);
+                        canonicalize_responses_object(inner, false);
                     }
                 }
                 _ => {}
             }
         }
-        _ => canonicalize(body, endpoint, request_id),
+        _ => canonicalize_body(body, endpoint, request_id, false),
     }
 }
 
-fn canonicalize_systemone(body: &mut Value) {
+fn canonicalize_systemone(body: &mut Value, filter_usage_fields: bool) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
@@ -702,8 +712,8 @@ fn canonicalize_systemone(body: &mut Value) {
     }
     retain_allowed(object, SYSTEMONE_TOP);
     sanitize_error(object.get_mut("error"));
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, SYSTEMONE_USAGE);
+    if filter_usage_fields {
+        filter_systemone_usage(object.get_mut("usage"));
     }
 }
 
@@ -752,12 +762,14 @@ pub(crate) fn sanitize_messages_error_event(
     }
 }
 
-fn canonicalize_text_completion(body: &mut Value) {
+fn canonicalize_text_completion(body: &mut Value, filter_usage_fields: bool) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
     retain_allowed(object, COMPLETION_TOP);
-    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    if filter_usage_fields {
+        filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    }
     sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
@@ -803,11 +815,11 @@ fn canonicalize_responses(body: &mut Value) {
         Some("error" | "response.error") => sanitize_responses_error_event(object),
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                canonicalize_responses_object(inner);
+                canonicalize_responses_object(inner, true);
             }
         }
         Some(_) => {}
-        None => canonicalize_responses_object(object),
+        None => canonicalize_responses_object(object, true),
     }
 }
 
@@ -870,9 +882,14 @@ pub(crate) fn sanitize_responses_error_event(object: &mut serde_json::Map<String
     }
 }
 
-fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
+fn canonicalize_responses_object(
+    object: &mut serde_json::Map<String, Value>,
+    filter_usage_fields: bool,
+) {
     retain_allowed(object, RESPONSES_TOP);
-    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiResponses);
+    if filter_usage_fields {
+        filter_usage(object.get_mut("usage"), SseProtocol::OpenaiResponses);
+    }
     // `output[]` items are content (message/reasoning/function_call, …) and left
     // intact; the identifying fields ride at the top level, dropped above.
     sanitize_responses_error_field(object.get_mut("error"));
@@ -946,12 +963,20 @@ pub(crate) fn filter_usage(usage: Option<&mut Value>, protocol: SseProtocol) {
     }
 }
 
-fn canonicalize_chat_completion(body: &mut Value) {
+pub(crate) fn filter_systemone_usage(usage: Option<&mut Value>) {
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, SYSTEMONE_USAGE);
+    }
+}
+
+fn canonicalize_chat_completion(body: &mut Value, filter_usage_fields: bool) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
     retain_allowed(object, CHAT_TOP);
-    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    if filter_usage_fields {
+        filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    }
     // The allowlist keeps the `error` field (so the client sees an in-band error
     // and metering classifies the stream), but the error object's interior is
     // upstream-controlled — filter it to the standard fields and scrub its

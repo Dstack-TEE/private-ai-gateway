@@ -918,6 +918,24 @@ async fn owner_filters_failed_usage_before_reporting_and_pricing() {
 }
 
 #[tokio::test]
+async fn usage_after_native_chat_error_is_filtered_on_wire_and_in_report() {
+    let snapshot = capture(&usage_after_failure_case()).await;
+    assert_eq!(snapshot["wire"], concat!(
+        "data: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"cost\":8}}\n\n",
+        "data: [DONE]\n\n",
+    ));
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    assert_eq!(
+        reports[0]["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3})
+    );
+}
+
+#[tokio::test]
 async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
     let text = "x".repeat(crate::sse::MAX_EVENT_BYTES - 100);
     let event =

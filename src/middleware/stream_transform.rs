@@ -11,7 +11,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 #[cfg(test)]
@@ -39,13 +39,8 @@ use crate::sse_protocol::{event_kind, EventKind, EventMeaning, SseProtocol};
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
-/// Where a Chat bridge leaves the usage the meter reports: the shape the
-/// buffered path reports for the same surface, known even when the converted
-/// stream ends in an error that carries none.
-///
-/// For Responses it is the upstream's own chat usage: the Responses shape has
-/// no field for cache-creation tokens, and its `input_tokens` is a total where
-/// the control plane reads the same name as cache-excluded.
+/// Billing usage from Chat bridges, even if conversion has no event carrying it.
+/// Responses uses the Chat counters so cache creation is retained for pricing.
 pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
 
 /// Which streaming transform applies.
@@ -84,15 +79,12 @@ impl StreamTransform {
     ) -> Result<Vec<Record>, ()> {
         // Failure evidence belongs to the response owner. Preserve the complete
         // source record, including usage, through every content stage.
-        if state.passthrough {
-            return Ok(vec![record]);
-        }
         if let Some(event) = record
             .event
             .as_ref()
             .filter(|event| event.meaning.failure.is_some())
         {
-            state.passthrough = !event.after_terminal;
+            state.passthrough |= !event.after_terminal;
             return Ok(vec![record]);
         }
         match self {
@@ -101,6 +93,17 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
+                // A bridge that has stopped converting still forwards source
+                // usage for accounting. It has no destination payload to edit.
+                if state.passthrough
+                    && record
+                        .event
+                        .as_ref()
+                        .and_then(|event| event.source_protocol)
+                        != Some(crate::sse_protocol::sse_protocol(endpoint.path()))
+                {
+                    return Ok(vec![record]);
+                }
                 let meaning = record
                     .event
                     .as_ref()
@@ -118,6 +121,9 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             _ => {}
+        }
+        if state.passthrough {
+            return Ok(vec![record]);
         }
         if record.residual {
             return Ok(vec![record]);
@@ -800,10 +806,6 @@ impl MessagesEvents {
     }
 }
 
-fn report_usage(slot: &UpstreamUsage, usage: Value) {
-    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(usage);
-}
-
 impl ChatEvents for MessagesEvents {
     fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut Vec<Record>) {
         let text = |key| {
@@ -839,7 +841,11 @@ impl ChatEvents for MessagesEvents {
     }
 
     fn usage(&mut self, usage: &Value) {
-        report_usage(&self.upstream_usage, messages_usage(Some(usage)));
+        super::sse::observe_bridge_usage(
+            &self.upstream_usage,
+            messages_usage(Some(usage)),
+            SseProtocol::AnthropicMessages,
+        );
     }
 
     fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {
@@ -1079,7 +1085,11 @@ impl ChatEvents for ResponsesEvents {
     }
 
     fn usage(&mut self, usage: &Value) {
-        report_usage(&self.upstream_usage, usage.clone());
+        super::sse::observe_bridge_usage(
+            &self.upstream_usage,
+            usage.clone(),
+            SseProtocol::OpenaiChat,
+        );
     }
 
     fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {

@@ -138,6 +138,20 @@ impl StreamReport {
 #[derive(Clone)]
 pub(crate) struct AccountingHandle(Arc<Mutex<AccountingState>>);
 
+/// A bridge can observe usage without emitting a destination event for it.
+pub(super) fn observe_bridge_usage(slot: &UpstreamUsage, mut usage: Value, protocol: SseProtocol) {
+    filter_observed_usage(Some(&mut usage), protocol, None);
+    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(usage);
+}
+
+fn filter_observed_usage(usage: Option<&mut Value>, protocol: SseProtocol, endpoint: Option<&str>) {
+    if endpoint == Some(crate::aggregator::service::SYSTEMONE_PATH) {
+        response_transform::filter_systemone_usage(usage);
+    } else {
+        response_transform::filter_usage(usage, protocol);
+    }
+}
+
 struct AccountingState {
     report: StreamReport,
     last_usage: Option<Value>,
@@ -320,7 +334,19 @@ impl AccountingHandle {
         let bridged = source.is_some_and(|source| source != destination);
         let mut wire_usage = None;
         record.edit_json(|parsed| {
+            // Filter each usage object once, including when it is emitted but
+            // another usage object on the same event is selected for billing.
+            let filter = |usage: Option<&mut Value>| {
+                filter_observed_usage(
+                    usage,
+                    source.unwrap_or(destination),
+                    Some(&state.report.endpoint),
+                );
+            };
+            filter(parsed.get_mut("usage"));
+            filter(parsed.get_mut("response").and_then(|r| r.get_mut("usage")));
             if kind == EventKind::MessageStart {
+                filter(parsed.get_mut("message").and_then(|m| m.get_mut("usage")));
                 state.start_usage = message_start_usage(parsed).cloned();
             }
             let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
