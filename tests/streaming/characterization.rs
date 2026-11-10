@@ -503,7 +503,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
     json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid})
 }
 
-fn coded_failure_cases() -> Vec<Case> {
+fn rate_limit_cases() -> Vec<Case> {
     let chat = concat!(
         "data: {\"error\":{\"code\":429,\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n",
         "data: [DONE]\n\n"
@@ -517,12 +517,19 @@ fn coded_failure_cases() -> Vec<Case> {
         ("native_responses_rate_limit_failed", Endpoint::CreateModelResponse,
          "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"failed\",\"output\":[],\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n", "openai"),
         ("rate_limit_chat_messages", Endpoint::Messages, chat, "openai"),
-        ("failed_chat_usage_filter", Endpoint::ChatComplete,
-         "data: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai"),
     ]
     .into_iter()
     .map(|(name, endpoint, source, format)| Case::new(name, endpoint, source, format))
     .collect()
+}
+
+fn failed_usage_case() -> Case {
+    Case::new(
+        "failed_chat_usage_filter",
+        Endpoint::ChatComplete,
+        "data: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n",
+        "openai",
+    )
 }
 
 fn review_cases() -> Vec<Case> {
@@ -641,7 +648,8 @@ async fn exact_wire_characterization_corpus() {
         cases.push(Case::new(name, Endpoint::ChatComplete, &source, "openai"));
     }
     cases.extend(review_cases());
-    cases.extend(coded_failure_cases());
+    cases.extend(rate_limit_cases());
+    cases.push(failed_usage_case());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -801,7 +809,7 @@ async fn native_responses_extension_failure_keeps_usage_and_cost() {
     let case = Case::new(
         "native_responses_extension_failure",
         Endpoint::CreateModelResponse,
-        "event: extension\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
+        "event: extension\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"PRIVATE_UPSTREAM_DETAIL from https://provider.test\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
         "openai",
     );
     let snapshot = capture(&case).await;
@@ -823,6 +831,75 @@ async fn native_responses_extension_failure_keeps_usage_and_cost() {
     assert_eq!(
         reports[0]["usage"],
         json!({"input_tokens":2,"output_tokens":3,"total_tokens":5})
+    );
+}
+
+#[tokio::test]
+async fn owner_preserves_sanitized_rate_limit_codes_and_failure_terminals() {
+    for case in rate_limit_cases() {
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        let error_line = wire
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let payload: Value = serde_json::from_str(error_line).unwrap();
+        let error = match case.endpoint {
+            Endpoint::ChatComplete => {
+                assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+                assert_eq!(wire.matches("\n\n").count(), 2);
+                assert_eq!(payload["error"]["code"], 429);
+                &payload["error"]
+            }
+            Endpoint::Messages => {
+                assert!(wire.starts_with("event: error\n"), "{wire}");
+                &payload["error"]
+            }
+            Endpoint::CreateModelResponse if case.name.ends_with("failed") => {
+                assert!(wire.starts_with("event: response.failed\n"), "{wire}");
+                assert_eq!(payload["response"]["status"], "failed");
+                &payload["response"]["error"]
+            }
+            Endpoint::CreateModelResponse => {
+                assert!(wire.starts_with("event: error\n"), "{wire}");
+                assert_eq!(payload["sequence_number"], 2);
+                &payload
+            }
+            _ => panic!("unexpected rate-limit fixture {}", case.name),
+        };
+        if case.endpoint == Endpoint::CreateModelResponse {
+            assert_eq!(error["code"], "rate_limit_exceeded");
+        } else {
+            assert_eq!(error["type"], "rate_limit_error");
+        }
+        if case.endpoint != Endpoint::ChatComplete {
+            assert_eq!(wire.matches("\n\n").count(), 1);
+        }
+        assert_eq!(
+            error["message"],
+            "Rate limit exceeded. Please retry after some time."
+        );
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], 502);
+        assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    }
+}
+
+#[tokio::test]
+async fn owner_filters_failed_usage_before_reporting_and_pricing() {
+    let snapshot = capture(&failed_usage_case()).await;
+    let wire = snapshot["wire"].as_str().unwrap();
+    assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+    assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"));
+    assert!(wire.contains("\"cost\":8"), "{wire}");
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    assert_eq!(
+        reports[0]["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5})
     );
 }
 

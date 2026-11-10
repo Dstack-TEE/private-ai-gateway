@@ -828,5 +828,85 @@
         }
       ]
     }
+  },
+  "rate_limit_chat_messages": {
+    "reason": "The Chat-to-Messages bridge omits the synthetic message_start emitted only for the error. Its sanitized rate_limit_error terminal and report are identical to main.",
+    "baseline_wire": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"req-fixture\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limit exceeded. Please retry after some time.\"},\"request_id\":\"req-fixture\"}\n\n",
+    "expected": {
+      "name": "rate_limit_chat_messages",
+      "wire": "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Rate limit exceeded. Please retry after some time.\"},\"request_id\":\"req-fixture\"}\n\n",
+      "wire_hash": "sha256:b7900816f701cd3967a215aa80ba8bb8c9b62ab19b190cbc78e2cc2c567e38fb",
+      "source_hash": "sha256:7b1a4b1d1f274bd9634ebaaaa115d81c9337174039aaf2dd827c06879e32ef76",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": null,
+        "endpoint": "/v1/messages",
+        "event_log": [
+          {
+            "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "fixture-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:7b1a4b1d1f274bd9634ebaaaa115d81c9337174039aaf2dd827c06879e32ef76",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:b7900816f701cd3967a215aa80ba8bb8c9b62ab19b190cbc78e2cc2c567e38fb",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "4e565aa93a68a555702aade36926e292a8d8de00acd5498f5aa66b79eb2c3aabe1752c4519d24b27c7fccf25bff881127443ba14468c20d489ac99c851842d00",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/messages",
+          "status": 502,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          },
+          "errorMessage": "stream_inband_error"
+        }
+      ]
+    }
   }
 }

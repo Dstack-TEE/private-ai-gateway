@@ -220,7 +220,7 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
         (Chat, "event: custom\n\n", 200, None),
         (Chat, "data: {\"choices\":[{\"finish_reason\":\"upstream_error\"}]}\n\ndata: [DONE]\n\n", 502, Some("stream_inband_error")),
         (Messages, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", 502, Some("stream_inband_error")),
-        (Responses, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"CANARY-private\"}}}\n\n", 502, Some("stream_inband_error")),
+        (Responses, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"CANARY-private at https://provider.test\"}}}\n\n", 502, Some("stream_inband_error")),
     ] {
         let control = Control::new().await;
         let chunks: Vec<_> = wire.as_bytes().chunks(7).map(|b| Ok(Bytes::copy_from_slice(b))).collect();

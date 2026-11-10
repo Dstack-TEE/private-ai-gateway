@@ -21,6 +21,7 @@ use super::errors::{
 use super::request_transform::{effective_responses_tools, Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
+use crate::sse_protocol::SseProtocol;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
@@ -723,7 +724,7 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
     sanitize_messages_error_event(object, request_id);
 }
 
-fn sanitize_messages_error_event(
+pub(crate) fn sanitize_messages_error_event(
     object: &mut serde_json::Map<String, Value>,
     request_id: Option<&str>,
 ) {
@@ -756,9 +757,7 @@ fn canonicalize_text_completion(body: &mut Value) {
         return;
     };
     retain_allowed(object, COMPLETION_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
-    }
+    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
     sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
@@ -823,7 +822,7 @@ fn canonicalize_responses(body: &mut Value) {
 /// the framing observer continues that numbering when it appends a tail of its
 /// own. The rebuilt event keeps `type: "error"`, which the meter and the
 /// framing observer classify a failed stream by.
-fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
+pub(crate) fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
     let nested = object.get("error");
     // Prefer the nested object's fields over the envelope's. The kind is the
     // `code`, falling back to the nested `type`; the top-level `type` is the
@@ -873,9 +872,7 @@ fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
 
 fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
     retain_allowed(object, RESPONSES_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, RESPONSES_USAGE);
-    }
+    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiResponses);
     // `output[]` items are content (message/reasoning/function_call, …) and left
     // intact; the identifying fields ride at the top level, dropped above.
     sanitize_responses_error_field(object.get_mut("error"));
@@ -889,7 +886,7 @@ fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
 /// kind keeps its name and its scrubbed message; a suppressed kind becomes the
 /// gateway's own vocabulary; no kind at all relays the scrubbed message under
 /// the generic code.
-fn sanitize_responses_error_field(error: Option<&mut Value>) {
+pub(crate) fn sanitize_responses_error_field(error: Option<&mut Value>) {
     let Some(error) = error else { return };
     let (code, message) = match &*error {
         // A null error is the healthy value; there is nothing to rebuild.
@@ -938,14 +935,23 @@ fn retain_allowed(object: &mut serde_json::Map<String, Value>, allowed: &[&str])
     object.retain(|key, _| allowed.contains(&key.as_str()));
 }
 
+pub(crate) fn filter_usage(usage: Option<&mut Value>, protocol: SseProtocol) {
+    let allowed = match protocol {
+        SseProtocol::OpenaiChat => CHAT_USAGE,
+        SseProtocol::OpenaiResponses => RESPONSES_USAGE,
+        SseProtocol::AnthropicMessages => return,
+    };
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, allowed);
+    }
+}
+
 fn canonicalize_chat_completion(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
     retain_allowed(object, CHAT_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
-    }
+    filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
     // The allowlist keeps the `error` field (so the client sees an in-band error
     // and metering classifies the stream), but the error object's interior is
     // upstream-controlled — filter it to the standard fields and scrub its
@@ -978,7 +984,7 @@ fn canonicalize_chat_completion(body: &mut Value) {
 /// `{message, type, param, code}` object (a client indexing those keys must
 /// never miss one) with its message scrubbed; a bare-string error becomes the
 /// same object; any other non-null shape folds into the generic error.
-fn sanitize_error(error: Option<&mut Value>) {
+pub(crate) fn sanitize_error(error: Option<&mut Value>) {
     let Some(error) = error else { return };
     if error.is_null() {
         return;

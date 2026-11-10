@@ -337,6 +337,23 @@ impl ResponseOwner {
             .event
             .as_ref()
             .is_some_and(|event| event.meaning.failure.is_some());
+        if failure && self.accounting.is_some() {
+            if let Some(source) = record
+                .event
+                .as_ref()
+                .and_then(|event| event.source_protocol)
+            {
+                // Failed events bypass the content transforms; apply the same
+                // usage allowlist here before the report captures it.
+                record.edit_json(|body| {
+                    response_transform::filter_usage(body.get_mut("usage"), source);
+                    response_transform::filter_usage(
+                        body.get_mut("response").and_then(|r| r.get_mut("usage")),
+                        source,
+                    );
+                });
+            }
+        }
         let usage = self
             .accounting
             .as_ref()
@@ -387,10 +404,11 @@ impl ResponseOwner {
         let terminal = event.meaning.terminal;
         let late = event.after_terminal;
         let source = event.source_protocol;
-        let sequence = record
+        let error = record
             .json()
-            .and_then(|body| body.get("sequence_number"))
-            .and_then(Value::as_u64);
+            .and_then(|body| body.get("error"))
+            .filter(|error| !error.is_null())
+            .cloned();
         let request_id = self.request_id.as_deref();
         match protocol {
             SseProtocol::OpenaiChat | SseProtocol::AnthropicMessages => {
@@ -403,34 +421,40 @@ impl ResponseOwner {
                     self.ids.chat_id = self.request_id.clone();
                 }
                 let mut records = error_records(protocol, 502, request_id, None);
-                if protocol == SseProtocol::OpenaiChat {
-                    if late {
-                        records.truncate(1);
-                    }
-                    if let (Some(first), Some(usage)) = (records.first_mut(), usage) {
-                        first.edit_json(|body| {
+                if protocol == SseProtocol::OpenaiChat && late {
+                    records.truncate(1);
+                }
+                if let Some(first) = records.first_mut() {
+                    first.edit_json(|body| {
+                        if let Some(error) = error {
+                            body["error"] = error;
+                            if protocol == SseProtocol::OpenaiChat {
+                                response_transform::sanitize_error(body.get_mut("error"));
+                            } else if let Some(object) = body.as_object_mut() {
+                                response_transform::sanitize_messages_error_event(
+                                    object, request_id,
+                                );
+                            }
+                        }
+                        if let Some(usage) = usage.filter(|_| protocol == SseProtocol::OpenaiChat) {
                             body["usage"] = usage;
-                            response_transform::canonicalize(
-                                body,
-                                Endpoint::ChatComplete,
-                                request_id,
-                            );
-                        });
-                    }
+                        }
+                    });
                 }
                 records
             }
             SseProtocol::OpenaiResponses
                 if source == Some(protocol) && terminal != Some(TerminalKind::Failed) =>
             {
+                let mut body = record
+                    .json()
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                response_transform::sanitize_responses_error_event(&mut body);
                 vec![Record::generated(
                     Some("error"),
-                    Payload::Json(responses_error_event(
-                        Some(responses_gateway_code(502)),
-                        crate::error_payload::upstream_message(502),
-                        None,
-                        sequence,
-                    )),
+                    Payload::Json(Value::Object(body)),
                     EventMeaning::generated(protocol, EventKind::Error),
                 )]
             }
@@ -448,7 +472,10 @@ impl ResponseOwner {
                             });
                         }
                         body["type"] = json!("response.failed");
-                        body["response"]["error"] = responses_failure_error();
+                        if body["response"]["error"].is_null() {
+                            body["response"]["error"] =
+                                error.unwrap_or_else(responses_failure_error);
+                        }
                         body["response"]["status"] = json!("failed");
                         if let Some(identity) = &self.identity {
                             response_transform::rewrite_stream_identity(
@@ -472,6 +499,8 @@ impl ResponseOwner {
                         .as_ref()
                         .map(|accounting| accounting.handle.responses_usage())
                 });
+                let mut error = error.unwrap_or_else(responses_failure_error);
+                response_transform::sanitize_responses_error_field(Some(&mut error));
                 let body = json!({"response":{
                     "store":false,
                     "id":request_id,
@@ -480,7 +509,7 @@ impl ResponseOwner {
                     "model":self.identity.as_ref().and_then(|i| i.user_model.as_deref()),
                     "status":"failed",
                     "incomplete_details":null,
-                    "error":responses_failure_error(),
+                    "error":error,
                     "output":[],
                     "usage":usage,
                 }, "type":"response.failed", "sequence_number":self.sequence.map_or(0, |n| n.saturating_add(1))});
