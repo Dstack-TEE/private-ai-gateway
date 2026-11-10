@@ -88,7 +88,6 @@ pub struct AciService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct E2eeReplayKey {
-    client_public_key_hex: String,
     model_public_key_hex: String,
     nonce: String,
 }
