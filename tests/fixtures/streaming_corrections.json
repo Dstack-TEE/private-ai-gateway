@@ -393,5 +393,40 @@
         }
       ]
     }
+  },
+  "early_non_sse_over_cap": {
+    "reason": "Early non-SSE overflow preserves main's 502 upstream_transport error tail and DONE; canonical encoding removes only the redundant leading blank block.",
+    "baseline_wire": ": PROCESSING\n\n\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n",
+    "expected": {
+      "name": "early_non_sse_over_cap",
+      "wire": ": PROCESSING\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n",
+      "wire_hash": "sha256:b96c14f4def8507a1e4eabf1a0d1770192243b4b77d21eb46540e79639e1534e",
+      "source_hash": "sha256:991bc82a1f5bdf203ad43efb5c253856b49b5c09580d8ed24bcdd2f431f7707c",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": true
+      },
+      "receipt": null,
+      "signature_valid": false,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/chat/completions",
+          "status": 502,
+          "durationMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          },
+          "errorMessage": "upstream_transport"
+        }
+      ]
+    }
   }
 }

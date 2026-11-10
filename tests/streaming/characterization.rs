@@ -139,7 +139,15 @@ impl UpstreamBackend for Backend {
             status_code: 200,
             headers: HashMap::from([("content-type".into(), self.content_type.into())]),
             body: Box::pin(CheckpointStream {
-                chunks: self.source.chunks(7).map(Bytes::copy_from_slice).collect(),
+                chunks: self
+                    .source
+                    .chunks(if self.source.len() > 1024 * 1024 {
+                        64 * 1024
+                    } else {
+                        7
+                    })
+                    .map(Bytes::copy_from_slice)
+                    .collect(),
                 gate: self.gate.clone(),
             }),
             served_instance_id: None,
@@ -495,6 +503,33 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
     json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid})
 }
 
+fn review_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    for early in [false, true] {
+        let source = "x".repeat(16 * 1024 * 1024 + 1);
+        let mut case = Case::new(
+            if early {
+                "early_non_sse_over_cap"
+            } else {
+                "non_sse_over_cap"
+            },
+            Endpoint::ChatComplete,
+            &source,
+            "openai",
+        );
+        case.non_sse = true;
+        case.early = early;
+        cases.push(case);
+    }
+    cases.push(Case::new("late_filtered_failure", Endpoint::ChatComplete,
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\nevent: ping\ndata: {\"type\":\"ping\",\"error\":{\"type\":\"api_error\",\"message\":\"failure\"}}\n\n", "anthropic"));
+    cases.push(Case::new("native_post_terminal_usage", Endpoint::ChatComplete,
+        "data: [DONE]\n\ndata: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n", "openai"));
+    cases.push(Case::new("anthropic_post_terminal_usage", Endpoint::ChatComplete,
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n", "anthropic"));
+    cases
+}
+
 #[tokio::test]
 async fn exact_wire_characterization_corpus() {
     const CHAT:&str="data: {\"id\":\"upstream-id\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n";
@@ -567,6 +602,7 @@ async fn exact_wire_characterization_corpus() {
     for (name, source) in crate::aci::upstream::characterization_provider_sources().await {
         cases.push(Case::new(name, Endpoint::ChatComplete, &source, "openai"));
     }
+    cases.extend(review_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -674,5 +710,32 @@ async fn early_declared_non_sse_opaque_bodies_use_unbilled_byte_path() {
         assert_eq!(reports[0]["status"], 200);
         assert!(reports[0]["usage"].is_null());
         assert!(reports[0]["errorMessage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn over_cap_non_sse_matches_main_on_normal_and_early_paths() {
+    let baselines: Value =
+        serde_json::from_str(include_str!("../fixtures/streaming_wire.json")).unwrap();
+    let corrections: Value =
+        serde_json::from_str(include_str!("../fixtures/streaming_corrections.json")).unwrap();
+    for case in review_cases().into_iter().take(2) {
+        let actual = capture(&case).await;
+        let baseline = baselines
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["name"] == case.name)
+            .unwrap();
+        let expected = corrections
+            .get(&case.name)
+            .map_or(baseline, |value| &value["expected"]);
+        assert_eq!(&actual, expected);
+        assert_eq!(actual["reports"].as_array().unwrap().len(), 1);
+        assert_eq!(actual["reports"][0]["status"], 502);
+        assert_eq!(actual["reports"][0]["errorMessage"], "upstream_transport");
+        assert!(actual["reports"][0]["usage"].is_null());
+        assert!(actual["reports"][0]["ttftMs"].is_null());
+        assert!(actual["receipt"].is_null());
     }
 }

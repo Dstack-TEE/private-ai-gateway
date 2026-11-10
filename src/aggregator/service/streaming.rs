@@ -119,8 +119,8 @@ pub(crate) fn decode_source(
 ) -> EventStream {
     let mut ids = Identifiers::default();
     Box::pin(
-        DecodedStream::new(inner, Some(protocol)).map(move |record| {
-            if let Ok(record) = &record {
+        DecodedStream::new(inner, Some(protocol)).map(move |mut record| {
+            if let Ok(record) = &mut record {
                 accounting.ingress(record);
                 ids.observe(record);
                 journal.observe_source(&ids);
@@ -244,6 +244,7 @@ pub(crate) struct ResponseOwner {
     e2ee: Option<E2eeRequestContext>,
     endpoint: String,
     protocol: Option<SseProtocol>,
+    non_sse: bool,
     request_id: Option<String>,
     ids: Identifiers,
     wire_hasher: Sha256,
@@ -272,6 +273,7 @@ impl ResponseOwner {
             e2ee,
             endpoint,
             protocol,
+            non_sse: false,
             request_id,
             ids: Identifiers::default(),
             wire_hasher: Sha256::new(),
@@ -322,7 +324,7 @@ impl ResponseOwner {
         if let Some(protocol) = self.protocol {
             self.tail.extend(if self.broken {
                 error_records(protocol, 502, self.request_id.as_deref(), self.sequence)
-            } else if protocol == SseProtocol::OpenaiChat {
+            } else if !self.non_sse && protocol == SseProtocol::OpenaiChat {
                 vec![done_record()]
             } else {
                 Vec::new()
@@ -331,13 +333,13 @@ impl ResponseOwner {
     }
     fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
         if record.non_sse.is_some() {
-            self.protocol = None;
+            self.non_sse = true;
         }
         self.truncated |= record.residual;
         self.ids.observe(&record);
         if let Some(event) = &record.event {
             self.saw_terminal |= event.meaning.terminal.is_some();
-            self.saw_error |= event.meaning.failure.is_some();
+            self.saw_error |= !event.after_terminal && event.meaning.failure.is_some();
             if let Some(sequence) = event
                 .payload
                 .json()

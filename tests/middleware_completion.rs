@@ -6062,9 +6062,8 @@ async fn client_disconnect_after_early_commit_while_forward_pending_preserves_cl
 }
 
 #[tokio::test]
-async fn declared_non_sse_opaque_body_over_buffered_json_cap_passes_through_unbilled() {
-    let source = vec![b'x'; MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1];
-    let expected_len = source.len();
+async fn declared_non_sse_over_event_cap_fails_as_upstream_transport() {
+    let source = vec![b'x'; 16 * 1024 * 1024 + 1];
     let (service, _) = build_recording_service(200, source, "application/json");
     let (control_url, posts) = spawn_control_capturing(
         200,
@@ -6076,11 +6075,12 @@ async fn declared_non_sse_opaque_body_over_buffered_json_cap_passes_through_unbi
     let response = mw.handle_completion(&service, input).await;
     assert_eq!(response.status(), 200);
     let output = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(output.len(), expected_len);
-    assert!(output.iter().all(|byte| *byte == b'x'));
+    assert!(output.is_empty());
     let report = wait_for_post(&posts, |_| true).await;
-    assert_eq!(report["status"], 200);
+    assert_eq!(report["status"], 502);
     assert!(report["usage"].is_null());
-    assert!(report["errorMessage"].is_null());
+    assert!(report["ttftMs"].is_null());
+    assert!(report["errorSource"].is_null());
+    assert_eq!(report["errorMessage"], "upstream_transport");
     assert_eq!(posts.lock().unwrap().len(), 1);
 }

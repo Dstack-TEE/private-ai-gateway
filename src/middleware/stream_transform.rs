@@ -88,11 +88,17 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
+                let meaning = record
+                    .event
+                    .as_ref()
+                    .map(|event| event.meaning)
+                    .unwrap_or_default();
                 record.edit_json(|body| {
-                    response_transform::rewrite_identity(body, identity);
-                    response_transform::canonicalize(
+                    response_transform::rewrite_stream_identity(body, identity, meaning.kind);
+                    response_transform::canonicalize_stream(
                         body,
                         *endpoint,
+                        meaning,
                         Some(identity.request_id.as_str()),
                     );
                 });
@@ -135,6 +141,7 @@ impl StreamTransform {
         let mut output = output.unwrap_or_default();
         for record in &mut output {
             if let Some(output) = record.event.as_mut() {
+                output.after_terminal = event.after_terminal;
                 if event.meaning.failure.is_some() {
                     output.meaning.failure = event.meaning.failure;
                 }
@@ -185,7 +192,6 @@ pub fn select_stream_transform(
 #[derive(Default)]
 struct StreamState {
     // Anthropic -> OpenAI chat.
-    anthropic_terminated: bool,
     tool_index: Option<i64>,
     usage: Option<Value>,
     model: Option<String>,
@@ -202,11 +208,7 @@ fn anthropic_chat_stream(
     state: &mut StreamState,
     strict: bool,
 ) -> Result<Option<Vec<Record>>, ()> {
-    if state.anthropic_terminated {
-        return Ok(None);
-    }
-    if event.meaning.failure.is_some() {
-        state.anthropic_terminated = true;
+    if event.meaning.failure.is_some() || event.meaning.kind == EventKind::Error {
         let error = event
             .payload
             .json()
@@ -214,20 +216,35 @@ fn anthropic_chat_stream(
             .filter(|value| !value.is_null())
             .cloned()
             .unwrap_or_else(malformed_response_error);
-        return Ok(Some(vec![
-            chat_event(json!({
-                "id": fallback_id,
-                "object": "chat.completion.chunk",
-                "created": now_secs(),
-                "model": "",
-                "error": error,
-                "choices": [{"finish_reason": Value::Null, "delta": {"content": ""}}],
-            })),
-            done_event(),
-        ]));
+        let usage = event.payload.json().and_then(|value| {
+            if matches!(
+                event.meaning.kind,
+                EventKind::MessageStart | EventKind::MessageDelta
+            ) {
+                anthropic_chat_chunk(value, event.meaning.kind, fallback_id, state, strict)
+                    .and_then(|records| {
+                        records.into_iter().find_map(|record| {
+                            record.json().and_then(|value| value.get("usage")).cloned()
+                        })
+                    })
+            } else {
+                None
+            }
+        });
+        let mut body = json!({
+            "id": fallback_id,
+            "object": "chat.completion.chunk",
+            "created": now_secs(),
+            "model": "",
+            "error": error,
+            "choices": [{"finish_reason": Value::Null, "delta": {"content": ""}}],
+        });
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        return Ok(Some(vec![chat_event(body), done_event()]));
     }
     if event.meaning.terminal.is_some() {
-        state.anthropic_terminated = true;
         return Ok(Some(vec![done_event()]));
     }
     match event.meaning.kind {
@@ -360,9 +377,7 @@ fn anthropic_chat_chunk(
         .get("delta")
         .and_then(|d| d.get("partial_json"))
         .filter(|v| !v.is_null());
-    let is_tool_block_delta = parsed.get("type").and_then(Value::as_str)
-        == Some("content_block_delta")
-        && partial_json.is_some();
+    let is_tool_block_delta = kind == EventKind::ContentBlockDelta && partial_json.is_some();
 
     if is_tool_block_start {
         if let Some(block) = parsed.get("content_block") {

@@ -1432,6 +1432,301 @@
     ]
   },
   {
+    "name": "non_sse_over_cap",
+    "wire": "",
+    "wire_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "source_hash": "sha256:991bc82a1f5bdf203ad43efb5c253856b49b5c09580d8ed24bcdd2f431f7707c",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": true
+    },
+    "receipt": null,
+    "signature_valid": false,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 502,
+        "durationMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": null,
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        },
+        "errorMessage": "upstream_transport"
+      }
+    ]
+  },
+  {
+    "name": "early_non_sse_over_cap",
+    "wire": ": PROCESSING\n\n\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:ec5d87a0f83843488e84e2327cb38a83323a506d373585541696ff2e48757ae4",
+    "source_hash": "sha256:991bc82a1f5bdf203ad43efb5c253856b49b5c09580d8ed24bcdd2f431f7707c",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": true
+    },
+    "receipt": null,
+    "signature_valid": false,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 502,
+        "durationMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": null,
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        },
+        "errorMessage": "upstream_transport"
+      }
+    ]
+  },
+  {
+    "name": "late_filtered_failure",
+    "wire": "data: [DONE]\n\n",
+    "wire_hash": "sha256:d8d37da081f11203f2af42092a92cb35508f27db75eba643058a0a580454517d",
+    "source_hash": "sha256:c1b6d28f6d76e84bc9444b862384473965ecc4aad394321d00226f9b464ee7e0",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:c1b6d28f6d76e84bc9444b862384473965ecc4aad394321d00226f9b464ee7e0",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:d8d37da081f11203f2af42092a92cb35508f27db75eba643058a0a580454517d",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "e0f9051d5fdd8b4cb73aecf9ed46c154647e0cf9f6dbebd6c135a034ba60f66d4317d5208263aad18461eee0f3c425bc483d1cdabe9688ad58e6ab2b6e790d08",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": null,
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "native_post_terminal_usage",
+    "wire": "data: [DONE]\n\ndata: {\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":8}}\n\n",
+    "wire_hash": "sha256:2b9eeba818fde9f3cfb8f494c89606a8b446b3aec8e2f541f0f148af77afd5f7",
+    "source_hash": "sha256:b64340913ba49e456a544eed3b42fe3b9f460031b97b65938a3f7d1c4648abb2",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "upstream-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:b64340913ba49e456a544eed3b42fe3b9f460031b97b65938a3f7d1c4648abb2",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:2b9eeba818fde9f3cfb8f494c89606a8b446b3aec8e2f541f0f148af77afd5f7",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "931bded91782def90f5d5a013e3780f26635c59d25eb3ad3ec2afc25769b644c504b8f742eed688c9a67705c0ad5eccc8b0bb449ff93860622c2a52766b34807",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3,
+          "total_tokens": 5
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
+    "name": "anthropic_post_terminal_usage",
+    "wire": "data: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"delta\":{\"content\":\"\"},\"index\":0,\"logprobs\":null,\"finish_reason\":null}]}\n\ndata: [DONE]\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":3,\"prompt_tokens\":1,\"total_tokens\":4,\"cost\":7}}\n\n",
+    "wire_hash": "sha256:1f4aba108d6a2de9e93cded0ded7bc9f7f44835c705f5a466e1a81a6eb94d342",
+    "source_hash": "sha256:840a58846d9358d45edcf7209f36abc34cfed7c38a00fd1cb06b79a15e79131d",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": "req-fixture",
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:f935b93744f946cdaf3b0e0fbaeadcc4b192a7c6cc508521bfc7e638256d1962",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:840a58846d9358d45edcf7209f36abc34cfed7c38a00fd1cb06b79a15e79131d",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:1f4aba108d6a2de9e93cded0ded7bc9f7f44835c705f5a466e1a81a6eb94d342",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "5143f216bd6830fa555c1548881ac893bb6c9d441727119cacdad623b7171bfca359aeab6e5019a870de7ac29202dae068cc8d7055d1c8c0f9c1902ee1109b0f",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 200,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 1,
+          "total_tokens": 4
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        }
+      }
+    ]
+  },
+  {
     "name": "buffered_sse",
     "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
     "wire_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",

@@ -387,6 +387,14 @@ async fn transformed_response(
             StreamTransform::AnthropicToOpenaiChat,
         ));
     }
+    if endpoint == Endpoint::Messages {
+        let usage = UpstreamUsage::default();
+        accounting.handle.upstream_usage(usage.clone());
+        events = Box::pin(EventTransformStream::new(
+            events,
+            StreamTransform::OpenaiToAnthropicMessages(usage),
+        ));
+    }
     if endpoint == Endpoint::CreateModelResponse && source_protocol != SseProtocol::OpenaiResponses
     {
         let usage = UpstreamUsage::default();
@@ -447,7 +455,7 @@ async fn filtered_anthropic_error_evidence_reaches_client_and_single_report() {
         let output = transformed_response(&control, source.into(), SseProtocol::AnthropicMessages, Endpoint::ChatComplete, false).await;
         assert!(output.contains("\"error\":"), "{output}");
         assert!(output.ends_with("data: [DONE]\n\n"), "{output}");
-        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        assert_eq!(output.matches("data: [DONE]").count(), if source.contains("message_stop") { 2 } else { 1 });
         let report = control.captured().await;
         assert_eq!(report["status"], 502);
         assert_eq!(report["errorMessage"], "stream_inband_error");
@@ -572,4 +580,89 @@ async fn early_non_sse_handoff_disables_subsequent_keepalives() {
         "opaque body"
     );
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn rejected_empty_bridge_terminal_is_a_failure_with_destination_error() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let output = transformed_response(
+        &control,
+        "data: [DONE]\n\n".into(),
+        SseProtocol::OpenaiChat,
+        Endpoint::Messages,
+        false,
+    )
+    .await;
+    assert!(output.starts_with("event: error\n"), "{output}");
+    assert!(!output.contains("event: message_stop\n"));
+    assert_eq!(control.captured().await["status"], 502);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn failed_anthropic_delta_retains_its_usage_and_cost() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let source = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\"},\"usage\":{\"output_tokens\":3}}\n\n";
+    let output = transformed_response(
+        &control,
+        source.into(),
+        SseProtocol::AnthropicMessages,
+        Endpoint::ChatComplete,
+        false,
+    )
+    .await;
+    assert!(output.contains("\"error\":"), "{output}");
+    assert!(output.contains("\"cost\":8"), "{output}");
+    assert!(output.ends_with("data: [DONE]\n\n"));
+    let report = control.captured().await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["usage"]["prompt_tokens"], 2);
+    assert_eq!(report["usage"]["completion_tokens"], 3);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn numeric_chat_payload_uses_exact_decoded_size_in_every_transform() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let numbers = "1234567890123,".repeat(1_107_142);
+    let source = format!("data: {{\"choices\":[{numbers}1234567890123]}}\n\ndata: [DONE]\n\n");
+    assert!(source.len() > 15_500_000 && source.len() < crate::sse::MAX_EVENT_BYTES);
+    let output = transformed_response(
+        &control,
+        source,
+        SseProtocol::OpenaiChat,
+        Endpoint::ChatComplete,
+        false,
+    )
+    .await;
+    assert_eq!(output.matches("1234567890123").count(), 1_107_143);
+    assert!(output.ends_with("data: [DONE]\n\n"));
+    assert!(!output.contains("\"error\":"));
+    assert_eq!(control.captured().await["status"], 200);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn named_tool_delta_without_payload_type_keeps_arguments() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let source = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"search\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"delta\":{\"partial_json\":\"{\\\"q\\\":\\\"test\\\"}\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let output = transformed_response(
+        &control,
+        source.into(),
+        SseProtocol::AnthropicMessages,
+        Endpoint::ChatComplete,
+        false,
+    )
+    .await;
+    assert!(
+        output.contains("\"arguments\":\"{\\\"q\\\":\\\"test\\\"}\""),
+        "{output}"
+    );
+    assert!(output.ends_with("data: [DONE]\n\n"));
+    assert_eq!(control.captured().await["status"], 200);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
 }

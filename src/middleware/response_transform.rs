@@ -181,6 +181,35 @@ pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
     }
 }
 
+/// Streaming identity uses the ingress kind, including named events whose
+/// payload omits a redundant top-level type.
+pub(crate) fn rewrite_stream_identity(
+    body: &mut Value,
+    identity: &ResponseIdentity,
+    kind: crate::sse_protocol::EventKind,
+) {
+    use crate::sse_protocol::EventKind;
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let nested = match kind {
+        EventKind::MessageStart => Some("message"),
+        EventKind::ResponseCreated
+        | EventKind::ResponseInProgress
+        | EventKind::ResponseCompleted
+        | EventKind::ResponseIncomplete
+        | EventKind::ResponseFailed => Some("response"),
+        _ => None,
+    };
+    if let Some(key) = nested {
+        if let Some(object) = object.get_mut(key).and_then(Value::as_object_mut) {
+            rewrite_id_and_model(object, identity);
+        }
+    } else {
+        rewrite_id_and_model(object, identity);
+    }
+}
+
 /// Replace `id`/`model` where they already exist, on whichever object carries
 /// the response identity.
 fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &ResponseIdentity) {
@@ -626,6 +655,48 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
     }
 }
 
+/// Sanitation changes representation; protocol identity and outcome come from
+/// ingress metadata rather than the payload's optional type field.
+pub(crate) fn canonicalize_stream(
+    body: &mut Value,
+    endpoint: Endpoint,
+    meaning: crate::sse_protocol::EventMeaning,
+    request_id: Option<&str>,
+) {
+    use crate::sse_protocol::EventKind;
+    match endpoint {
+        Endpoint::Messages => {
+            if meaning.kind == EventKind::Error {
+                if let Some(object) = body.as_object_mut() {
+                    sanitize_messages_error_event(object, request_id);
+                }
+            }
+        }
+        Endpoint::CreateModelResponse => {
+            let Some(object) = body.as_object_mut() else {
+                return;
+            };
+            match meaning.kind {
+                EventKind::Error => sanitize_responses_error_event(object),
+                EventKind::ResponseCreated
+                | EventKind::ResponseInProgress
+                | EventKind::ResponseCompleted
+                | EventKind::ResponseIncomplete
+                | EventKind::ResponseFailed => {
+                    if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
+                        canonicalize_responses_object(inner);
+                    }
+                }
+                EventKind::Data if meaning.failure.is_some() => {
+                    sanitize_responses_error_event(object)
+                }
+                _ => {}
+            }
+        }
+        _ => canonicalize(body, endpoint, request_id),
+    }
+}
+
 fn canonicalize_systemone(body: &mut Value) {
     let Some(object) = body.as_object_mut() else {
         return;
@@ -659,6 +730,13 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
     if object.get("type").and_then(Value::as_str) != Some("error") {
         return;
     }
+    sanitize_messages_error_event(object, request_id);
+}
+
+fn sanitize_messages_error_event(
+    object: &mut serde_json::Map<String, Value>,
+    request_id: Option<&str>,
+) {
     // The same kind resolution and the same suppressed-status rules as every
     // other surface: read code-first, and let the account check outrank the
     // kind. Reading the `type` slot alone would relay an unpaid provider as a

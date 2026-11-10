@@ -259,6 +259,12 @@ response outcome even if a later stage filters the record; the terminal cannot
 turn it into a successful usage report. Multiline
 JSON data is interpreted and metered once as one payload.
 
+Failure evidence remains sticky through the source protocol's terminal. Later
+source events cannot change that outcome; their bytes are still hashed through
+EOF, and usage and billing retain the existing behavior of the selected bridge.
+A source terminal alone does not prove a conversion succeeded: the destination
+terminal must be produced, and gateway-stage failures still fail the response.
+
 Application blocks are limited to 16 MiB. A clean EOF between events retains the
 existing completion policy: Chat gets a missing `data: [DONE]` marker, while
 Messages and Responses receive no fabricated success terminal. Legacy Anthropic
@@ -266,8 +272,12 @@ completion conversion emits exactly one typed `data: [DONE]` marker. A body that
 explicitly declares a non-SSE content type follows an unbilled byte path: valid
 JSON objects receive identity rewriting and sanitization, while invalid JSON and
 non-object bodies pass through. It gets no SSE blank-line suffix or sentinel.
+This path retains the 16 MiB buffering bound. Overflow ends the body and records
+an upstream `502` with `upstream_transport` and no usage.
 If early commit already emitted a heartbeat before upstream headers arrived,
 that comment precedes the non-SSE body. Normal non-SSE responses have no heartbeat.
+An overflow after early commit retains the protocol's error tail and terminal,
+since the gateway already committed event-stream headers.
 Streaming E2EE still requires SSE.
 
 Receipt `response.received` hashes the provider adapter's application bytes before

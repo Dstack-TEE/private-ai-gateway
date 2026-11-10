@@ -1334,7 +1334,9 @@ fn json_stream(
         let mut bytes = Vec::new();
         while let Some(chunk) = body.next().await {
             let chunk = chunk?;
-            accounting.first_byte();
+            if bytes.len().saturating_add(chunk.len()) > crate::sse::MAX_EVENT_BYTES {
+                Err(ServiceError::Upstream(UpstreamError::Transport("provider SSE event exceeded the size cap".into())))?;
+            }
             bytes.extend_from_slice(&chunk);
         }
         // Declared non-SSE responses were never metered. Preserve opaque and
@@ -1348,6 +1350,7 @@ fn json_stream(
                     .map_err(|_| ServiceError::AdmissionInvariant("JSON response encoding failed"))?;
             }
         }
+        accounting.first_byte();
         yield Bytes::from(bytes);
     })
 }

@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 
 use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 use crate::aci::digest;
-use crate::sse::Payload;
 
 /// JCS bytes for the AAD documents — same bytes main's `canonical` module
 /// produced for these integer-and-ASCII inputs.
@@ -557,7 +556,7 @@ pub(super) fn encrypt_e2ee_record(
     let Some(event) = &record.event else {
         return Ok(());
     };
-    if matches!(&event.payload, Payload::Text(text) if text == "[DONE]") {
+    if event.meaning.kind == crate::sse_protocol::EventKind::Done {
         return Ok(());
     }
     let value = event

@@ -43,6 +43,7 @@ pub(crate) struct Event {
     pub data: String,
     pub payload: Payload,
     pub meaning: EventMeaning,
+    pub after_terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,7 @@ impl Record {
                 explicit_name: metadata.event.clone(),
                 data: data.clone(),
                 meaning: classify(protocol, metadata.event.as_deref(), &payload),
+                after_terminal: false,
                 payload,
             }
         });
@@ -119,7 +121,7 @@ impl Record {
     pub fn generated(name: Option<&str>, payload: Payload, meaning: EventMeaning) -> Self {
         let data = match &payload {
             Payload::Text(text) => text.clone(),
-            Payload::Json(_) => String::new(),
+            Payload::Json(value) => value.to_string(),
         };
         Self {
             event: Some(Event {
@@ -128,6 +130,7 @@ impl Record {
                 data,
                 payload,
                 meaning,
+                after_terminal: false,
             }),
             metadata: Sse {
                 event: name.map(str::to_string),
@@ -135,7 +138,7 @@ impl Record {
             },
             residual: false,
             heartbeat: false,
-            edited: true,
+            edited: false,
             non_sse: None,
         }
     }
@@ -152,23 +155,7 @@ impl Record {
         }
     }
     pub fn buffered_bytes(&self) -> usize {
-        fn size(value: &Value) -> usize {
-            match value {
-                Value::String(s) => s.len(),
-                Value::Array(v) => v.iter().map(size).fold(0, usize::saturating_add),
-                Value::Object(v) => v
-                    .iter()
-                    .map(|(k, v)| k.len().saturating_add(size(v)))
-                    .fold(0, usize::saturating_add),
-                _ => 16,
-            }
-        }
-        self.event.as_ref().map_or(0, |event| {
-            event.data.len().max(match &event.payload {
-                Payload::Json(v) => size(v),
-                Payload::Text(s) => s.len(),
-            })
-        })
+        self.event.as_ref().map_or(0, |event| event.data.len())
     }
 }
 

@@ -172,6 +172,7 @@ struct AccountingState {
     upstream_usage: Option<UpstreamUsage>,
     ttft_ms: Option<u64>,
     saw_terminal: bool,
+    ingress_terminal: bool,
     saw_error: bool,
     truncated: bool,
     failure: StreamFailure,
@@ -194,6 +195,7 @@ impl Accounting {
                 upstream_usage: None,
                 ttft_ms: None,
                 saw_terminal: false,
+                ingress_terminal: false,
                 saw_error: false,
                 truncated: false,
                 failure: StreamFailure::default(),
@@ -312,12 +314,19 @@ impl AccountingHandle {
         }
     }
     /// Capture protocol facts before any stage can filter or reshape a record.
-    pub(crate) fn ingress(&self, record: &Record) {
+    pub(crate) fn ingress(&self, record: &mut Record) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.truncated |= record.residual;
-        if let Some(event) = &record.event {
-            state.saw_terminal |= event.meaning.terminal.is_some();
-            state.saw_error |= event.meaning.failure.is_some();
+        if let Some(event) = &mut record.event {
+            event.after_terminal = state.ingress_terminal;
+            if event.after_terminal {
+                // Protocol outcome is fixed at the accepted terminal. Keep
+                // reading/hashing bytes and observing usage until upstream EOF.
+                event.meaning.failure = None;
+            } else {
+                state.saw_error |= event.meaning.failure.is_some();
+                state.ingress_terminal |= event.meaning.terminal.is_some();
+            }
         }
     }
     pub(crate) fn protocol_facts(&self) -> (bool, bool, bool) {
@@ -359,10 +368,10 @@ impl AccountingHandle {
         }
         let Some(event) = &record.event else { return };
         state.saw_terminal |= event.meaning.terminal.is_some();
-        state.saw_error |= event.meaning.failure.is_some();
+        state.saw_error |= !event.after_terminal && event.meaning.failure.is_some();
+        let event_kind = event.meaning.kind;
         record.edit_json(|parsed| {
-            let event_type = parsed.get("type").and_then(Value::as_str);
-            if event_type == Some("message_start") {
+            if event_kind == crate::sse_protocol::EventKind::MessageStart {
                 if let Some(usage) = parsed
                     .get("message")
                     .and_then(|m| m.get("usage"))
@@ -371,7 +380,7 @@ impl AccountingHandle {
                     state.start_usage = Some(usage.clone());
                 }
             }
-            let start_usage = (event_type == Some("message_delta"))
+            let start_usage = (event_kind == crate::sse_protocol::EventKind::MessageDelta)
                 .then(|| state.start_usage.clone())
                 .flatten();
             let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
