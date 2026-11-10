@@ -7,7 +7,7 @@
 //! legacy E2EE request paths.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -39,8 +39,8 @@ use private_ai_gateway::aci::upstream::{
     MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
-    UpstreamVerifier,
+    AciService, AciServiceConfig, Clock, FixedClock, InMemoryReceiptStore,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session::EvidenceRef;
 use private_ai_gateway::http::{build_router, build_router_with_admin};
@@ -394,6 +394,20 @@ fn harness_with(
     verifier: Arc<dyn UpstreamVerifier>,
     enable_e2ee: bool,
 ) -> Harness {
+    harness_with_clock(
+        upstream,
+        verifier,
+        enable_e2ee,
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+}
+
+fn harness_with_clock(
+    upstream: RecordingUpstream,
+    verifier: Arc<dyn UpstreamVerifier>,
+    enable_e2ee: bool,
+    clock: Arc<dyn Clock>,
+) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream_calls = upstream.calls();
@@ -420,7 +434,7 @@ fn harness_with(
             verifier,
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
-            Arc::new(FixedClock(1_700_000_000)),
+            clock,
         )
         .unwrap(),
     );
@@ -694,8 +708,17 @@ fn e2ee_chat_request(
     nonce: &str,
     stream: bool,
 ) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    e2ee_chat_request_at(h, client_secret, nonce, stream, 1_700_000_000)
+}
+
+fn e2ee_chat_request_at(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+    nonce: &str,
+    stream: bool,
+    timestamp: u64,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
     let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     let aad = aci_request_aad(
         &model_key.algo,
@@ -1766,6 +1789,198 @@ async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
         .await;
     assert_eq!(second.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_detection_covers_the_full_timestamp_window() {
+    let now = 1_700_000_000;
+    for (timestamp_offset, replay_offsets) in [(0, &[300][..]), (300, &[300, 600][..])] {
+        let clock = Arc::new(admission::TestClock(AtomicU64::new(now)));
+        let h = harness_with_clock(
+            RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+            Arc::new(AlwaysVerified),
+            true,
+            clock.clone(),
+        );
+        let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+        let nonce = hex_nonce("nonce-window");
+        let timestamp = now + timestamp_offset;
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, timestamp);
+        let first = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(first.status, StatusCode::OK);
+
+        for replay_offset in replay_offsets {
+            clock.set(now + replay_offset);
+            let repeated = h
+                .requester
+                .post_owned_headers("/v1/chat/completions", &body, &headers)
+                .await;
+            assert_eq!(repeated.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error_type(&repeated), "e2ee_replay_detected");
+        }
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+
+        let after_window = timestamp + 301;
+        clock.set(after_window);
+        let expired = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+
+        // An entry is released once its timestamp can no longer be accepted.
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, after_window);
+        let next = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(next.status, StatusCode::OK);
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn e2ee_v2_rechecks_timestamp_before_claim_after_entry_expiry() {
+    struct ValidationSnapshotClock {
+        current: admission::TestClock,
+        validation_snapshot: Mutex<Option<u64>>,
+    }
+    impl Clock for ValidationSnapshotClock {
+        fn now_secs(&self) -> u64 {
+            self.validation_snapshot
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| self.current.now_secs())
+        }
+    }
+
+    let timestamp = 1_700_000_000;
+    let clock = Arc::new(ValidationSnapshotClock {
+        current: admission::TestClock(AtomicU64::new(timestamp)),
+        validation_snapshot: Mutex::new(None),
+    });
+    let h = harness_with_clock(
+        RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+        Arc::new(AlwaysVerified),
+        true,
+        clock.clone(),
+    );
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let nonce = hex_nonce("nonce-claim-time");
+    let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    clock.current.set(timestamp + 301);
+    let (other_body, other_headers) = e2ee_chat_request_at(
+        &h,
+        &client_secret,
+        &hex_nonce("nonce-next-claim"),
+        false,
+        timestamp + 301,
+    );
+    let other = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &other_body, &other_headers)
+        .await;
+    assert_eq!(other.status, StatusCode::OK);
+
+    // The initial validation snapshot is at the inclusive boundary; the claim
+    // must use the current clock after the earlier entry has been evicted.
+    *clock.validation_snapshot.lock().unwrap() = Some(timestamp + 300);
+    let expired = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_identity_is_independent_of_client_key() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let nonce = hex_nonce("nonce-client-keys");
+    for (client_key, expected_status) in [
+        ([0x58; 32], StatusCode::OK),
+        ([0x59; 32], StatusCode::BAD_REQUEST),
+    ] {
+        let client_secret = k256::SecretKey::from_slice(&client_key).unwrap();
+        let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+        let response = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(response.status, expected_status);
+        if expected_status == StatusCode::BAD_REQUEST {
+            assert_eq!(error_type(&response), "e2ee_replay_detected");
+        }
+    }
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_detection_normalizes_service_key_hex_case() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-service-key"));
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    let model_key = &mut headers
+        .iter_mut()
+        .find(|(name, _)| *name == "x-model-pub-key")
+        .unwrap()
+        .1;
+    *model_key = model_key.to_ascii_uppercase();
+    let second = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(second.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_failed_decryption_leaves_nonce_available() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-decryption"));
+    let mut invalid_payload: Value = serde_json::from_slice(&body).unwrap();
+    let content = &mut invalid_payload["messages"][0]["content"];
+    let mut ciphertext = hex::decode(content.as_str().unwrap()).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    *content = Value::String(hex::encode(ciphertext));
+
+    let invalid = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&invalid_payload).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&invalid), "e2ee_decryption_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+
+    let valid = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(valid.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -217,9 +217,12 @@ have established through ACI attestation.
   characters, either case, with no `0x` prefix. The service rejects malformed
   values with `e2ee_invalid_nonce`.
 - The client MUST generate a fresh E2EE nonce per request. The service MUST
-  reject a repeated `(client_public_key, service_public_key, nonce)` tuple
-  within the acceptance window with `e2ee_replay_detected`. For replay
-  comparison, the two accepted hex cases encode the same nonce bytes.
+  record the `(service_public_key, nonce)` tuple only after successful request
+  decryption and reject a repeated tuple with `e2ee_replay_detected` throughout
+  the timestamp acceptance window, including `now = timestamp + 300` for the
+  default window. For replay comparison, the service public key is normalized
+  according to its suite, and the two accepted hex cases encode the same nonce
+  bytes.
 
 A malformed client public key is rejected with `e2ee_invalid_public_key`.
 An `X-E2EE-Version` other than `2` is rejected with
@@ -264,7 +267,7 @@ a different status.
 | `e2ee_invalid_public_key` | 400 | A supplied public key is not valid for the selected suite. |
 | `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
 | `e2ee_invalid_nonce` | 400 | `X-E2EE-Nonce` is not exactly 64 hexadecimal characters. |
-| `e2ee_replay_detected` | 400 | The client-key, service-key, and nonce tuple was already used inside the replay window. |
+| `e2ee_replay_detected` | 400 | The normalized service-key and nonce tuple was already used inside the timestamp acceptance window. |
 | `e2ee_invalid_timestamp` | 400 | `X-E2EE-Timestamp` is malformed or outside the acceptance window. |
 | `e2ee_invalid_payload_model` | 400 | The request's top-level `model` is absent or not a string. |
 | `e2ee_decryption_failed` | 400 | A ciphertext is malformed, AEAD authentication fails, or decrypted content cannot be restored. |
