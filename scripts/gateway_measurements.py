@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 SCHEMA = "gateway-measurements/v1"
 DEFAULT_REPO = "Dstack-TEE/private-ai-gateway"
-RELEASE_PATTERN = r"gateway-prod-\d{4}-\d{2}-\d{2}(?:-[1-9]\d*)?"
+RELEASE_PATTERN = r"gateway-prod-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[1-9][0-9]*)?"
 FIELDS = {
     "app": ("compose_hash", "app_id", "repo_url", "repo_commit", "launcher_image"),
     "kms": ("root_key",),
