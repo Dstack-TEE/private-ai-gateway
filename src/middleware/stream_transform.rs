@@ -887,8 +887,11 @@ impl ChatEvents for MessagesEvents {
                 fallback_id.to_string()
             }
         });
-        let mut usage = messages_usage(chunk.get("usage"));
-        usage["output_tokens"] = json!(0);
+        // Usage on an early Chat chunk can be a running total that lacks the
+        // final cache split, which would overstate `input_tokens`. Like the
+        // Responses bridge, state usage only once it is final, in
+        // `message_delta`.
+        let usage = messages_usage(None);
         out.push_str(&sse_event(
             "message_start",
             &json!({
@@ -2398,6 +2401,30 @@ mod tests {
 
     fn tool_event(call: Value) -> String {
         chat_event(json!({ "tool_calls": [call] }), None)
+    }
+
+    #[test]
+    fn openai_to_anthropic_states_usage_only_once_final() {
+        // vLLM-style continuous usage puts a running total on every chunk, and
+        // only the last carries the cache split. A per-field max over
+        // message_start and message_delta must not bill cached input in full.
+        let events = [
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1}}".to_string(),
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":80}}}".to_string(),
+            "data: [DONE]".to_string(),
+        ];
+        let refs: Vec<&str> = events.iter().map(String::as_str).collect();
+        let out = run(messages_transform(), &refs);
+        let start = out.iter().find(|e| e["type"] == "message_start").unwrap();
+        assert_eq!(
+            start["message"]["usage"],
+            json!({ "input_tokens": 0, "output_tokens": 0 })
+        );
+        let delta = out.iter().find(|e| e["type"] == "message_delta").unwrap();
+        assert_eq!(
+            delta["usage"],
+            json!({ "input_tokens": 20, "output_tokens": 2, "cache_read_input_tokens": 80 })
+        );
     }
 
     #[test]
