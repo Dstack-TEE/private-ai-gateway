@@ -239,6 +239,9 @@
             "finish_reason": "stop_sequence"
           }
         ]
+      },
+      {
+        "__done": true
       }
     ]
   },

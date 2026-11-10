@@ -12,12 +12,14 @@
 
 use serde_json::Value;
 
-use crate::sse_protocol::{sse_protocol, SseProtocol};
+use crate::sse_protocol::{
+    event_type, parse_event, sse_protocol, terminal_kind, SseProtocol, TerminalKind,
+};
 
 /// Cap on the reassembly buffers. Without one, a response that never sends a
 /// line terminator would grow them until the request runs out of memory. A
 /// single SSE event above this is pathological.
-const MAX_OBSERVED_EVENT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_OBSERVED_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 /// Watches an SSE stream as it flows past: the identifiers a receipt records,
 /// and how the stream ended.
@@ -29,16 +31,15 @@ const MAX_OBSERVED_EVENT_BYTES: usize = 16 * 1024 * 1024;
 /// complete is decided by its caller from how the body ended.
 pub struct SseFramingObserver {
     line_buffer: Vec<u8>,
-    event_data: Vec<u8>,
+    event_buffer: Vec<u8>,
     /// A `\r` closed the previous line; a `\n` right after it belongs to that
     /// same CRLF terminator rather than opening an empty line.
     pending_cr: bool,
     chat_id: Option<String>,
     model_id: Option<String>,
-    /// `None` when these bytes are not the client-facing stream, so no terminal
-    /// is meaningful and only the identifiers are collected.
+    /// `None` for non-SSE or buffered bodies where only identifiers matter.
     protocol: Option<SseProtocol>,
-    saw_terminal: bool,
+    terminal: Option<TerminalKind>,
     saw_error: bool,
     /// A non-comment field line has been read but not yet dispatched by a blank
     /// line: the stream is mid-event. Tracks the WHATWG "event in progress"
@@ -62,9 +63,8 @@ impl SseFramingObserver {
         Self::with_protocol(Some(protocol))
     }
 
-    /// Observe bytes that are not the client-facing stream — an upstream-format
-    /// draft, or a buffered body. A terminal in some other protocol would mean
-    /// nothing here, so only the identifiers are collected.
+    /// Collect identifiers from buffered or non-SSE bodies without interpreting
+    /// a protocol terminal.
     pub fn identifiers_only() -> Self {
         Self::with_protocol(None)
     }
@@ -72,12 +72,12 @@ impl SseFramingObserver {
     fn with_protocol(protocol: Option<SseProtocol>) -> Self {
         Self {
             line_buffer: Vec::new(),
-            event_data: Vec::new(),
+            event_buffer: Vec::new(),
             pending_cr: false,
             chat_id: None,
             model_id: None,
             protocol,
-            saw_terminal: false,
+            terminal: None,
             saw_error: false,
             mid_event: false,
             last_sequence_number: None,
@@ -91,7 +91,11 @@ impl SseFramingObserver {
 
     /// The stream delivered its protocol's framing terminal.
     pub fn saw_terminal(&self) -> bool {
-        self.saw_terminal
+        self.terminal().is_some()
+    }
+
+    pub fn terminal(&self) -> Option<TerminalKind> {
+        self.terminal
     }
 
     /// The stream delivered an in-band error event; the upstream told the client
@@ -125,11 +129,14 @@ impl SseFramingObserver {
         !self.observation_failed
     }
 
-    pub fn observe(&mut self, chunk: &[u8]) {
+    /// Return the exclusive offset in this chunk of the first dispatched
+    /// terminal. A CR dispatches immediately, including when a following LF
+    /// arrives in a later chunk. No byte after that boundary is observed.
+    pub fn observe(&mut self, chunk: &[u8]) -> Option<usize> {
         if self.done() {
-            return;
+            return None;
         }
-        for &byte in chunk {
+        for (offset, &byte) in chunk.iter().enumerate() {
             // LF, CRLF and a lone CR all terminate a line. Splitting only on
             // `\n` would leave a CR-framed stream as one endless line, so its
             // terminal would never be seen and a complete response would look
@@ -143,78 +150,66 @@ impl SseFramingObserver {
                     self.pending_cr = byte == b'\r';
                     let line = std::mem::take(&mut self.line_buffer);
                     self.observe_line(&line);
+                    if self.saw_terminal() {
+                        return Some(offset + 1);
+                    }
                     if self.done() {
-                        return;
+                        return None;
                     }
                 }
                 _ => self.line_buffer.push(byte),
             }
-            if self.line_buffer.len() + self.event_data.len() > MAX_OBSERVED_EVENT_BYTES {
+            if self.line_buffer.len() + self.event_buffer.len() > MAX_OBSERVED_EVENT_BYTES {
                 // Give up rather than keep buffering. The bytes still reach the
                 // client untouched; only the judgement about how the stream
                 // ended is lost, and a lost judgement must not become a guess.
                 self.observation_failed = true;
                 self.line_buffer = Vec::new();
-                self.event_data = Vec::new();
-                return;
+                self.event_buffer = Vec::new();
+                return None;
             }
         }
+        None
     }
 
     /// Nothing left to learn: the identifiers are known and the stream has
     /// ended, so no later byte can change the answer.
     fn done(&self) -> bool {
         self.observation_failed
-            || (self.chat_id.is_some()
-                && self.model_id.is_some()
-                && (self.protocol.is_none() || self.saw_terminal || self.saw_error))
+            || self.saw_terminal()
+            || (self.protocol.is_none() && self.chat_id.is_some() && self.model_id.is_some())
     }
 
     fn observe_line(&mut self, line: &[u8]) {
-        // A blank line ends the event and resets the framing state, whether or
-        // not a message was dispatched.
         if line.is_empty() {
             self.dispatch_event();
             self.mid_event = false;
             return;
         }
-        // Comments do not start an event.
-        if line.starts_with(b":") {
-            return;
-        }
-        // Any field line (`data:`, `event:`, `id:`, an unknown field) puts an
-        // event in progress; only `data:` contributes to the payload watched
-        // for identifiers and `[DONE]`.
-        self.mid_event = true;
-        let Some(rest) = line.strip_prefix(b"data:") else {
-            return;
-        };
-        // WHATWG: append the value and a single LF for every `data:` field,
-        // including an empty one. `dispatch` strips one trailing LF. So a lone
-        // empty `data:` before `data: [DONE]` yields the payload "\n[DONE]",
-        // which is not the terminator — as the client's own parser sees it.
-        let data = rest.strip_prefix(b" ").unwrap_or(rest);
-        self.event_data.extend_from_slice(data);
-        self.event_data.push(b'\n');
+        // Comments do not start an event. Keep the complete event text so the
+        // observer and transforms use the same field and bare-payload parser.
+        self.mid_event |= !line.starts_with(b":");
+        self.event_buffer.extend_from_slice(line);
+        self.event_buffer.push(b'\n');
     }
 
     fn dispatch_event(&mut self) {
-        // Empty means no `data:` field was seen (each appends at least an LF).
-        if self.event_data.is_empty() {
-            return;
-        }
-        let mut data = std::mem::take(&mut self.event_data);
-        if data.last() == Some(&b'\n') {
-            data.pop();
-        }
-        if data.as_slice() == b"[DONE]" {
-            self.saw_terminal |= self.protocol == Some(SseProtocol::OpenaiChat);
-            return;
-        }
-        let Ok(parsed) = serde_json::from_slice::<Value>(&data) else {
+        let event = std::mem::take(&mut self.event_buffer);
+        let event = parse_event(&String::from_utf8_lossy(&event));
+        let Some(data) = event.data.as_deref() else {
             return;
         };
-        self.observe_terminal(&parsed);
+        if let Some(terminal) = self
+            .protocol
+            .and_then(|protocol| terminal_kind(protocol, None, data.as_bytes()))
+        {
+            self.terminal = Some(terminal);
+            return;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(data.trim()) else {
+            return;
+        };
+        self.observe_terminal(&parsed, event.name.as_deref(), data.as_bytes());
         if self.chat_id.is_none() {
             self.chat_id = parsed.get("id").and_then(Value::as_str).map(str::to_string);
         }
@@ -233,7 +228,7 @@ impl SseFramingObserver {
     /// terminal: whether the stream is complete is decided by how it ended
     /// (a clean end vs a transport error), not by a content-level signal that
     /// says nothing about the framing around it.
-    fn observe_terminal(&mut self, parsed: &Value) {
+    fn observe_terminal(&mut self, parsed: &Value, name: Option<&str>, data: &[u8]) {
         if let Some(sequence) = parsed.get("sequence_number").and_then(Value::as_u64) {
             self.last_sequence_number = Some(match self.last_sequence_number {
                 Some(previous) => previous.max(sequence),
@@ -243,16 +238,8 @@ impl SseFramingObserver {
         let Some(protocol) = self.protocol else {
             return;
         };
-        let event_type = parsed.get("type").and_then(Value::as_str);
-        let terminal = match protocol {
-            SseProtocol::OpenaiChat => false,
-            SseProtocol::AnthropicMessages => event_type == Some("message_stop"),
-            SseProtocol::OpenaiResponses => matches!(
-                event_type,
-                Some("response.completed" | "response.incomplete" | "response.failed")
-            ),
-        };
-        self.saw_terminal |= terminal;
+        let event_type = event_type(name, parsed);
+        self.terminal = terminal_kind(protocol, event_type, data);
         // An error is an error however the protocol frames it: a top-level
         // `error`, an `error`-typed event, a Responses `response.failed`, the
         // error object nested under `response`, or an error-shaped finish reason
@@ -282,7 +269,8 @@ impl SseFramingObserver {
             .and_then(|d| d.get("stop_reason"))
             .and_then(Value::as_str)
             .is_some_and(is_error_reason);
-        self.saw_error |= event_type == Some("error")
+        self.saw_error |= self.terminal == Some(TerminalKind::Failed)
+            || event_type == Some("error")
             || parsed.get("error").is_some_and(|e| !e.is_null())
             || responses_failed
             || nested_error
@@ -299,9 +287,136 @@ mod tests {
     fn observe(path: &str, chunks: &[&str]) -> SseFramingObserver {
         let mut parser = SseFramingObserver::new(path);
         for chunk in chunks {
-            parser.observe(chunk.as_bytes());
+            let _ = parser.observe(chunk.as_bytes());
         }
         parser
+    }
+
+    #[test]
+    fn terminals_have_the_same_dispatch_boundary_at_every_split() {
+        for (protocol, payload, kind) in [
+            (
+                SseProtocol::OpenaiChat,
+                "data: [DONE]",
+                TerminalKind::Completed,
+            ),
+            (SseProtocol::OpenaiChat, "[DONE]", TerminalKind::Completed),
+            (
+                SseProtocol::OpenaiChat,
+                "data:  [DONE] ",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::OpenaiChat,
+                "data:\ndata: [DONE]",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::AnthropicMessages,
+                "{\"type\":\"message_stop\"}",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::AnthropicMessages,
+                "event: message_stop\ndata: {}",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::AnthropicMessages,
+                "event: error\ndata: {}",
+                TerminalKind::Failed,
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                "event: response.completed\ndata: {}",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                "data: {\"type\":\"response.incomplete\"}",
+                TerminalKind::Completed,
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                "data: {\"type\":\"response.failed\"}",
+                TerminalKind::Failed,
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                "event: error\ndata: {}",
+                TerminalKind::Failed,
+            ),
+            (
+                SseProtocol::OpenaiResponses,
+                "event: response.error\ndata: {\"type\":\"response.error\"}",
+                TerminalKind::Failed,
+            ),
+        ] {
+            for line_ending in ["\n", "\r\n", "\r"] {
+                let terminal = format!(
+                    "{}{}{}",
+                    payload.replace('\n', line_ending),
+                    line_ending,
+                    line_ending
+                );
+                // CR dispatches without looking ahead for the optional LF.
+                let expected = terminal.len() - usize::from(line_ending == "\r\n");
+                let bytes = format!("{terminal}data: {{\"error\":{{}}}}\n\n").into_bytes();
+                for split in 0..=bytes.len() {
+                    let mut parser = SseFramingObserver::for_protocol(protocol);
+                    let first = parser.observe(&bytes[..split]);
+                    let boundary =
+                        first.or_else(|| parser.observe(&bytes[split..]).map(|end| split + end));
+                    assert_eq!(
+                        boundary,
+                        Some(expected),
+                        "{protocol:?}, {line_ending:?}, split {split}"
+                    );
+                    assert_eq!(parser.terminal(), Some(kind));
+                    assert_eq!(parser.saw_error(), kind == TerminalKind::Failed);
+                    assert!(parser.at_event_boundary());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn named_events_are_literal_and_override_payload_types() {
+        for (name, payload_type, terminal) in [
+            ("response.completed", "response.output_text.delta", true),
+            ("response.output_text.delta", "response.completed", false),
+            ("response.completed ", "response.completed", false),
+            ("", "response.completed", true),
+        ] {
+            let wire = format!("event: {name}\ndata: {{\"type\":\"{payload_type}\"}}\n\n");
+            let parser = observe(RESPONSES_PATH, &[&wire]);
+            assert_eq!(parser.saw_terminal(), terminal, "{wire}");
+        }
+        assert!(!observe(MESSAGES_PATH, &["event: message_stop\n\n"]).saw_terminal());
+        assert!(!observe(
+            CHAT_COMPLETIONS_PATH,
+            &["data: {\"content\":\"[DONE]\"}\n\n"]
+        )
+        .saw_terminal());
+        assert!(!observe(
+            RESPONSES_PATH,
+            &["data: {\"type\":\"response.completed\"}\n"]
+        )
+        .saw_terminal());
+    }
+
+    #[test]
+    fn failure_evidence_does_not_hide_a_later_sentinel_or_observe_its_suffix() {
+        let mut parser = SseFramingObserver::for_protocol(SseProtocol::OpenaiChat);
+        let prefix = b"data: {\"id\":\"a\",\"model\":\"m\",\"error\":{}}\n\n";
+        assert_eq!(parser.observe(prefix), None);
+        assert!(parser.saw_error());
+        let mut terminal = b"data: [DONE]\n\n".to_vec();
+        terminal.extend(vec![b'x'; MAX_OBSERVED_EVENT_BYTES + 1]);
+        assert_eq!(parser.observe(&terminal), Some(14));
+        assert!(parser.saw_terminal());
+        assert!(parser.saw_error());
+        assert!(parser.observation_usable());
     }
 
     // Every SSE line terminator has to split lines. Splitting only on `\n`
@@ -481,19 +596,15 @@ mod tests {
         );
     }
 
-    // WHATWG appends an LF per `data:` field, so an empty `data:` before
-    // `data: [DONE]` makes the payload "\n[DONE]" — not the terminator, exactly
-    // as the client's own parser would decode it.
+    // Keep empty data lines in the shared payload. Sentinel classification
+    // tolerates surrounding whitespace, as the response transforms do.
     #[test]
-    fn an_empty_data_line_is_not_folded_away() {
+    fn multiline_data_preserves_json_and_accepts_whitespace_sentinel() {
         let terminal = observe(CHAT_COMPLETIONS_PATH, &["data: [DONE]\n\n"]);
         assert!(terminal.saw_terminal());
 
-        let not_terminal = observe(CHAT_COMPLETIONS_PATH, &["data:\ndata: [DONE]\n\n"]);
-        assert!(
-            !not_terminal.saw_terminal(),
-            "payload is \\n[DONE], not the [DONE] sentinel"
-        );
+        let whitespace = observe(CHAT_COMPLETIONS_PATH, &["data:\ndata: [DONE]\n\n"]);
+        assert!(whitespace.saw_terminal());
 
         // Multi-line data joins with LF (each line its own `data:` field),
         // forming one JSON payload — matching the client's decode.
@@ -509,7 +620,7 @@ mod tests {
     #[test]
     fn an_unbounded_line_ends_observation_rather_than_memory() {
         let mut parser = SseFramingObserver::new(CHAT_COMPLETIONS_PATH);
-        parser.observe(&vec![b'x'; MAX_OBSERVED_EVENT_BYTES + 1]);
+        let _ = parser.observe(&vec![b'x'; MAX_OBSERVED_EVENT_BYTES + 1]);
         assert!(!parser.observation_usable());
     }
 
@@ -517,7 +628,7 @@ mod tests {
     #[test]
     fn identifier_only_parsing_tracks_no_terminal() {
         let mut parser = SseFramingObserver::identifiers_only();
-        parser.observe(b"data: {\"id\":\"a\",\"model\":\"m\"}\n\ndata: [DONE]\n\n");
+        let _ = parser.observe(b"data: {\"id\":\"a\",\"model\":\"m\"}\n\ndata: [DONE]\n\n");
         assert_eq!(parser.chat_id().as_deref(), Some("a"));
         assert!(!parser.saw_terminal());
     }

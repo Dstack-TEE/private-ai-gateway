@@ -219,6 +219,7 @@ pub fn candidate(id: &str) -> ForwardCandidate {
     ForwardCandidate {
         route_id: id.to_string(),
         path: "/v1/chat/completions",
+        stream_protocol: private_ai_gateway::middleware::errors::SseProtocol::OpenaiChat,
         body: REQUEST.to_vec(),
     }
 }

@@ -393,6 +393,13 @@ async fn run_inner(
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
         .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {
+            stream_protocol: stream_transform::source_protocol(
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.route_id == route_id)
+                    .map_or(ProviderFormat::Openai, |candidate| candidate.format),
+                upstream_endpoint,
+            ),
             route_id,
             body: serde_json::to_vec(&body).unwrap_or_default(),
             path: upstream_endpoint.path(),
@@ -491,6 +498,7 @@ async fn run_inner(
                     }
                     let pipeline_inputs = StreamPipelineInputs {
                         endpoint: client_endpoint,
+                        journal: journal.clone(),
                         endpoint_path,
                         identity: identity.clone(),
                         exclude_reasoning,
@@ -499,7 +507,6 @@ async fn run_inner(
                     };
                     return build_early_streaming_response(
                         service.clone(),
-                        control.clone(),
                         meter,
                         forward,
                         journal,
@@ -509,7 +516,6 @@ async fn run_inner(
                         received_body.clone(),
                         requester.clone(),
                         request_id.clone(),
-                        started,
                     );
                 }
             }
@@ -783,19 +789,6 @@ async fn run_inner(
             // then record an internal failure, not a client disconnect.
             let downstream_abort = Arc::new(AtomicBool::new(false));
             let meter_settled = Arc::new(AtomicBool::new(false));
-            // A finalizer failure after the meter has settled Completed
-            // (receipt store / E2EE finish at end of stream) is reported from
-            // the body wrapper below with this template.
-            let late_failure = PostReport {
-                status: 502,
-                is_streaming: Some(true),
-                attempt_index: Some(attempt_index),
-                selected_route_id: Some(forward.selected_route.clone()),
-                error_source: Some(ErrorSource::Gateway),
-                error_message: Some(ErrorClass::DownstreamFinalizerFailed),
-                ..meter.base()
-            };
-            let late_failure_control = control.clone();
             let report = meter.into_stream_report(
                 forward.selected_route.clone(),
                 attempt_index,
@@ -812,6 +805,7 @@ async fn run_inner(
             let response_header_map = gateway_owned_headers(&content_type);
             let pipeline_inputs = StreamPipelineInputs {
                 endpoint: client_endpoint,
+                journal: journal.clone(),
                 endpoint_path,
                 identity: identity.clone(),
                 exclude_reasoning,
@@ -893,15 +887,6 @@ async fn run_inner(
                                     error = %err,
                                     "response stream error; ending body gracefully instead of aborting the connection"
                                 );
-                                // A finalizer error after a clean end-of-stream
-                                // (receipt store / E2EE finish): the meter has
-                                // already settled Completed and will not emit,
-                                // so record the client-visible failure here.
-                                if meter_settled.load(Ordering::Relaxed) {
-                                    let mut report = late_failure.clone();
-                                    report.duration_ms = started.elapsed().as_millis() as u64;
-                                    spawn_report(&late_failure_control, report);
-                                }
                                 None
                             }
                         })
@@ -1147,7 +1132,6 @@ impl Meter {
 #[allow(clippy::too_many_arguments)]
 fn build_early_streaming_response(
     service: Arc<AciService>,
-    control: ControlClient,
     mut meter: Meter,
     forward: Pin<Box<dyn Future<Output = Result<MiddlewareForwardResult, ServiceError>> + Send>>,
     journal: MiddlewareReceiptJournal,
@@ -1157,7 +1141,6 @@ fn build_early_streaming_response(
     received_body: Arc<Bytes>,
     requester: Option<ReceiptOwner>,
     request_id: String,
-    started: Instant,
 ) -> Response {
     let endpoint_path = inputs.endpoint_path;
     let protocol = errors::sse_protocol(endpoint_path);
@@ -1168,18 +1151,6 @@ fn build_early_streaming_response(
     journal.set_early_response_keyset(keyset.clone());
     let downstream_abort = Arc::new(AtomicBool::new(false));
     let meter_settled = Arc::new(AtomicBool::new(false));
-    // Template for a finalizer error that lands after the meter has already
-    // settled at end of stream; the exact route/attempt are filled in once the
-    // Stream result is known, so this carries what is knowable now.
-    let late_failure_control = control.clone();
-    let late_failure = PostReport {
-        status: 502,
-        is_streaming: Some(true),
-        error_source: Some(ErrorSource::Gateway),
-        error_message: Some(ErrorClass::DownstreamFinalizerFailed),
-        ..meter.base()
-    };
-
     let stream_request_id = request_id.clone();
     let stream_abort = downstream_abort.clone();
     let stream_settled = meter_settled.clone();
@@ -1226,10 +1197,6 @@ fn build_early_streaming_response(
     let kept: ServiceResponseStream =
         Box::pin(KeepAliveStream::new(Box::pin(body_stream), keepalive));
 
-    // For a finalizer failure after the stream settled: the serving candidate
-    // and its attempt index are read back from the journal at failure time —
-    // they are unknown when this response is committed.
-    let late_journal = journal.clone();
     let finalized = match service.finalize_middleware_response_stream(
         journal,
         kept,
@@ -1277,16 +1244,6 @@ fn build_early_streaming_response(
                     error = %err,
                     "response stream error; ending body gracefully instead of aborting the connection"
                 );
-                if meter_settled.load(Ordering::Relaxed) {
-                    let in_flight = late_journal.in_flight();
-                    let attempt_index = in_flight.as_ref().map_or(0, |a| a.attempt_index);
-                    let selected_route = in_flight.map(|a| a.route_id);
-                    let mut report = late_failure.clone();
-                    report.duration_ms = started.elapsed().as_millis() as u64;
-                    report.attempt_index = Some(attempt_index);
-                    report.selected_route_id = selected_route;
-                    spawn_report(&late_failure_control, report);
-                }
                 None
             }
         })
@@ -1302,6 +1259,7 @@ fn build_early_streaming_response(
 #[derive(Clone)]
 pub(super) struct StreamPipelineInputs {
     pub endpoint: Endpoint,
+    pub journal: MiddlewareReceiptJournal,
     pub endpoint_path: &'static str,
     pub identity: Arc<response_transform::ResponseIdentity>,
     pub exclude_reasoning: bool,
@@ -1418,7 +1376,8 @@ pub(super) fn build_metered_pipeline(
         sanitized,
         report,
         errors::sse_protocol(inputs.endpoint_path),
-    );
+    )
+    .with_finalizer(&inputs.journal);
     Box::pin(if reports_upstream_usage {
         meter.with_upstream_usage(upstream_usage)
     } else {

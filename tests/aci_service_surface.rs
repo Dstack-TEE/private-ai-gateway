@@ -133,6 +133,7 @@ struct RecordingUpstream {
     stream_chunks: Vec<Bytes>,
     /// Transport failure emitted after the scripted chunks.
     stream_error: Option<String>,
+    stream_pending: bool,
 }
 
 impl Default for RecordingUpstream {
@@ -151,6 +152,7 @@ impl Default for RecordingUpstream {
                 Bytes::from_static(b"data: [DONE]\n\n"),
             ],
             stream_error: None,
+            stream_pending: false,
         }
     }
 }
@@ -253,7 +255,13 @@ impl UpstreamBackend for RecordingUpstream {
                     .stream_error
                     .clone()
                     .map(|message| Err(UpstreamError::Transport(message)));
-                Box::pin(stream::iter(ok.chain(tail)))
+                let body: private_ai_gateway::aci::upstream::UpstreamBodyStream =
+                    Box::pin(stream::iter(ok.chain(tail)));
+                if self.stream_pending {
+                    Box::pin(body.chain(stream::pending()))
+                } else {
+                    body
+                }
             },
             served_instance_id: None,
         })
@@ -593,6 +601,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
                 br#"{"error":{"message":"Invalid request parameters","type":"invalid_request_error","code":400}}"#,
             )],
             stream_error: None,
+            stream_pending: false,
         },
     )
 }
@@ -1222,28 +1231,54 @@ async fn receipt_lookup_requires_authenticated_original_requester() {
         )
         .await;
     assert_eq!(chat.status, StatusCode::OK);
-    let unauthenticated = h.requester.get("/v1/signature/chat-aci-1", &[]).await;
-    assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
-
-    let wrong_requester = h
-        .requester
-        .get(
-            "/v1/signature/chat-aci-1",
-            &[("authorization", "Bearer requester-b")],
-        )
-        .await;
-    // A wrong credential reads as a missing receipt (§7.6): no existence
-    // oracle for other tenants' receipts.
-    assert_eq!(wrong_requester.status, StatusCode::NOT_FOUND);
-
-    let original = h
-        .requester
-        .get(
-            "/v1/signature/chat-aci-1",
-            &[("authorization", "Bearer requester-a")],
-        )
-        .await;
-    assert_eq!(original.status, StatusCode::OK);
+    let receipt_id = header(&chat.headers, "x-receipt-id");
+    let mut unavailable_body = None;
+    for endpoint in ["/v1/signature", "/v1/aci/receipts"] {
+        let uri = format!("{endpoint}/chat-aci-1");
+        let unauthenticated = h.requester.get(&uri, &[]).await;
+        assert_eq!(unauthenticated.status, StatusCode::UNAUTHORIZED);
+        let wrong_requester = h
+            .requester
+            .get(&uri, &[("authorization", "Bearer requester-b")])
+            .await;
+        assert_eq!(wrong_requester.status, StatusCode::NOT_FOUND);
+        assert_eq!(json_body(&wrong_requester)["error"]["type"], "not_found");
+        assert_eq!(
+            json_body(&wrong_requester)["error"]["message"],
+            "receipt unavailable"
+        );
+        for id in ["unknown-receipt-a", "unknown-receipt-b"] {
+            let miss = h
+                .requester
+                .get(
+                    &format!("{endpoint}/{id}"),
+                    &[("authorization", "Bearer requester-b")],
+                )
+                .await;
+            assert_eq!(miss.status, StatusCode::NOT_FOUND);
+            assert_eq!(miss.body, wrong_requester.body);
+        }
+        if let Some(body) = &unavailable_body {
+            assert_eq!(&wrong_requester.body, body);
+        }
+        unavailable_body = Some(wrong_requester.body);
+        let original = h
+            .requester
+            .get(&uri, &[("authorization", "Bearer requester-a")])
+            .await;
+        assert_eq!(original.status, StatusCode::OK);
+        let metrics = String::from_utf8(h.service.metrics().unwrap().body).unwrap();
+        for (outcome, count) in [
+            ("unauthorized", 1),
+            ("owner_mismatch", 1),
+            ("local_miss", 2),
+            ("hit", 1),
+        ] {
+            assert!(metrics.lines().any(|line| line == format!("private_ai_gateway_receipt_lookups_total{{endpoint=\"{endpoint}/{{id}}\",outcome=\"{outcome}\"}} {count}")), "{metrics}");
+        }
+        assert!(!metrics.contains(receipt_id));
+        assert!(!metrics.contains("unknown-receipt"));
+    }
 }
 
 #[tokio::test]
@@ -4799,4 +4834,121 @@ async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(json_body(&response)["text"], "hello");
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+fn assert_stream_publication_outcome(service: &AciService, outcome: &str) {
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    let rows: Vec<_> = metrics
+        .lines()
+        .filter(|line| line.starts_with("private_ai_gateway_receipt_finalizations_total{"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{metrics}");
+    assert_eq!(rows[0], format!("private_ai_gateway_receipt_finalizations_total{{endpoint=\"/v1/chat/completions\",outcome=\"{outcome}\"}} 1"));
+}
+
+#[test]
+fn e2ee_partial_event_drop_needs_no_runtime_and_does_not_publish() {
+    use futures_util::FutureExt;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (service, receipt_id, body) = runtime.block_on(async {
+        let h = harness_with_e2ee(RecordingUpstream {
+            stream_chunks: vec![Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"buffered\"}}]}",
+            )],
+            stream_pending: true,
+            ..RecordingUpstream::default()
+        });
+        let client_secret = k256::SecretKey::from_slice(&[0x22; 32]).unwrap();
+        let (request, headers) = e2ee_stream_request(&h, &client_secret, &"ea".repeat(32));
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            req = req.header(name, value);
+        }
+        let response = h
+            .requester
+            .app
+            .clone()
+            .oneshot(req.body(Body::from(request)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt_id = header(response.headers(), "x-receipt-id").to_string();
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            body.next().now_or_never().is_none(),
+            "a partial event must stay buffered"
+        );
+        (h.service, receipt_id, body)
+    });
+    drop(runtime);
+    drop(body);
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_none());
+    assert_stream_publication_outcome(&service, "dropped_before_finalization");
+}
+
+#[tokio::test]
+async fn failed_receipt_finalization_records_one_outcome_after_drop() {
+    use private_ai_gateway::aci::keys::{KeyError, KeyProvider};
+    use private_ai_gateway::aci::types::KeyedPublicKey;
+    struct FailingReceiptKeys {
+        keys: StaticKeyProvider,
+        attempts: Arc<AtomicUsize>,
+    }
+    impl KeyProvider for FailingReceiptKeys {
+        fn receipt_keys(&self) -> Vec<KeyedPublicKey> {
+            self.keys.receipt_keys()
+        }
+        fn sign_receipt(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, KeyError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            Err(KeyError::Crypto("fixture signing failure".into()))
+        }
+        fn e2ee_keys(&self) -> Vec<KeyedPublicKey> {
+            self.keys.e2ee_keys()
+        }
+        fn tls_spkis(&self) -> Vec<TlsSpki> {
+            self.keys.tls_spkis()
+        }
+        fn is_test_only(&self) -> bool {
+            true
+        }
+    }
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(FailingReceiptKeys {
+                keys: StaticKeyProvider::default(),
+                attempts: attempts.clone(),
+            }),
+            Arc::new(StubQuoter::default()),
+            Arc::new(RecordingUpstream::default()),
+            Arc::new(AlwaysVerified),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let requester = Requester {
+        app: build_router(service.clone()),
+    };
+    let response = requester
+        .post(
+            "/v1/chat/completions",
+            br#"{"model":"aci-model","stream":true,"messages":[]}"#,
+            &[],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert!(
+        !response.body.ends_with(b"data: [DONE]\n\n"),
+        "signing failure withholds the successful terminal"
+    );
+    assert!(service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .is_none());
+    assert_stream_publication_outcome(&service, "finalize_failed");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 }

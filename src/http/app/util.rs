@@ -6,9 +6,12 @@ use axum::{
     response::Response,
 };
 
+use crate::aggregator::metrics::ReceiptLookupOutcome;
 use crate::aggregator::service::ReceiptOwner;
 
-use super::error_responses::{admin_not_found_response, error_response};
+use super::error_responses::{
+    admin_not_found_response, error_response, receipt_unavailable_response,
+};
 use super::AppState;
 
 pub(super) fn extract_bearer(headers: &HeaderMap) -> Option<String> {
@@ -91,10 +94,16 @@ pub(super) fn enforce_owner(
     state: &AppState,
     headers: &HeaderMap,
     receipt_id: &str,
+    endpoint: &str,
 ) -> Option<Response> {
     // Anonymous receipts: any caller may retrieve them.
     let recorded_owner = state.service.owner_of_receipt(receipt_id)?;
     let Some(token) = extract_bearer(headers) else {
+        state.service.record_receipt_lookup(
+            endpoint,
+            receipt_id,
+            ReceiptLookupOutcome::Unauthorized,
+        );
         return Some(error_response(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -106,11 +115,12 @@ pub(super) fn enforce_owner(
     } else {
         // A non-matching credential gets the same answer as a missing
         // receipt: no existence oracle for other tenants' receipts.
-        Some(error_response(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "receipt not found",
-        ))
+        state.service.record_receipt_lookup(
+            endpoint,
+            receipt_id,
+            ReceiptLookupOutcome::OwnerMismatch,
+        );
+        Some(receipt_unavailable_response())
     }
 }
 

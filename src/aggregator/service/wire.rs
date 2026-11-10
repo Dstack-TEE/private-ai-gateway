@@ -10,6 +10,7 @@ use super::{ReceiptOwner, ServiceError};
 use crate::aci::identity::SealedWorkloadKeyset;
 use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
+use crate::sse_protocol::SseProtocol;
 
 pub struct E2eeRequestParts<'a> {
     pub signing_algo: Option<&'a str>,
@@ -178,12 +179,21 @@ pub struct InFlightAttempt {
 }
 
 /// Per-request channel between the forwarder and the completion handler:
-/// the reserved receipt id, the receipt draft handed over at end of stream,
+/// the reserved receipt id, the draft handed over at the source terminal or EOF,
 /// the keyset committed in early response headers, and the candidate currently
 /// in flight.
 #[derive(Clone, Default)]
 pub struct MiddlewareReceiptJournal {
     inner: Arc<Mutex<MiddlewareReceiptJournalState>>,
+}
+
+/// The finalizer commits accounting after receipt publication, before releasing
+/// the response pipeline or exposing its terminal bytes.
+#[derive(Clone, Copy)]
+pub enum StreamCompletion {
+    Completed,
+    Failed,
+    FinalizeFailed,
 }
 
 #[derive(Default)]
@@ -197,9 +207,29 @@ struct MiddlewareReceiptJournalState {
     /// them. Never read on a completed request (the forward result carries
     /// the authoritative list).
     abandoned: Vec<FailedAttempt>,
+    stream_settlement: Option<Box<dyn FnOnce(StreamCompletion) + Send>>,
 }
 
 impl MiddlewareReceiptJournal {
+    pub fn on_stream_completion(&self, settlement: impl FnOnce(StreamCompletion) + Send + 'static) {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .stream_settlement = Some(Box::new(settlement));
+    }
+
+    pub(super) fn complete_stream(&self, outcome: StreamCompletion) {
+        let settlement = self
+            .inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .stream_settlement
+            .take();
+        if let Some(settlement) = settlement {
+            settlement(outcome);
+        }
+    }
+
     pub(crate) fn set_early_response_keyset(&self, keyset: Arc<SealedWorkloadKeyset>) {
         self.inner
             .lock()
@@ -289,6 +319,11 @@ impl MiddlewareReceiptJournal {
             .receipt_id
             .clone()
     }
+
+    /// Drop diagnostics must remain safe even when another journal user panicked.
+    pub(super) fn diagnostic_receipt_id(&self) -> Option<String> {
+        self.inner.lock().ok()?.receipt_id.clone()
+    }
 }
 
 pub struct MiddlewareReceiptFinalization {
@@ -323,7 +358,8 @@ pub enum StreamingForwardResult {
 
 pub struct StreamingForwardStream {
     /// Receipt id reserved before the upstream stream starts. The
-    /// receipt becomes queryable after the response stream finishes
+    /// receipt becomes queryable before the protocol terminal is returned,
+    /// or at EOF when there is no recognized terminal
     /// and the final hash is known.
     pub receipt_id: String,
     pub keyset_digest: String,
@@ -427,6 +463,8 @@ pub struct ForwardCandidate {
     pub route_id: String,
     pub body: Vec<u8>,
     pub path: &'static str,
+    /// The selected source's SSE protocol, before any client-surface conversion.
+    pub stream_protocol: SseProtocol,
 }
 
 /// Provider HTTP statuses that trigger failover to the next candidate when

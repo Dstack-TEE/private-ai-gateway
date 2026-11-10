@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,9 @@ use serde_json::Value;
 use tokio::time::{sleep, Sleep};
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use crate::aggregator::service::{
+    MiddlewareReceiptJournal, ServiceError, ServiceResponseStream, StreamCompletion,
+};
 use crate::sse_protocol::SseProtocol;
 
 use super::control::ControlClient;
@@ -103,6 +105,7 @@ impl StreamFailure {
 }
 
 /// Fixed fields for the post-stream usage report; `settle` fills in the rest.
+#[derive(Clone)]
 pub struct StreamReport {
     pub control: ControlClient,
     pub request_id: String,
@@ -119,15 +122,10 @@ pub struct StreamReport {
     pub prefix_hash: Option<String>,
     pub session_kind: Option<SessionKind>,
     pub started: Instant,
-    /// Set by the response-body wrapper when the downstream finalizer
-    /// (receipt drafting / E2EE) errors mid-consumption. The meter's drop then
-    /// settles the stream as an internal failure instead of misattributing the
-    /// teardown to the client.
+    /// Marks finalizer failures and synchronous pipeline rejection as gateway
+    /// failures, including when the pipeline is released before its first poll.
     pub downstream_abort: Arc<AtomicBool>,
-    /// Set once this report has settled. Lets the response-body wrapper tell
-    /// whether a finalizer error arrived after a clean end-of-stream (the
-    /// meter has already settled Completed and will not emit again) so it can
-    /// record the failure itself.
+    /// Shared exactly-once guard for finalization and abandonment accounting.
     pub settled: Arc<AtomicBool>,
 }
 
@@ -139,7 +137,9 @@ impl StreamReport {
         ttft_ms: Option<u64>,
         failure: StreamFailure,
     ) {
-        self.settled.store(true, Ordering::Relaxed);
+        if self.settled.swap(true, Ordering::Relaxed) {
+            return;
+        }
         // A Failed settle caused by the downstream finalizer is a gateway
         // failure, not the upstream's: attribute it so health scoring does not
         // count it against the serving route.
@@ -197,9 +197,18 @@ enum Fed {
     Overflow,
 }
 
+/// Latest accounting collected while the finalizer owns settlement.
+#[derive(Default)]
+struct StreamAccounting {
+    usage: Option<Value>,
+    ttft_ms: Option<u64>,
+    failure: StreamFailure,
+    failed: bool,
+}
+
 /// Wraps a client-surface SSE stream: injects `usage.cost`, measures TTFT,
-/// classifies the outcome, and fires the usage report exactly once (on clean
-/// end, upstream error, or downstream cancel via `Drop`).
+/// collects accounting for the finalizer's exactly-once settlement. Standalone
+/// meters settle at EOF; unsettled drops account for abandonment.
 pub struct MeterStream {
     inner: ServiceResponseStream,
     report: StreamReport,
@@ -220,11 +229,10 @@ pub struct MeterStream {
     /// completed with them.
     start_usage: Option<Value>,
     ttft_ms: Option<u64>,
-    saw_error: bool,
     /// The client-facing outcome (Completed / Failed) is read from this shared
     /// observer, byte-accurate about SSE framing, so it agrees with what the
     /// finalizer does to the body. The line parse below stays for cost, TTFT and
-    /// in-band error detection.
+    /// usage collection.
     framing: crate::sse_framing::SseFramingObserver,
     settled: bool,
     /// Recorded when the inner stream errors, so the settle reports the
@@ -234,6 +242,7 @@ pub struct MeterStream {
     /// report then carries the upstream's own usage from here, not the reshaped
     /// one read off the stream.
     upstream_usage: Option<UpstreamUsage>,
+    accounting: Option<Arc<Mutex<StreamAccounting>>>,
 }
 
 impl MeterStream {
@@ -250,11 +259,64 @@ impl MeterStream {
             last_usage: None,
             start_usage: None,
             ttft_ms: None,
-            saw_error: false,
             framing: crate::sse_framing::SseFramingObserver::for_protocol(protocol),
             settled: false,
             upstream_usage: None,
+            accounting: None,
         }
+    }
+
+    /// Collect usage now; the finalizer commits the one report after signing
+    /// and retaining the receipt. Drop still accounts for real abandonment.
+    pub fn with_finalizer(mut self, journal: &MiddlewareReceiptJournal) -> Self {
+        let accounting = Arc::new(Mutex::new(StreamAccounting::default()));
+        let pending = accounting.clone();
+        let report = self.report.clone();
+        journal.on_stream_completion(move |completion| {
+            let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let outcome = match completion {
+                StreamCompletion::Completed if pending.failed => Outcome::Failed,
+                StreamCompletion::Completed => Outcome::Completed,
+                StreamCompletion::Failed => Outcome::Failed,
+                StreamCompletion::FinalizeFailed => {
+                    report.downstream_abort.store(true, Ordering::Relaxed);
+                    Outcome::Failed
+                }
+            };
+            report.settle(
+                outcome,
+                pending.usage.take(),
+                pending.ttft_ms,
+                pending.failure,
+            );
+        });
+        self.accounting = Some(accounting);
+        self
+    }
+
+    fn update_accounting(&self) {
+        if let Some(accounting) = &self.accounting {
+            let mut accounting = accounting.lock().unwrap_or_else(PoisonError::into_inner);
+            accounting.usage = match &self.upstream_usage {
+                Some(usage) => usage.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+                None => self.last_usage.clone(),
+            };
+            accounting.ttft_ms = self.ttft_ms;
+            accounting.failure = self.classified_failure();
+            accounting.failed = self.protocol_outcome(self.inner_done) == Outcome::Failed;
+        }
+    }
+
+    fn classified_failure(&self) -> StreamFailure {
+        let mut failure = self.failure;
+        if failure.class.is_none() {
+            failure.class = Some(if self.framing.saw_error() {
+                ErrorClass::StreamInbandError
+            } else {
+                ErrorClass::StreamTruncated
+            });
+        }
+        failure
     }
 
     /// Report the usage a stage ahead of the meter leaves in `upstream_usage`,
@@ -276,11 +338,7 @@ impl MeterStream {
     /// always a failure.
     fn protocol_outcome(&self, clean_eof: bool) -> Outcome {
         let f = &self.framing;
-        // Two complementary error detectors: the meter's own parse catches
-        // error-shaped finish reasons; the framing observer catches framed
-        // errors (in-band `error`, `response.failed`, nested `response.error`).
-        // Either one fails the stream.
-        if self.saw_error || f.saw_error() {
+        if f.saw_error() {
             Outcome::Failed
         } else if f.saw_terminal() || (clean_eof && f.at_event_boundary() && f.observation_usable())
         {
@@ -295,14 +353,7 @@ impl MeterStream {
             return;
         }
         self.settled = true;
-        let mut failure = self.failure;
-        if outcome == Outcome::Failed && failure.class.is_none() {
-            failure.class = Some(if self.saw_error || self.framing.saw_error() {
-                ErrorClass::StreamInbandError
-            } else {
-                ErrorClass::StreamTruncated
-            });
-        }
+        let failure = self.classified_failure();
         let usage = match &self.upstream_usage {
             Some(upstream_usage) => upstream_usage
                 .lock()
@@ -311,53 +362,6 @@ impl MeterStream {
             None => self.last_usage.take(),
         };
         self.report.settle(outcome, usage, self.ttft_ms, failure);
-    }
-
-    // Detect in-band error signals, surface-agnostic (works on either the OpenAI
-    // or Anthropic shape).
-    fn detect_outcome(&mut self, parsed: &Value) {
-        let error_value = parsed
-            .get("error")
-            .filter(|e| !e.is_null())
-            .or_else(|| {
-                (parsed.get("type").and_then(Value::as_str) == Some("error")).then_some(parsed)
-            })
-            .or_else(|| {
-                parsed
-                    .get("response")
-                    .and_then(|r| r.get("error"))
-                    .filter(|e| !e.is_null())
-            });
-        // Only the event's presence is noted; its contents are not read.
-        if error_value.is_some() {
-            self.saw_error = true;
-            self.failure
-                .class
-                .get_or_insert(ErrorClass::StreamInbandError);
-        }
-        let mut reasons: Vec<&str> = parsed
-            .get("choices")
-            .and_then(Value::as_array)
-            .map(|choices| {
-                choices
-                    .iter()
-                    .filter_map(|c| c.get("finish_reason").and_then(Value::as_str))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(reason) = parsed
-            .get("delta")
-            .and_then(|d| d.get("stop_reason"))
-            .and_then(Value::as_str)
-        {
-            reasons.push(reason);
-        }
-        if reasons
-            .iter()
-            .any(|reason| *reason == "error" || reason.ends_with("_error"))
-        {
-            self.saw_error = true;
-        }
     }
 
     // Feed one raw upstream chunk: buffer it and process every now-complete line
@@ -376,7 +380,7 @@ impl MeterStream {
         if self.oversized_line() {
             return Fed::Overflow;
         }
-        let Some(nl) = self.buf.iter().rposition(|&b| b == b'\n') else {
+        let Some(nl) = self.buf.iter().rposition(|&b| b == b'\n' || b == b'\r') else {
             return Fed::NeedMore;
         };
         let complete: Vec<u8> = self.buf.drain(..=nl).collect();
@@ -393,7 +397,7 @@ impl MeterStream {
         }
         let mut start = 0;
         for (i, &b) in self.buf.iter().enumerate() {
-            if b == b'\n' {
+            if b == b'\n' || b == b'\r' {
                 if i - start > MAX_SSE_LINE_BYTES {
                     return true;
                 }
@@ -418,12 +422,14 @@ impl MeterStream {
     // was rewritten (only rewritten runs are re-encoded).
     fn transform_lines(&mut self, raw: Vec<u8>) -> Bytes {
         let text = String::from_utf8_lossy(&raw);
-        let lines: Vec<&str> = text.split('\n').collect();
+        let lines: Vec<&str> = text.split_inclusive(['\n', '\r']).collect();
         let rewritten: Option<String> = {
             let mut changed = false;
             let out_lines: Vec<String> = lines
                 .iter()
-                .map(|&line| {
+                .map(|&raw_line| {
+                    let line = raw_line.trim_end_matches(['\n', '\r']);
+                    let ending = &raw_line[line.len()..];
                     // TTFT: the first non-empty, non-comment line marks the first
                     // content delivered. Evaluated on complete lines only, so a
                     // comment (`:`-prefixed) split across chunks can't have its
@@ -437,16 +443,15 @@ impl MeterStream {
                     // dropped. `trim` then covers that space and a trailing CR
                     // from CRLF endings.
                     let Some(data) = line.strip_prefix("data:") else {
-                        return line.to_string();
+                        return raw_line.to_string();
                     };
                     let data = data.trim();
                     if data == "[DONE]" {
-                        return line.to_string();
+                        return raw_line.to_string();
                     }
                     let Ok(parsed) = serde_json::from_str::<Value>(data) else {
-                        return line.to_string();
+                        return raw_line.to_string();
                     };
-                    self.detect_outcome(&parsed);
 
                     let event_type = parsed.get("type").and_then(Value::as_str);
                     if event_type == Some("message_start") {
@@ -468,7 +473,7 @@ impl MeterStream {
                         .and_then(|r| r.get("usage"))
                         .is_some_and(|u| !u.is_null());
                     if !top_usage && !nested_usage {
-                        return line.to_string();
+                        return raw_line.to_string();
                     }
 
                     let mut updated = parsed;
@@ -486,7 +491,7 @@ impl MeterStream {
                     };
                     self.last_usage = Some(billed.clone());
                     if !self.inject && !normalized {
-                        return line.to_string();
+                        return raw_line.to_string();
                     }
                     changed = true;
                     if self.inject {
@@ -509,12 +514,13 @@ impl MeterStream {
                         }
                     }
                     format!(
-                        "data: {}",
-                        serde_json::to_string(&updated).unwrap_or_default()
+                        "data: {}{}",
+                        serde_json::to_string(&updated).unwrap_or_default(),
+                        ending,
                     )
                 })
                 .collect();
-            changed.then(|| out_lines.join("\n"))
+            changed.then(|| out_lines.join(""))
         };
 
         match rewritten {
@@ -547,6 +553,15 @@ impl Stream for MeterStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let result = this.poll_meter(cx);
+        this.update_accounting();
+        result
+    }
+}
+
+impl MeterStream {
+    fn poll_meter(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, ServiceError>>> {
+        let this = self;
         // Mark the stream as started so a drop before any poll (e.g. the finalizer
         // erroring before it consumes the body) does not report a spurious cancel.
         this.started = true;
@@ -556,8 +571,9 @@ impl Stream for MeterStream {
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    this.framing.observe(&bytes);
-                    match this.process(&bytes) {
+                    let _ = this.framing.observe(&bytes);
+                    let processed = this.process(&bytes);
+                    match processed {
                         Fed::Emit(out) => return Poll::Ready(Some(Ok(out))),
                         // Only a partial line so far: poll again rather than emit a
                         // fragment.
@@ -571,7 +587,9 @@ impl Stream for MeterStream {
                                 .class
                                 .get_or_insert(ErrorClass::StreamLineOverflow);
                             let outcome = this.protocol_outcome(false);
-                            this.settle(outcome);
+                            if this.accounting.is_none() {
+                                this.settle(outcome);
+                            }
                             return Poll::Ready(Some(Err(ServiceError::Upstream(
                                 UpstreamError::Transport("sse line overflow".to_string()),
                             ))));
@@ -587,7 +605,9 @@ impl Stream for MeterStream {
                     this.buf.clear();
                     this.failure = StreamFailure::from_error(&err);
                     let outcome = this.protocol_outcome(false);
-                    this.settle(outcome);
+                    if this.accounting.is_none() {
+                        this.settle(outcome);
+                    }
                     return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(None) => {
@@ -599,7 +619,9 @@ impl Stream for MeterStream {
                     // check lives in `protocol_outcome`.
                     let residual = this.flush();
                     let outcome = this.protocol_outcome(true);
-                    this.settle(outcome);
+                    if this.accounting.is_none() {
+                        this.settle(outcome);
+                    }
                     return match residual {
                         Some(out) => Poll::Ready(Some(Ok(out))),
                         None => Poll::Ready(None),
@@ -901,10 +923,14 @@ mod tests {
     fn in_band_error_records_a_class_and_none_of_its_text() {
         let mut meter = test_meter();
         let chunk =
-            Bytes::from("data: {\"error\":{\"message\":\"CANARY-in-band\",\"code\":500}}\n");
+            Bytes::from("data: {\"error\":{\"message\":\"CANARY-in-band\",\"code\":500}}\n\n");
         assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-        assert!(meter.saw_error);
-        assert_eq!(meter.failure.class, Some(ErrorClass::StreamInbandError));
+        let _ = meter.framing.observe(&chunk);
+        assert!(meter.framing.saw_error());
+        assert_eq!(
+            meter.classified_failure().class,
+            Some(ErrorClass::StreamInbandError)
+        );
         assert!(
             !format!("{:?}", meter.failure).contains("CANARY"),
             "failure state holds no upstream text"
@@ -916,10 +942,11 @@ mod tests {
     fn error_finish_reason_marks_the_stream_as_errored() {
         let mut meter = test_meter();
         let chunk = Bytes::from(
-            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"upstream_error\"}]}\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"upstream_error\"}]}\n\n",
         );
         assert!(matches!(meter.process(&chunk), Fed::Emit(_)));
-        assert!(meter.saw_error);
+        let _ = meter.framing.observe(&chunk);
+        assert!(meter.framing.saw_error());
     }
 
     // A usage-bearing SSE event split across two upstream chunks must still be

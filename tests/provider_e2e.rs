@@ -1573,6 +1573,8 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
                     path: "/v1/chat/completions",
+                    stream_protocol:
+                        private_ai_gateway::middleware::errors::SseProtocol::OpenaiChat,
                 }],
                 stream,
                 journal.clone(),

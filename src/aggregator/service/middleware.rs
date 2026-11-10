@@ -727,6 +727,11 @@ impl AciService {
                         receipt_journal,
                         self.metrics.clone(),
                         status,
+                        upstream_headers
+                            .iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                            .is_none_or(|(_, value)| is_sse_content_type(Some(value)))
+                            .then_some(candidate.stream_protocol),
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
@@ -952,7 +957,7 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         if is_sse {
             let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(&final_cleartext_body);
+            let _ = parser.observe(&final_cleartext_body);
             if parser.chat_id().is_some() {
                 draft.builder.set_chat_id(parser.chat_id());
             }

@@ -7,6 +7,7 @@ use super::{
 };
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
 use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
+use crate::aggregator::metrics::ReceiptLookupOutcome;
 use crate::aggregator::session::AttestedSession;
 use crate::aggregator::session_store::{sort_sessions_newest_first, SessionLease, SessionStore};
 
@@ -33,6 +34,28 @@ pub(super) fn store_receipt(
 }
 
 impl AciService {
+    pub(crate) fn record_receipt_lookup(
+        &self,
+        endpoint: &str,
+        id: &str,
+        outcome: ReceiptLookupOutcome,
+    ) {
+        self.metrics.record_receipt_lookup(endpoint, outcome);
+        if matches!(
+            outcome,
+            ReceiptLookupOutcome::LocalMiss | ReceiptLookupOutcome::OwnerMismatch
+        ) {
+            tracing::info!(
+                target: "receipt_lookup",
+                endpoint,
+                lookup_id_hash = %crate::aci::digest::sha256_hex(id.as_bytes()),
+                outcome = outcome.as_str(),
+                serving_instance_id = self.serving_instance_id.as_deref(),
+                "receipt unavailable on this serving instance"
+            );
+        }
+    }
+
     pub(super) fn store_receipt(
         &self,
         receipt: SignedReceipt,

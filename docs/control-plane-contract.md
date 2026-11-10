@@ -399,6 +399,13 @@ A request can produce multiple reports. Count attempts only when
 `errorSource` is a request-level failure, such as a reported consult denial, a
 no-route result, or the summary after the candidate chain failed.
 
+For a committed streaming attempt, the gateway collects usage while the body is
+polled and commits one outcome after receipt finalization, before returning the
+protocol terminal. Receipt signing, session retention, or E2EE finalization
+failures withhold the successful terminal and produce one gateway failure report.
+Cancellation before the client-surface terminal remains a `499`, including when
+the source has finished but converted output is still pending.
+
 Streaming and cancellation do not erase accounting:
 
 - a client disconnect before the first upstream byte produces status `499`,

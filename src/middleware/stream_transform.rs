@@ -20,6 +20,9 @@ use serde_json::{json, Map, Value};
 
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use crate::sse_protocol::{
+    event_type, parse_event, terminal_kind, ParsedEvent, SseProtocol, TerminalKind,
+};
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
@@ -167,6 +170,18 @@ pub fn select_stream_transform(
     }
 }
 
+/// Source format is selected explicitly; a bridged request path alone does
+/// not identify the response protocol (notably Messages served as Chat).
+pub fn source_protocol(format: ProviderFormat, endpoint: Endpoint) -> SseProtocol {
+    match (format, endpoint) {
+        (ProviderFormat::Anthropic, Endpoint::ChatComplete | Endpoint::Messages) => {
+            SseProtocol::AnthropicMessages
+        }
+        (_, Endpoint::CreateModelResponse) => SseProtocol::OpenaiResponses,
+        _ => SseProtocol::OpenaiChat,
+    }
+}
+
 /// Mutable per-stream state threaded across events. A given stream only
 /// touches the part for its transform.
 #[derive(Default)]
@@ -180,71 +195,6 @@ struct StreamState {
     responses: Option<ChatStream<ResponsesEvents>>,
 }
 
-/// One SSE event reduced to the fields the transforms consume: the last
-/// `event:` name and the `data:` lines joined with `\n` (per the SSE spec).
-struct ParsedEvent {
-    name: Option<String>,
-    data: Option<String>,
-}
-
-// Parse an event's text per the SSE field rules: `:`-prefixed lines are
-// comments, a field's value starts after the colon with at most one leading
-// space stripped, and every field other than `event:`/`data:` (`id:`,
-// `retry:`, vendor extensions) is ignored per the spec. Lines with no field
-// shape at all — bare `[DONE]`, bare JSON (colons inside JSON do not make it a
-// field: a `{`/`[`/`"` opener marks a payload line), plain garbage — are
-// collected and become the data when no `data:` field is present, so a
-// prefix-less payload survives even when a comment or `event:` line shares
-// the event block, and garbage still reaches the transforms' fail-fast parse.
-fn parse_event(event: &str) -> ParsedEvent {
-    let mut name = None;
-    let mut data: Option<String> = None;
-    let mut bare: Option<String> = None;
-    for line in event.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        // Judge the JSON opener on the trimmed line (upstreams may indent a
-        // bare payload) but keep the raw line as the payload.
-        let json_like = matches!(
-            line.trim_start().as_bytes().first(),
-            Some(b'{' | b'[' | b'"')
-        );
-        let colon = if json_like { None } else { line.find(':') };
-        match colon {
-            Some(idx) => {
-                let value = &line[idx + 1..];
-                let value = value.strip_prefix(' ').unwrap_or(value);
-                match &line[..idx] {
-                    // The name is trimmed: exact-match dispatch must tolerate
-                    // trailing whitespace an upstream leaves after the value.
-                    "event" => name = Some(value.trim().to_string()),
-                    "data" => {
-                        let buf = data.get_or_insert_with(String::new);
-                        if !buf.is_empty() {
-                            buf.push('\n');
-                        }
-                        buf.push_str(value);
-                    }
-                    _ => {}
-                }
-            }
-            None => {
-                let buf = bare.get_or_insert_with(String::new);
-                if !buf.is_empty() {
-                    buf.push('\n');
-                }
-                buf.push_str(line);
-            }
-        }
-    }
-    if data.is_none() {
-        data = bare.filter(|b| !b.trim().is_empty());
-    }
-    ParsedEvent { name, data }
-}
-
 // ── Anthropic Messages SSE → OpenAI chat.completion.chunk ────────────────────
 
 fn anthropic_chat_stream(
@@ -253,18 +203,29 @@ fn anthropic_chat_stream(
     state: &mut StreamState,
     strict: bool,
 ) -> Result<Option<String>, ()> {
-    match event.name.as_deref() {
-        Some("ping") | Some("content_block_stop") => return Ok(None),
-        Some("message_stop") => return Ok(Some("data: [DONE]\n\n".to_string())),
-        _ => {}
-    }
     let payload = event.data.as_deref().unwrap_or("").trim();
     // No payload → no dispatch (name-only keep-alives included); a non-empty
     // malformed payload must still fail the stream rather than be skipped.
     if payload.is_empty() {
         return Ok(None);
     }
-    let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let mut parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let kind = event_type(event.name.as_deref(), &parsed).map(str::to_string);
+    let object = parsed.as_object_mut().ok_or(())?;
+    if let Some(kind) = &kind {
+        object.insert("type".to_string(), json!(kind));
+    }
+    if terminal_kind(
+        SseProtocol::AnthropicMessages,
+        kind.as_deref(),
+        payload.as_bytes(),
+    ) == Some(TerminalKind::Completed)
+    {
+        return Ok(Some(framed_event("data: [DONE]")));
+    }
+    if parsed["type"] == "ping" || parsed["type"] == "content_block_stop" {
+        return Ok(None);
+    }
     Ok(anthropic_chat_chunk(&parsed, fallback_id, state, strict))
 }
 
@@ -640,9 +601,10 @@ impl<E: ChatEvents> ChatStream<E> {
     /// the stream is corrupt, and skipping the event could silently drop part
     /// of the answer.
     fn event(&mut self, event: &ParsedEvent, fallback_id: &str) -> Result<Option<String>, ()> {
-        let payload = event.data.as_deref().unwrap_or("").trim();
+        let raw_payload = event.data.as_deref().unwrap_or("");
+        let payload = raw_payload.trim();
         let mut out = String::new();
-        if payload == "[DONE]" {
+        if terminal_kind(SseProtocol::OpenaiChat, None, raw_payload.as_bytes()).is_some() {
             self.finish(&mut out)?;
         } else if !payload.is_empty() && !self.terminated {
             let chunk: Value = serde_json::from_str(payload).map_err(|_| ())?;
@@ -1290,13 +1252,14 @@ fn anthropic_complete_stream(event: &ParsedEvent) -> Result<Option<String>, ()> 
     if event.name.as_deref() == Some("ping") {
         return Ok(None);
     }
-    let payload = event.data.as_deref().unwrap_or("").trim();
+    let raw_payload = event.data.as_deref().unwrap_or("");
+    let payload = raw_payload.trim();
     // No payload → no dispatch, mirroring the chat path.
     if payload.is_empty() {
         return Ok(None);
     }
-    if payload == "[DONE]" {
-        return Ok(Some("[DONE]".to_string()));
+    if terminal_kind(SseProtocol::OpenaiChat, None, raw_payload.as_bytes()).is_some() {
+        return Ok(Some(framed_event("data: [DONE]")));
     }
     // Fail the stream on a malformed event rather than skip it.
     let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
@@ -1473,14 +1436,17 @@ fn edit_event_body(event: &str, edit: impl FnOnce(&mut Value)) -> String {
     if body == original {
         return framed_event(event);
     }
-    // An edit that renames the payload's `type` (the `response.error` →
-    // canonical `error` rebuild) must rename the SSE event field with it — a
-    // client subscribing by event name would otherwise never see it.
+    // Rename a matching event name with the canonical payload type. A different
+    // explicit name remains authoritative, just as it is for the source observer.
     let renamed = match (
         original.get("type").and_then(Value::as_str),
         body.get("type").and_then(Value::as_str),
     ) {
-        (Some(old), Some(new)) if old != new => Some(new.to_string()),
+        (Some(old), Some(new))
+            if old != new && event_type(parsed.name.as_deref(), &original) == Some(old) =>
+        {
+            Some(new.to_string())
+        }
         _ => None,
     };
     replace_data_fields(event, &json_str(&body), renamed.as_deref())
@@ -1768,8 +1734,7 @@ mod tests {
     // Regressions of the field parser against the old prefix-stripping code:
     // a bare (data:-less) payload must survive an `event:` line or an injected
     // comment in the same event block; `id:`/`retry:`-only and empty-data
-    // events must dispatch nothing instead of failing the stream; a trailing
-    // space after an event name must not break exact-match dispatch.
+    // events must dispatch nothing instead of failing the stream.
     #[test]
     fn bare_payloads_and_ignorable_events_are_handled() {
         let mut state = StreamState::default();
@@ -1813,14 +1778,43 @@ mod tests {
         assert!(
             matches!(
                 StreamTransform::AnthropicToOpenaiChat.apply(
-                    "event: ping \ndata: {}",
+                    "event: ping\ndata: {}",
                     "fb",
                     &mut state
                 ),
                 Ok(None)
             ),
-            "trailing space after the event name is tolerated"
+            "named ping is ignored"
         );
+    }
+
+    #[test]
+    fn bridges_share_whitespace_tolerant_sentinel_and_reject_non_object_messages() {
+        for event in [
+            "data: [DONE] ",
+            "data:\ndata: [DONE]",
+            ": heartbeat\n [DONE] ",
+        ] {
+            let out = messages_transform()
+                .apply(event, "fb", &mut started_messages_state())
+                .unwrap()
+                .unwrap();
+            assert!(out.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+            let out = StreamTransform::AnthropicCompleteToOpenai
+                .apply(event, "fb", &mut StreamState::default())
+                .unwrap()
+                .unwrap();
+            assert_eq!(out, "data: [DONE]\n\n");
+        }
+        for payload in ["null", "[]", "1", "\"text\""] {
+            assert!(StreamTransform::AnthropicToOpenaiChat
+                .apply(
+                    &format!("event: message_stop\ndata: {payload}"),
+                    "fb",
+                    &mut StreamState::default()
+                )
+                .is_err());
+        }
     }
 
     fn started_messages_state() -> StreamState {
@@ -1905,6 +1899,35 @@ mod tests {
         assert!(wire.contains("\"text\":\"hi\""), "content survived: {wire}");
     }
 
+    #[test]
+    fn sanitization_preserves_explicit_event_classification() {
+        use crate::sse_framing::SseFramingObserver;
+
+        let transform = StreamTransform::SanitizeResponse(
+            Arc::new(ResponseIdentity {
+                request_id: "req_ours".to_string(),
+                user_model: None,
+            }),
+            Endpoint::CreateModelResponse,
+        );
+        for (name, kind) in [
+            ("response.output_text.delta", None),
+            ("response.completed", Some(TerminalKind::Completed)),
+            ("response.error", Some(TerminalKind::Failed)),
+        ] {
+            let source = format!("event: {name}\ndata: {{\"type\":\"response.error\",\"code\":\"server_error\"}}\n\n");
+            let wire = transform
+                .apply(&source, "fb", &mut StreamState::default())
+                .unwrap()
+                .unwrap();
+            for event in [&source, &wire] {
+                let mut observer = SseFramingObserver::for_protocol(SseProtocol::OpenaiResponses);
+                let _ = observer.observe(event.as_bytes());
+                assert_eq!(observer.terminal(), kind, "{event}");
+            }
+        }
+    }
+
     /// A `response.error`-framed upstream error through the sanitize stage: the
     /// payload is rebuilt as the canonical `error` event, and the SSE `event:`
     /// field must be renamed with it — a client subscribing by event name would
@@ -1968,7 +1991,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_transforms_match_node_fixtures() {
+    fn stream_transforms_match_fixtures() {
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../../tests/fixtures/stream_golden.json"))
                 .expect("parse stream fixtures");
@@ -1992,7 +2015,7 @@ mod tests {
             assert_eq!(
                 Value::Array(output),
                 case["output"],
-                "stream case {name} diverges from Node"
+                "stream case {name} diverges from the expected wire events"
             );
         }
     }

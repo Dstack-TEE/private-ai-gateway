@@ -2693,6 +2693,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
     let candidate = || ForwardCandidate {
         route_id: "tee-a:gpt-test".to_string(),
         path: "/v1/chat/completions",
+        stream_protocol: private_ai_gateway::middleware::errors::SseProtocol::OpenaiChat,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     };
 
@@ -3134,10 +3135,8 @@ async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close
     );
 }
 
-// Post-settle: once the meter settled Completed at a clean end-of-stream, a
-// later finalizer error (flag set just before the drop) must not emit a
-// second, conflicting usage report — the late failure is the response
-// wrapper's to report, not the meter's.
+// A standalone meter also respects its exactly-once guard after settlement.
+// The completion pipeline instead defers settlement to the finalizer.
 #[tokio::test]
 async fn downstream_abort_after_settle_does_not_double_report() {
     let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
@@ -3379,6 +3378,7 @@ fn plain_candidate(route: &str) -> ForwardCandidate {
     ForwardCandidate {
         route_id: route.to_string(),
         path: "/v1/chat/completions",
+        stream_protocol: private_ai_gateway::middleware::errors::SseProtocol::OpenaiChat,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     }
 }
@@ -3640,6 +3640,7 @@ async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
     let twin = |body: &[u8]| ForwardCandidate {
         route_id: "dup:gpt-test".to_string(),
         path: "/v1/chat/completions",
+        stream_protocol: private_ai_gateway::middleware::errors::SseProtocol::OpenaiChat,
         body: body.to_vec(),
     };
     let result = service
@@ -4754,10 +4755,8 @@ impl UpstreamBackend for FailoverScriptedUpstream {
 
 #[tokio::test]
 async fn in_flight_tracks_the_serving_candidate_across_failover() {
-    // The late-finalizer failure report reads the serving candidate back from
-    // the journal; if `in_flight` were stuck on attempt 0, that report would
-    // collide with the first attempt's own row under the control plane's
-    // (request_id, attempt, status) dedupe and be dropped.
+    // The journal must follow the serving candidate so abandonment reports
+    // preserve the failed attempts and identify the current route.
     let service = build_service_with_backend(Arc::new(FailoverScriptedUpstream {
         calls: std::sync::atomic::AtomicUsize::new(0),
     }));
@@ -4781,7 +4780,7 @@ async fn in_flight_tracks_the_serving_candidate_across_failover() {
             assert_eq!(in_flight.route_id, "b:gpt-test");
             assert_eq!(
                 in_flight.attempt_index, 1,
-                "a late report keyed on attempt 0 would collide with the failed attempt's row"
+                "the serving attempt follows the failed candidate"
             );
         }
         other => panic!(
@@ -6008,4 +6007,1473 @@ async fn audio_requires_endpoint_opt_in() {
     .await;
     assert_eq!(status, 404);
     assert!(requests.lock().unwrap().is_empty());
+}
+
+// Provider chunks followed by EOF, a read failure, or an open body. These
+// exercise the production draft -> meter -> finalizer chain without a server.
+#[derive(Default)]
+struct ReceiptPublicationUpstream {
+    chunks: Vec<Bytes>,
+    read_failure: bool,
+    pending: bool,
+    lifecycle: Arc<PublicationLifecycle>,
+    delay: Duration,
+    content_type: Option<&'static str>,
+}
+
+#[derive(Default)]
+struct PublicationLifecycle {
+    polls: AtomicUsize,
+    released: std::sync::atomic::AtomicBool,
+}
+
+struct TrackedPublicationStream {
+    inner: private_ai_gateway::aci::upstream::UpstreamBodyStream,
+    lifecycle: Arc<PublicationLifecycle>,
+}
+
+impl futures_util::Stream for TrackedPublicationStream {
+    type Item = Result<Bytes, UpstreamError>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        this.lifecycle.polls.fetch_add(1, Ordering::SeqCst);
+        this.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for TrackedPublicationStream {
+    fn drop(&mut self) {
+        self.lifecycle.released.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl UpstreamBackend for ReceiptPublicationUpstream {
+    fn name(&self) -> &str {
+        "receipt-publication-fixture"
+    }
+
+    fn url_origin(&self) -> Option<&str> {
+        None
+    }
+
+    async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        unreachable!("streaming fixture")
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        _: PreparedUpstreamRequest,
+        _: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        let chunks = self.chunks.clone().into_iter().map(Ok);
+        let failure = self
+            .read_failure
+            .then(|| Err(UpstreamError::Transport("fixture read failure".to_string())));
+        let body: private_ai_gateway::aci::upstream::UpstreamBodyStream =
+            Box::pin(futures_util::stream::iter(chunks.chain(failure)));
+        let body = if self.pending {
+            Box::pin(body.chain(futures_util::stream::pending()))
+                as private_ai_gateway::aci::upstream::UpstreamBodyStream
+        } else {
+            body
+        };
+        Ok(UpstreamStreamResponse {
+            status_code: 200,
+            headers: HashMap::from([(
+                "content-type".into(),
+                self.content_type.unwrap_or("text/event-stream").into(),
+            )]),
+            body: Box::pin(TrackedPublicationStream {
+                inner: body,
+                lifecycle: self.lifecycle.clone(),
+            }),
+            served_instance_id: None,
+        })
+    }
+}
+
+const PUBLICATION_USAGE: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n";
+
+fn assert_publication_outcome(service: &AciService, outcome: &str) {
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    let rows: Vec<_> = metrics
+        .lines()
+        .filter(|line| line.starts_with("private_ai_gateway_receipt_finalizations_total{"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{metrics}");
+    assert_eq!(
+        rows[0],
+        format!("private_ai_gateway_receipt_finalizations_total{{endpoint=\"/v1/chat/completions\",outcome=\"{outcome}\"}} 1")
+    );
+}
+
+fn assert_publication_log(
+    request_id: &str,
+    outcome: &str,
+    terminal: bool,
+    at_event_boundary: bool,
+    upstream_ended: bool,
+) {
+    let logs = captured_logs().text();
+    let rows: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("receipt_finalization:") && line.contains(request_id))
+        .collect();
+    assert_eq!(rows.len(), 1, "{logs}");
+    assert!(
+        rows[0].contains(&format!("outcome=\"{outcome}\"")),
+        "{}",
+        rows[0]
+    );
+    assert!(
+        rows[0].contains(&format!("terminal_observed={terminal}")),
+        "{}",
+        rows[0]
+    );
+    assert!(
+        rows[0].contains(&format!("at_event_boundary={at_event_boundary}")),
+        "{}",
+        rows[0]
+    );
+    assert!(
+        rows[0].contains(&format!("upstream_ended={upstream_ended}")),
+        "{}",
+        rows[0]
+    );
+}
+
+#[tokio::test]
+async fn receipt_publication_drop_preserves_usage_without_publishing() {
+    captured_logs();
+    for terminal in [false, true] {
+        let request_id = format!("publication-drop-{terminal}");
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow": true,
+                "candidates": [{"routeId":"fixture:model", "format":"openai"}]
+            }),
+        )
+        .await;
+        let mut chunks = vec![Bytes::from_static(PUBLICATION_USAGE)];
+        if terminal {
+            chunks.push(Bytes::from_static(b"data: [DONE]\n\n"));
+        }
+        let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+            chunks,
+            read_failure: false,
+            pending: true,
+            ..Default::default()
+        }));
+        let mut input = chat_input();
+        input.request_id = request_id.clone();
+        input.stream = true;
+        let response = middleware(control_url)
+            .handle_completion(&service, input)
+            .await;
+        let receipt_id = response.headers()["x-receipt-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let mut body = response.into_body().into_data_stream();
+        let marker = if terminal {
+            "[DONE]"
+        } else {
+            "completion_tokens"
+        };
+        let mut emitted = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !String::from_utf8_lossy(&emitted).contains(marker) {
+                emitted.extend_from_slice(&body.next().await.unwrap().unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            service.get_receipt_by_receipt_id(&receipt_id).is_some(),
+            terminal
+        );
+        drop(body);
+        let report = wait_for_post(&posts, |r| r["requestId"] == request_id).await;
+        assert_eq!(
+            report["status"],
+            if terminal { 200 } else { 499 },
+            "{request_id}: {report}"
+        );
+        assert_eq!(report["usage"]["prompt_tokens"], 11);
+        assert_eq!(report["usage"]["completion_tokens"], 7);
+        assert_eq!(posts.lock().unwrap().len(), 1, "usage settles exactly once");
+        assert_eq!(
+            service.get_receipt_by_receipt_id(&receipt_id).is_some(),
+            terminal
+        );
+        assert_eq!(
+            metric_total(&service, "private_ai_gateway_receipts_issued_total"),
+            u64::from(terminal)
+        );
+        if terminal {
+            assert_publication_outcome(&service, "published");
+            continue;
+        }
+        assert_publication_outcome(&service, "dropped_before_finalization");
+        assert_publication_log(
+            &request_id,
+            "dropped_before_finalization",
+            terminal,
+            true,
+            false,
+        );
+        assert!(captured_logs()
+            .text()
+            .lines()
+            .any(|line| line.contains(&request_id) && line.contains(&receipt_id)));
+    }
+}
+
+#[tokio::test]
+async fn receipt_publication_eof_signs_the_emitted_body_once() {
+    use private_ai_gateway::aci::{
+        digest::sha256_hex, keys::verify_receipt_signature, receipt::receipt_signing_input,
+    };
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow":true, "candidates":[{"routeId":"fixture:model","format":"openai"}]
+        }),
+    )
+    .await;
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![
+            Bytes::from_static(PUBLICATION_USAGE),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ],
+        read_failure: false,
+        pending: false,
+        ..Default::default()
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let receipt = service.get_receipt_by_receipt_id(&receipt_id).unwrap();
+    let document = receipt.document_json().unwrap();
+    let returned = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "response.returned")
+        .unwrap();
+    assert_eq!(returned["body_hash"], sha256_hex(&body));
+    let keyset = service.keyset();
+    let key = keyset
+        .receipt_signing_keys
+        .iter()
+        .find(|key| key.key_id == receipt.key_id)
+        .unwrap();
+    assert!(verify_receipt_signature(
+        key,
+        &receipt_signing_input(&document).unwrap(),
+        &hex::decode(receipt.signature_hex).unwrap()
+    ));
+    assert_eq!(
+        metric_total(&service, "private_ai_gateway_receipts_issued_total"),
+        1
+    );
+    assert_publication_outcome(&service, "published");
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn receipt_publication_provider_read_failure_has_no_draft() {
+    captured_logs();
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow":true, "candidates":[{"routeId":"fixture:model","format":"openai"}]
+        }),
+    )
+    .await;
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![Bytes::from_static(PUBLICATION_USAGE)],
+        read_failure: true,
+        pending: false,
+        ..Default::default()
+    }));
+    let mut input = chat_input();
+    input.request_id = "publication-read-failure".into();
+    input.stream = true;
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_none());
+    assert_publication_outcome(&service, "no_draft");
+    assert_publication_log("publication-read-failure", "no_draft", false, true, true);
+    let report = wait_for_post(&posts, |r| r["status"] == 502).await;
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn receipt_publication_early_commit_drop_does_not_invent_a_receipt() {
+    captured_logs();
+    // No candidate has been admitted when the keepalive commits the response.
+    for polled in [false, true] {
+        let request_id = format!("publication-early-drop-{polled}");
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow":true, "candidates":[{"routeId":"fixture:model","format":"openai"}]
+            }),
+        )
+        .await;
+        let service = build_service_with_backend(Arc::new(HangingUpstream));
+        let mut input = chat_input();
+        input.request_id = request_id.clone();
+        input.stream = true;
+        let response = middleware_with_keepalive(control_url, 10)
+            .handle_completion(&service, input)
+            .await;
+        assert!(!response.headers().contains_key("x-receipt-id"));
+        let mut body = response.into_body().into_data_stream();
+        if polled {
+            assert_eq!(body.next().await.unwrap().unwrap(), ": PROCESSING\n\n");
+        }
+        drop(body);
+        wait_for_post(&posts, |r| r["status"] == 499).await;
+        assert_publication_outcome(&service, "dropped_before_finalization");
+        assert_eq!(
+            metric_total(&service, "private_ai_gateway_receipts_issued_total"),
+            0
+        );
+        assert!(service.get_receipt_by_chat_id(&request_id).is_none());
+        assert_publication_log(
+            &request_id,
+            "dropped_before_finalization",
+            false,
+            true,
+            false,
+        );
+        let logs = captured_logs().text();
+        let row = logs
+            .lines()
+            .find(|line| line.contains("receipt_finalization:") && line.contains(&request_id))
+            .unwrap();
+        assert!(
+            !row.contains("receipt_id="),
+            "no receipt id was reserved: {row}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn receipt_lookup_logs_hashes_and_serving_instance_without_raw_ids() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use private_ai_gateway::aci::digest::sha256_hex;
+    use tower::ServiceExt;
+    captured_logs();
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(MockUpstream {
+                status: 200,
+                body: br#"{"id":"lookup-chat","choices":[]}"#.to_vec(),
+                extra_headers: vec![],
+            }),
+            Arc::new(OkVerifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap()
+        .with_serving_instance_id(Some("lookup-fixture-instance".into())),
+    );
+    let app = private_ai_gateway::http::build_router(service);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer lookup-owner-secret")
+                .body(Body::from(r#"{"model":"gpt-test","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    drop(response);
+    let unknown_id = "untrusted-receipt-lookup-canary";
+    for endpoint in ["/v1/aci/receipts", "/v1/signature"] {
+        for id in [unknown_id, &receipt_id] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("{endpoint}/{id}"))
+                        .header("authorization", "Bearer lookup-wrong-secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404);
+        }
+    }
+    let logs = captured_logs().text();
+    let rows: Vec<_> = logs
+        .lines()
+        .filter(|line| line.contains("receipt_lookup:") && line.contains("lookup-fixture-instance"))
+        .collect();
+    assert_eq!(rows.len(), 4, "{logs}");
+    for row in rows {
+        assert!(!row.contains(unknown_id), "{row}");
+        assert!(!row.contains(&receipt_id), "{row}");
+        assert!(!row.contains("lookup-owner-secret"), "{row}");
+        assert!(!row.contains("lookup-wrong-secret"), "{row}");
+        let digest = if row.contains("outcome=\"local_miss\"") {
+            sha256_hex(unknown_id.as_bytes())
+        } else {
+            sha256_hex(receipt_id.as_bytes())
+        };
+        assert!(row.contains(&digest), "{row}");
+    }
+}
+
+#[tokio::test]
+async fn receipt_publication_terminal_settles_and_publishes_before_immediate_drop() {
+    use std::sync::atomic::AtomicBool;
+    captured_logs();
+    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+    let control = ControlClient::new(&MiddlewareConfig {
+        control_url,
+        control_token: None,
+        control_timeout_ms: Some(2_000),
+        control_post_timeout_ms: Some(2_000),
+        sse_keepalive_ms: None,
+        send_request_features: None,
+        tee_only_domains: Vec::new(),
+    })
+    .unwrap();
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![
+            Bytes::from_static(PUBLICATION_USAGE),
+            Bytes::from_static(b"data: [DONE]\n\n: trailing"),
+        ],
+        read_failure: false,
+        pending: false,
+        ..Default::default()
+    }));
+    let journal = MiddlewareReceiptJournal::default();
+    let MiddlewareForwardResult::Stream(forwarded) = service
+        .forward_chat_completion_for_middleware(
+            capacity_retry_request(None),
+            vec![plain_candidate("fixture:model")],
+            true,
+            journal.clone(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("stream expected")
+    };
+    let settled = Arc::new(AtomicBool::new(false));
+    let report = StreamReport {
+        control,
+        request_id: "publication-settled-drop".into(),
+        endpoint: "/v1/chat/completions".into(),
+        request_model: "gpt-test".into(),
+        pricing: None,
+        spend_mode: None,
+        tenant: TenantIdentity::default(),
+        virtual_key_id: None,
+        selected_route_id: Some("fixture:model".into()),
+        attempt_index: 0,
+        upstream_status: 200,
+        prefix_hash: None,
+        session_kind: None,
+        started: std::time::Instant::now(),
+        downstream_abort: Arc::new(AtomicBool::new(false)),
+        settled: settled.clone(),
+    };
+    // A suffix in the terminal chunk never reaches metering or the finalizer.
+    let metered =
+        MeterStream::new(forwarded.body, report, SseProtocol::OpenaiChat).with_finalizer(&journal);
+    let mut body = service
+        .finalize_middleware_response_stream(
+            journal.clone(),
+            Box::pin(metered),
+            "/v1/chat/completions",
+            Some("text/event-stream"),
+            None,
+            None,
+            Some("publication-settled-drop".into()),
+        )
+        .unwrap()
+        .body;
+    let mut emitted = Vec::new();
+    while !String::from_utf8_lossy(&emitted).contains("[DONE]") {
+        emitted.extend_from_slice(&body.next().await.unwrap().unwrap());
+    }
+    assert!(settled.load(Ordering::Relaxed));
+    assert!(journal.peek_receipt_id().is_some());
+    assert!(service
+        .get_receipt_by_receipt_id(&forwarded.receipt_id)
+        .is_some());
+    assert!(!String::from_utf8_lossy(&emitted).contains(": trailing"));
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["requestId"] == "publication-settled-drop").await;
+    assert_eq!(report["status"], 200);
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(posts.lock().unwrap().len(), 1);
+    assert!(service
+        .get_receipt_by_receipt_id(&forwarded.receipt_id)
+        .is_some());
+    assert!(!String::from_utf8_lossy(&emitted).contains(": trailing"));
+    assert_publication_outcome(&service, "published");
+}
+
+#[test]
+fn receipt_publication_unpolled_uncommitted_stream_is_not_counted_as_abandoned() {
+    let service = build_service_with_upstream(200, b"{}".to_vec());
+    let finalized = service
+        .finalize_middleware_response_stream(
+            MiddlewareReceiptJournal::default(),
+            Box::pin(futures_util::stream::pending()),
+            "/v1/chat/completions",
+            Some("text/event-stream"),
+            None,
+            None,
+            Some("publication-unpolled".into()),
+        )
+        .unwrap();
+    drop(finalized);
+    assert_eq!(
+        metric_total(&service, "private_ai_gateway_receipt_finalizations_total"),
+        0
+    );
+}
+
+fn assert_terminal_receipt(
+    service: &AciService,
+    receipt_id: &str,
+    received: &[u8],
+    returned: &[u8],
+) {
+    use private_ai_gateway::aci::{
+        digest::sha256_hex, keys::verify_receipt_signature, receipt::receipt_signing_input,
+    };
+    let receipt = service
+        .get_receipt_by_receipt_id(receipt_id)
+        .expect("published before terminal delivery");
+    let document = receipt.document_json().unwrap();
+    for (kind, bytes) in [
+        ("response.received", received),
+        ("response.returned", returned),
+    ] {
+        let event = document["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == kind)
+            .unwrap();
+        assert_eq!(event["body_hash"], sha256_hex(bytes), "{kind}");
+    }
+    let keyset = service.keyset();
+    let key = keyset
+        .receipt_signing_keys
+        .iter()
+        .find(|key| key.key_id == receipt.key_id)
+        .unwrap();
+    assert!(verify_receipt_signature(
+        key,
+        &receipt_signing_input(&document).unwrap(),
+        &hex::decode(receipt.signature_hex).unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn supported_protocols_publish_and_release_before_terminal_delivery() {
+    let chat = concat!(
+        "data: {\"id\":\"source\",\"model\":\"internal\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let messages = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"source\",\"model\":\"internal\",\"usage\":{\"input_tokens\":11}}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let failed_chat = "data: {\"id\":\"source\",\"model\":\"internal\",\"error\":{\"message\":\"failed\"}}\n\ndata: [DONE]\n\n";
+    let responses = |kind: &str| {
+        format!("event: {kind}\ndata: {{\"type\":\"{kind}\",\"response\":{{\"id\":\"source\",\"status\":\"completed\",\"output\":[],\"usage\":{{\"input_tokens\":11,\"output_tokens\":7}}}}}}\n\n")
+    };
+    for (endpoint, format, native_responses, source, marker, status) in [
+        (Endpoint::ChatComplete, "openai", false, chat.to_string(), "[DONE]", 200),
+        (Endpoint::ChatComplete, "openai", false, failed_chat.to_string(), "[DONE]", 502),
+        (Endpoint::Messages, "anthropic", false, messages.to_string(), "message_stop", 200),
+        (Endpoint::ChatComplete, "anthropic", false, messages.to_string(), "[DONE]", 200),
+        (Endpoint::Messages, "openai", false, chat.to_string(), "message_stop", 200),
+        (Endpoint::CreateModelResponse, "openai", false, chat.to_string(), "response.completed", 200),
+        (Endpoint::CreateModelResponse, "openai", true, responses("response.completed"), "response.completed", 200),
+        (Endpoint::CreateModelResponse, "openai", true, responses("response.incomplete"), "response.incomplete", 200),
+        (Endpoint::CreateModelResponse, "openai", true, responses("response.failed"), "response.failed", 502),
+        (Endpoint::CreateModelResponse, "openai", true, "event: error\ndata: {\"type\":\"error\",\"message\":\"failed\"}\n\n".to_string(), "event: error", 502),
+        (Endpoint::Messages, "anthropic", false, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n".to_string(), "event: error", 502),
+        (Endpoint::Complete, "anthropic", false, "data: {\"completion\":\"x\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\n".to_string(), "[DONE]", 200),
+    ] {
+        let mut candidate = json!({"routeId":"fixture:model","format":format});
+        if native_responses { candidate["supportedEndpoints"] = json!(["/v1/responses"]); }
+        let (control_url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[candidate],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}})).await;
+        let lifecycle = Arc::new(PublicationLifecycle::default());
+        let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+            // A suffix in the same read must never enter transforms or hashes.
+            chunks: vec![Bytes::from(format!("{source}data: {{\"error\":{{\"message\":\"ignored suffix\"}}}}\n\n"))],
+            pending: true,
+            lifecycle: lifecycle.clone(),
+            ..Default::default()
+        }));
+        let mut input = match endpoint {
+            Endpoint::Messages => messages_input(true),
+            Endpoint::CreateModelResponse => responses_input(true),
+            Endpoint::Complete => {
+                let mut input = chat_input();
+                input.endpoint = endpoint;
+                input.endpoint_path = endpoint.path();
+                input.params = json!({"model":"gpt-test","prompt":"hi","stream":true});
+                input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+                input
+            }
+            _ => chat_input(),
+        };
+        input.stream = true;
+        let response = middleware(control_url).handle_completion(&service, input).await;
+        assert_eq!(response.status(), 200, "{endpoint:?}, {format}");
+        let receipt_id = response.headers()["x-receipt-id"].to_str().unwrap().to_string();
+        let mut body = response.into_body().into_data_stream();
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !String::from_utf8_lossy(&wire).contains(marker) {
+                wire.extend_from_slice(&body.next().await.expect("terminal expected").unwrap());
+            }
+        }).await.unwrap();
+        assert_terminal_receipt(&service, &receipt_id, source.as_bytes(), &wire);
+        assert!(lifecycle.released.load(Ordering::SeqCst));
+        assert_eq!(lifecycle.polls.load(Ordering::SeqCst), 1);
+        drop(body);
+        let report = wait_for_post(&posts, |_| true).await;
+        assert_eq!(report["status"], status, "{endpoint:?}, {format}: {report}");
+        assert_eq!(posts.lock().unwrap().len(), 1);
+    }
+}
+
+// Exercise source drafting, conversion, sanitization, metering and finalization
+// with an upstream that never closes after its terminal.
+async fn compatible_terminal_publication(
+    endpoint: Endpoint,
+    format: &str,
+    source: &str,
+    client_terminal: &str,
+) -> (Vec<u8>, Value) {
+    let mut candidate = json!({"routeId":"fixture:model","format":format});
+    if endpoint == Endpoint::CreateModelResponse {
+        candidate["supportedEndpoints"] = json!(["/v1/responses"]);
+    }
+    let (control_url, posts) =
+        spawn_control_capturing(200, json!({"allow":true,"candidates":[candidate]})).await;
+    let lifecycle = Arc::new(PublicationLifecycle::default());
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![Bytes::from(format!("{source}: ignored suffix\n\n"))],
+        pending: true,
+        lifecycle: lifecycle.clone(),
+        ..Default::default()
+    }));
+    let mut input = match endpoint {
+        Endpoint::Messages => messages_input(true),
+        Endpoint::CreateModelResponse => responses_input(true),
+        Endpoint::Complete => {
+            let mut input = chat_input();
+            input.endpoint = endpoint;
+            input.endpoint_path = endpoint.path();
+            input.params = json!({"model":"gpt-test","prompt":"hi","stream":true});
+            input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+            input
+        }
+        _ => chat_input(),
+    };
+    input.stream = true;
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    assert_eq!(response.status(), 200);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !wire.ends_with(client_terminal.as_bytes()) {
+            wire.extend_from_slice(&body.next().await.expect("terminal expected").unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    assert_terminal_receipt(&service, &receipt_id, source.as_bytes(), &wire);
+    assert!(lifecycle.released.load(Ordering::SeqCst));
+    assert_eq!(lifecycle.polls.load(Ordering::SeqCst), 1);
+    assert!(!String::from_utf8_lossy(&wire).contains("ignored suffix"));
+    drop(body);
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(posts.lock().unwrap().len(), 1);
+    (wire, report)
+}
+
+#[tokio::test]
+async fn responses_error_alias_publishes_sanitized_error_with_upstream_attribution() {
+    let source = "event: response.error\ndata: {\"type\":\"response.error\",\"code\":\"server_error\",\"message\":\"failed\",\"sequence_number\":3}\n\n";
+    let (wire, report) =
+        compatible_terminal_publication(Endpoint::CreateModelResponse, "openai", source, "\n\n")
+            .await;
+    assert_eq!(
+        wire,
+        format!(
+            "event: error\ndata: {}\n\n",
+            json!({
+                "type":"error", "code":"server_error",
+                "message":"The upstream provider returned an error", "param":null, "sequence_number":3,
+            })
+        )
+        .as_bytes()
+    );
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_inband_error");
+    // An omitted source on the selected attempt is the upstream default.
+    assert!(report["errorSource"].is_null());
+    assert_eq!(report["selectedRouteId"], "fixture:model");
+}
+
+#[tokio::test]
+async fn bare_chat_sentinel_publishes_before_bridged_message_stop() {
+    let source = format!("{}[DONE]\n\n", String::from_utf8_lossy(PUBLICATION_USAGE));
+    let (wire, report) = compatible_terminal_publication(
+        Endpoint::Messages,
+        "openai",
+        &source,
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&wire).contains("\"text\":\"x\""));
+    assert_eq!(report["status"], 200);
+    assert_eq!(report["usage"]["output_tokens"], 7);
+}
+
+#[tokio::test]
+async fn bare_message_stop_publishes_before_bridged_chat_sentinel() {
+    let (wire, report) = compatible_terminal_publication(
+        Endpoint::ChatComplete,
+        "anthropic",
+        "{\"type\":\"message_stop\"}\n\n",
+        "data: [DONE]\n\n",
+    )
+    .await;
+    assert_eq!(wire, b"data: [DONE]\n\n");
+    assert_eq!(report["status"], 200);
+}
+
+#[tokio::test]
+async fn whitespace_chat_sentinel_publishes_through_both_bridges() {
+    for (endpoint, format, prefix, terminal, content) in [
+        (
+            Endpoint::Messages,
+            "openai",
+            String::from_utf8_lossy(PUBLICATION_USAGE).into_owned(),
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            "\"text\":\"x\"",
+        ),
+        (
+            Endpoint::Complete,
+            "anthropic",
+            "data: {\"completion\":\"x\",\"stop_reason\":\"stop_sequence\"}\n\n".to_string(),
+            "data: [DONE]\n\n",
+            "\"text\":\"x\"",
+        ),
+    ] {
+        let source = format!("{prefix}data:  [DONE] \t\n\n");
+        let (wire, report) =
+            compatible_terminal_publication(endpoint, format, &source, terminal).await;
+        assert!(String::from_utf8_lossy(&wire).contains(content));
+        assert_eq!(report["status"], 200);
+    }
+}
+
+#[tokio::test]
+async fn early_commit_publishes_before_terminal_without_a_receipt_header() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}]}),
+    )
+    .await;
+    let source = b"data: {\"id\":\"source\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\ndata: [DONE]\n\n";
+    let lifecycle = Arc::new(PublicationLifecycle::default());
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![Bytes::from_static(source)],
+        pending: true,
+        delay: Duration::from_millis(30),
+        lifecycle: lifecycle.clone(),
+        ..Default::default()
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+    let response = middleware_with_keepalive(control_url, 5)
+        .handle_completion(&service, input)
+        .await;
+    assert!(!response.headers().contains_key("x-receipt-id"));
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !String::from_utf8_lossy(&wire).contains("[DONE]") {
+            wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+        }
+    })
+    .await
+    .unwrap();
+    let receipt = service
+        .get_receipt_by_chat_id("req-1")
+        .expect("early receipt published");
+    assert_terminal_receipt(&service, &receipt.receipt_id, source, &wire);
+    assert!(wire.starts_with(b": PROCESSING\n\n"));
+    assert!(lifecycle.released.load(Ordering::SeqCst));
+    drop(body);
+    assert_eq!(wait_for_post(&posts, |_| true).await["status"], 200);
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_suffixes_are_ignored_independently_of_chunking() {
+    let source = [PUBLICATION_USAGE, b"data: [DONE]\n\n"].concat();
+    for suffix in [
+        "data: {\"usage\":{\"prompt_tokens\":999}}\n\n".to_string(),
+        "data: {\"error\":{}}\n\n".to_string(),
+        ": trailing comment\n\n".to_string(),
+        format!("data: {}", "x".repeat(16 * 1024 * 1024 + 1)),
+    ] {
+        for combined in [false, true] {
+            let (control_url, posts) = spawn_control_capturing(
+                200,
+                json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}]}),
+            )
+            .await;
+            let chunks = if combined {
+                vec![Bytes::from([source.as_slice(), suffix.as_bytes()].concat())]
+            } else {
+                vec![Bytes::from(source.clone()), Bytes::from(suffix.clone())]
+            };
+            let lifecycle = Arc::new(PublicationLifecycle::default());
+            let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+                chunks,
+                pending: true,
+                lifecycle: lifecycle.clone(),
+                ..Default::default()
+            }));
+            let mut input = chat_input();
+            input.stream = true;
+            let response = middleware(control_url)
+                .handle_completion(&service, input)
+                .await;
+            let receipt_id = response.headers()["x-receipt-id"]
+                .to_str()
+                .unwrap()
+                .to_string();
+            let wire = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_terminal_receipt(&service, &receipt_id, &source, &wire);
+            assert!(lifecycle.released.load(Ordering::SeqCst));
+            assert_eq!(lifecycle.polls.load(Ordering::SeqCst), 1);
+            let report = wait_for_post(&posts, |_| true).await;
+            assert_eq!(report["status"], 200);
+            assert_eq!(report["usage"]["prompt_tokens"], 11);
+            assert_eq!(posts.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn source_terminal_does_not_settle_abandoned_converted_output() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}]}),
+    )
+    .await;
+    let lifecycle = Arc::new(PublicationLifecycle::default());
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![Bytes::from(
+            [PUBLICATION_USAGE, b"data: [DONE]\n\n"].concat(),
+        )],
+        pending: true,
+        lifecycle: lifecycle.clone(),
+        ..Default::default()
+    }));
+    let response = middleware(control_url)
+        .handle_completion(&service, responses_input(true))
+        .await;
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut body = response.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert!(!String::from_utf8_lossy(&first).contains("response.completed"));
+    assert!(
+        lifecycle.released.load(Ordering::SeqCst),
+        "source is already complete"
+    );
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_none());
+    drop(body);
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 499);
+    assert_eq!(report["usage"]["completion_tokens"], 7);
+    assert_eq!(posts.lock().unwrap().len(), 1);
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_none());
+}
+
+fn publication_e2ee_context(
+    service: &AciService,
+) -> private_ai_gateway::aggregator::service::E2eeRequestContext {
+    use private_ai_gateway::aci::e2ee::{
+        x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_X25519_AESGCM,
+    };
+    use private_ai_gateway::aggregator::service::E2eeRequestParts;
+    let client_secret = x25519_secret_key_from_bytes(&[7; 32]).unwrap();
+    let client_key = x25519_public_key_hex(&client_secret);
+    let model_key = service
+        .keyset()
+        .e2ee_public_keys
+        .iter()
+        .find(|key| key.algo == E2EE_ALGO_X25519_AESGCM)
+        .unwrap()
+        .public_key_hex
+        .clone();
+    let nonce = "77".repeat(32);
+    let aad = private_ai_gateway::aci::digest::jcs_bytes(&json!({
+        "purpose":"aci.e2ee.request.v2", "algo":E2EE_ALGO_X25519_AESGCM,
+        "model":"gpt-test", "field":"messages.0.content", "nonce":nonce, "ts":1700000000,
+    }))
+    .unwrap();
+    let encrypted =
+        private_ai_gateway::aci::e2ee::encrypt_x25519_for_public_key(&model_key, b"hi", &aad)
+            .unwrap();
+    let body = serde_json::to_vec(
+        &json!({"model":"gpt-test","messages":[{"role":"user","content":encrypted}]}),
+    )
+    .unwrap();
+    service
+        .prepare_e2ee_v2_request(
+            E2eeRequestParts {
+                signing_algo: None,
+                client_public_key: Some(&client_key),
+                model_public_key: Some(&model_key),
+                version: Some("2"),
+                nonce: Some(&nonce),
+                timestamp: Some("1700000000"),
+            },
+            &body,
+            "/v1/chat/completions",
+        )
+        .unwrap()
+        .context
+}
+
+#[tokio::test]
+async fn e2ee_terminal_and_synthesized_tail_publish_before_returning_final_bytes() {
+    for (ending, terminal) in [("\n", true), ("\r\n", true), ("\r", true), ("\n", false)] {
+        let prefix = "data: {\"id\":\"source\",\"choices\":[{\"delta\":{\"content\":\"plaintext canary\"}}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}\n\n".replace('\n', ending);
+        let source = if terminal {
+            format!("{prefix}data: [DONE]{ending}{ending}")
+        } else {
+            prefix
+        };
+        let received = if terminal && ending == "\r\n" {
+            &source.as_bytes()[..source.len() - 1]
+        } else {
+            source.as_bytes()
+        };
+        let (control_url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}})).await;
+        let lifecycle = Arc::new(PublicationLifecycle::default());
+        let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+            chunks: vec![Bytes::from(source.clone())],
+            pending: terminal,
+            lifecycle: lifecycle.clone(),
+            ..Default::default()
+        }));
+        let mut input = chat_input();
+        input.stream = true;
+        input.e2ee = Some(publication_e2ee_context(&service));
+        let response = middleware(control_url)
+            .handle_completion(&service, input)
+            .await;
+        let receipt_id = response.headers()["x-receipt-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let mut body = response.into_body().into_data_stream();
+        let mut wire = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !String::from_utf8_lossy(&wire).contains("[DONE]") {
+                wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_terminal_receipt(&service, &receipt_id, received, &wire);
+        assert!(!String::from_utf8_lossy(&wire).contains("plaintext canary"));
+        let payload: Value = serde_json::from_str(
+            String::from_utf8_lossy(&wire)
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("data: ")
+                        .filter(|payload| payload.starts_with('{'))
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        let aad = private_ai_gateway::aci::digest::jcs_bytes(&json!({
+            "purpose":"aci.e2ee.response.v2", "algo":private_ai_gateway::aci::e2ee::E2EE_ALGO_X25519_AESGCM,
+            "model":"gpt-test", "id":"req-1", "field":"choices.0.delta.content", "nonce":"77".repeat(32), "ts":1700000000,
+        })).unwrap();
+        let client_secret =
+            private_ai_gateway::aci::e2ee::x25519_secret_key_from_bytes(&[7; 32]).unwrap();
+        assert_eq!(
+            private_ai_gateway::aci::e2ee::decrypt_x25519_with_secret_key(
+                &client_secret,
+                payload["choices"][0]["delta"]["content"].as_str().unwrap(),
+                &aad
+            )
+            .unwrap(),
+            b"plaintext canary"
+        );
+        assert!(String::from_utf8_lossy(&wire).contains("cost"));
+        assert!(lifecycle.released.load(Ordering::SeqCst));
+        drop(body);
+        assert_eq!(wait_for_post(&posts, |_| true).await["status"], 200);
+        assert_eq!(posts.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn partial_terminal_and_e2ee_event_abandonment_never_flush_or_publish() {
+    for (e2ee, partial) in [
+        (false, "data: [DONE]\n"),
+        (
+            true,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial canary\"}}]}\n",
+        ),
+    ] {
+        let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
+        let control = ControlClient::new(&MiddlewareConfig {
+            control_url,
+            control_token: None,
+            control_timeout_ms: Some(2000),
+            control_post_timeout_ms: Some(2000),
+            sse_keepalive_ms: None,
+            send_request_features: None,
+            tee_only_domains: Vec::new(),
+        })
+        .unwrap();
+        let lifecycle = Arc::new(PublicationLifecycle::default());
+        let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+            chunks: vec![Bytes::from_static(PUBLICATION_USAGE), Bytes::from(partial)],
+            pending: true,
+            lifecycle: lifecycle.clone(),
+            ..Default::default()
+        }));
+        let journal = MiddlewareReceiptJournal::default();
+        let MiddlewareForwardResult::Stream(forwarded) = service
+            .forward_chat_completion_for_middleware(
+                capacity_retry_request(None),
+                vec![plain_candidate("fixture:model")],
+                true,
+                journal.clone(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("stream expected")
+        };
+        let report = StreamReport {
+            control,
+            request_id: "partial-abandonment".into(),
+            endpoint: "/v1/chat/completions".into(),
+            request_model: "gpt-test".into(),
+            pricing: None,
+            spend_mode: None,
+            tenant: TenantIdentity::default(),
+            virtual_key_id: None,
+            selected_route_id: Some("fixture:model".into()),
+            attempt_index: 0,
+            upstream_status: 200,
+            prefix_hash: None,
+            session_kind: None,
+            started: std::time::Instant::now(),
+            downstream_abort: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            settled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let metered = MeterStream::new(forwarded.body, report, SseProtocol::OpenaiChat)
+            .with_finalizer(&journal);
+        let context = e2ee.then(|| publication_e2ee_context(&service));
+        let mut body = service
+            .finalize_middleware_response_stream(
+                journal,
+                Box::pin(metered),
+                "/v1/chat/completions",
+                Some("text/event-stream"),
+                None,
+                context,
+                None,
+            )
+            .unwrap()
+            .body;
+        let first = body.next().await.unwrap().unwrap();
+        assert!(!String::from_utf8_lossy(&first).contains("partial canary"));
+        if e2ee {
+            assert!(tokio::time::timeout(Duration::from_millis(20), body.next())
+                .await
+                .is_err());
+        } else {
+            let partial = body.next().await.unwrap().unwrap();
+            assert_eq!(partial, "data: [DONE]\n");
+        }
+        drop(body);
+        assert!(lifecycle.released.load(Ordering::SeqCst));
+        assert!(service
+            .get_receipt_by_receipt_id(&forwarded.receipt_id)
+            .is_none());
+        let report = wait_for_post(&posts, |_| true).await;
+        assert_eq!(report["status"], 499);
+        assert_eq!(report["usage"]["completion_tokens"], 7);
+        assert_eq!(posts.lock().unwrap().len(), 1);
+    }
+}
+
+struct PublicationKeys {
+    inner: StaticKeyProvider,
+    fail_signing: std::sync::atomic::AtomicBool,
+}
+
+impl private_ai_gateway::aci::keys::KeyProvider for PublicationKeys {
+    fn receipt_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+        self.inner.receipt_keys()
+    }
+    fn sign_receipt(
+        &self,
+        key_id: &str,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, private_ai_gateway::aci::keys::KeyError> {
+        if self.fail_signing.load(Ordering::SeqCst) {
+            return Err(private_ai_gateway::aci::keys::KeyError::Crypto(
+                "fixture signing failure".into(),
+            ));
+        }
+        self.inner.sign_receipt(key_id, payload)
+    }
+    fn e2ee_keys(&self) -> Vec<private_ai_gateway::aci::types::KeyedPublicKey> {
+        self.inner.e2ee_keys()
+    }
+    fn decrypt_e2ee(
+        &self,
+        key_id: &str,
+        ciphertext_hex: &str,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, private_ai_gateway::aci::keys::KeyError> {
+        self.inner.decrypt_e2ee(key_id, ciphertext_hex, aad)
+    }
+    fn tls_spkis(&self) -> Vec<private_ai_gateway::aci::types::TlsSpki> {
+        self.inner.tls_spkis()
+    }
+    fn is_test_only(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Default)]
+struct PublicationSessions {
+    inner: private_ai_gateway::aggregator::session_store::InMemorySessionStore,
+    fail_retention: std::sync::atomic::AtomicBool,
+}
+
+impl private_ai_gateway::aggregator::session_store::SessionStore for PublicationSessions {
+    fn get_session(
+        &self,
+        id: &str,
+        now: u64,
+    ) -> Option<private_ai_gateway::aggregator::session::AttestedSession> {
+        self.inner.get_session(id, now)
+    }
+    fn current_or_seal(
+        &self,
+        fingerprint: &str,
+        retention_until: u64,
+        now: u64,
+        seal: &mut dyn FnMut() -> std::io::Result<
+            private_ai_gateway::aggregator::session::AttestedSession,
+        >,
+    ) -> std::io::Result<private_ai_gateway::aggregator::session_store::SessionLease> {
+        self.inner
+            .current_or_seal(fingerprint, retention_until, now, seal)
+    }
+    fn extend_retention(
+        &self,
+        lease: &private_ai_gateway::aggregator::session_store::SessionLease,
+        deadline: u64,
+    ) -> std::io::Result<()> {
+        if self.fail_retention.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("fixture retention failure"));
+        }
+        self.inner.extend_retention(lease, deadline)
+    }
+}
+
+#[tokio::test]
+async fn finalization_failures_withhold_success_and_settle_once_as_gateway_failure() {
+    for failure in ["signing", "retention", "e2ee"] {
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}]}),
+        )
+        .await;
+        let keys = Arc::new(PublicationKeys {
+            inner: StaticKeyProvider::default(),
+            fail_signing: std::sync::atomic::AtomicBool::new(false),
+        });
+        let sessions = Arc::new(PublicationSessions::default());
+        let source = if failure == "e2ee" {
+            [PUBLICATION_USAGE, b"data: invalid-json\n\ndata: [DONE]\n\n"].concat()
+        } else {
+            [PUBLICATION_USAGE, b"data: [DONE]\n\n"].concat()
+        };
+        let lifecycle = Arc::new(PublicationLifecycle::default());
+        let backend = Arc::new(ReceiptPublicationUpstream {
+            chunks: vec![Bytes::from(source)],
+            pending: true,
+            lifecycle: lifecycle.clone(),
+            ..Default::default()
+        });
+        let service = Arc::new(
+            AciService::new_with_upstream_verifier(
+                keys.clone(),
+                Arc::new(StubQuoter::default()),
+                backend,
+                Arc::new(OkVerifier),
+                Arc::new(InMemoryReceiptStore::default()),
+                AciServiceConfig::for_test(),
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap()
+            .with_session_store(sessions.clone()),
+        );
+        let mut input = chat_input();
+        input.stream = true;
+        if failure == "e2ee" {
+            input.e2ee = Some(publication_e2ee_context(&service));
+        }
+        let response = middleware(control_url)
+            .handle_completion(&service, input)
+            .await;
+        let receipt_id = response.headers()["x-receipt-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        keys.fail_signing
+            .store(failure == "signing", Ordering::SeqCst);
+        sessions
+            .fail_retention
+            .store(failure == "retention", Ordering::SeqCst);
+        let wire = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            !String::from_utf8_lossy(&wire).contains("[DONE]"),
+            "{failure}"
+        );
+        assert!(service.get_receipt_by_receipt_id(&receipt_id).is_none());
+        assert!(lifecycle.released.load(Ordering::SeqCst));
+        let report = wait_for_post(&posts, |_| true).await;
+        assert_eq!(report["status"], 502, "{failure}: {report}");
+        assert_eq!(report["errorSource"], "gateway", "{failure}: {report}");
+        assert_eq!(report["usage"]["completion_tokens"], 7);
+        assert_eq!(posts.lock().unwrap().len(), 1);
+        assert_publication_outcome(&service, "finalize_failed");
+    }
+}
+
+#[tokio::test]
+async fn reserved_receipt_without_a_complete_draft_withholds_the_terminal() {
+    let service = build_service();
+    let journal = MiddlewareReceiptJournal::default();
+    journal.reserve_receipt_id("reserved-fixture".into());
+    let mut body = service
+        .finalize_middleware_response_stream(
+            journal,
+            Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+                b"data: [DONE]\n\n",
+            ))])),
+            "/v1/chat/completions",
+            Some("text/event-stream"),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .body;
+    assert!(body.next().await.unwrap().is_err());
+    assert!(body.next().await.is_none());
+    assert_publication_outcome(&service, "finalize_failed");
+}
+
+#[tokio::test]
+async fn direct_finalizer_publishes_and_releases_in_the_terminal_poll() {
+    use private_ai_gateway::aci::{
+        digest::sha256_hex, keys::verify_receipt_signature, receipt::receipt_signing_input,
+    };
+    use private_ai_gateway::aggregator::service::StreamingForwardResult;
+    for ending in ["\n", "\r\n", "\r"] {
+        let source = format!("data: {{\"id\":\"source\",\"model\":\"internal\"}}{ending}{ending}data: [DONE]{ending}{ending}");
+        let boundary = source.len() - usize::from(ending == "\r\n");
+        for split in 0..=source.len() {
+            let lifecycle = Arc::new(PublicationLifecycle::default());
+            let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+                chunks: vec![
+                    Bytes::copy_from_slice(&source.as_bytes()[..split]),
+                    Bytes::from(format!("{}: suffix", &source[split..])),
+                ],
+                pending: true,
+                lifecycle: lifecycle.clone(),
+                ..Default::default()
+            }));
+            let StreamingForwardResult::Stream(mut response) = service
+                .forward_chat_completion_stream_request(capacity_retry_request(None))
+                .await
+                .unwrap()
+            else {
+                panic!("stream expected")
+            };
+            let mut wire = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while wire.len() < boundary {
+                    wire.extend_from_slice(&response.body.next().await.unwrap().unwrap());
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(wire, &source.as_bytes()[..boundary]);
+            let receipt = service
+                .get_receipt_by_receipt_id(&response.receipt_id)
+                .expect("direct publication precedes terminal return");
+            let document = receipt.document_json().unwrap();
+            let returned = document["event_log"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|event| event["type"] == "response.returned")
+                .unwrap();
+            assert_eq!(returned["body_hash"], sha256_hex(&wire));
+            let keyset = service.keyset();
+            let key = keyset
+                .receipt_signing_keys
+                .iter()
+                .find(|key| key.key_id == receipt.key_id)
+                .unwrap();
+            assert!(verify_receipt_signature(
+                key,
+                &receipt_signing_input(&document).unwrap(),
+                &hex::decode(receipt.signature_hex).unwrap()
+            ));
+            assert!(lifecycle.released.load(Ordering::SeqCst));
+            let polls = lifecycle.polls.load(Ordering::SeqCst);
+            assert!(response.body.next().await.is_none());
+            assert_eq!(lifecycle.polls.load(Ordering::SeqCst), polls);
+        }
+    }
+}
+
+#[tokio::test]
+async fn e2ee_reassembly_is_bounded_before_dispatch() {
+    let service = build_service();
+    let context = publication_e2ee_context(&service);
+    let bytes = Bytes::from(format!(": {}", "x".repeat(16 * 1024 * 1024 + 1)));
+    let mut body = service
+        .finalize_middleware_response_stream(
+            MiddlewareReceiptJournal::default(),
+            Box::pin(
+                futures_util::stream::iter([Ok(bytes)]).chain(futures_util::stream::pending()),
+            ),
+            "/v1/chat/completions",
+            Some("text/event-stream"),
+            None,
+            Some(context),
+            None,
+        )
+        .unwrap()
+        .body;
+    assert!(body.next().await.unwrap().is_err());
+    assert!(body.next().await.is_none());
+    assert_publication_outcome(&service, "finalize_failed");
+}
+
+#[tokio::test]
+async fn non_sse_bodies_keep_their_eof_boundary() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"fixture:model","format":"openai"}]}),
+    )
+    .await;
+    let source = [
+        PUBLICATION_USAGE,
+        b"data: [DONE]\n\ndata: {\"usage\":{\"prompt_tokens\":999}}\n\n",
+    ]
+    .concat();
+    let service = build_service_with_backend(Arc::new(ReceiptPublicationUpstream {
+        chunks: vec![Bytes::from(source.clone())],
+        content_type: Some("application/octet-stream"),
+        ..Default::default()
+    }));
+    let mut input = chat_input();
+    input.stream = true;
+    let response = middleware(control_url)
+        .handle_completion(&service, input)
+        .await;
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let wire = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&wire).contains("999"));
+    assert_terminal_receipt(&service, &receipt_id, &source, &wire);
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 200);
+    assert_eq!(report["usage"]["prompt_tokens"], 999);
+    assert_eq!(posts.lock().unwrap().len(), 1);
 }

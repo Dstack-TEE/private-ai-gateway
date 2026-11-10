@@ -23,6 +23,107 @@ pub enum SseProtocol {
     AnthropicMessages,
 }
 
+/// A protocol boundary is independent of failure evidence in earlier events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalKind {
+    Completed,
+    Failed,
+}
+
+/// One SSE event shared by observers and transforms: the last `event:` name
+/// and the `data:` lines joined with `\n`, with bare payload compatibility.
+pub(crate) struct ParsedEvent {
+    pub(crate) name: Option<String>,
+    pub(crate) data: Option<String>,
+}
+
+// Parse an event's text per the SSE field rules: `:`-prefixed lines are
+// comments, a field's value starts after the colon with at most one leading
+// space stripped, and every field other than `event:`/`data:` (`id:`,
+// `retry:`, vendor extensions) is ignored per the spec. Lines with no field
+// shape at all — bare `[DONE]`, bare JSON (colons inside JSON do not make it a
+// field: a `{`/`[`/`"` opener marks a payload line), plain garbage — are
+// collected and become the data when no `data:` field is present, so a
+// prefix-less payload survives even when a comment or `event:` line shares
+// the event block, and garbage still reaches the transforms' fail-fast parse.
+pub(crate) fn parse_event(event: &str) -> ParsedEvent {
+    let mut name = None;
+    let mut data: Option<String> = None;
+    let mut bare: Option<String> = None;
+    for line in event.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        // Judge the JSON opener on the trimmed line (upstreams may indent a
+        // bare payload) but keep the raw line as the payload.
+        let json_like = matches!(
+            line.trim_start().as_bytes().first(),
+            Some(b'{' | b'[' | b'"')
+        );
+        let colon = if json_like { None } else { line.find(':') };
+        match colon {
+            Some(idx) => {
+                let value = &line[idx + 1..];
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                match &line[..idx] {
+                    "event" => name = Some(value.to_string()),
+                    "data" => match data.as_mut() {
+                        Some(buf) => {
+                            buf.push('\n');
+                            buf.push_str(value);
+                        }
+                        None => data = Some(value.to_string()),
+                    },
+                    _ => {}
+                }
+            }
+            None => {
+                let buf = bare.get_or_insert_with(String::new);
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(line);
+            }
+        }
+    }
+    if data.is_none() {
+        data = bare.filter(|b| !b.trim().is_empty());
+    }
+    ParsedEvent { name, data }
+}
+
+/// SSE names select named events; unnamed events use the payload's type.
+pub fn event_type<'a>(name: Option<&'a str>, parsed: &'a Value) -> Option<&'a str> {
+    name.filter(|name| !name.is_empty())
+        .or_else(|| parsed.get("type").and_then(Value::as_str))
+}
+
+/// Classify the dispatched event, including accepted whitespace around Chat's
+/// sentinel and the Responses error alias canonicalized by sanitization.
+pub fn terminal_kind(
+    protocol: SseProtocol,
+    event_type: Option<&str>,
+    data: &[u8],
+) -> Option<TerminalKind> {
+    match (protocol, event_type) {
+        (SseProtocol::OpenaiChat, _)
+            if std::str::from_utf8(data).is_ok_and(|data| data.trim() == "[DONE]") =>
+        {
+            Some(TerminalKind::Completed)
+        }
+        (SseProtocol::AnthropicMessages, Some("message_stop"))
+        | (SseProtocol::OpenaiResponses, Some("response.completed" | "response.incomplete")) => {
+            Some(TerminalKind::Completed)
+        }
+        (SseProtocol::AnthropicMessages | SseProtocol::OpenaiResponses, Some("error"))
+        | (SseProtocol::OpenaiResponses, Some("response.failed" | "response.error")) => {
+            Some(TerminalKind::Failed)
+        }
+        _ => None,
+    }
+}
+
 /// The streaming protocol an endpoint speaks.
 pub fn sse_protocol(endpoint_path: &str) -> SseProtocol {
     match endpoint_path {

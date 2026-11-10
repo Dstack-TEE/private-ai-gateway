@@ -151,8 +151,17 @@ authorizes another. The steps, caching, and re-verification are in
 
 ### 3. After the response
 
-The gateway signs a per-request receipt under a key from its attested keyset.
-The receipt commits to:
+When response finalization runs, the gateway signs a per-request receipt under
+a key from its attested keyset. `X-Receipt-Id` reserves an id before publication.
+For supported SSE protocols, the gateway completes its response at the protocol
+terminal. It publishes the receipt before emitting the bytes that dispatch that
+event, then ends the HTTP body and releases the upstream without waiting for
+upstream EOF. Cancellation before this boundary can leave the reserved receipt
+unpublished. Streams without a terminal finalize through the EOF path. This
+boundary does not establish delivery to the client or model-generation
+completeness. Usage records, billing, or request status do not prove receipt
+issuance. In middleware mode, a provider read failure before the terminal also
+leaves the receipt unpublished. A published receipt commits to:
 
 - the request body the gateway processed;
 - the body forwarded after any gateway rewrite;

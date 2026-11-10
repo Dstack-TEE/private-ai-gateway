@@ -15,6 +15,8 @@ pub struct ServiceMetrics {
     upstream_verifications_total: IntCounterVec,
     upstream_responses_total: IntCounterVec,
     receipts_issued_total: IntCounterVec,
+    receipt_finalizations_total: IntCounterVec,
+    receipt_lookups_total: IntCounterVec,
     stream_errors_total: IntCounterVec,
 }
 
@@ -61,12 +63,28 @@ impl ServiceMetrics {
             ),
             &["endpoint", "kind"],
         )?;
+        let receipt_finalizations_total = IntCounterVec::new(
+            Opts::new(
+                "private_ai_gateway_receipt_finalizations_total",
+                "Streaming receipt publication outcomes, including abandoned bodies.",
+            ),
+            &["endpoint", "outcome"],
+        )?;
+        let receipt_lookups_total = IntCounterVec::new(
+            Opts::new(
+                "private_ai_gateway_receipt_lookups_total",
+                "Receipt lookup outcomes on this serving instance.",
+            ),
+            &["endpoint", "outcome"],
+        )?;
 
         registry.register(Box::new(requests_total.clone()))?;
         registry.register(Box::new(upstream_verifications_total.clone()))?;
         registry.register(Box::new(upstream_responses_total.clone()))?;
         registry.register(Box::new(receipts_issued_total.clone()))?;
         registry.register(Box::new(stream_errors_total.clone()))?;
+        registry.register(Box::new(receipt_finalizations_total.clone()))?;
+        registry.register(Box::new(receipt_lookups_total.clone()))?;
 
         let audio_failures_total = IntCounterVec::new(
             Opts::new(
@@ -83,6 +101,8 @@ impl ServiceMetrics {
             upstream_verifications_total,
             upstream_responses_total,
             receipts_issued_total,
+            receipt_finalizations_total,
+            receipt_lookups_total,
             stream_errors_total,
         })
     }
@@ -140,6 +160,56 @@ impl ServiceMetrics {
         self.stream_errors_total
             .with_label_values(&[endpoint, kind.as_str()])
             .inc();
+    }
+
+    pub fn record_receipt_finalization(&self, endpoint: &str, outcome: ReceiptFinalizationOutcome) {
+        self.receipt_finalizations_total
+            .with_label_values(&[endpoint, outcome.as_str()])
+            .inc();
+    }
+
+    pub fn record_receipt_lookup(&self, endpoint: &str, outcome: ReceiptLookupOutcome) {
+        self.receipt_lookups_total
+            .with_label_values(&[endpoint, outcome.as_str()])
+            .inc();
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptFinalizationOutcome {
+    Published,
+    FinalizeFailed,
+    NoDraft,
+    DroppedBeforeFinalization,
+}
+
+impl ReceiptFinalizationOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::FinalizeFailed => "finalize_failed",
+            Self::NoDraft => "no_draft",
+            Self::DroppedBeforeFinalization => "dropped_before_finalization",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ReceiptLookupOutcome {
+    Hit,
+    LocalMiss,
+    OwnerMismatch,
+    Unauthorized,
+}
+
+impl ReceiptLookupOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::LocalMiss => "local_miss",
+            Self::OwnerMismatch => "owner_mismatch",
+            Self::Unauthorized => "unauthorized",
+        }
     }
 }
 

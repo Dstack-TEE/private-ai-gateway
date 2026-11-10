@@ -96,6 +96,10 @@ pub(super) fn admin_not_found_response() -> Response {
     )
 }
 
+pub(super) fn receipt_unavailable_response() -> Response {
+    error_response(StatusCode::NOT_FOUND, "not_found", "receipt unavailable")
+}
+
 pub(super) fn upstream_config_error_response(err: UpstreamConfigError) -> Response {
     match err {
         UpstreamConfigError::InvalidConfig(message) => {
