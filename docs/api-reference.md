@@ -305,6 +305,9 @@ extension events, which verifiers that do not know them ignore (ACI §7.4):
 
 On a [TEE-only hostname](configuration-reference.md#tee-only-hostnames), the
 gateway relays `tee=true` in place of any client-supplied `tee` parameter.
+In middleware mode, a request with a bearer key also relays the key's SHA-256
+as `x-api-key-hash`; see the
+[control-plane contract](control-plane-contract.md#catalog-endpoints).
 
 ## Canonical ACI endpoints
 

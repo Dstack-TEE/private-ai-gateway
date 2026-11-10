@@ -11,7 +11,7 @@ mod common;
 use axum::{
     body::{to_bytes, Body},
     extract::RawQuery,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     routing::get,
     Json, Router,
 };
@@ -22,7 +22,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
+use private_ai_gateway::middleware::{hash_api_key, Middleware, MiddlewareConfig, PrefixHashKey};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -80,23 +80,29 @@ fn build_service() -> (
 // test can prove catalog filters (e.g. `?zdr=true`) survive the relay. The
 // control plane serves catalogs without the `/v1` prefix.
 async fn spawn_stub_control() -> String {
+    fn key_hash(headers: &HeaderMap) -> Value {
+        headers
+            .get("x-api-key-hash")
+            .and_then(|value| value.to_str().ok())
+            .map_or(Value::Null, |hash| json!(hash))
+    }
     let app = Router::new()
         .route(
             "/models",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["m1"], "source": "control-models", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["m1"], "source": "control-models", "query": q, "keyHash": key_hash(&headers) }))
             }),
         )
         .route(
             "/models/*rest",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["ns"], "source": "control-sub", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["ns"], "source": "control-sub", "query": q, "keyHash": key_hash(&headers) }))
             }),
         )
         .route(
             "/embeddings/models",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["e1"], "source": "control-embeddings", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["e1"], "source": "control-embeddings", "query": q, "keyHash": key_hash(&headers) }))
             }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -193,6 +199,47 @@ async fn relays_catalog_query_string_to_control() {
     // No query string means no trailing `?` is invented.
     let (_, body) = get_json(app, "/v1/models").await;
     assert_eq!(body["query"], Value::Null);
+}
+
+// The control plane answers a catalog for the caller, so every catalog route
+// relays the hash of the key the request carried, and only the hash. A request
+// with no key relays none.
+#[tokio::test]
+async fn relays_caller_key_hash_to_control() {
+    let control_url = spawn_stub_control().await;
+    let middleware = Arc::new(
+        new_middleware(&MiddlewareConfig {
+            control_url,
+            control_token: None,
+            control_timeout_ms: Some(2_000),
+            control_post_timeout_ms: Some(2_000),
+            sse_keepalive_ms: None,
+            send_request_features: None,
+            tee_only_domains: Vec::new(),
+        })
+        .unwrap(),
+    );
+    let (_directory, service, manager) = build_service();
+    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+
+    for uri in [
+        "/v1/models",
+        "/v1/models/my-namespace",
+        "/v1/embeddings/models",
+    ] {
+        let request = Request::builder()
+            .uri(uri)
+            .header("authorization", "Bearer sk-caller")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["keyHash"], hash_api_key("sk-caller"), "{uri}");
+
+        let (_, body) = get_json(app.clone(), uri).await;
+        assert_eq!(body["keyHash"], Value::Null, "{uri}");
+    }
 }
 
 #[tokio::test]

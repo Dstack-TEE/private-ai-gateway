@@ -102,6 +102,12 @@ fn tee_only_catalog_query(
     }
 }
 
+/// The hash of the key a catalog request carried, relayed so the control
+/// plane can answer for that caller. A request with no key sends none.
+fn caller_key_hash(headers: &HeaderMap) -> Option<String> {
+    extract_bearer(headers).as_deref().map(hash_api_key)
+}
+
 pub(super) async fn models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -110,7 +116,10 @@ pub(super) async fn models(
     if let Some(middleware) = state.middleware.clone() {
         let query = tee_only_catalog_query(&middleware, &headers, query);
         return middleware
-            .handle_catalog(&catalog_path("/v1/models", query))
+            .handle_catalog(
+                &catalog_path("/v1/models", query),
+                caller_key_hash(&headers).as_deref(),
+            )
             .await;
     }
     match state.service.upstream().models().await {
@@ -138,7 +147,10 @@ pub(super) async fn models_subpath(
     };
     let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
-        .handle_catalog(&catalog_path(&format!("/v1/models/{rest}"), query))
+        .handle_catalog(
+            &catalog_path(&format!("/v1/models/{rest}"), query),
+            caller_key_hash(&headers).as_deref(),
+        )
         .await
 }
 
@@ -158,7 +170,10 @@ pub(super) async fn embeddings_models(
     };
     let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
-        .handle_catalog(&catalog_path("/v1/embeddings/models", query))
+        .handle_catalog(
+            &catalog_path("/v1/embeddings/models", query),
+            caller_key_hash(&headers).as_deref(),
+        )
         .await
 }
 

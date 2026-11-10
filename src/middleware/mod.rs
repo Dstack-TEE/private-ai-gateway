@@ -92,10 +92,11 @@ impl Middleware {
 
     /// Relay a `/v1/...` catalog request to the control plane, which serves
     /// catalogs without the `/v1` prefix. The control body is returned verbatim
-    /// with its status and a forced JSON content type.
-    pub async fn handle_catalog(&self, v1_path: &str) -> Response {
+    /// with its status and a forced JSON content type. `api_key_hash` is the
+    /// hash of the caller's key, when the request carried one.
+    pub async fn handle_catalog(&self, v1_path: &str, api_key_hash: Option<&str>) -> Response {
         let control_path = v1_path.strip_prefix("/v1").unwrap_or(v1_path);
-        match self.control.catalog_get(control_path).await {
+        match self.control.catalog_get(control_path, api_key_hash).await {
             Ok(catalog) => {
                 let status =
                     StatusCode::from_u16(catalog.status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -178,7 +179,7 @@ mod tests {
         })
         .unwrap();
 
-        let response = middleware.handle_catalog("/v1/models").await;
+        let response = middleware.handle_catalog("/v1/models", None).await;
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(
             response
@@ -205,7 +206,7 @@ mod tests {
         })
         .unwrap();
 
-        let response = middleware.handle_catalog("/v1/models").await;
+        let response = middleware.handle_catalog("/v1/models", None).await;
         assert_eq!(response.status().as_u16(), 502);
     }
 
