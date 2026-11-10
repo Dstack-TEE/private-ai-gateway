@@ -2,7 +2,7 @@
 use super::*;
 use crate::middleware::config::MiddlewareConfig;
 use crate::middleware::control::ControlClient;
-use crate::middleware::sse::{MeterEvents, StreamReport};
+use crate::middleware::sse::StreamReport;
 use crate::middleware::types::{OrganizationScope, TenantIdentity};
 use axum::{routing::post, Json, Router};
 use std::sync::Mutex;
@@ -102,8 +102,12 @@ fn owner_for(
     };
     report.endpoint = endpoint.into();
     let accounting = Accounting::new(report, None);
-    let source = Box::pin(DecodedStream::new(inner, Some(protocol)));
-    let events = Box::pin(MeterEvents::new(source, accounting.handle.clone()));
+    let events = decode_source(
+        inner,
+        protocol,
+        MiddlewareReceiptJournal::default(),
+        accounting.handle.clone(),
+    );
     ResponseOwner::new(
         ResponseInput::Events(events),
         Some(accounting),
@@ -229,8 +233,16 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
         assert!(!report.to_string().contains("CANARY"));
         if status == 200 && protocol == Chat {
             assert!(bytes.ends_with(b"data: [DONE]\n\n"));
-        } else if status == 200 || class == Some("stream_inband_error") {
+        } else if status == 200 {
             assert_eq!(bytes, wire.as_bytes(), "no fabricated terminal after {wire:?}");
+        } else if class == Some("stream_inband_error") {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(!text.contains("CANARY"));
+            match protocol {
+                Chat => assert!(text.ends_with("data: [DONE]\n\n")),
+                Messages => assert!(text.starts_with("event: error\n")),
+                Responses => assert!(text.starts_with("event: response.failed\n")),
+            }
         } else {
             assert!(bytes.is_empty(), "discard pending data without a terminal");
         }
@@ -381,13 +393,13 @@ async fn transformed_response(
             events,
             StreamTransform::AnthropicCompleteToOpenai,
         ));
-    } else if source_protocol == SseProtocol::AnthropicMessages {
+    } else if source_protocol == SseProtocol::AnthropicMessages && endpoint != Endpoint::Messages {
         events = Box::pin(EventTransformStream::new(
             events,
             StreamTransform::AnthropicToOpenaiChat,
         ));
     }
-    if endpoint == Endpoint::Messages {
+    if endpoint == Endpoint::Messages && source_protocol != SseProtocol::AnthropicMessages {
         let usage = UpstreamUsage::default();
         accounting.handle.upstream_usage(usage.clone());
         events = Box::pin(EventTransformStream::new(
@@ -408,9 +420,8 @@ async fn transformed_response(
         events,
         StreamTransform::SanitizeResponse(identity, endpoint),
     ));
-    let events = Box::pin(MeterEvents::new(sanitized, accounting.handle.clone()));
     let output: Vec<_> = ResponseOwner::new(
-        ResponseInput::Events(events),
+        ResponseInput::Events(sanitized),
         Some(accounting),
         None,
         endpoint_path.into(),
@@ -458,7 +469,7 @@ async fn filtered_anthropic_error_evidence_reaches_client_and_single_report() {
         let output = transformed_response(&control, source.into(), SseProtocol::AnthropicMessages, Endpoint::ChatComplete, false).await;
         assert!(output.contains("\"error\":"), "{output}");
         assert!(output.ends_with("data: [DONE]\n\n"), "{output}");
-        assert_eq!(output.matches("data: [DONE]").count(), if source.contains("message_stop") { 2 } else { 1 });
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
         let report = control.captured().await;
         assert_eq!(report["status"], 502);
         assert_eq!(report["errorMessage"], "stream_inband_error");
@@ -668,4 +679,66 @@ async fn named_tool_delta_without_payload_type_keeps_arguments() {
     assert!(output.ends_with("data: [DONE]\n\n"));
     assert_eq!(control.captured().await["status"], 200);
     assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn sanitize_renames_the_sse_event_with_the_rebuilt_payload() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let wire = transformed_response(&control, concat!(
+        "event: response.error\n",
+        "data: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"type\":\"insufficient_quota\",\"code\":\"credit_balance_exhausted\",\"message\":\"no credits, top up at https://console.acme.ai/billing\"}}\n\n",
+    ).into(), SseProtocol::OpenaiResponses, Endpoint::CreateModelResponse, false).await;
+    assert!(wire.starts_with("event: error\n"), "{wire}");
+    assert!(!wire.contains("response.error"), "{wire}");
+    assert!(wire.contains("\"type\":\"error\""), "{wire}");
+    assert!(wire.contains("\"sequence_number\":2"), "{wire}");
+    assert!(!wire.contains("credit_balance_exhausted"), "{wire}");
+    assert!(!wire.contains("console.acme.ai"), "{wire}");
+    assert_eq!(control.captured().await["status"], 502);
+}
+
+#[tokio::test]
+async fn anthropic_stream_error_reaches_the_chat_client_as_an_error_member() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let wire = transformed_response(&control, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n".into(), SseProtocol::AnthropicMessages, Endpoint::ChatComplete, false).await;
+    assert!(wire.contains("\"error\""), "no error member: {wire}");
+    assert!(!wire.contains("billing_error"), "leaked kind: {wire}");
+    assert!(!wire.contains("credit balance"), "leaked message: {wire}");
+    assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+    assert_eq!(control.captured().await["status"], 502);
+}
+
+#[tokio::test]
+async fn named_anthropic_error_crosses_bridge_with_failure_and_terminal() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let wire = transformed_response(
+        &control,
+        "event: error\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n"
+            .into(),
+        SseProtocol::AnthropicMessages,
+        Endpoint::ChatComplete,
+        false,
+    )
+    .await;
+    assert_eq!(wire.matches("data: [DONE]").count(), 1);
+    assert!(wire.contains("\"error\":"));
+    assert_eq!(
+        control.captured().await["errorMessage"],
+        "stream_inband_error"
+    );
+}
+
+#[tokio::test]
+async fn sanitize_renaming_preserves_terminal_failure_metadata() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let wire = transformed_response(&control, "event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n".into(), SseProtocol::OpenaiResponses, Endpoint::CreateModelResponse, true).await;
+    assert_eq!(wire.matches("event: error\n").count(), 1);
+    assert_eq!(
+        control.captured().await["errorMessage"],
+        "stream_inband_error"
+    );
 }

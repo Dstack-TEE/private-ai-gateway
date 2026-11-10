@@ -40,7 +40,7 @@ use super::request_transform::{
     build_candidates, messages_reasoning, responses_to_chat_params, validate_responses_request,
     Endpoint, ResponsesCandidateInput, TransformError,
 };
-use super::sse::{Accounting, AccountingHandle, KeepAliveStream, MeterEvents, StreamReport};
+use super::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamReport};
 use super::stream_transform::{EventTransformStream, StreamTransform, UpstreamUsage};
 use super::types::{
     ErrorClass, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
@@ -835,6 +835,7 @@ async fn run_inner(
                         requester: requester.clone(),
                         e2ee,
                         request_id: Some(request_id.clone()),
+                        identity: Some(identity.clone()),
                     },
                     accounting,
                 )
@@ -1126,6 +1127,7 @@ fn build_early_streaming_response(
     let accounting_handle = accounting.handle.clone();
     let source_journal = journal.clone();
     let stream_request_id = request_id.clone();
+    let identity = inputs.identity.clone();
     let body_stream = async_stream::stream! {
         yield Ok::<Record, ServiceError>(Record::heartbeat());
         match forward.await {
@@ -1162,6 +1164,7 @@ fn build_early_streaming_response(
             requester,
             e2ee: None,
             request_id: Some(request_id.clone()),
+            identity: Some(identity),
         },
         accounting,
     );
@@ -1315,7 +1318,7 @@ pub(super) fn build_metered_pipeline(
     if reports_upstream_usage {
         accounting.upstream_usage(upstream_usage);
     }
-    Box::pin(MeterEvents::new(sanitized, accounting))
+    sanitized
 }
 
 fn graceful_body(body: ServiceResponseStream, request_id: String) -> Body {

@@ -20,11 +20,14 @@ use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
-use crate::middleware::sse::{Accounting, AccountingHandle};
+use crate::middleware::request_transform::Endpoint;
+use crate::middleware::response_transform::{self, ResponseIdentity};
+use crate::middleware::sse::{Accounting, AccountingHandle, StreamFailure};
+use crate::middleware::types::{ErrorClass, ErrorSource};
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, EventKind, EventMeaning,
-    SseProtocol,
+    SseProtocol, TerminalKind,
 };
 
 #[derive(Default)]
@@ -135,6 +138,7 @@ pub(crate) struct ResponseContext {
     pub endpoint: String,
     pub e2ee: Option<E2eeRequestContext>,
     pub request_id: Option<String>,
+    pub identity: Option<Arc<ResponseIdentity>>,
 }
 
 pub(crate) enum ResponseInput {
@@ -247,12 +251,12 @@ pub(crate) struct ResponseOwner {
     non_sse: bool,
     request_id: Option<String>,
     ids: Identifiers,
+    identity: Option<Arc<ResponseIdentity>>,
     wire_hasher: Sha256,
     saw_terminal: bool,
-    saw_error: bool,
+    failure: Option<StreamFailure>,
     truncated: bool,
     sequence: Option<u64>,
-    broken: bool,
     ended: bool,
     finished: bool,
     tail: VecDeque<Record>,
@@ -276,12 +280,12 @@ impl ResponseOwner {
             non_sse: false,
             request_id,
             ids: Identifiers::default(),
+            identity: None,
             wire_hasher: Sha256::new(),
             saw_terminal: false,
-            saw_error: false,
+            failure: None,
             truncated: false,
             sequence: None,
-            broken: false,
             ended: false,
             finished: false,
             tail: VecDeque::new(),
@@ -299,10 +303,12 @@ impl ResponseOwner {
             endpoint,
             e2ee,
             request_id,
+            identity,
         } = context;
         let protocol = matches!(&inner, ResponseInput::Events(_))
             .then(|| crate::sse_protocol::sse_protocol(&endpoint));
         let mut owner = Self::new(inner, accounting, e2ee, endpoint, protocol, request_id);
+        owner.identity = identity;
         owner.receipt = Some(ReceiptContext::new(
             service,
             requester,
@@ -312,34 +318,190 @@ impl ResponseOwner {
     }
     fn end(&mut self) {
         self.ended = true;
-        if let Some(accounting) = &self.accounting {
-            let (terminal, failure, truncated) = accounting.handle.protocol_facts();
-            self.saw_terminal |= terminal;
-            self.saw_error |= failure;
-            self.truncated |= truncated;
-        }
-        if self.saw_terminal || self.saw_error || self.truncated {
+        if self.saw_terminal || self.failure.is_some() {
             return;
         }
-        if let Some(protocol) = self.protocol {
-            self.tail.extend(if self.broken {
-                error_records(protocol, 502, self.request_id.as_deref(), self.sequence)
-            } else if !self.non_sse && protocol == SseProtocol::OpenaiChat {
-                vec![done_record()]
-            } else {
-                Vec::new()
+        if self.truncated {
+            self.failure = Some(StreamFailure {
+                class: Some(ErrorClass::StreamTruncated),
+                ..StreamFailure::default()
             });
+        } else if !self.non_sse && self.protocol == Some(SseProtocol::OpenaiChat) {
+            self.tail.push_back(done_record());
         }
     }
-    fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
-        if record.non_sse.is_some() {
-            self.non_sse = true;
-        }
+
+    fn accept(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
         self.truncated |= record.residual;
+        let failure = record
+            .event
+            .as_ref()
+            .is_some_and(|event| event.meaning.failure.is_some());
+        let usage = self
+            .accounting
+            .as_ref()
+            .and_then(|accounting| accounting.handle.observe(&mut record, failure));
+        let Some(event) = record.event.as_ref().filter(|_| failure) else {
+            return if self.accounting.is_some() && self.failure.is_some() {
+                Ok(Bytes::new())
+            } else {
+                self.encode(record)
+            };
+        };
+        if self.accounting.is_none() {
+            // Direct forwarding retains the provider's application payloads.
+            if !self.saw_terminal {
+                self.failure = Some(inband_failure());
+            }
+            return self.encode(record);
+        }
+        if self.failure.is_some() {
+            return Ok(Bytes::new());
+        }
+        let Some(protocol) = self.protocol else {
+            return Ok(Bytes::new());
+        };
+        if event.after_terminal {
+            // A late native error still has its safe representation. A bridge
+            // must not append a new failure terminal after a completed turn.
+            if event.source_protocol != Some(protocol) {
+                return Ok(Bytes::new());
+            }
+        } else {
+            self.failure = Some(inband_failure());
+        }
+        let failure = self.canonical_failure(record, protocol, usage);
+        self.tail.extend(failure);
+        Ok(Bytes::new())
+    }
+
+    fn canonical_failure(
+        &mut self,
+        mut record: Record,
+        protocol: SseProtocol,
+        usage: Option<Value>,
+    ) -> Vec<Record> {
+        let Some(event) = &record.event else {
+            return Vec::new();
+        };
+        let terminal = event.meaning.terminal;
+        let late = event.after_terminal;
+        let source = event.source_protocol;
+        let sequence = record
+            .json()
+            .and_then(|body| body.get("sequence_number"))
+            .and_then(Value::as_u64);
+        let request_id = self.request_id.as_deref();
+        match protocol {
+            SseProtocol::OpenaiChat | SseProtocol::AnthropicMessages => {
+                // The Chat envelope is omitted for a bridged failure, but its
+                // receipt still identifies the same response as before.
+                if protocol == SseProtocol::OpenaiChat
+                    && source == Some(SseProtocol::AnthropicMessages)
+                    && self.ids.chat_id.is_none()
+                {
+                    self.ids.chat_id = self.request_id.clone();
+                }
+                let mut records = error_records(protocol, 502, request_id, None);
+                if protocol == SseProtocol::OpenaiChat {
+                    if late {
+                        records.truncate(1);
+                    }
+                    if let (Some(first), Some(usage)) = (records.first_mut(), usage) {
+                        first.edit_json(|body| {
+                            body["usage"] = usage;
+                            response_transform::canonicalize(
+                                body,
+                                Endpoint::ChatComplete,
+                                request_id,
+                            );
+                        });
+                    }
+                }
+                records
+            }
+            SseProtocol::OpenaiResponses
+                if source == Some(protocol) && terminal != Some(TerminalKind::Failed) =>
+            {
+                vec![Record::generated(
+                    Some("error"),
+                    Payload::Json(responses_error_event(
+                        Some(responses_gateway_code(502)),
+                        crate::error_payload::upstream_message(502),
+                        None,
+                        sequence,
+                    )),
+                    EventMeaning::generated(protocol, EventKind::Error),
+                )]
+            }
+            SseProtocol::OpenaiResponses => {
+                if terminal == Some(TerminalKind::Failed)
+                    && record
+                        .json()
+                        .and_then(|body| body.get("response"))
+                        .is_some_and(Value::is_object)
+                {
+                    record.edit_json(|body| {
+                        if let Some(envelope) = body.as_object_mut() {
+                            envelope.retain(|field, _| {
+                                matches!(field.as_str(), "type" | "response" | "sequence_number")
+                            });
+                        }
+                        body["type"] = json!("response.failed");
+                        body["response"]["error"] = responses_failure_error();
+                        body["response"]["status"] = json!("failed");
+                        if let Some(identity) = &self.identity {
+                            response_transform::rewrite_stream_identity(
+                                body,
+                                identity,
+                                EventKind::ResponseFailed,
+                            );
+                        }
+                        response_transform::canonicalize_stream(
+                            body,
+                            Endpoint::CreateModelResponse,
+                            EventMeaning::generated(protocol, EventKind::ResponseFailed),
+                            request_id,
+                        );
+                    });
+                    record.set_event_name("response.failed");
+                    return vec![record];
+                }
+                let usage = usage.or_else(|| {
+                    self.accounting
+                        .as_ref()
+                        .map(|accounting| accounting.handle.responses_usage())
+                });
+                let body = json!({"response":{
+                    "store":false,
+                    "id":request_id,
+                    "object":"response",
+                    "created_at":response_transform::now_secs(),
+                    "model":self.identity.as_ref().and_then(|i| i.user_model.as_deref()),
+                    "status":"failed",
+                    "incomplete_details":null,
+                    "error":responses_failure_error(),
+                    "output":[],
+                    "usage":usage,
+                }, "type":"response.failed", "sequence_number":self.sequence.map_or(0, |n| n.saturating_add(1))});
+                vec![Record::generated(
+                    Some("response.failed"),
+                    Payload::Json(body),
+                    EventMeaning::generated(protocol, EventKind::ResponseFailed),
+                )]
+            }
+        }
+    }
+
+    fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
+        self.non_sse |= record.non_sse.is_some();
         self.ids.observe(&record);
+        if let Some(ctx) = &self.e2ee {
+            encrypt_e2ee_record(&mut record, ctx, &self.endpoint)?;
+        }
+        let bytes = serialize(&record)?;
         if let Some(event) = &record.event {
             self.saw_terminal |= event.meaning.terminal.is_some();
-            self.saw_error |= !event.after_terminal && event.meaning.failure.is_some();
             if let Some(sequence) = event
                 .payload
                 .json()
@@ -349,15 +511,16 @@ impl ResponseOwner {
                 self.sequence = Some(self.sequence.map_or(sequence, |old| old.max(sequence)));
             }
         }
-        if let Some(ctx) = &self.e2ee {
-            encrypt_e2ee_record(&mut record, ctx, &self.endpoint)?;
-        }
-        serialize(&record)
+        Ok(bytes)
     }
     fn fail(&mut self, error: &ServiceError) {
         self.finished = true;
         if let Some(accounting) = &mut self.accounting {
-            accounting.settle(false, true);
+            accounting.settle(Some(StreamFailure {
+                status: 502,
+                class: Some(ErrorClass::DownstreamFinalizerFailed),
+                source: Some(ErrorSource::Gateway),
+            }));
         }
         if let Some(receipt) = &self.receipt {
             receipt.metrics.record_stream_error(
@@ -392,15 +555,15 @@ impl Stream for ResponseOwner {
                 if let Err(error) = &result {
                     this.fail(error);
                 } else if let Some(accounting) = &mut this.accounting {
-                    accounting.settle(!this.broken, false);
+                    accounting.settle(this.failure);
                 }
                 return Poll::Ready(result.err().map(Err));
             } else {
                 let result = match &mut this.inner {
                     ResponseInput::Events(stream) => match stream.as_mut().poll_next(cx) {
-                        Poll::Ready(Some(Ok(record))) => Some(this.encode(record)),
+                        Poll::Ready(Some(Ok(record))) => Some(this.accept(record)),
                         Poll::Ready(Some(Err(error))) => {
-                            this.source_error(&error);
+                            this.stream_error(&error);
                             None
                         }
                         Poll::Ready(None) => {
@@ -412,7 +575,7 @@ impl Stream for ResponseOwner {
                     ResponseInput::Bytes(stream) => match stream.as_mut().poll_next(cx) {
                         Poll::Ready(Some(Ok(bytes))) => Some(Ok(bytes)),
                         Poll::Ready(Some(Err(error))) => {
-                            this.source_error(&error);
+                            this.stream_error(&error);
                             None
                         }
                         Poll::Ready(None) => {
@@ -440,19 +603,45 @@ impl Stream for ResponseOwner {
     }
 }
 impl ResponseOwner {
-    fn source_error(&mut self, error: &ServiceError) {
-        if let Some(accounting) = &self.accounting {
-            accounting.handle.error(error);
+    fn stream_error(&mut self, error: &ServiceError) {
+        let upstream = matches!(error, ServiceError::Upstream(_));
+        if !upstream || (!self.saw_terminal && self.failure.is_none()) {
+            self.failure = Some(StreamFailure::from_error(error));
         }
         if let Some(receipt) = &self.receipt {
-            receipt
-                .metrics
-                .record_stream_error(&self.endpoint, StreamErrorKind::UpstreamRead);
+            receipt.metrics.record_stream_error(
+                &self.endpoint,
+                if upstream {
+                    StreamErrorKind::UpstreamRead
+                } else {
+                    StreamErrorKind::Transform
+                },
+            );
         }
         tracing::warn!(target: "stream_abort", request_id = self.request_id.as_deref().unwrap_or_default(), error = %error, "response stream failed; ending the body gracefully");
-        self.broken = true;
-        self.end();
+        self.ended = true;
+        if !self.saw_terminal && !self.truncated {
+            if let Some(protocol) = self.protocol {
+                self.tail.extend(error_records(
+                    protocol,
+                    502,
+                    self.request_id.as_deref(),
+                    self.sequence,
+                ));
+            }
+        }
     }
+}
+
+fn inband_failure() -> StreamFailure {
+    StreamFailure {
+        class: Some(ErrorClass::StreamInbandError),
+        ..StreamFailure::default()
+    }
+}
+
+fn responses_failure_error() -> Value {
+    json!({"code":responses_gateway_code(502),"message":crate::error_payload::upstream_message(502)})
 }
 
 pub(super) fn finalize_sse_body(
@@ -515,7 +704,10 @@ pub(crate) fn error_records(
     let mut out = vec![Record::generated(
         name,
         Payload::Json(body),
-        EventMeaning::generated(protocol, EventKind::Error),
+        EventMeaning {
+            failure: None,
+            ..EventMeaning::generated(protocol, EventKind::Error)
+        },
     )];
     if protocol == SseProtocol::OpenaiChat {
         out.push(done_record());
@@ -536,6 +728,7 @@ pub(super) fn direct_response(
         endpoint,
         e2ee,
         request_id,
+        ..
     } = context;
     let inner: ServiceResponseStream =
         Box::pin(inner.map(|item| item.map_err(ServiceError::Upstream)));

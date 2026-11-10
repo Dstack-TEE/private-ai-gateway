@@ -755,3 +755,72 @@ async fn over_cap_non_sse_matches_main_on_normal_and_early_paths() {
         assert!(actual["receipt"].is_null());
     }
 }
+
+#[tokio::test]
+async fn native_messages_extension_failure_never_exposes_upstream_text() {
+    let case = Case::new(
+        "messages_extension_failure",
+        Endpoint::Messages,
+        "event: extension\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n",
+        "anthropic",
+    );
+    let snapshot = capture(&case).await;
+    assert_eq!(snapshot["wire"], "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"The upstream provider returned an error\"},\"request_id\":\"req-fixture\"}\n\n");
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    assert!(reports[0]["errorSource"].is_null());
+}
+
+#[tokio::test]
+async fn native_responses_extension_failure_keeps_usage_and_cost() {
+    let case = Case::new(
+        "native_responses_extension_failure",
+        Endpoint::CreateModelResponse,
+        "event: extension\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
+        "openai",
+    );
+    let snapshot = capture(&case).await;
+    let wire = snapshot["wire"].as_str().unwrap();
+    assert!(wire.starts_with("event: response.failed\n"));
+    assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"));
+    let payload: Value =
+        serde_json::from_str(wire.lines().nth(1).unwrap().strip_prefix("data: ").unwrap()).unwrap();
+    assert_eq!(payload["response"]["status"], "failed");
+    assert_eq!(
+        payload["response"]["usage"],
+        json!({"input_tokens":2,"output_tokens":3,"total_tokens":5,"cost":8})
+    );
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    assert!(reports[0]["errorSource"].is_null());
+    assert_eq!(
+        reports[0]["usage"],
+        json!({"input_tokens":2,"output_tokens":3,"total_tokens":5})
+    );
+}
+
+#[tokio::test]
+async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
+    let text = "x".repeat(crate::sse::MAX_EVENT_BYTES - 100);
+    let event =
+        format!("event: content_block_delta\ndata: {{\"delta\":{{\"text\":\"{text}\"}}}}\n\n");
+    assert!(event.len() < crate::sse::MAX_EVENT_BYTES);
+    let case = Case::new(
+        "late_conversion_overflow",
+        Endpoint::ChatComplete,
+        &format!("event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n{event}"),
+        "anthropic",
+    );
+    let snapshot = capture(&case).await;
+    assert_eq!(snapshot["wire"], "data: [DONE]\n\n");
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorMessage"], "internal_error");
+    assert_eq!(reports[0]["errorSource"], "gateway");
+    assert!(snapshot["receipt"].is_null());
+}

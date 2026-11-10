@@ -5,8 +5,8 @@
 //! Provider conversions are selected by upstream format and client surface.
 //! Same-format streaming reaches this module too: every stream is sanitized
 //! here (identity rewrite + canonicalize, per chunk), and reasoning is excluded
-//! when the client opts out. Cost injection, TTFT, and outcome are a separate
-//! metering pass downstream (`sse`).
+//! when the client opts out. The response owner accounts usage, chooses failure
+//! terminals and writes the client stream.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -35,7 +35,7 @@ use super::response_transform::{
 };
 use super::types::ProviderFormat;
 use crate::sse::{Event, EventStream, Payload, Record, MAX_EVENT_BYTES};
-use crate::sse_protocol::{event_kind, EventKind, EventMeaning, FailureEvidence, SseProtocol};
+use crate::sse_protocol::{event_kind, EventKind, EventMeaning, SseProtocol};
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
@@ -82,6 +82,19 @@ impl StreamTransform {
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Vec<Record>, ()> {
+        // Failure evidence belongs to the response owner. Preserve the complete
+        // source record, including usage, through every content stage.
+        if state.passthrough {
+            return Ok(vec![record]);
+        }
+        if let Some(event) = record
+            .event
+            .as_ref()
+            .filter(|event| event.meaning.failure.is_some())
+        {
+            state.passthrough = !event.after_terminal;
+            return Ok(vec![record]);
+        }
         match self {
             StreamTransform::ExcludeReasoning => {
                 record.edit_json(response_transform::exclude_reasoning);
@@ -112,9 +125,6 @@ impl StreamTransform {
         let Some(event) = record.event.as_ref() else {
             return Ok(Vec::new());
         };
-        if event.active_failure() == Some(FailureEvidence::ConflictingType) {
-            return Err(());
-        }
         let output = match self {
             StreamTransform::AnthropicToOpenaiChat => {
                 anthropic_chat_stream(event, fallback_id, state, STRICT_OPENAI_COMPLIANCE)
@@ -142,9 +152,6 @@ impl StreamTransform {
         for record in &mut output {
             if let Some(output) = record.event.as_mut() {
                 output.after_terminal = event.after_terminal;
-                if event.active_failure().is_some() {
-                    output.meaning.failure = event.active_failure();
-                }
             }
         }
         Ok(output)
@@ -153,6 +160,9 @@ impl StreamTransform {
     /// Close what the stream left open when the upstream ends it. `Err(())`
     /// means it ended before the response was complete.
     fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, ()> {
+        if state.passthrough {
+            return Ok(None);
+        }
         match self {
             StreamTransform::OpenaiToAnthropicMessages(_) => state
                 .messages
@@ -191,6 +201,7 @@ pub fn select_stream_transform(
 /// touches the part for its transform.
 #[derive(Default)]
 struct StreamState {
+    passthrough: bool,
     // Anthropic -> OpenAI chat.
     tool_index: Option<i64>,
     usage: Option<Value>,
@@ -208,42 +219,6 @@ fn anthropic_chat_stream(
     state: &mut StreamState,
     strict: bool,
 ) -> Result<Option<Vec<Record>>, ()> {
-    if event.active_failure().is_some() || event.meaning.kind == EventKind::Error {
-        let error = event
-            .payload
-            .json()
-            .and_then(|value| value.get("error"))
-            .filter(|value| !value.is_null())
-            .cloned()
-            .unwrap_or_else(malformed_response_error);
-        let usage = event.payload.json().and_then(|value| {
-            if matches!(
-                event.meaning.kind,
-                EventKind::MessageStart | EventKind::MessageDelta
-            ) {
-                anthropic_chat_chunk(value, event.meaning.kind, fallback_id, state, strict)
-                    .and_then(|records| {
-                        records.into_iter().find_map(|record| {
-                            record.json().and_then(|value| value.get("usage")).cloned()
-                        })
-                    })
-            } else {
-                None
-            }
-        });
-        let mut body = json!({
-            "id": fallback_id,
-            "object": "chat.completion.chunk",
-            "created": now_secs(),
-            "model": "",
-            "error": error,
-            "choices": [{"finish_reason": Value::Null, "delta": {"content": ""}}],
-        });
-        if let Some(usage) = usage {
-            body["usage"] = usage;
-        }
-        return Ok(Some(vec![chat_event(body), done_event()]));
-    }
     if event.meaning.terminal.is_some() {
         return Ok(Some(vec![done_event()]));
     }
@@ -273,31 +248,15 @@ fn anthropic_chat_chunk(
 ) -> Option<Vec<Record>> {
     let model = state.model.clone().unwrap_or_default();
 
-    let message_usage = parsed.get("message").and_then(|m| m.get("usage"));
     if kind == EventKind::MessageStart {
-        if let Some(usage) = message_usage {
-            let input = i64_field(usage, "input_tokens");
-            let cache_read = i64_field(usage, "cache_read_input_tokens");
-            let cache_creation = i64_field(usage, "cache_creation_input_tokens");
+        if let Some(usage) = parsed.get("message").and_then(|m| m.get("usage")) {
             state.model = Some(
-                parsed
-                    .get("message")
-                    .and_then(|m| m.get("model"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                parsed["message"]["model"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
             );
-            let mut usage_state = json!({ "prompt_tokens": input + cache_read + cache_creation });
-            if cache_read != 0 || cache_creation != 0 {
-                let map = usage_state.as_object_mut().unwrap();
-                if let Some(v) = usage.get("cache_read_input_tokens") {
-                    map.insert("cache_read_input_tokens".into(), v.clone());
-                }
-                if let Some(v) = usage.get("cache_creation_input_tokens") {
-                    map.insert("cache_creation_input_tokens".into(), v.clone());
-                }
-            }
-            state.usage = Some(usage_state);
+            state.usage = Some(usage.clone());
             let body = json!({
                 "id": fallback_id,
                 "object": "chat.completion.chunk",
@@ -317,25 +276,10 @@ fn anthropic_chat_chunk(
 
     if kind == EventKind::MessageDelta {
         if let Some(usage) = parsed.get("usage") {
-            let output = i64_field(usage, "output_tokens");
-            let prompt = state
-                .usage
-                .as_ref()
-                .map(|u| i64_field(u, "prompt_tokens"))
-                .unwrap_or(0);
-            let mut usage_out = json!({ "completion_tokens": output });
-            if let Some(state_usage) = state.usage.as_ref().and_then(Value::as_object) {
-                for (k, v) in state_usage {
-                    usage_out
-                        .as_object_mut()
-                        .unwrap()
-                        .insert(k.clone(), v.clone());
-                }
-            }
-            usage_out
-                .as_object_mut()
-                .unwrap()
-                .insert("total_tokens".into(), json!(prompt + output));
+            let usage_out = response_transform::chat_usage(
+                state.usage.as_ref(),
+                i64_field(usage, "output_tokens"),
+            );
             let stop_reason = parsed
                 .get("delta")
                 .and_then(|d| d.get("stop_reason"))
@@ -537,18 +481,16 @@ struct ToolCall {
 }
 
 /// Why a stream that ended in-band has no answer to give.
-enum Failure<'a> {
-    /// The upstream reported an error.
-    Upstream(&'a Value),
+enum Failure {
     /// The stream never carried a choice.
     Empty,
     /// Every tool call lacked a name, so none can be run.
     UnusableToolCalls,
 }
 
-enum Outcome<'a> {
+enum Outcome {
     Finished { finish: ChatFinish, tool_use: bool },
-    Failed(Failure<'a>),
+    Failed(Failure),
 }
 
 /// The events one client surface writes for a Chat stream.
@@ -571,7 +513,7 @@ trait ChatEvents {
         truncated: bool,
         out: &mut Vec<Record>,
     ) -> bool;
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut Vec<Record>);
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>);
 }
 
 /// Reads a Chat stream for a client surface. Text and reasoning stream as
@@ -600,7 +542,6 @@ struct ChatStream<E> {
     last_call: Option<(usize, usize)>,
     finish_reason: Option<String>,
     usage: Option<Value>,
-    error: Option<Value>,
 }
 
 impl<E: ChatEvents> ChatStream<E> {
@@ -618,7 +559,6 @@ impl<E: ChatEvents> ChatStream<E> {
             last_call: None,
             finish_reason: None,
             usage: None,
-            error: None,
         }
     }
 
@@ -634,22 +574,6 @@ impl<E: ChatEvents> ChatStream<E> {
         let mut out = Vec::new();
         if self.terminated {
             return Ok(None);
-        }
-        if event.active_failure().is_some() && self.error.is_none() {
-            self.start(
-                event.payload.json().unwrap_or(&Value::Null),
-                fallback_id,
-                &mut out,
-            );
-            self.error = Some(
-                event
-                    .payload
-                    .json()
-                    .and_then(|chunk| chunk.get("error"))
-                    .filter(|error| !error.is_null())
-                    .cloned()
-                    .unwrap_or_else(malformed_response_error),
-            );
         }
         if event.meaning.terminal.is_some() {
             self.finish(&mut out)?;
@@ -668,7 +592,7 @@ impl<E: ChatEvents> ChatStream<E> {
         if self.terminated {
             return Ok(None);
         }
-        if self.finish_reason.is_none() && self.error.is_none() {
+        if self.finish_reason.is_none() {
             return Err(());
         }
         let mut out = Vec::new();
@@ -804,9 +728,7 @@ impl<E: ChatEvents> ChatStream<E> {
         let finish = ChatFinish::parse(self.finish_reason.as_deref());
         // Text the turn was cut off in is unfinished, unless calls followed it.
         self.close_text(!finish.truncated() || self.called_after_text, out);
-        let outcome = if let Some(error) = &self.error {
-            Outcome::Failed(Failure::Upstream(error))
-        } else if !self.answered {
+        let outcome = if !self.answered {
             Outcome::Failed(Failure::Empty)
         } else {
             let mut named = 0;
@@ -969,13 +891,12 @@ impl ChatEvents for MessagesEvents {
         true
     }
 
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut Vec<Record>) {
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>) {
         let (finish, tool_use) = match outcome {
             Outcome::Finished { finish, tool_use } => (finish, tool_use),
             Outcome::Failed(failure) => {
                 // Rebuilt by the sanitize stage; only a relayable kind survives.
                 let error = match failure {
-                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => json!({
                         "type": "api_error",
                         "message": "The upstream provider returned no response",
@@ -1277,7 +1198,7 @@ impl ChatEvents for ResponsesEvents {
         true
     }
 
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut Vec<Record>) {
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>) {
         let (event, status, incomplete_details, error) = match outcome {
             Outcome::Finished { finish, .. } => {
                 let (status, details) = finish.responses_status();
@@ -1290,7 +1211,6 @@ impl ChatEvents for ResponsesEvents {
             }
             Outcome::Failed(failure) => {
                 let error = match failure {
-                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => malformed_response_error(),
                     Failure::UnusableToolCalls => unusable_tool_calls_error(),
                 };
@@ -1310,16 +1230,6 @@ impl ChatEvents for ResponsesEvents {
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
 
 fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
-    if event.active_failure().is_some() {
-        let error = event
-            .payload
-            .json()
-            .and_then(|value| value.get("error"))
-            .filter(|error| !error.is_null())
-            .cloned()
-            .unwrap_or_else(malformed_response_error);
-        return Ok(Some(vec![chat_event(json!({"error":error})), done_event()]));
-    }
     if event.meaning.kind == EventKind::Ping {
         return Ok(None);
     }
@@ -1378,9 +1288,8 @@ impl EventTransformStream {
     }
     fn fail(&mut self, reason: &'static str) {
         self.inner_done = true;
-        self.pending_error.get_or_insert_with(|| {
-            ServiceError::Upstream(UpstreamError::Transport(reason.to_string()))
-        });
+        self.pending_error
+            .get_or_insert(ServiceError::AdmissionInvariant(reason));
     }
     fn enqueue(&mut self, records: Vec<Record>) {
         let bytes = records
@@ -1427,13 +1336,20 @@ impl Stream for EventTransformStream {
                 Poll::Ready(None) => {
                     this.inner_done = true;
                     if this.residual {
-                        this.fail("provider ended mid-event");
+                        this.pending_error = Some(ServiceError::Upstream(
+                            UpstreamError::Transport("provider ended mid-event".into()),
+                        ));
                         continue;
                     }
                     match this.transform.end_of_stream(&mut this.state) {
                         Ok(Some(records)) => this.enqueue(records),
                         Ok(None) => {}
-                        Err(()) => this.fail("provider ended before finishing its response"),
+                        Err(()) => {
+                            this.pending_error =
+                                Some(ServiceError::Upstream(UpstreamError::Transport(
+                                    "provider ended before finishing its response".into(),
+                                )))
+                        }
                     }
                 }
             }
@@ -1468,9 +1384,6 @@ mod tests {
         .into_iter()
         .next()
         .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
-    }
-    fn decode_event(text: &str) -> Event {
-        decode_record(text).event.unwrap()
     }
     fn edit_event_body(text: &str, edit: impl FnOnce(&mut Value)) -> String {
         let mut record = decode_record(text);
@@ -1677,7 +1590,7 @@ mod tests {
             "a trailing space is part of the event name"
         );
         let record = decode_record("event: message_stop\nevent\ndata: {}");
-        assert_eq!(record.event.as_ref().unwrap().name, "message");
+        assert_eq!(record.event_name(), "message");
         let output = StreamTransform::AnthropicToOpenaiChat
             .apply_record(record, "fb", &mut state)
             .unwrap();
@@ -1778,43 +1691,6 @@ mod tests {
         assert!(wire.contains("req_ours"), "{wire}");
         assert!(wire.contains("acme/model-a"), "{wire}");
         assert!(wire.contains("\"text\":\"hi\""), "content survived: {wire}");
-    }
-
-    /// A `response.error`-framed upstream error through the sanitize stage: the
-    /// payload is rebuilt as the canonical `error` event, and the SSE `event:`
-    /// field must be renamed with it — a client subscribing by event name would
-    /// otherwise never see the error the payload now claims to be.
-    #[tokio::test]
-    async fn sanitize_renames_the_sse_event_with_the_rebuilt_payload() {
-        let upstream = concat!(
-            "event: response.error\n",
-            "data: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"type\":\"insufficient_quota\",\"code\":\"credit_balance_exhausted\",\"message\":\"no credits, top up at https://console.acme.ai/billing\"}}\n\n",
-        );
-        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
-        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
-            inner,
-            Some(SseProtocol::OpenaiChat),
-        ));
-        let identity = Arc::new(ResponseIdentity {
-            request_id: "req_ours".to_string(),
-            user_model: Some("acme/model-a".to_string()),
-        });
-        let sanitized = EventTransformStream::new(
-            inner,
-            StreamTransform::SanitizeResponse(identity, Endpoint::CreateModelResponse),
-        );
-        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
-        let wire: String = collected
-            .into_iter()
-            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
-            .collect();
-        assert!(wire.contains("event: error\n"), "{wire}");
-        assert!(!wire.contains("response.error"), "{wire}");
-        assert!(wire.contains("\"type\":\"error\""), "{wire}");
-        assert!(wire.contains("\"sequence_number\":2"), "{wire}");
-        assert!(!wire.contains("credit_balance_exhausted"), "{wire}");
-        assert!(!wire.contains("console.acme.ai"), "{wire}");
     }
 
     // Replay a fixture's input events through the transform (fixed fallback id),
@@ -2034,12 +1910,12 @@ mod tests {
             }
         }
         for block in wire.split("\n\n").filter(|block| !block.trim().is_empty()) {
-            let parsed = decode_event(block);
-            let data = parsed.data.as_str();
+            let parsed = decode_record(block);
+            let data = parsed.event.as_ref().unwrap().data.as_str();
             assert_ne!(data, "[DONE]", "Responses surface emitted [DONE]");
             let value: Value = serde_json::from_str(data).expect("Responses event JSON");
             assert_eq!(
-                Some(parsed.name.as_str()),
+                Some(parsed.event_name()),
                 value["type"].as_str(),
                 "SSE event name must match payload type"
             );
@@ -2056,12 +1932,10 @@ mod tests {
         let nameless =
             tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{" } }));
         let length = chat_event(json!({}), Some("length"));
-        let error = format!("data: {}", json!({ "error": { "message": "failed" } }));
         let no_choice = "data: {}".to_string();
         for (events, terminal) in [
             // Cut off mid-call: incomplete, even with no named call.
             (vec![&text, &nameless, &length], "response.incomplete"),
-            (vec![&text, &error], "response.failed"),
             (vec![&no_choice], "response.failed"),
         ] {
             let mut events: Vec<&str> = events.into_iter().map(String::as_str).collect();
@@ -2571,44 +2445,6 @@ mod tests {
             .is_err());
     }
 
-    /// An Anthropic upstream's error on the chat surface must reach the client
-    /// as this surface's own in-band error — the `error` member a client
-    /// detects a failed 200 stream by — not as the upstream's error type in
-    /// `finish_reason`, which left nothing to detect and named a vocabulary
-    /// this surface does not use. Run through the production pair
-    /// (convert, then sanitize), since the rebuild happens in the second stage.
-    #[tokio::test]
-    async fn anthropic_stream_error_reaches_the_chat_client_as_an_error_member() {
-        let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n";
-        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
-        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
-            inner,
-            Some(SseProtocol::AnthropicMessages),
-        ));
-        let converted = Box::pin(EventTransformStream::new(
-            inner,
-            StreamTransform::AnthropicToOpenaiChat,
-        ));
-        let identity = Arc::new(ResponseIdentity {
-            request_id: "req_ours".to_string(),
-            user_model: Some("acme/model-a".to_string()),
-        });
-        let sanitized = EventTransformStream::new(
-            converted,
-            StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete),
-        );
-        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
-        let wire: String = collected
-            .into_iter()
-            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
-            .collect();
-        assert!(wire.contains("\"error\""), "no error member: {wire}");
-        assert!(!wire.contains("billing_error"), "leaked kind: {wire}");
-        assert!(!wire.contains("credit balance"), "leaked message: {wire}");
-        assert!(wire.contains("data: [DONE]"), "{wire}");
-    }
-
     #[tokio::test]
     async fn upstream_that_omits_done_still_terminates_the_anthropic_message() {
         // `[DONE]` is an OpenAI convention, not an SSE requirement. GMI's
@@ -2823,45 +2659,5 @@ mod tests {
                 "{output}"
             );
         }
-    }
-    #[test]
-    fn named_anthropic_error_crosses_bridge_with_failure_and_terminal() {
-        let record = crate::sse::decode_buffered(Bytes::from_static(b"event: error\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n"), Some(SseProtocol::AnthropicMessages)).unwrap().remove(0);
-        let output = StreamTransform::AnthropicToOpenaiChat
-            .apply_record(record, "fixed", &mut StreamState::default())
-            .unwrap();
-        assert_eq!(output.len(), 2);
-        assert!(output[0].json().unwrap().get("error").is_some());
-        assert_eq!(
-            output[1].event.as_ref().unwrap().meaning.kind,
-            EventKind::Done
-        );
-        assert!(output.iter().all(|record| record
-            .event
-            .as_ref()
-            .unwrap()
-            .meaning
-            .failure
-            .is_some()));
-    }
-
-    #[test]
-    fn sanitize_renaming_preserves_terminal_failure_metadata() {
-        let record = crate::sse::decode_buffered(Bytes::from_static(b"event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n"), Some(SseProtocol::OpenaiResponses)).unwrap().remove(0);
-        let meaning = record.event.as_ref().unwrap().meaning;
-        let transform = StreamTransform::SanitizeResponse(
-            Arc::new(ResponseIdentity {
-                request_id: "fixed".into(),
-                user_model: None,
-            }),
-            Endpoint::CreateModelResponse,
-        );
-        let output = transform
-            .apply_record(record, "fixed", &mut StreamState::default())
-            .unwrap();
-        assert_eq!(output[0].event.as_ref().unwrap().meaning, meaning);
-        assert!(meaning.terminal.is_some());
-        assert!(meaning.failure.is_some());
-        assert_eq!(output[0].json().unwrap()["type"], "error");
     }
 }

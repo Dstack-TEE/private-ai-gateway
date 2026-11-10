@@ -38,20 +38,11 @@ impl Payload {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Event {
-    pub name: String,
-    pub explicit_name: Option<String>,
     pub data: String,
     pub payload: Payload,
     pub meaning: EventMeaning,
     pub after_terminal: bool,
-}
-
-impl Event {
-    /// The owner assigns the protocol phase. Preserve original classification
-    /// for representation edits while later source failures cannot affect outcome.
-    pub fn active_failure(&self) -> Option<crate::sse_protocol::FailureEvidence> {
-        self.meaning.failure.filter(|_| !self.after_terminal)
-    }
+    pub source_protocol: Option<SseProtocol>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,16 +62,10 @@ impl Record {
             let payload = serde_json::from_str(data)
                 .map_or_else(|_| Payload::Text(data.clone()), Payload::Json);
             Event {
-                name: metadata
-                    .event
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("message")
-                    .into(),
-                explicit_name: metadata.event.clone(),
                 data: data.clone(),
                 meaning: classify(protocol, metadata.event.as_deref(), &payload),
                 after_terminal: false,
+                source_protocol: protocol,
                 payload,
             }
         });
@@ -105,20 +90,21 @@ impl Record {
         if previous == *value {
             return;
         }
-        if let (Some(old), Some(new)) = (
-            previous.get("type").and_then(Value::as_str),
-            value.get("type").and_then(Value::as_str),
-        ) {
-            if old != new && self.metadata.event.is_some() {
-                self.metadata.event = Some(new.into());
-                event.explicit_name = Some(new.into());
-                event.name = new.into();
-            }
-        }
         self.edited = true;
     }
     pub fn json(&self) -> Option<&Value> {
         self.event.as_ref()?.payload.json()
+    }
+    #[cfg(test)]
+    pub fn event_name(&self) -> &str {
+        self.metadata
+            .event
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("message")
+    }
+    pub fn set_event_name(&mut self, name: &str) {
+        self.metadata.event = Some(name.into());
     }
     pub fn set_encrypted(&mut self, value: Value) {
         if let Some(event) = &mut self.event {
@@ -133,12 +119,11 @@ impl Record {
         };
         Self {
             event: Some(Event {
-                name: name.filter(|s| !s.is_empty()).unwrap_or("message").into(),
-                explicit_name: name.map(str::to_string),
                 data,
                 payload,
                 meaning,
                 after_terminal: false,
+                source_protocol: None,
             }),
             metadata: Sse {
                 event: name.map(str::to_string),
@@ -149,6 +134,9 @@ impl Record {
             edited: false,
             non_sse: None,
         }
+    }
+    pub fn is_heartbeat(&self) -> bool {
+        self.heartbeat
     }
     pub fn heartbeat() -> Self {
         Self {

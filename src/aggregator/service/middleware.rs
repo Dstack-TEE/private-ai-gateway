@@ -1060,6 +1060,7 @@ impl AciService {
                     endpoint: endpoint.into(),
                     e2ee: None,
                     request_id,
+                    identity: None,
                 },
                 Some(accounting),
             )),

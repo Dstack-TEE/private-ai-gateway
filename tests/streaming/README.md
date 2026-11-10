@@ -31,11 +31,12 @@ cargo test --locked -j 8 --lib exact_wire_characterization_corpus
 refactoring differences: preserve the original snapshot and explicitly identify
 any approved parsing correction with its old and new expectation.
 
-`streaming_corrections.json` keeps the two approved changed expectations alongside
-their original bytes and a reason. Sixteen cases remain identical to the original
-snapshot. The declared non-SSE JSON case loses its old SSE blank-line suffix;
-legacy completion loses the bare `[DONE]` block and emits one typed data terminal.
-Only the wire bytes, returned digest and receipt signature change in those cases.
+`streaming_corrections.json` records every approved difference with the original
+wire bytes and the corrected snapshot. Of the 35 cases, 24 match main exactly.
+The failure cases cover each destination and bridge. Native failures retain
+their canonical output, including both Responses terminal forms. Bridge failures
+omit startup events or the Chat chunk wrapper that existed only to carry an
+error. Legacy Anthropic completion reports a source failure instead of success.
 
 Framing normalization and rejection cases are pinned separately by
 `library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,

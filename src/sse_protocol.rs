@@ -254,6 +254,14 @@ pub(crate) fn classify(
             || payload_type == Some("response.error")
         {
             meaning.failure.get_or_insert(FailureEvidence::Inband);
+            // An extension event can still carry a protocol failure terminal.
+            if protocol == Some(SseProtocol::OpenaiResponses) && meaning.terminal.is_none() {
+                meaning.terminal = match payload_type {
+                    Some("response.failed") => Some(TerminalKind::Failed),
+                    Some("error" | "response.error") => Some(TerminalKind::Error),
+                    _ => None,
+                };
+            }
         }
     }
     meaning

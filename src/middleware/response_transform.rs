@@ -665,19 +665,12 @@ pub(crate) fn canonicalize_stream(
 ) {
     use crate::sse_protocol::EventKind;
     match endpoint {
-        Endpoint::Messages => {
-            if meaning.kind == EventKind::Error {
-                if let Some(object) = body.as_object_mut() {
-                    sanitize_messages_error_event(object, request_id);
-                }
-            }
-        }
+        Endpoint::Messages => {}
         Endpoint::CreateModelResponse => {
             let Some(object) = body.as_object_mut() else {
                 return;
             };
             match meaning.kind {
-                EventKind::Error => sanitize_responses_error_event(object),
                 EventKind::ResponseCreated
                 | EventKind::ResponseInProgress
                 | EventKind::ResponseCompleted
@@ -686,9 +679,6 @@ pub(crate) fn canonicalize_stream(
                     if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
                         canonicalize_responses_object(inner);
                     }
-                }
-                EventKind::Data if meaning.failure.is_some() => {
-                    sanitize_responses_error_event(object)
                 }
                 _ => {}
             }
@@ -1050,7 +1040,7 @@ pub(super) fn elapsed_ms(started: std::time::Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-pub(super) fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     #[cfg(test)]
     if crate::streaming_test_support::active() {
         return 1_700_000_000;
@@ -1100,6 +1090,27 @@ pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
         )
     });
     (cache_read, cache_creation)
+}
+
+/// Chat usage for the input counts from Messages and the latest output count.
+pub(super) fn chat_usage(start: Option<&Value>, output: i64) -> Value {
+    let mut usage = json!({"completion_tokens": output});
+    let mut prompt = 0;
+    if let Some(start) = start {
+        let read = i64_field(start, "cache_read_input_tokens");
+        let creation = i64_field(start, "cache_creation_input_tokens");
+        prompt = i64_field(start, "input_tokens") + read + creation;
+        usage["prompt_tokens"] = json!(prompt);
+        if read != 0 || creation != 0 {
+            for key in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+                if let Some(value) = start.get(key) {
+                    usage[key] = value.clone();
+                }
+            }
+        }
+    }
+    usage["total_tokens"] = json!(prompt + output);
+    usage
 }
 
 /// Anthropic usage for a Chat usage object.

@@ -631,6 +631,7 @@ impl AciService {
                 endpoint: endpoint_path.into(),
                 e2ee: req.e2ee.clone(),
                 request_id: Some(request_id),
+                identity: None,
             },
             is_sse,
         );
