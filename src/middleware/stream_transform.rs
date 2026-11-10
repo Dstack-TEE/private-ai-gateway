@@ -32,8 +32,7 @@ use super::response_transform::{
 };
 use super::types::ProviderFormat;
 use crate::sse::{
-    DecodedStream, Event, EventStream, Payload, Record, SerializedStream, WirePolicy,
-    MAX_EVENT_BYTES,
+    DecodedStream, Event, EventStream, Payload, Record, SerializedStream, MAX_EVENT_BYTES,
 };
 use crate::sse_protocol::{event_kind, EventKind, EventMeaning, FailureEvidence, SseProtocol};
 
@@ -82,7 +81,6 @@ impl StreamTransform {
         fallback_id: &str,
         state: &mut StreamState,
     ) -> Result<Vec<Record>, ()> {
-        record.policy = WirePolicy::Middleware;
         match self {
             StreamTransform::ExcludeReasoning => {
                 record.edit_json(response_transform::exclude_reasoning);
@@ -1438,16 +1436,17 @@ mod tests {
     use super::*;
 
     fn decode_record(text: &str) -> Record {
-        let mut decoder = crate::sse::Decoder::new(None);
-        decoder.push(Bytes::from(format!("{text}\n\n"))).unwrap();
-        decoder.next().unwrap().unwrap()
+        crate::sse::decode_buffered(Bytes::from(format!("{text}\n\n")), None)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
     }
     fn decode_event(text: &str) -> Event {
         decode_record(text).event.unwrap()
     }
     fn edit_event_body(text: &str, edit: impl FnOnce(&mut Value)) -> String {
         let mut record = decode_record(text);
-        record.policy = WirePolicy::Middleware;
         record.edit_json(edit);
         String::from_utf8(crate::sse::serialize(&record).unwrap().to_vec()).unwrap()
     }
@@ -2637,7 +2636,10 @@ mod tests {
         assert!(output.contains("event: chunk\n"), "{output}");
         assert!(output.contains("id: 7\n"), "{output}");
         assert!(output.contains("retry: 100\n"), "{output}");
-        assert!(output.contains(": keep\n"), "{output}");
+        assert!(
+            !output.contains(": keep\n"),
+            "upstream comments are dropped: {output}"
+        );
         assert!(output.contains("\"content\":\"answer\""), "{output}");
         assert!(output.contains("\"reasoning_tokens\":3"), "{output}");
         assert!(!output.contains("hidden"), "{output}");
@@ -2705,7 +2707,7 @@ mod tests {
         });
         let transform = StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete);
         let mut state = StreamState::default();
-        for event in ["data: [DONE]", ": PROCESSING", "data: "] {
+        for event in ["data: [DONE]", "data: "] {
             let output = transform
                 .apply(event, "fb", &mut state)
                 .unwrap_or_else(|_| panic!("rejected {event}"))
@@ -2718,9 +2720,7 @@ mod tests {
     }
     #[test]
     fn named_anthropic_error_crosses_bridge_with_failure_and_terminal() {
-        let mut decoder = crate::sse::Decoder::new(Some(SseProtocol::AnthropicMessages));
-        decoder.push(Bytes::from_static(b"event: error\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n")).unwrap();
-        let record = decoder.next().unwrap().unwrap();
+        let record = crate::sse::decode_buffered(Bytes::from_static(b"event: error\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n"), Some(SseProtocol::AnthropicMessages)).unwrap().remove(0);
         let output = StreamTransform::AnthropicToOpenaiChat
             .apply_record(record, "fixed", &mut StreamState::default())
             .unwrap();
@@ -2741,9 +2741,7 @@ mod tests {
 
     #[test]
     fn sanitize_renaming_preserves_terminal_failure_metadata() {
-        let mut decoder = crate::sse::Decoder::new(Some(SseProtocol::OpenaiResponses));
-        decoder.push(Bytes::from_static(b"event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n")).unwrap();
-        let record = decoder.next().unwrap().unwrap();
+        let record = crate::sse::decode_buffered(Bytes::from_static(b"event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n"), Some(SseProtocol::OpenaiResponses)).unwrap().remove(0);
         let meaning = record.event.as_ref().unwrap().meaning;
         let transform = StreamTransform::SanitizeResponse(
             Arc::new(ResponseIdentity {
