@@ -88,15 +88,28 @@ impl Control {
     }
 }
 fn owner(inner: ServiceResponseStream, report: StreamReport) -> ResponseOwner {
+    owner_for(inner, report, SseProtocol::OpenaiChat)
+}
+fn owner_for(
+    inner: ServiceResponseStream,
+    mut report: StreamReport,
+    protocol: SseProtocol,
+) -> ResponseOwner {
+    let endpoint = match protocol {
+        SseProtocol::OpenaiChat => "/v1/chat/completions",
+        SseProtocol::AnthropicMessages => "/v1/messages",
+        SseProtocol::OpenaiResponses => "/v1/responses",
+    };
+    report.endpoint = endpoint.into();
     let accounting = Accounting::new(report, None);
-    let source = Box::pin(DecodedStream::new(inner, Some(SseProtocol::OpenaiChat)));
+    let source = Box::pin(DecodedStream::new(inner, Some(protocol)));
     let events = Box::pin(MeterEvents::new(source, accounting.handle.clone()));
     ResponseOwner::new(
         ResponseInput::Events(events),
         Some(accounting),
         None,
-        "/v1/chat/completions".into(),
-        Some(SseProtocol::OpenaiChat),
+        endpoint.into(),
+        Some(protocol),
         None,
     )
 }
@@ -104,14 +117,26 @@ fn owner(inner: ServiceResponseStream, report: StreamReport) -> ResponseOwner {
 #[tokio::test]
 async fn typed_accounting_injects_cost_reports_original_usage_and_tenant() {
     let control = Control::new().await;
-    let source = Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\ndata: [DONE]\n\n"))]));
+    let wire = b"data:{\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"reasoning_tokens\":5,\"completion_tokens_details\":null}}\n\ndata: ping\n\ndata:[DONE]\n\n";
+    let chunks: Vec<_> = wire
+        .chunks(7)
+        .map(|chunk| Ok(Bytes::copy_from_slice(chunk)))
+        .collect();
+    let source = Box::pin(futures_util::stream::iter(chunks));
     let output: Vec<_> = owner(source, control.report()).collect().await;
     let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
-    assert!(String::from_utf8(bytes).unwrap().contains("\"cost\":50"));
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(text.contains("\"cost\":50"));
+    assert!(text.contains("\"completion_tokens_details\":{\"reasoning_tokens\":5}"));
+    assert!(text.contains("data: ping\n\n"));
     let report = control.captured().await;
     assert_eq!(report["status"], 200);
     assert_eq!(report["usage"]["prompt_tokens"], 10);
     assert_eq!(report["usage"]["completion_tokens"], 20);
+    assert_eq!(
+        report["usage"]["completion_tokens_details"]["reasoning_tokens"],
+        5
+    );
     assert!(report["usage"].get("cost").is_none());
     assert!(report["ttftMs"].is_number());
     assert_eq!(
@@ -126,12 +151,37 @@ async fn typed_accounting_injects_cost_reports_original_usage_and_tenant() {
 
 #[tokio::test]
 async fn only_an_exact_dispatched_terminal_rescues_a_read_timeout() {
-    for (wire, status) in [
-        ("data: [DONE]\n\n", 200),
-        ("data: [DONE] \n\n", 504),
-        ("data:\ndata: [DONE]\n\n", 504),
-        ("[DONE]\n\n", 504),
-        ("{\"type\":\"message_stop\"}\n\n", 504),
+    use SseProtocol::{
+        AnthropicMessages as Messages, OpenaiChat as Chat, OpenaiResponses as Responses,
+    };
+    for (protocol, wire, status) in [
+        (Chat, "data: [DONE]\n\n", 200),
+        (Chat, "data: [DONE]\n", 504),
+        (
+            Chat,
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            504,
+        ),
+        (Chat, "data: [DONE] \n\n", 504),
+        (Chat, "data:\ndata: [DONE]\n\n", 504),
+        (Chat, "[DONE]\n\n", 504),
+        (Chat, "{\"type\":\"message_stop\"}\n\n", 504),
+        (Messages, "data: [DONE]\n\n", 504),
+        (
+            Messages,
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            504,
+        ),
+        (
+            Messages,
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            200,
+        ),
+        (
+            Responses,
+            "data: {\"type\":\"response.completed\",\"sequence_number\":7}\n\n",
+            200,
+        ),
     ] {
         let control = Control::new().await;
         let source = Box::pin(futures_util::stream::iter([
@@ -140,14 +190,96 @@ async fn only_an_exact_dispatched_terminal_rescues_a_read_timeout() {
                 crate::aci::upstream::UpstreamError::Timeout("read deadline".into()),
             )),
         ]));
-        let mut stream = owner(source, control.report());
+        let mut stream = owner_for(source, control.report(), protocol);
         while stream.next().await.is_some() {}
         let report = control.captured().await;
-        assert_eq!(report["status"], status, "{wire:?}");
+        assert_eq!(report["status"], status, "{protocol:?} {wire:?}");
         if status == 504 {
             assert_eq!(report["errorMessage"], "upstream_timeout");
         }
     }
+}
+
+#[tokio::test]
+async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_protocol() {
+    use SseProtocol::{
+        AnthropicMessages as Messages, OpenaiChat as Chat, OpenaiResponses as Responses,
+    };
+    for (protocol, wire, status, class) in [
+        (Chat, "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n", 200, None),
+        (Chat, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", 200, None),
+        (Messages, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n", 200, None),
+        (Responses, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1}\n\n", 200, None),
+        (Chat, "data: {\"choices\":[{\"delta\":{}}]}\n", 502, Some("stream_truncated")),
+        (Chat, "data: {\"choices\":[", 502, Some("stream_truncated")),
+        (Chat, "event: custom\n", 502, Some("stream_truncated")),
+        (Chat, "event: custom\n\n", 200, None),
+        (Chat, "data: {\"choices\":[{\"finish_reason\":\"upstream_error\"}]}\n\ndata: [DONE]\n\n", 502, Some("stream_inband_error")),
+        (Messages, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", 502, Some("stream_inband_error")),
+        (Responses, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"CANARY-private\"}}}\n\n", 502, Some("stream_inband_error")),
+    ] {
+        let control = Control::new().await;
+        let chunks: Vec<_> = wire.as_bytes().chunks(7).map(|b| Ok(Bytes::copy_from_slice(b))).collect();
+        let source = Box::pin(futures_util::stream::iter(chunks));
+        let output: Vec<_> = owner_for(source, control.report(), protocol).collect().await;
+        let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
+        let report = control.captured().await;
+        assert_eq!(report["status"], status, "{protocol:?} {wire:?}");
+        assert_eq!(report["errorMessage"].as_str(), class, "{protocol:?} {wire:?}");
+        assert!(!report.to_string().contains("CANARY"));
+        if status == 200 && protocol == Chat {
+            assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+        } else if status == 200 || class == Some("stream_inband_error") {
+            assert_eq!(bytes, wire.as_bytes(), "no fabricated terminal after {wire:?}");
+        } else {
+            assert!(bytes.is_empty(), "discard pending data without a terminal");
+        }
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn fragmented_comments_do_not_start_ttft() {
+    for content in [false, true] {
+        let control = Control::new().await;
+        let mut chunks = vec![
+            Ok(Bytes::from_static(b": keep-al")),
+            Ok(Bytes::from_static(b"ive\n")),
+        ];
+        if content {
+            chunks.push(Ok(Bytes::from_static(b"data: {\"choices\":[]}\n\n")));
+        }
+        let source = Box::pin(futures_util::stream::iter(chunks));
+        let output: Vec<_> = owner(source, control.report()).collect().await;
+        let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
+        assert!(!String::from_utf8(bytes).unwrap().contains("keep-alive"));
+        let report = control.captured().await;
+        assert_eq!(report["status"], 200);
+        assert_eq!(report["ttftMs"].is_number(), content);
+    }
+}
+
+#[tokio::test]
+async fn event_overflow_reports_an_upstream_failure_and_retains_partial_usage() {
+    let control = Control::new().await;
+    let mut oversized = b"data: {}\n".to_vec();
+    oversized.resize(crate::sse::MAX_EVENT_BYTES + 1, b'x');
+    let source = Box::pin(futures_util::stream::iter([
+        Ok(Bytes::from_static(
+            b"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":9}}\n\n",
+        )),
+        Ok(Bytes::from(oversized)),
+    ]));
+    let output: Vec<_> = owner(source, control.report()).collect().await;
+    let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
+    assert!(!bytes.ends_with(b"data: [DONE]\n\n"));
+    let report = control.captured().await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_line_overflow");
+    assert_ne!(report["errorSource"], "gateway");
+    assert_eq!(report["usage"]["prompt_tokens"], 3);
+    assert_eq!(report["usage"]["completion_tokens"], 9);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -2870,14 +2870,19 @@ async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
             // The error continues the event numbering rather than restarting
             // it, which is why the finalizer builds it: only there is the last
             // sequence known.
-            name: "responses stream drops after sequence 4",
+            name: "responses stream drops after sequences 3 and 9",
             path: "/v1/responses",
             request: responses,
-            chunks: vec![Bytes::from_static(
-                b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\n",
-            )],
+            chunks: vec![
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3}\n\n",
+                ),
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":9}\n\n",
+                ),
+            ],
             expect_error: true,
-            expect_in_error: "\"sequence_number\":5",
+            expect_in_error: "\"sequence_number\":10",
         },
     ];
     for case in cases {
