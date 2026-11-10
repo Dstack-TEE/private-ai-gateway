@@ -186,3 +186,225 @@ pub fn stream_error_event(
 fn json_str(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
+
+/// Protocol meaning is assigned at application ingress and survives all edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EventKind {
+    #[default]
+    Data,
+    Done,
+    MessageStart,
+    MessageDelta,
+    MessageStop,
+    Ping,
+    ContentBlockStart,
+    ContentBlockDelta,
+    ContentBlockStop,
+    ResponseCreated,
+    ResponseInProgress,
+    ResponseCompleted,
+    ResponseIncomplete,
+    ResponseFailed,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalKind {
+    Success,
+    Incomplete,
+    Failed,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureEvidence {
+    Inband,
+    ConflictingType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct EventMeaning {
+    pub kind: EventKind,
+    pub terminal: Option<TerminalKind>,
+    pub failure: Option<FailureEvidence>,
+}
+
+impl EventMeaning {
+    /// Constructors for converted/generated events use their known kind. They
+    /// never parse wire bytes or reclassify an edited payload.
+    pub fn generated(protocol: SseProtocol, kind: EventKind) -> Self {
+        let terminal = match (protocol, kind) {
+            (SseProtocol::OpenaiChat, EventKind::Done)
+            | (SseProtocol::AnthropicMessages, EventKind::MessageStop)
+            | (SseProtocol::OpenaiResponses, EventKind::ResponseCompleted) => {
+                Some(TerminalKind::Success)
+            }
+            (SseProtocol::OpenaiResponses, EventKind::ResponseIncomplete) => {
+                Some(TerminalKind::Incomplete)
+            }
+            (SseProtocol::OpenaiResponses, EventKind::ResponseFailed) => Some(TerminalKind::Failed),
+            (SseProtocol::OpenaiResponses | SseProtocol::AnthropicMessages, EventKind::Error) => {
+                Some(TerminalKind::Error)
+            }
+            _ => None,
+        };
+        let failure = matches!(kind, EventKind::Error | EventKind::ResponseFailed)
+            .then_some(FailureEvidence::Inband);
+        Self {
+            kind,
+            terminal,
+            failure,
+        }
+    }
+}
+
+pub(crate) fn event_kind(name: &str) -> EventKind {
+    match name {
+        "message_start" => EventKind::MessageStart,
+        "message_delta" => EventKind::MessageDelta,
+        "message_stop" => EventKind::MessageStop,
+        "ping" => EventKind::Ping,
+        "content_block_start" => EventKind::ContentBlockStart,
+        "content_block_delta" => EventKind::ContentBlockDelta,
+        "content_block_stop" => EventKind::ContentBlockStop,
+        "response.created" => EventKind::ResponseCreated,
+        "response.in_progress" => EventKind::ResponseInProgress,
+        "response.completed" => EventKind::ResponseCompleted,
+        "response.incomplete" => EventKind::ResponseIncomplete,
+        "response.failed" => EventKind::ResponseFailed,
+        "response.error" | "error" => EventKind::Error,
+        _ => EventKind::Data,
+    }
+}
+
+pub(crate) fn classify(
+    protocol: Option<SseProtocol>,
+    name: Option<&str>,
+    payload: &crate::sse::Payload,
+) -> EventMeaning {
+    use crate::sse::Payload;
+    if matches!(payload, Payload::Text(text) if text == "[DONE]") {
+        return protocol.map_or_else(EventMeaning::default, |protocol| {
+            EventMeaning::generated(protocol, EventKind::Done)
+        });
+    }
+    let value = payload.json();
+    let payload_type = value.and_then(|v| v.get("type")).and_then(Value::as_str);
+    let name = name.filter(|name| !name.is_empty());
+    let kind = event_kind(name.or(payload_type).unwrap_or_default());
+    let mut meaning = protocol.map_or(
+        EventMeaning {
+            kind,
+            ..EventMeaning::default()
+        },
+        |protocol| EventMeaning::generated(protocol, kind),
+    );
+    if let (Some(name), Some(payload_type)) = (name, payload_type) {
+        let named_kind = event_kind(name);
+        let payload_kind = event_kind(payload_type);
+        // Known control names and payload types must agree. Unknown extensions
+        // remain opaque; a trailing space never acquires a control meaning.
+        if named_kind != EventKind::Data && payload_kind != EventKind::Data && name != payload_type
+        {
+            meaning.failure = Some(FailureEvidence::ConflictingType);
+        }
+    }
+    if let Some(value) = value {
+        let error_reason = |reason: &str| reason == "error" || reason.ends_with("_error");
+        let choices_error = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .is_some_and(error_reason)
+                })
+            });
+        let stop_error = value
+            .get("delta")
+            .and_then(|delta| delta.get("stop_reason"))
+            .and_then(Value::as_str)
+            .is_some_and(error_reason);
+        let nested_error = value
+            .get("response")
+            .and_then(|response| response.get("error"))
+            .is_some_and(|error| !error.is_null());
+        if value.get("error").is_some_and(|error| !error.is_null())
+            || nested_error
+            || choices_error
+            || stop_error
+            || payload_type == Some("error")
+            || payload_type == Some("response.failed")
+        {
+            meaning.failure.get_or_insert(FailureEvidence::Inband);
+        }
+    }
+    meaning
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use crate::sse::Payload;
+    #[test]
+    fn terminals_and_names_are_exact() {
+        for protocol in [
+            SseProtocol::OpenaiChat,
+            SseProtocol::AnthropicMessages,
+            SseProtocol::OpenaiResponses,
+        ] {
+            assert!(
+                classify(Some(protocol), None, &Payload::Text(" [DONE] ".into()))
+                    .terminal
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            classify(
+                Some(SseProtocol::OpenaiChat),
+                None,
+                &Payload::Text("[DONE]".into())
+            )
+            .terminal,
+            Some(TerminalKind::Success)
+        );
+        let payload = Payload::Json(json!({"type":"message_stop"}));
+        assert!(classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop "),
+            &payload
+        )
+        .terminal
+        .is_none());
+        assert!(classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop"),
+            &payload
+        )
+        .terminal
+        .is_some());
+    }
+    #[test]
+    fn failure_is_independent_of_terminal_and_conflicts_fail() {
+        let error = Payload::Json(json!({"error":{"message":"failed"}}));
+        let meaning = classify(Some(SseProtocol::OpenaiChat), None, &error);
+        assert!(meaning.failure.is_some());
+        assert!(meaning.terminal.is_none());
+        let conflict = classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop"),
+            &Payload::Json(json!({"type":"error"})),
+        );
+        assert_eq!(conflict.failure, Some(FailureEvidence::ConflictingType));
+        assert_eq!(conflict.terminal, Some(TerminalKind::Success));
+        let named_error = classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("error"),
+            &Payload::Json(json!({})),
+        );
+        assert_eq!(named_error.terminal, Some(TerminalKind::Error));
+        assert!(named_error.failure.is_some());
+    }
+}
