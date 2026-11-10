@@ -2878,6 +2878,85 @@
     ]
   },
   {
+    "name": "chat_usage_after_failure",
+    "wire": "data: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"cost\":8}}\n\ndata: [DONE]\n\n",
+    "wire_hash": "sha256:09344efeebfa86b8db7593c75ddb4866ef3d4e3078d114dedac65609a8ae06e4",
+    "source_hash": "sha256:cfc49660cb40736f584ad1bef7c0c9b6fff0c3aa500e076cab855be6fde9cc1b",
+    "status": 200,
+    "before_eof": {
+      "receipt": false,
+      "report": false
+    },
+    "receipt": {
+      "api_version": "aci/1",
+      "chat_id": null,
+      "endpoint": "/v1/chat/completions",
+      "event_log": [
+        {
+          "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+          "type": "request.received"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "middleware.forwarded"
+        },
+        {
+          "target_route_id": "fixture:model",
+          "type": "route.selected"
+        },
+        {
+          "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+          "type": "request.forwarded"
+        },
+        {
+          "model_id": "fixture-model",
+          "required": false,
+          "result": "verified",
+          "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+          "type": "upstream.verified"
+        },
+        {
+          "body_hash": "sha256:cfc49660cb40736f584ad1bef7c0c9b6fff0c3aa500e076cab855be6fde9cc1b",
+          "type": "response.received"
+        },
+        {
+          "body_hash": "sha256:09344efeebfa86b8db7593c75ddb4866ef3d4e3078d114dedac65609a8ae06e4",
+          "type": "response.returned"
+        }
+      ],
+      "key_id": "static-receipt-ed25519",
+      "method": "POST",
+      "model": "fixture-model",
+      "receipt_id": "rcpt-characterization",
+      "served_at": 1700000000,
+      "signature": "3863bff10a5392a9d117db95d2402c98eb1afe8b614caaec07c71004136a1d3018c061c85f398023ac27a274d1841abbc4e525bca47437ce8947393b8fc38407",
+      "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+    },
+    "signature_valid": true,
+    "reports": [
+      {
+        "requestId": "req-fixture",
+        "endpoint": "/v1/chat/completions",
+        "status": 502,
+        "durationMs": 0,
+        "ttftMs": 0,
+        "isStreaming": true,
+        "attemptIndex": 0,
+        "selectedRouteId": "fixture:model",
+        "requestModel": "fixture-model",
+        "usage": {
+          "prompt_tokens": 2,
+          "completion_tokens": 3
+        },
+        "pricing": {
+          "inputCostPerToken": "1",
+          "outputCostPerToken": "2"
+        },
+        "errorMessage": "stream_inband_error"
+      }
+    ]
+  },
+  {
     "name": "buffered_sse",
     "source_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",
     "wire_hash": "sha256:04c3d23aa53499bcbc23cf01542028919154fff9a378aecb3cbaf182cbfb907b",

@@ -532,6 +532,19 @@ fn failed_usage_case() -> Case {
     )
 }
 
+fn usage_after_failure_case() -> Case {
+    Case::new(
+        "chat_usage_after_failure",
+        Endpoint::ChatComplete,
+        concat!(
+            "data: {\"error\":{\"type\":\"api_error\",\"message\":\"Upstream failed\"}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n",
+            "data: [DONE]\n\n"
+        ),
+        "openai",
+    )
+}
+
 fn review_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     for early in [false, true] {
@@ -650,6 +663,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(review_cases());
     cases.extend(rate_limit_cases());
     cases.push(failed_usage_case());
+    cases.push(usage_after_failure_case());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
