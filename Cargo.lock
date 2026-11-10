@@ -3383,6 +3383,7 @@ dependencies = [
  "serde_json_canonicalizer",
  "sha2",
  "sha3 0.10.9",
+ "sse-stream",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -4472,6 +4473,22 @@ checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
  "der 0.8.0",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d385160fc0fba84f7b9cc8ef3263e410d0e3ca7ab4927f1356df33145ace69a4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "memchr",
+ "pin-project-lite",
+ "simdutf8",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

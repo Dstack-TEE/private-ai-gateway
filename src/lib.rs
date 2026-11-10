@@ -27,3 +27,7 @@ pub(crate) mod streaming_test_support;
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 mod common;
+
+#[cfg(test)]
+#[path = "../tests/streaming/library_contract.rs"]
+mod sse_library_contract;

@@ -89,6 +89,7 @@ async-trait = "0.1"
 
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
+sse-stream = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
