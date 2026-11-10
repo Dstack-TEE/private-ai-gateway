@@ -447,6 +447,12 @@ path and query string:
 | `GET /v1/models/providers/acme?zdr=true` | `GET /models/providers/acme?zdr=true` |
 | `GET /v1/embeddings/models` | `GET /embeddings/models` |
 
+When the request carries a bearer key, the gateway sends its lowercase
+SHA-256 hex, the same value as the consult's `apiKeyHash`, in the
+`x-api-key-hash` header. A request without a key sends no such header. The
+hash is not a verified credential, and a control plane that answers per caller
+must vary any cache on this header.
+
 The control plane owns the response schema and status. The gateway relays the
 body and status with `content-type: application/json`. A transport failure
 becomes `502 control plane unavailable`.

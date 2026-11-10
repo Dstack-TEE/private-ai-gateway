@@ -71,6 +71,7 @@ against the code:
 | Destination | Contents | Defined in |
 | --- | --- | --- |
 | Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the public endpoint, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and the cache-affinity key (`prefixHash`, with `sessionKind`) | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Catalog request to the control plane | The catalog path and query string, the TEE-only `tee=true` override, and, when the request carried a bearer key, its SHA-256 as `x-api-key-hash` | `catalog_get` in `src/middleware/control.rs` |
 | Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, successful image count/size/quality, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
