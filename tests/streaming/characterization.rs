@@ -503,6 +503,28 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
     json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid})
 }
 
+fn coded_failure_cases() -> Vec<Case> {
+    let chat = concat!(
+        "data: {\"error\":{\"code\":429,\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    [
+        ("rate_limit_native_chat", Endpoint::ChatComplete, chat, "openai"),
+        ("rate_limit_native_messages", Endpoint::Messages,
+         "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Too many requests\"}}\n\n", "anthropic"),
+        ("native_responses_rate_limit_error", Endpoint::CreateModelResponse,
+         "event: response.error\ndata: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"}}\n\n", "openai"),
+        ("native_responses_rate_limit_failed", Endpoint::CreateModelResponse,
+         "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"failed\",\"output\":[],\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Too many requests\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n", "openai"),
+        ("rate_limit_chat_messages", Endpoint::Messages, chat, "openai"),
+        ("failed_chat_usage_filter", Endpoint::ChatComplete,
+         "data: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai"),
+    ]
+    .into_iter()
+    .map(|(name, endpoint, source, format)| Case::new(name, endpoint, source, format))
+    .collect()
+}
+
 fn review_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     for early in [false, true] {
@@ -619,6 +641,7 @@ async fn exact_wire_characterization_corpus() {
         cases.push(Case::new(name, Endpoint::ChatComplete, &source, "openai"));
     }
     cases.extend(review_cases());
+    cases.extend(coded_failure_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
