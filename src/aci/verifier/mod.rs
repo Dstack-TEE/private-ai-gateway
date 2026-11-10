@@ -59,9 +59,9 @@ pub use dstack::{dstack_rtmr3_event, verify_dstack_event_log, DstackEventLog, Ve
 pub use external::ProviderVerifierConfigError;
 pub use privatemode::PrivatemodeProviderVerifier;
 pub use providers::{
-    ArmetAiProviderVerifier, ChutesProviderVerifier, NearAiProviderVerifier,
-    PhalaDirectProviderVerifier, RoutingUpstreamVerifier, SecretAiProviderVerifier,
-    TinfoilProviderVerifier,
+    ArmetAiProviderVerifier, ChutesProviderVerifier, ConfidentialAiProviderVerifier,
+    NearAiProviderVerifier, PhalaDirectProviderVerifier, RoutingUpstreamVerifier,
+    SecretAiProviderVerifier, TinfoilProviderVerifier,
 };
 pub use quote::QuoteStepError;
 pub use report::{

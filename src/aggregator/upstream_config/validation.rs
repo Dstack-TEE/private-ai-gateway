@@ -118,14 +118,40 @@ fn valid_root_https_origin(value: &str) -> bool {
         && origin.fragment().is_none()
 }
 
+fn valid_lowercase_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// `tdx-measurement:sha256:<64 lowercase hex>`, the pin format the armet-ai
 /// bridge derives from the verified MRTD, RTMR0-3 and TD launch configuration.
 pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
     value
         .strip_prefix("tdx-measurement:sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .is_some_and(|hex| valid_lowercase_hex(hex, 64))
+}
+
+fn valid_confidential_ai_subject(value: &str) -> bool {
+    let Some((kind, pin)) = value.split_once(':') else {
+        return false;
+    };
+    match kind {
+        "tdx-mrtd" | "tdx-rtmr1" | "tdx-rtmr2" | "tdx-rtmr3" => valid_lowercase_hex(pin, 96),
+        "c8s-allowlist" => pin
+            .strip_prefix("sha256:")
+            .is_some_and(|v| valid_lowercase_hex(v, 64)),
+        "c8s-workload" => {
+            !pin.is_empty()
+                && pin.len() <= 63
+                && pin.as_bytes()[0].is_ascii_alphanumeric()
+                && pin
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        }
+        _ => false,
+    }
 }
 
 /// `tdx-boot-chain:sha256:<64 lowercase hex>`: SHA-256 over a dstack OS
@@ -133,9 +159,7 @@ pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
 fn valid_tdx_boot_chain_subject(value: &str) -> bool {
     value
         .strip_prefix("tdx-boot-chain:sha256:")
-        .is_some_and(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .is_some_and(|hex| valid_lowercase_hex(hex, 64))
 }
 
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {
@@ -251,6 +275,27 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                     "upstream {:?} provider armet-ai accepted_subjects entry {bad:?} must be tdx-measurement:sha256:<64 lowercase hex>",
                     upstream.name
                 )));
+            }
+        }
+        if upstream.provider == UpstreamProvider::ConfidentialAi {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            let required = [
+                "tdx-mrtd:",
+                "tdx-rtmr1:",
+                "tdx-rtmr2:",
+                "tdx-rtmr3:",
+                "c8s-workload:",
+            ];
+            if !valid_root_https_origin(&upstream.base_url)
+                || !subjects.iter().all(|s| valid_confidential_ai_subject(s))
+                || required
+                    .iter()
+                    .any(|prefix| subjects.iter().filter(|s| s.starts_with(prefix)).count() != 1)
+                || !subjects.iter().any(|s| s.starts_with("c8s-allowlist:"))
+            {
+                return Err(UpstreamConfigError::InvalidConfig(
+                    "confidential-ai requires a root HTTPS base_url and accepted_subjects: exactly one each of tdx-mrtd, tdx-rtmr1, tdx-rtmr2, tdx-rtmr3 (96 lowercase hex) and c8s-workload, plus c8s-allowlist:sha256:<64 lowercase hex> pins".into(),
+                ));
             }
         }
         if upstream.basic_auth {

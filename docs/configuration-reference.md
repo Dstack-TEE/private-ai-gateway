@@ -277,6 +277,7 @@ client-observed body and the provider-facing body.
 | `tinfoil` | TEE | Tinfoil verifier through the Python bridge and TLS-SPKI enforcement. |
 | `near-ai` | TEE | NEAR AI verifier through the Python bridge, external dstack verifier, and TLS-SPKI enforcement. |
 | `chutes` | TEE | Per-instance attestation and encrypted Chutes E2EE transport. |
+| `confidential-ai` | TEE | c8s attest-lb front door at verification time, configured measurement/workload/allowlist pins, and TLS-SPKI forwarding. Admission remains not acceptable; keep out of production config. See [verification](providers/confidential-ai/verification.md). |
 | `secret-ai` | TEE | SecretVM CPU, GPU, workload, and inference-SPKI verifier. |
 | `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
 | `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
@@ -293,13 +294,13 @@ request time.
 | --- | --- | --- | --- |
 | `name` | string | required | Unique non-empty upstream name. |
 | `provider` | enum | `openai-compatible` | One provider value from the table above. |
-| `base_url` | string | required | Non-empty provider origin. `secret-ai`, `armet-ai` and `0g-private-computer` require a root HTTPS URL without user info, path, query, or fragment. |
+| `base_url` | string | required | Non-empty provider origin. `secret-ai`, `confidential-ai`, `armet-ai` and `0g-private-computer` require a root HTTPS URL without user info, path, query, or fragment. |
 | `path` | string | unset | Upstream path for chat requests. Leading `/` is added when missing. See [Chat request path](#chat-request-path). |
 | `models` | object | required | Non-empty map of public model ID to non-empty provider model ID. |
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
 | `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
-| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
+| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` / `confidential-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). For `confidential-ai`, require exactly one each of `tdx-mrtd:<96hex>`, `tdx-rtmr1:<96hex>`, `tdx-rtmr2:<96hex>`, `tdx-rtmr3:<96hex>`, `c8s-workload:<name>`, and one or more `c8s-allowlist:sha256:<64hex>` pins (lowercase hex); see [Confidential AI configuration](providers/confidential-ai/verification.md#required-configuration). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
 | `accepted_dstack_kms_root_public_keys` | string array | unset | ACI-service accepted dstack KMS root public keys. |
 | `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service and 0G DCAP verifiers. |
