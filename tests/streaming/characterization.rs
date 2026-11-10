@@ -208,7 +208,7 @@ async fn capture(case: &Case) -> Value {
         _ => CHAT_COMPLETIONS_PATH,
     };
     let candidate = if case.endpoint == Endpoint::CreateModelResponse
-        && case.name == "native_responses"
+        && case.name.starts_with("native_responses")
     {
         json!({"routeId":"fixture:model", "format":case.format, "supportedEndpoints":[RESPONSES_PATH]})
     } else {
@@ -527,6 +527,22 @@ fn review_cases() -> Vec<Case> {
         "data: [DONE]\n\ndata: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n", "openai"));
     cases.push(Case::new("anthropic_post_terminal_usage", Endpoint::ChatComplete,
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n", "anthropic"));
+    let chat_error = "data: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n";
+    let messages_error = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n";
+    for (name, endpoint, source, format) in [
+        ("failure_native_chat", Endpoint::ChatComplete, chat_error, "openai"),
+        ("failure_native_messages", Endpoint::Messages, messages_error, "anthropic"),
+        ("native_responses_failure", Endpoint::CreateModelResponse, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"failed\",\"output\":[],\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n", "openai"),
+        ("native_responses_error", Endpoint::CreateModelResponse, "event: response.error\ndata: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai"),
+        ("failure_messages_chat", Endpoint::ChatComplete, messages_error, "anthropic"),
+        ("failure_chat_messages", Endpoint::Messages, chat_error, "openai"),
+        ("failure_chat_responses", Endpoint::CreateModelResponse, chat_error, "openai"),
+        ("failure_messages_responses", Endpoint::CreateModelResponse, messages_error, "anthropic"),
+        ("failure_legacy_completion", Endpoint::Complete, messages_error, "anthropic"),
+    ] {
+        cases.push(Case::new(name, endpoint, source, format));
+    }
+
     cases
 }
 
