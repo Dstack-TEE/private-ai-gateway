@@ -60,6 +60,7 @@ impl Stream for CheckpointStream {
 struct TrackingSessions {
     inner: crate::aggregator::session_store::InMemorySessionStore,
     id: Mutex<Option<String>>,
+    fail_retention: bool,
 }
 impl crate::aggregator::session_store::SessionStore for TrackingSessions {
     fn get_session(
@@ -87,6 +88,11 @@ impl crate::aggregator::session_store::SessionStore for TrackingSessions {
         lease: &crate::aggregator::session_store::SessionLease,
         deadline: u64,
     ) -> std::io::Result<()> {
+        if self.fail_retention {
+            return Err(std::io::Error::other(
+                "fixture retention persistence failed",
+            ));
+        }
         self.inner.extend_retention(lease, deadline)
     }
 }
@@ -163,6 +169,7 @@ struct Case {
     e2ee: bool,
     non_sse: bool,
     lease_handoff: bool,
+    fail_publish: bool,
 }
 
 impl Case {
@@ -178,6 +185,7 @@ impl Case {
             e2ee: false,
             non_sse: false,
             lease_handoff: false,
+            fail_publish: false,
         }
     }
 }
@@ -223,7 +231,10 @@ async fn capture(case: &Case) -> Value {
         axum::serve(listener, app).await.unwrap();
     });
     let gate = Arc::new(Gate::default());
-    let sessions = Arc::new(TrackingSessions::default());
+    let sessions = Arc::new(TrackingSessions {
+        fail_retention: case.fail_publish,
+        ..TrackingSessions::default()
+    });
     let clock = Arc::new(common::admission::TestClock(
         std::sync::atomic::AtomicU64::new(1_700_000_000),
     ));
@@ -319,7 +330,7 @@ async fn capture(case: &Case) -> Value {
     while let Some(Some(chunk)) = body.next().now_or_never() {
         wire.extend_from_slice(&chunk.unwrap());
     }
-    let buffered_report = if case.buffered {
+    let checkpoint_report = if case.buffered {
         Some(
             tokio::time::timeout(Duration::from_secs(3), reports.recv())
                 .await
@@ -327,7 +338,12 @@ async fn capture(case: &Case) -> Value {
                 .unwrap(),
         )
     } else {
-        None
+        // Give the real control-plane report channel a chance to receive any
+        // premature settlement while the upstream EOF gate is still closed.
+        tokio::time::timeout(Duration::from_millis(50), reports.recv())
+            .await
+            .ok()
+            .flatten()
     };
     if case.lease_handoff {
         clock.set(1_700_003_601);
@@ -338,7 +354,7 @@ async fn capture(case: &Case) -> Value {
             "in-flight source must own its lease"
         );
     }
-    let before = json!({"receipt":service.get_receipt_by_receipt_id("rcpt-characterization").is_some(),"report":buffered_report.is_some()});
+    let before = json!({"receipt":service.get_receipt_by_receipt_id("rcpt-characterization").is_some(),"report":checkpoint_report.is_some()});
     if case.disconnect {
         drop(body);
     } else {
@@ -348,7 +364,7 @@ async fn capture(case: &Case) -> Value {
             wire.extend_from_slice(&chunk.unwrap());
         }
     }
-    let report = match buffered_report {
+    let report = match checkpoint_report {
         Some(report) => report,
         None => tokio::time::timeout(Duration::from_secs(3), reports.recv())
             .await
@@ -405,7 +421,13 @@ async fn capture(case: &Case) -> Value {
     });
     server.abort();
     let _ = server.await;
-    json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports})
+    let mut snapshot = json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports});
+    if case.fail_publish {
+        snapshot["metrics"] = String::from_utf8(service.metrics().unwrap().body)
+            .unwrap()
+            .into();
+    }
+    snapshot
 }
 
 async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
@@ -514,11 +536,24 @@ async fn exact_wire_characterization_corpus() {
     let mut non_sse = Case::new(
         "declared_non_sse",
         Endpoint::ChatComplete,
-        r#"{"id":"upstream-id","model":"upstream-model","choices":[]}"#,
+        r#"{"id":"upstream-id","model":"upstream-model","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#,
         "openai",
     );
     non_sse.non_sse = true;
     cases.push(non_sse);
+    for (name, source) in [
+        ("declared_non_sse_invalid", "not JSON"),
+        ("declared_non_sse_array", "[1, 2]"),
+        (
+            "early_declared_non_sse",
+            r#"{"id":"upstream-id","model":"upstream-model","choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}"#,
+        ),
+    ] {
+        let mut case = Case::new(name, Endpoint::ChatComplete, source, "openai");
+        case.non_sse = true;
+        case.early = name == "early_declared_non_sse";
+        cases.push(case);
+    }
     let messages="event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     for (name, endpoint) in [
         ("native_messages", Endpoint::Messages),
@@ -572,5 +607,72 @@ async fn exact_wire_characterization_corpus() {
             assert_eq!(actual, expected, "case {name}");
         }
         assert_eq!(actual.len(), expected.as_array().unwrap().len());
+    }
+}
+
+#[tokio::test]
+async fn receipt_retention_failure_settles_once_with_usage_and_preserves_metrics() {
+    let mut case = Case::new("receipt_failure", Endpoint::ChatComplete,
+        "data: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n", "openai");
+    case.fail_publish = true;
+    let snapshot = capture(&case).await;
+    assert_eq!(
+        snapshot["before_eof"],
+        json!({"receipt":false,"report":false})
+    );
+    assert!(snapshot["receipt"].is_null());
+    let wire = snapshot["wire"].as_str().unwrap();
+    assert!(wire.contains("\"cost\":8"), "{wire}");
+    assert!(wire.ends_with("data: [DONE]\n\n"));
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["errorSource"], "gateway");
+    assert_eq!(reports[0]["errorMessage"], "downstream_finalizer_failed");
+    assert_eq!(reports[0]["usage"]["prompt_tokens"], 2);
+    assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
+    assert!(reports[0]["usage"].get("cost").is_none());
+    let metrics = snapshot["metrics"].as_str().unwrap();
+    for (prefix, label) in [
+        (
+            "private_ai_gateway_upstream_responses_total{",
+            "model_id=\"upstream-model\"",
+        ),
+        (
+            "private_ai_gateway_stream_errors_total{",
+            "kind=\"receipt_finalize\"",
+        ),
+    ] {
+        let series: Vec<_> = metrics
+            .lines()
+            .filter(|line| line.starts_with(prefix))
+            .collect();
+        assert_eq!(series.len(), 1, "{metrics}");
+        assert!(series[0].contains(label), "{metrics}");
+        assert!(series[0].ends_with(" 1"), "{metrics}");
+    }
+    assert!(!metrics
+        .lines()
+        .any(|line| line.starts_with("private_ai_gateway_receipts_issued_total{")));
+}
+
+#[tokio::test]
+async fn early_declared_non_sse_opaque_bodies_use_unbilled_byte_path() {
+    for source in ["not JSON", "[1, 2]"] {
+        let mut case = Case::new("early_opaque", Endpoint::ChatComplete, source, "openai");
+        case.early = true;
+        case.non_sse = true;
+        let snapshot = capture(&case).await;
+        assert_eq!(snapshot["wire"], format!(": PROCESSING\n\n{source}"));
+        assert_eq!(
+            snapshot["before_eof"],
+            json!({"receipt":false,"report":false})
+        );
+        assert!(snapshot["signature_valid"].as_bool().unwrap());
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], 200);
+        assert!(reports[0]["usage"].is_null());
+        assert!(reports[0]["errorMessage"].is_null());
     }
 }

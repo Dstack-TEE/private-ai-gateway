@@ -728,6 +728,7 @@ impl AciService {
                             response_model: None,
                         },
                         receipt_journal,
+                        self.metrics.clone(),
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(

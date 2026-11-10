@@ -53,6 +53,8 @@ pub(crate) struct Record {
     pub residual: bool,
     heartbeat: bool,
     edited: bool,
+    /// Explicit non-SSE response bytes, including the early-commit handoff.
+    pub non_sse: Option<Bytes>,
 }
 impl Record {
     pub fn from_sse(metadata: Sse, protocol: Option<SseProtocol>) -> Self {
@@ -78,6 +80,7 @@ impl Record {
             residual: false,
             heartbeat: false,
             edited: false,
+            non_sse: None,
         }
     }
     pub fn edit_json(&mut self, edit: impl FnOnce(&mut Value)) {
@@ -133,11 +136,18 @@ impl Record {
             residual: false,
             heartbeat: false,
             edited: true,
+            non_sse: None,
         }
     }
     pub fn heartbeat() -> Self {
         Self {
             heartbeat: true,
+            ..Self::from_sse(Sse::default(), None)
+        }
+    }
+    pub fn non_sse(bytes: Bytes) -> Self {
+        Self {
+            non_sse: Some(bytes),
             ..Self::from_sse(Sse::default(), None)
         }
     }
@@ -154,7 +164,7 @@ impl Record {
             }
         }
         self.event.as_ref().map_or(0, |event| {
-            event.data.len().saturating_add(match &event.payload {
+            event.data.len().max(match &event.payload {
                 Payload::Json(v) => size(v),
                 Payload::Text(s) => s.len(),
             })
@@ -165,6 +175,9 @@ impl Record {
 /// The only SSE encoding boundary. The heartbeat is the gateway's fixed comment;
 /// all fields and payloads are encoded through the library's public encoder.
 pub(crate) fn serialize(record: &Record) -> Result<Bytes, ServiceError> {
+    if let Some(bytes) = &record.non_sse {
+        return Ok(bytes.clone());
+    }
     if record.residual {
         return Ok(Bytes::new());
     }

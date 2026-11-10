@@ -20,7 +20,7 @@ use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
-use crate::middleware::sse::Accounting;
+use crate::middleware::sse::{Accounting, AccountingHandle};
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, EventKind, EventMeaning,
@@ -54,19 +54,25 @@ pub(super) struct MiddlewareProviderResponseDraftingStream {
     journal: MiddlewareReceiptJournal,
     hasher: Sha256,
     finished: bool,
+    metrics: Arc<ServiceMetrics>,
+    endpoint: String,
 }
 impl MiddlewareProviderResponseDraftingStream {
     pub(super) fn new(
         inner: UpstreamBodyStream,
         draft: MiddlewareReceiptDraft,
         journal: MiddlewareReceiptJournal,
+        metrics: Arc<ServiceMetrics>,
     ) -> Self {
+        let endpoint = draft.endpoint_path.clone();
         journal.set(draft);
         Self {
             inner,
             journal,
             hasher: Sha256::new(),
             finished: false,
+            metrics,
+            endpoint,
         }
     }
 }
@@ -93,6 +99,12 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
                     "sha256:{}",
                     hex::encode(this.hasher.clone().finalize())
                 ));
+                this.metrics.record_upstream_response(
+                    &this.endpoint,
+                    RequestMode::Streaming,
+                    this.journal.source_status(),
+                    this.journal.response_model().as_deref(),
+                );
                 Poll::Ready(result.err().map(Err))
             }
         }
@@ -103,11 +115,13 @@ pub(crate) fn decode_source(
     inner: ServiceResponseStream,
     protocol: SseProtocol,
     journal: MiddlewareReceiptJournal,
+    accounting: AccountingHandle,
 ) -> EventStream {
     let mut ids = Identifiers::default();
     Box::pin(
         DecodedStream::new(inner, Some(protocol)).map(move |record| {
             if let Ok(record) = &record {
+                accounting.ingress(record);
                 ids.observe(record);
                 journal.observe_source(&ids);
             }
@@ -204,12 +218,14 @@ impl ReceiptContext {
             self.ttl,
             lease.as_ref(),
         )?;
-        self.metrics.record_upstream_response(
-            endpoint,
-            RequestMode::Streaming,
-            status,
-            response_model.as_deref(),
-        );
+        if matches!(self.draft, ReceiptDraft::Direct { .. }) {
+            self.metrics.record_upstream_response(
+                endpoint,
+                RequestMode::Streaming,
+                status,
+                response_model.as_deref(),
+            );
+        }
         self.metrics.record_receipt_issued(
             endpoint,
             RequestMode::Streaming,
@@ -294,6 +310,12 @@ impl ResponseOwner {
     }
     fn end(&mut self) {
         self.ended = true;
+        if let Some(accounting) = &self.accounting {
+            let (terminal, failure, truncated) = accounting.handle.protocol_facts();
+            self.saw_terminal |= terminal;
+            self.saw_error |= failure;
+            self.truncated |= truncated;
+        }
         if self.saw_terminal || self.saw_error || self.truncated {
             return;
         }
@@ -308,6 +330,9 @@ impl ResponseOwner {
         }
     }
     fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
+        if record.non_sse.is_some() {
+            self.protocol = None;
+        }
         self.truncated |= record.residual;
         self.ids.observe(&record);
         if let Some(event) = &record.event {
@@ -362,8 +387,10 @@ impl Stream for ResponseOwner {
                 let result = this.receipt.as_mut().map_or(Ok(()), |receipt| {
                     receipt.publish(&this.ids, hash, &this.endpoint)
                 });
-                if let Some(accounting) = &mut this.accounting {
-                    accounting.settle(!this.broken, result.is_err());
+                if let Err(error) = &result {
+                    this.fail(error);
+                } else if let Some(accounting) = &mut this.accounting {
+                    accounting.settle(!this.broken, false);
                 }
                 return Poll::Ready(result.err().map(Err));
             } else {

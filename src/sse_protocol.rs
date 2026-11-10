@@ -251,6 +251,7 @@ pub(crate) fn classify(
             || stop_error
             || payload_type == Some("error")
             || payload_type == Some("response.failed")
+            || payload_type == Some("response.error")
         {
             meaning.failure.get_or_insert(FailureEvidence::Inband);
         }

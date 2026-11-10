@@ -185,6 +185,7 @@ pub fn select_stream_transform(
 #[derive(Default)]
 struct StreamState {
     // Anthropic -> OpenAI chat.
+    anthropic_terminated: bool,
     tool_index: Option<i64>,
     usage: Option<Value>,
     model: Option<String>,
@@ -201,64 +202,62 @@ fn anthropic_chat_stream(
     state: &mut StreamState,
     strict: bool,
 ) -> Result<Option<Vec<Record>>, ()> {
-    match Some(event.name.as_str()) {
-        Some("ping") | Some("content_block_stop") => return Ok(None),
-        Some("message_stop") => return Ok(Some(vec![done_event()])),
+    if state.anthropic_terminated {
+        return Ok(None);
+    }
+    if event.meaning.failure.is_some() {
+        state.anthropic_terminated = true;
+        let error = event
+            .payload
+            .json()
+            .and_then(|value| value.get("error"))
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or_else(malformed_response_error);
+        return Ok(Some(vec![
+            chat_event(json!({
+                "id": fallback_id,
+                "object": "chat.completion.chunk",
+                "created": now_secs(),
+                "model": "",
+                "error": error,
+                "choices": [{"finish_reason": Value::Null, "delta": {"content": ""}}],
+            })),
+            done_event(),
+        ]));
+    }
+    if event.meaning.terminal.is_some() {
+        state.anthropic_terminated = true;
+        return Ok(Some(vec![done_event()]));
+    }
+    match event.meaning.kind {
+        EventKind::Ping | EventKind::ContentBlockStop => return Ok(None),
         _ => {}
     }
-    let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
-    // No payload → no dispatch (name-only keep-alives included); a non-empty
-    // malformed payload must still fail the stream rather than be skipped.
-    if empty {
+    if matches!(&event.payload, Payload::Text(text) if text.is_empty()) {
         return Ok(None);
     }
     let parsed = event.payload.json().ok_or(())?;
-    if event.meaning.kind == EventKind::Error
-        && parsed.get("type").and_then(Value::as_str) != Some("error")
-    {
-        let parsed = json!({"type":"error","error":parsed.get("error").cloned().unwrap_or_else(malformed_response_error)});
-        return Ok(anthropic_chat_chunk(&parsed, fallback_id, state, strict));
-    }
-    Ok(anthropic_chat_chunk(parsed, fallback_id, state, strict))
+    Ok(anthropic_chat_chunk(
+        parsed,
+        event.meaning.kind,
+        fallback_id,
+        state,
+        strict,
+    ))
 }
 
 fn anthropic_chat_chunk(
     parsed: &Value,
+    kind: EventKind,
     fallback_id: &str,
     state: &mut StreamState,
     strict: bool,
 ) -> Option<Vec<Record>> {
     let model = state.model.clone().unwrap_or_default();
 
-    if parsed.get("type").and_then(Value::as_str) == Some("error") {
-        if let Some(error) = parsed.get("error") {
-            // The error rides in the chunk's `error` member, as it does on the
-            // same-format path: that is the member a client detects a failed
-            // 200 stream by, and the sanitize stage rebuilds its interior into
-            // this surface's vocabulary. Putting the upstream's error type in
-            // `finish_reason` instead left the client no error to find and
-            // relayed a word this surface does not use.
-            let body = json!({
-                "id": fallback_id,
-                "object": "chat.completion.chunk",
-                "created": now_secs(),
-                "model": "",
-                "error": error.clone(),
-                // No finish reason: the stream did not finish, it failed, and
-                // `stop` would tell a client reading only this field that a
-                // truncated response completed normally. The `error` member
-                // above is what says what happened.
-                "choices": [{
-                    "finish_reason": Value::Null,
-                    "delta": { "content": "" },
-                }],
-            });
-            return Some(vec![chat_event(body), done_event()]);
-        }
-    }
-
     let message_usage = parsed.get("message").and_then(|m| m.get("usage"));
-    if parsed.get("type").and_then(Value::as_str) == Some("message_start") {
+    if kind == EventKind::MessageStart {
         if let Some(usage) = message_usage {
             let input = i64_field(usage, "input_tokens");
             let cache_read = i64_field(usage, "cache_read_input_tokens");
@@ -299,7 +298,7 @@ fn anthropic_chat_chunk(
         }
     }
 
-    if parsed.get("type").and_then(Value::as_str) == Some("message_delta") {
+    if kind == EventKind::MessageDelta {
         if let Some(usage) = parsed.get("usage") {
             let output = i64_field(usage, "output_tokens");
             let prompt = state
@@ -343,8 +342,7 @@ fn anthropic_chat_chunk(
 
     // Tool-call and text deltas.
     let mut tool_calls: Vec<Value> = Vec::new();
-    let is_tool_block_start = parsed.get("type").and_then(Value::as_str)
-        == Some("content_block_start")
+    let is_tool_block_start = kind == EventKind::ContentBlockStart
         && parsed
             .get("content_block")
             .and_then(|b| b.get("type"))
@@ -448,7 +446,6 @@ fn stream_str<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> &'a str 
 struct ChatChunk<'a> {
     has_choice: bool,
     usage: Option<&'a Value>,
-    error: Option<&'a Value>,
     reasoning: &'a str,
     content: Cow<'a, str>,
     refusal: Cow<'a, str>,
@@ -495,7 +492,6 @@ fn parse_chat_chunk(chunk: &Value) -> ChatChunk<'_> {
     ChatChunk {
         has_choice: choice.is_some(),
         usage: chunk.get("usage").filter(|usage| usage.is_object()),
-        error: chunk.get("error").filter(|error| !error.is_null()),
         reasoning: choice
             .and_then(|choice| choice.get("delta"))
             .and_then(reasoning_text)
@@ -621,18 +617,29 @@ impl<E: ChatEvents> ChatStream<E> {
     fn event(&mut self, event: &Event, fallback_id: &str) -> Result<Option<Vec<Record>>, ()> {
         let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
         let mut out = Vec::new();
-        if event.meaning.kind == EventKind::Done {
+        if self.terminated {
+            return Ok(None);
+        }
+        if event.meaning.failure.is_some() && self.error.is_none() {
+            self.start(
+                event.payload.json().unwrap_or(&Value::Null),
+                fallback_id,
+                &mut out,
+            );
+            self.error = Some(
+                event
+                    .payload
+                    .json()
+                    .and_then(|chunk| chunk.get("error"))
+                    .filter(|error| !error.is_null())
+                    .cloned()
+                    .unwrap_or_else(malformed_response_error),
+            );
+        }
+        if event.meaning.terminal.is_some() {
             self.finish(&mut out)?;
-        } else if !empty && !self.terminated {
+        } else if !empty {
             let chunk = event.payload.json().ok_or(())?;
-            if event.meaning.failure.is_some() && self.error.is_none() {
-                self.error = Some(
-                    chunk
-                        .get("error")
-                        .cloned()
-                        .unwrap_or_else(malformed_response_error),
-                );
-            }
             self.chunk(chunk, fallback_id, &mut out);
         }
         Ok((!out.is_empty()).then_some(out))
@@ -654,8 +661,7 @@ impl<E: ChatEvents> ChatStream<E> {
         Ok((!out.is_empty()).then_some(out))
     }
 
-    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut Vec<Record>) {
-        let chunk = parse_chat_chunk(value);
+    fn start(&mut self, value: &Value, fallback_id: &str, out: &mut Vec<Record>) {
         if !self.started() {
             self.response_id = value
                 .get("id")
@@ -665,14 +671,16 @@ impl<E: ChatEvents> ChatStream<E> {
                 .to_string();
             self.events.start(value, fallback_id, out);
         }
+    }
+
+    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut Vec<Record>) {
+        let chunk = parse_chat_chunk(value);
+        self.start(value, fallback_id, out);
         if let Some(usage) = chunk.usage {
             let mut usage = usage.clone();
             let _ = normalize_reasoning_usage_value(&mut usage);
             self.events.usage(&usage);
             self.usage = Some(usage);
-        }
-        if let Some(error) = chunk.error {
-            self.error = Some(error.clone());
         }
         self.answered |= chunk.has_choice;
         let mut annotations = chunk.annotations.into_iter();
@@ -1287,7 +1295,17 @@ impl ChatEvents for ResponsesEvents {
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
 
 fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
-    if Some(event.name.as_str()) == Some("ping") {
+    if event.meaning.failure.is_some() {
+        let error = event
+            .payload
+            .json()
+            .and_then(|value| value.get("error"))
+            .filter(|error| !error.is_null())
+            .cloned()
+            .unwrap_or_else(malformed_response_error);
+        return Ok(Some(vec![chat_event(json!({"error":error})), done_event()]));
+    }
+    if event.meaning.kind == EventKind::Ping {
         return Ok(None);
     }
     let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
@@ -1427,11 +1445,14 @@ mod tests {
     }
 
     fn decode_record(text: &str) -> Record {
-        crate::sse::decode_buffered(Bytes::from(format!("{text}\n\n")), None)
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
+        crate::sse::decode_buffered(
+            Bytes::from(format!("{text}\n\n")),
+            Some(SseProtocol::OpenaiChat),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
     }
     fn decode_event(text: &str) -> Event {
         decode_record(text).event.unwrap()
@@ -1448,7 +1469,18 @@ mod tests {
             fallback: &str,
             state: &mut StreamState,
         ) -> Result<Option<String>, ()> {
-            let record = decode_record(text);
+            let protocol = match self {
+                StreamTransform::AnthropicToOpenaiChat => SseProtocol::AnthropicMessages,
+                _ => SseProtocol::OpenaiChat,
+            };
+            let record =
+                crate::sse::decode_buffered(Bytes::from(format!("{text}\n\n")), Some(protocol))
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        Record::from_sse(sse_stream::Sse::default(), Some(protocol))
+                    });
             let records = self.apply_record(record, fallback, state)?;
             let mut bytes = Vec::new();
             for record in records {
@@ -1478,7 +1510,10 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
         let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(
@@ -1513,7 +1548,10 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
         let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
         let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
@@ -1546,7 +1584,10 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
         let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
         let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
@@ -1575,7 +1616,10 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
         let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
         let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
@@ -1665,7 +1709,10 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let stream = EventTransformStream::new(inner, messages_transform());
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert_eq!(collected.len(), 1, "no payload, only the failure");
@@ -1688,7 +1735,10 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let converted = Box::pin(EventTransformStream::new(inner, messages_transform()));
         let identity = Arc::new(ResponseIdentity {
             request_id: "req_ours".to_string(),
@@ -1727,7 +1777,10 @@ mod tests {
         );
         let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let identity = Arc::new(ResponseIdentity {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
@@ -1939,7 +1992,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(chunks));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let identity = Arc::new(ResponseIdentity {
             request_id: "resp_fixture".to_string(),
             user_model: Some("gpt-test".to_string()),
@@ -2511,7 +2567,10 @@ mod tests {
         let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n";
         let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
         let converted = Box::pin(EventTransformStream::new(
             inner,
             StreamTransform::AnthropicToOpenaiChat,
@@ -2549,7 +2608,10 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let stream = EventTransformStream::new(inner, messages_transform());
         let text: String = wire(stream)
             .collect::<Vec<_>>()
@@ -2585,7 +2647,10 @@ mod tests {
             ))),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let stream = EventTransformStream::new(inner, messages_transform());
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(collected.last().expect("stream yielded items").is_err());
@@ -2609,7 +2674,10 @@ mod tests {
             Ok(Bytes::from("data: {\"choices\":[")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let stream = EventTransformStream::new(inner, messages_transform());
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 
@@ -2631,7 +2699,10 @@ mod tests {
             "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
         ))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(inner, None));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let stream = EventTransformStream::new(inner, messages_transform());
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 

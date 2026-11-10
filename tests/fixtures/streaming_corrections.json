@@ -1,12 +1,12 @@
 {
   "declared_non_sse": {
-    "reason": "Declared non-SSE JSON follows the JSON path without SSE blank lines.",
-    "baseline_wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[]}\n\n",
+    "reason": "Declared non-SSE bodies remain unbilled, with valid-object identity/sanitization and opaque/non-object pass-through, without the SSE blank-line suffix.",
+    "baseline_wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
     "expected": {
       "name": "declared_non_sse",
-      "wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[]}",
-      "wire_hash": "sha256:0008eb504bd837d799047d0635f1cef2ff746fe548bdd0053530d389d874213c",
-      "source_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+      "wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}",
+      "wire_hash": "sha256:711f33a7b9f6a330153134405d06ce19368c1390226265b760fa4e88109caa07",
+      "source_hash": "sha256:0f9da6e41e2127772b0cd107ba6447d0d766b291d72ee032e48b2ede76f07c4e",
       "status": 200,
       "before_eof": {
         "receipt": false,
@@ -41,11 +41,11 @@
             "type": "upstream.verified"
           },
           {
-            "body_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+            "body_hash": "sha256:0f9da6e41e2127772b0cd107ba6447d0d766b291d72ee032e48b2ede76f07c4e",
             "type": "response.received"
           },
           {
-            "body_hash": "sha256:0008eb504bd837d799047d0635f1cef2ff746fe548bdd0053530d389d874213c",
+            "body_hash": "sha256:711f33a7b9f6a330153134405d06ce19368c1390226265b760fa4e88109caa07",
             "type": "response.returned"
           }
         ],
@@ -54,7 +54,7 @@
         "model": "fixture-model",
         "receipt_id": "rcpt-characterization",
         "served_at": 1700000000,
-        "signature": "766feda2a45a0ede27cc9913df7b1c5a4563bd963ef3f30bd205701a7de355a6df35350890c32d720f907796e8914871e1235ed7bdd3202a65bf29d486712305",
+        "signature": "783688dad12e596deeb980b1513f18f0cccd95d883cabc3afd920580f45b4f1819af0d6c30bed5f0cffe1732bb46abd8dd562152d3d08e6e2b6505d12ec16900",
         "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
       },
       "signature_valid": true,
@@ -141,6 +141,243 @@
         {
           "requestId": "req-fixture",
           "endpoint": "/v1/completions",
+          "status": 200,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          }
+        }
+      ]
+    }
+  },
+  "declared_non_sse_invalid": {
+    "reason": "Declared non-SSE bodies remain unbilled, with valid-object identity/sanitization and opaque/non-object pass-through, without the SSE blank-line suffix.",
+    "baseline_wire": "not JSON\n\n",
+    "expected": {
+      "name": "declared_non_sse_invalid",
+      "wire": "not JSON",
+      "wire_hash": "sha256:62b8125a6f6d924ec53345b5fcd58ca3ed3f5e7d51e2e146e5f1346508acce69",
+      "source_hash": "sha256:62b8125a6f6d924ec53345b5fcd58ca3ed3f5e7d51e2e146e5f1346508acce69",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": null,
+        "endpoint": "/v1/chat/completions",
+        "event_log": [
+          {
+            "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "fixture-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:62b8125a6f6d924ec53345b5fcd58ca3ed3f5e7d51e2e146e5f1346508acce69",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:62b8125a6f6d924ec53345b5fcd58ca3ed3f5e7d51e2e146e5f1346508acce69",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "856aec1ccd0f72a26efe25f020dcac152388885930df0f3219f2b1b2d3c96f3840f7fe21de771aeffc7580bee35a958dc2690c720dd0df65cdb2fd8226503d0c",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/chat/completions",
+          "status": 200,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          }
+        }
+      ]
+    }
+  },
+  "declared_non_sse_array": {
+    "reason": "Declared non-SSE bodies remain unbilled, with valid-object identity/sanitization and opaque/non-object pass-through, without the SSE blank-line suffix.",
+    "baseline_wire": "[1, 2]\n\n",
+    "expected": {
+      "name": "declared_non_sse_array",
+      "wire": "[1, 2]",
+      "wire_hash": "sha256:3a316d6d3226f84c1e46e4447fa8d5fd800bff4a1bc6498152523cd4a602b69b",
+      "source_hash": "sha256:3a316d6d3226f84c1e46e4447fa8d5fd800bff4a1bc6498152523cd4a602b69b",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": null,
+        "endpoint": "/v1/chat/completions",
+        "event_log": [
+          {
+            "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "fixture-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:3a316d6d3226f84c1e46e4447fa8d5fd800bff4a1bc6498152523cd4a602b69b",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:3a316d6d3226f84c1e46e4447fa8d5fd800bff4a1bc6498152523cd4a602b69b",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "7ef1a55b5c280b407afc51ff67c571600feb0f6840c70d52a431c59d0646773d706d3d20aff892f1264c386d9a66ade013f7dc148c2e1432722b9cbf7ac97c00",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/chat/completions",
+          "status": 200,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          }
+        }
+      ]
+    }
+  },
+  "early_declared_non_sse": {
+    "reason": "After the initial early-commit heartbeat, declared non-SSE bodies take the same unbilled byte path, without the old blank-line suffix or synthesized SSE terminal.",
+    "baseline_wire": ": PROCESSING\n\n{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n",
+    "expected": {
+      "name": "early_declared_non_sse",
+      "wire": ": PROCESSING\n\n{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}",
+      "wire_hash": "sha256:8411e0520208bb452c3c0ea942acad2cfa7cec956a7405d30898b18d2daea80a",
+      "source_hash": "sha256:0f9da6e41e2127772b0cd107ba6447d0d766b291d72ee032e48b2ede76f07c4e",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": null,
+        "endpoint": "/v1/chat/completions",
+        "event_log": [
+          {
+            "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "fixture-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:0f9da6e41e2127772b0cd107ba6447d0d766b291d72ee032e48b2ede76f07c4e",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:8411e0520208bb452c3c0ea942acad2cfa7cec956a7405d30898b18d2daea80a",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "5e0564bab99e9fbc4b837f1ccb0419048a20c4e9496a8cee535dcb55d5baed688c69b8d6bdab4bbdaae067fe423c3e5bfb6b385426a39f495513054fd4fad00e",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/chat/completions",
           "status": 200,
           "durationMs": 0,
           "ttftMs": 0,

@@ -119,7 +119,10 @@ impl StreamReport {
         ttft_ms: Option<u64>,
         failure: StreamFailure,
     ) {
-        let (error_source, error_class) = if outcome == Outcome::Failed {
+        let (error_source, error_class) = if outcome == Outcome::Failed
+            || (outcome == Outcome::ClientClosed
+                && failure.class == Some(ErrorClass::ClientDisconnected))
+        {
             (failure.source, failure.class)
         } else {
             (None, None)
@@ -234,6 +237,10 @@ impl Drop for Accounting {
             return;
         }
         if state.report.selected_route_id.is_none() {
+            state.failure = StreamFailure {
+                class: Some(ErrorClass::ClientDisconnected),
+                ..StreamFailure::default()
+            };
             if let Some(journal) = &self.pending {
                 let abandoned = journal.abandoned_attempts();
                 for (index, attempt) in abandoned.iter().enumerate().filter(|(_, a)| a.status != 0)
@@ -298,6 +305,25 @@ impl AccountingState {
     }
 }
 impl AccountingHandle {
+    pub(crate) fn first_byte(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.ttft_ms.is_none() {
+            state.ttft_ms = Some(response_transform::elapsed_ms(state.report.started));
+        }
+    }
+    /// Capture protocol facts before any stage can filter or reshape a record.
+    pub(crate) fn ingress(&self, record: &Record) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.truncated |= record.residual;
+        if let Some(event) = &record.event {
+            state.saw_terminal |= event.meaning.terminal.is_some();
+            state.saw_error |= event.meaning.failure.is_some();
+        }
+    }
+    pub(crate) fn protocol_facts(&self) -> (bool, bool, bool) {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        (state.saw_terminal, state.saw_error, state.truncated)
+    }
     pub fn selected(&self, route: String, attempt: u32, status: u16) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.report.selected_route_id = Some(route);
@@ -454,6 +480,10 @@ impl Stream for KeepAliveStream {
         }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(item)) => {
+                if item.as_ref().is_ok_and(|record| record.non_sse.is_some()) {
+                    this.interval = None;
+                    this.sleep = None;
+                }
                 this.arm();
                 Poll::Ready(Some(item))
             }

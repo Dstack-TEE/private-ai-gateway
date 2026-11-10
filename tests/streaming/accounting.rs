@@ -337,3 +337,239 @@ async fn response_owner_settles_once_on_cancellation_completion_and_e2ee_failure
         assert_eq!(control.reports.lock().unwrap().len(), 1);
     }
 }
+
+async fn transformed_response(
+    control: &Control,
+    wire: String,
+    source_protocol: SseProtocol,
+    endpoint: crate::middleware::request_transform::Endpoint,
+    read_timeout: bool,
+) -> String {
+    use crate::middleware::request_transform::Endpoint;
+    use crate::middleware::response_transform::ResponseIdentity;
+    use crate::middleware::stream_transform::{
+        EventTransformStream, StreamTransform, UpstreamUsage,
+    };
+    let endpoint_path = match endpoint {
+        Endpoint::CreateModelResponse => "/v1/responses",
+        Endpoint::Messages => "/v1/messages",
+        Endpoint::Complete => "/v1/completions",
+        _ => "/v1/chat/completions",
+    };
+    let mut report = control.report();
+    report.endpoint = endpoint_path.into();
+    let accounting = Accounting::new(report, None);
+    let mut chunks = vec![Ok(Bytes::from(wire))];
+    if read_timeout {
+        chunks.push(Err(ServiceError::Upstream(
+            crate::aci::upstream::UpstreamError::Timeout("read deadline".into()),
+        )));
+    }
+    let body = Box::pin(futures_util::stream::iter(chunks));
+    let identity = Arc::new(ResponseIdentity {
+        request_id: "req-fixture".into(),
+        user_model: Some("fixture".into()),
+    });
+    let mut events = decode_source(
+        body,
+        source_protocol,
+        MiddlewareReceiptJournal::default(),
+        accounting.handle.clone(),
+    );
+    if endpoint == Endpoint::Complete {
+        events = Box::pin(EventTransformStream::new(
+            events,
+            StreamTransform::AnthropicCompleteToOpenai,
+        ));
+    } else if source_protocol == SseProtocol::AnthropicMessages {
+        events = Box::pin(EventTransformStream::new(
+            events,
+            StreamTransform::AnthropicToOpenaiChat,
+        ));
+    }
+    if endpoint == Endpoint::CreateModelResponse && source_protocol != SseProtocol::OpenaiResponses
+    {
+        let usage = UpstreamUsage::default();
+        accounting.handle.upstream_usage(usage.clone());
+        events = Box::pin(EventTransformStream::new(
+            events,
+            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity.clone(), usage),
+        ));
+    }
+    let sanitized = Box::pin(EventTransformStream::new(
+        events,
+        StreamTransform::SanitizeResponse(identity, endpoint),
+    ));
+    let events = Box::pin(MeterEvents::new(sanitized, accounting.handle.clone()));
+    let output: Vec<_> = ResponseOwner::new(
+        ResponseInput::Events(events),
+        Some(accounting),
+        None,
+        endpoint_path.into(),
+        Some(crate::sse_protocol::sse_protocol(endpoint_path)),
+        None,
+    )
+    .collect()
+    .await;
+    String::from_utf8(output.into_iter().flat_map(Result::unwrap).collect()).unwrap()
+}
+
+#[tokio::test]
+async fn payload_response_error_stays_failed_with_default_or_unknown_event_name() {
+    use crate::middleware::request_transform::Endpoint;
+    for name in ["message", "extension"] {
+        let control = Control::new().await;
+        let source = format!("event: {name}\ndata: {{\"type\":\"response.error\",\"sequence_number\":2,\"message\":\"private upstream detail\"}}\n\n");
+        let output = transformed_response(
+            &control,
+            source,
+            SseProtocol::OpenaiResponses,
+            Endpoint::CreateModelResponse,
+            false,
+        )
+        .await;
+        assert!(output.contains("event: error\n"), "{output}");
+        assert!(output.contains("\"type\":\"error\""), "{output}");
+        assert!(!output.contains("response.completed"));
+        assert_eq!(control.captured().await["status"], 502);
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn filtered_anthropic_error_evidence_reaches_client_and_single_report() {
+    use crate::middleware::request_transform::Endpoint;
+    for source in [
+        "event: error\ndata:\n\n",
+        "event: ping\ndata: {\"type\":\"ping\",\"error\":{\"message\":\"private detail\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ] {
+        let control = Control::new().await;
+        let output = transformed_response(&control, source.into(), SseProtocol::AnthropicMessages, Endpoint::ChatComplete, false).await;
+        assert!(output.contains("\"error\":"), "{output}");
+        assert!(output.ends_with("data: [DONE]\n\n"), "{output}");
+        assert_eq!(output.matches("data: [DONE]").count(), 1);
+        let report = control.captured().await;
+        assert_eq!(report["status"], 502);
+        assert_eq!(report["errorMessage"], "stream_inband_error");
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn failed_anthropic_terminal_becomes_responses_failure_terminal() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let source = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"fixture\",\"usage\":{\"input_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\",\"error\":{\"message\":\"private detail\"}}\n\n";
+    let output = transformed_response(
+        &control,
+        source.into(),
+        SseProtocol::AnthropicMessages,
+        Endpoint::CreateModelResponse,
+        false,
+    )
+    .await;
+    assert!(output.contains("event: response.failed\n"), "{output}");
+    assert!(output.contains("\"status\":\"failed\""), "{output}");
+    assert!(!output.contains("response.completed"));
+    assert_eq!(control.captured().await["status"], 502);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn data_only_anthropic_terminal_rescues_timeout_after_bridge() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let output = transformed_response(
+        &control,
+        "data: {\"type\":\"message_stop\"}\n\n".into(),
+        SseProtocol::AnthropicMessages,
+        Endpoint::ChatComplete,
+        true,
+    )
+    .await;
+    assert_eq!(output, "data: [DONE]\n\n");
+    let report = control.captured().await;
+    assert_eq!(report["status"], 200);
+    assert!(report["errorMessage"].is_null());
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn native_chat_event_under_ingress_cap_is_counted_once_by_transforms() {
+    use crate::middleware::request_transform::Endpoint;
+    let control = Control::new().await;
+    let content = "x".repeat(9 * 1024 * 1024);
+    let source = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{content}\"}}}}]}}\n\ndata: [DONE]\n\n"
+    );
+    let output = transformed_response(
+        &control,
+        source,
+        SseProtocol::OpenaiChat,
+        Endpoint::ChatComplete,
+        false,
+    )
+    .await;
+    assert!(output.contains(&content));
+    assert!(output.ends_with("data: [DONE]\n\n"));
+    assert!(!output.contains("\"error\":"));
+    assert_eq!(control.captured().await["status"], 200);
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_and_legacy_failures_keep_destination_failure_terminals() {
+    use crate::middleware::request_transform::Endpoint;
+    for (source_protocol, endpoint) in [
+        (SseProtocol::OpenaiChat, Endpoint::CreateModelResponse),
+        (SseProtocol::OpenaiChat, Endpoint::Complete),
+    ] {
+        let control = Control::new().await;
+        let output = transformed_response(
+            &control,
+            "event: error\ndata:\n\n".into(),
+            source_protocol,
+            endpoint,
+            false,
+        )
+        .await;
+        if endpoint == Endpoint::CreateModelResponse {
+            assert!(output.contains("event: response.failed\n"), "{output}");
+            assert!(!output.contains("response.completed"));
+        } else {
+            assert!(output.contains("\"error\":"), "{output}");
+            assert!(output.ends_with("data: [DONE]\n\n"));
+        }
+        assert_eq!(control.captured().await["status"], 502);
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn early_non_sse_handoff_disables_subsequent_keepalives() {
+    use crate::middleware::sse::KeepAliveStream;
+    use futures_util::FutureExt;
+    let (release, pending) = tokio::sync::oneshot::channel();
+    let source = Box::pin(async_stream::stream! {
+        yield Ok(Record::heartbeat());
+        yield Ok(Record::non_sse(Bytes::new()));
+        pending.await.unwrap();
+        yield Ok(Record::non_sse(Bytes::from_static(b"opaque body")));
+    });
+    let mut stream = KeepAliveStream::new(source, Some(Duration::from_millis(10)));
+    assert_eq!(
+        serialize(&stream.next().await.unwrap().unwrap()).unwrap(),
+        ": PROCESSING\n\n"
+    );
+    assert!(serialize(&stream.next().await.unwrap().unwrap())
+        .unwrap()
+        .is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(stream.next().now_or_never().is_none());
+    release.send(()).unwrap();
+    assert_eq!(
+        serialize(&stream.next().await.unwrap().unwrap()).unwrap(),
+        "opaque body"
+    );
+    assert!(stream.next().await.is_none());
+}

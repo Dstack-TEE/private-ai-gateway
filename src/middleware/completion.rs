@@ -46,7 +46,7 @@ use super::types::{
     ErrorClass, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
 };
 use super::{pricing, response_transform, stream_transform};
-use crate::sse::{EventStream, Payload, Record};
+use crate::sse::{EventStream, Record};
 use crate::sse_protocol::SseProtocol;
 
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
@@ -1134,7 +1134,13 @@ fn build_early_streaming_response(
                 meter.failed_attempts(&f.failed_attempts, true);
                 accounting_handle.selected(f.selected_route.clone(), attempt_index, f.upstream_status);
                 if f.upstream_headers.get("content-type").is_some_and(|value| !is_sse_content_type(Some(value))) {
-                    yield Err(ServiceError::Upstream(UpstreamError::Transport("upstream returned a non-SSE body after SSE headers committed".into())));
+                    // Switch the response owner to the explicit byte path before
+                    // polling the body, so EOF cannot synthesize an SSE terminal.
+                    yield Ok(Record::non_sse(Bytes::new()));
+                    let mut body = json_stream(f.body, accounting_handle.clone(), inputs.clone());
+                    while let Some(item) = body.next().await {
+                        yield item.map(Record::non_sse);
+                    }
                 } else {
                     let mut pipeline = build_metered_pipeline(f.body, &f.selected_route, f.selected_path, accounting_handle, source_journal, &inputs);
                     while let Some(item) = pipeline.next().await { yield item; }
@@ -1257,7 +1263,7 @@ pub(super) fn build_metered_pipeline(
         ProviderFormat::Openai if responses_passthrough => SseProtocol::OpenaiResponses,
         _ => SseProtocol::OpenaiChat,
     };
-    let body = decode_source(body, source_protocol, journal);
+    let body = decode_source(body, source_protocol, journal, accounting.clone());
     // Reasoning is excluded from the upstream's own chat events — the shape
     // exclusion reads — before a conversion could re-express it in the client
     // surface's shape.
@@ -1328,22 +1334,21 @@ fn json_stream(
         let mut bytes = Vec::new();
         while let Some(chunk) = body.next().await {
             let chunk = chunk?;
-            if bytes.len().saturating_add(chunk.len()) > crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES {
-                Err(ServiceError::Upstream(UpstreamError::Transport("JSON response exceeded the size cap".into())))?;
-            }
+            accounting.first_byte();
             bytes.extend_from_slice(&chunk);
         }
-        let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| ServiceError::Upstream(UpstreamError::Transport("upstream returned invalid JSON".into())))?;
-        if !value.is_object() { Err(ServiceError::Upstream(UpstreamError::Transport("upstream returned a non-object JSON response".into())))?; }
-        if inputs.exclude_reasoning { response_transform::exclude_reasoning(&mut value); }
-        response_transform::rewrite_identity(&mut value, &inputs.identity);
-        response_transform::canonicalize(&mut value, inputs.endpoint, Some(&inputs.identity.request_id));
-        let payload = Payload::Json(value);
-        let meaning = crate::sse_protocol::classify(None, None, &payload);
-        let mut record = Record::generated(None, payload, meaning);
-        accounting.observe(&mut record);
-        let value = record.json().ok_or(ServiceError::AdmissionInvariant("JSON response lost its payload"))?;
-        yield Bytes::from(serde_json::to_vec(value).map_err(|_| ServiceError::AdmissionInvariant("JSON response encoding failed"))?);
+        // Declared non-SSE responses were never metered. Preserve opaque and
+        // non-object bodies; only valid JSON objects receive identity/sanitation.
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) {
+            if value.is_object() {
+                if inputs.exclude_reasoning { response_transform::exclude_reasoning(&mut value); }
+                response_transform::rewrite_identity(&mut value, &inputs.identity);
+                response_transform::canonicalize(&mut value, inputs.endpoint, Some(&inputs.identity.request_id));
+                bytes = serde_json::to_vec(&value)
+                    .map_err(|_| ServiceError::AdmissionInvariant("JSON response encoding failed"))?;
+            }
+        }
+        yield Bytes::from(bytes);
     })
 }
 

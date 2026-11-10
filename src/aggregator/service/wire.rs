@@ -296,6 +296,14 @@ impl MiddlewareReceiptJournal {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .source_status
     }
+    pub(crate) fn response_model(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.response_model.clone())
+    }
     pub(crate) fn source_finished(&self) -> bool {
         self.inner
             .lock()

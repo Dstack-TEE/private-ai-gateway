@@ -6027,3 +6027,60 @@ async fn sanitized_response_error_retains_failure_after_renaming() {
     assert_eq!(report["errorMessage"], "stream_inband_error");
     assert_eq!(posts.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn client_disconnect_after_early_commit_while_forward_pending_preserves_class() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"mock:hang","format":"openai"}]}),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 10);
+    let service = build_service_with_backend(Arc::new(HangingUpstream));
+    let mut input = chat_input();
+    input.stream = true;
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        mw.handle_completion(&service, input),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), ": PROCESSING\n\n");
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["status"] == 499).await;
+    assert_eq!(report["selectedRouteId"], "mock:hang");
+    assert_eq!(report["attemptIndex"], 0);
+    assert_eq!(report["errorMessage"], "client_disconnected");
+    assert!(report["errorSource"].is_null());
+    assert!(report["ttftMs"].is_null());
+    assert!(report["usage"].is_null());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn declared_non_sse_opaque_body_over_buffered_json_cap_passes_through_unbilled() {
+    let source = vec![b'x'; MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1];
+    let expected_len = source.len();
+    let (service, _) = build_recording_service(200, source, "application/json");
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"mock:model","format":"openai"}],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}}),
+    ).await;
+    let mw = middleware_with_keepalive(control_url, 0);
+    let mut input = chat_input();
+    input.stream = true;
+    let response = mw.handle_completion(&service, input).await;
+    assert_eq!(response.status(), 200);
+    let output = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(output.len(), expected_len);
+    assert!(output.iter().all(|byte| *byte == b'x'));
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 200);
+    assert!(report["usage"].is_null());
+    assert!(report["errorMessage"].is_null());
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
