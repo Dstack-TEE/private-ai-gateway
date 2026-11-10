@@ -538,6 +538,13 @@ async fn exact_wire_characterization_corpus() {
     }
     actual.push(capture_buffered_sse(CHAT, false).await);
     actual.push(capture_buffered_sse(CHAT, true).await);
+    if std::env::var_os("RECORD_STREAMING_ACTUAL").is_some() {
+        std::fs::write(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/streaming/actual.tmp"),
+            serde_json::to_vec_pretty(&actual).unwrap(),
+        )
+        .unwrap();
+    }
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/streaming_wire.json");
     if std::env::var_os("UPDATE_STREAMING_CORPUS").is_some() {
@@ -548,6 +555,9 @@ async fn exact_wire_characterization_corpus() {
         .unwrap();
     } else {
         let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(Value::Array(actual), expected);
+        for (actual, expected) in actual.iter().zip(expected.as_array().unwrap()) {
+            assert_eq!(actual, expected, "case {}", actual["name"]);
+        }
+        assert_eq!(actual.len(), expected.as_array().unwrap().len());
     }
 }

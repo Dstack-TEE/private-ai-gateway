@@ -602,3 +602,136 @@ mod tests {
         assert_eq!(serialize(&comment).unwrap(), b": PROCESSING\n\n".as_slice());
     }
 }
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures_util::Stream;
+
+use crate::aci::upstream::UpstreamError;
+use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+
+pub(crate) type EventStream = Pin<Box<dyn Stream<Item = Result<Record, ServiceError>> + Send>>;
+
+/// Byte adapters are used only at ingress and at public byte-stream API boundaries.
+/// The application pipeline passes `Record` between all of its stages.
+pub(crate) struct DecodedStream {
+    inner: ServiceResponseStream,
+    decoder: Decoder,
+    ended: bool,
+    finished: bool,
+}
+
+impl DecodedStream {
+    pub fn new(inner: ServiceResponseStream, protocol: Option<SseProtocol>) -> Self {
+        Self {
+            inner,
+            decoder: Decoder::new(protocol),
+            ended: false,
+            finished: false,
+        }
+    }
+}
+
+impl Stream for DecodedStream {
+    type Item = Result<Record, ServiceError>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.finished {
+            return Poll::Ready(None);
+        }
+        loop {
+            match this.decoder.next() {
+                Ok(Some(record)) => return Poll::Ready(Some(Ok(record))),
+                Err(_) => {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(ServiceError::Upstream(
+                        UpstreamError::Transport("provider SSE event exceeded the size cap".into()),
+                    ))));
+                }
+                Ok(None) => {}
+            }
+            if this.ended {
+                this.finished = true;
+                return Poll::Ready(this.decoder.take_residual().map(Ok));
+            }
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(bytes))) => {
+                    if this.decoder.push(bytes).is_err() {
+                        this.finished = true;
+                        return Poll::Ready(Some(Err(ServiceError::AdmissionInvariant(
+                            "SSE ingress has pending input",
+                        ))));
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    this.ended = true;
+                    this.decoder.end();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct SerializedStream {
+    inner: EventStream,
+}
+
+impl SerializedStream {
+    pub fn new(inner: EventStream) -> Self {
+        Self { inner }
+    }
+}
+
+impl Stream for SerializedStream {
+    type Item = Result<Bytes, ServiceError>;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(record))) => match serialize(&record) {
+                    Ok(bytes) if bytes.is_empty() => {}
+                    Ok(bytes) => return Poll::Ready(Some(Ok(bytes))),
+                    Err(_) => {
+                        return Poll::Ready(Some(Err(ServiceError::AdmissionInvariant(
+                            "SSE serialization failed",
+                        ))))
+                    }
+                },
+            }
+        }
+    }
+}
+
+impl Record {
+    /// Conservative size of owned payload storage, used to bound conversion queues.
+    pub fn buffered_bytes(&self) -> usize {
+        fn size(value: &Value) -> usize {
+            match value {
+                Value::String(text) => text.len(),
+                Value::Array(values) => values.iter().map(size).fold(0, usize::saturating_add),
+                Value::Object(values) => values
+                    .iter()
+                    .map(|(key, value)| key.len().saturating_add(size(value)))
+                    .fold(0, usize::saturating_add),
+                _ => 16,
+            }
+        }
+        self.original
+            .len()
+            .saturating_add(self.event.as_ref().map_or(0, |event| {
+                event.data.len().saturating_add(match &event.payload {
+                    Payload::Json(value) => size(value),
+                    Payload::Text(text) => text.len(),
+                })
+            }))
+    }
+}

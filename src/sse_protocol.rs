@@ -284,9 +284,13 @@ pub(crate) fn classify(
 ) -> EventMeaning {
     use crate::sse::Payload;
     if matches!(payload, Payload::Text(text) if text == "[DONE]") {
-        return protocol.map_or_else(EventMeaning::default, |protocol| {
-            EventMeaning::generated(protocol, EventKind::Done)
-        });
+        return protocol.map_or_else(
+            || EventMeaning {
+                kind: EventKind::Done,
+                ..EventMeaning::default()
+            },
+            |protocol| EventMeaning::generated(protocol, EventKind::Done),
+        );
     }
     let value = payload.json();
     let payload_type = value.and_then(|v| v.get("type")).and_then(Value::as_str);
