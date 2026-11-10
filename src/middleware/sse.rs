@@ -319,11 +319,9 @@ impl AccountingHandle {
         state.truncated |= record.residual;
         if let Some(event) = &mut record.event {
             event.after_terminal = state.ingress_terminal;
-            if event.after_terminal {
-                // Protocol outcome is fixed at the accepted terminal. Keep
-                // reading/hashing bytes and observing usage until upstream EOF.
-                event.meaning.failure = None;
-            } else {
+            // Preserve classification for sanitation and client representation.
+            // Only the owner decides whether it can still affect the outcome.
+            if !event.after_terminal {
                 state.saw_error |= event.meaning.failure.is_some();
                 state.ingress_terminal |= event.meaning.terminal.is_some();
             }

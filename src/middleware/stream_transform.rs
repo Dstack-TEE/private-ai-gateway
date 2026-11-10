@@ -112,7 +112,7 @@ impl StreamTransform {
         let Some(event) = record.event.as_ref() else {
             return Ok(Vec::new());
         };
-        if event.meaning.failure == Some(FailureEvidence::ConflictingType) {
+        if event.active_failure() == Some(FailureEvidence::ConflictingType) {
             return Err(());
         }
         let output = match self {
@@ -142,8 +142,8 @@ impl StreamTransform {
         for record in &mut output {
             if let Some(output) = record.event.as_mut() {
                 output.after_terminal = event.after_terminal;
-                if event.meaning.failure.is_some() {
-                    output.meaning.failure = event.meaning.failure;
+                if event.active_failure().is_some() {
+                    output.meaning.failure = event.active_failure();
                 }
             }
         }
@@ -208,7 +208,7 @@ fn anthropic_chat_stream(
     state: &mut StreamState,
     strict: bool,
 ) -> Result<Option<Vec<Record>>, ()> {
-    if event.meaning.failure.is_some() || event.meaning.kind == EventKind::Error {
+    if event.active_failure().is_some() || event.meaning.kind == EventKind::Error {
         let error = event
             .payload
             .json()
@@ -635,7 +635,7 @@ impl<E: ChatEvents> ChatStream<E> {
         if self.terminated {
             return Ok(None);
         }
-        if event.meaning.failure.is_some() && self.error.is_none() {
+        if event.active_failure().is_some() && self.error.is_none() {
             self.start(
                 event.payload.json().unwrap_or(&Value::Null),
                 fallback_id,
@@ -1310,7 +1310,7 @@ impl ChatEvents for ResponsesEvents {
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
 
 fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
-    if event.meaning.failure.is_some() {
+    if event.active_failure().is_some() {
         let error = event
             .payload
             .json()

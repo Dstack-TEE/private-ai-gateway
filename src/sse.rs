@@ -46,6 +46,14 @@ pub(crate) struct Event {
     pub after_terminal: bool,
 }
 
+impl Event {
+    /// The owner assigns the protocol phase. Preserve original classification
+    /// for representation edits while later source failures cannot affect outcome.
+    pub fn active_failure(&self) -> Option<crate::sse_protocol::FailureEvidence> {
+        self.meaning.failure.filter(|_| !self.after_terminal)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Record {
     pub event: Option<Event>,

@@ -425,9 +425,12 @@ async fn transformed_response(
 #[tokio::test]
 async fn payload_response_error_stays_failed_with_default_or_unknown_event_name() {
     use crate::middleware::request_transform::Endpoint;
-    for name in ["message", "extension"] {
+    for (name, prefix, status) in [
+        ("message", "", 502), ("extension", "", 502),
+        ("message", "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n", 200),
+    ] {
         let control = Control::new().await;
-        let source = format!("event: {name}\ndata: {{\"type\":\"response.error\",\"sequence_number\":2,\"message\":\"private upstream detail\"}}\n\n");
+        let source = format!("{prefix}event: {name}\ndata: {{\"type\":\"response.error\",\"sequence_number\":2,\"message\":\"private upstream detail\"}}\n\n");
         let output = transformed_response(
             &control,
             source,
@@ -438,8 +441,8 @@ async fn payload_response_error_stays_failed_with_default_or_unknown_event_name(
         .await;
         assert!(output.contains("event: error\n"), "{output}");
         assert!(output.contains("\"type\":\"error\""), "{output}");
-        assert!(!output.contains("response.completed"));
-        assert_eq!(control.captured().await["status"], 502);
+        if prefix.is_empty() { assert!(!output.contains("response.completed")); }
+        assert_eq!(control.captured().await["status"], status);
         assert_eq!(control.reports.lock().unwrap().len(), 1);
     }
 }
