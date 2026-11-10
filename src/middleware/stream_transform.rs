@@ -14,12 +14,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
+#[cfg(test)]
 use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::{json, Map, Value};
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use crate::aggregator::service::ServiceError;
+#[cfg(test)]
+use crate::aggregator::service::ServiceResponseStream;
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
@@ -31,9 +34,7 @@ use super::response_transform::{
     unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity, ResponsesHead,
 };
 use super::types::ProviderFormat;
-use crate::sse::{
-    DecodedStream, Event, EventStream, Payload, Record, SerializedStream, MAX_EVENT_BYTES,
-};
+use crate::sse::{Event, EventStream, Payload, Record, MAX_EVENT_BYTES};
 use crate::sse_protocol::{event_kind, EventKind, EventMeaning, FailureEvidence, SseProtocol};
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
@@ -1325,6 +1326,7 @@ pub(crate) struct EventTransformStream {
     queue: VecDeque<Record>,
     inner_done: bool,
     pending_error: Option<ServiceError>,
+    residual: bool,
 }
 
 impl EventTransformStream {
@@ -1338,6 +1340,7 @@ impl EventTransformStream {
             queue: VecDeque::new(),
             inner_done: false,
             pending_error: None,
+            residual: false,
         }
     }
     fn fail(&mut self, reason: &'static str) {
@@ -1373,6 +1376,7 @@ impl Stream for EventTransformStream {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(record))) => {
+                    this.residual |= record.residual;
                     match this
                         .transform
                         .apply_record(record, &this.fallback_id, &mut this.state)
@@ -1389,6 +1393,10 @@ impl Stream for EventTransformStream {
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
+                    if this.residual {
+                        this.fail("provider ended mid-event");
+                        continue;
+                    }
                     match this.transform.end_of_stream(&mut this.state) {
                         Ok(Some(records)) => this.enqueue(records),
                         Ok(None) => {}
@@ -1402,10 +1410,12 @@ impl Stream for EventTransformStream {
 
 /// Public byte-stream API adapter. Application middleware uses
 /// `EventTransformStream` directly and keeps typed events between its stages.
-pub struct SseTransformStream {
-    wire: SerializedStream,
+#[cfg(test)]
+struct SseTransformStream {
+    wire: crate::sse::SerializedStream,
 }
 
+#[cfg(test)]
 impl SseTransformStream {
     pub fn new(inner: ServiceResponseStream, transform: StreamTransform) -> Self {
         let protocol = match &transform {
@@ -1417,13 +1427,16 @@ impl SseTransformStream {
             },
             _ => SseProtocol::OpenaiChat,
         };
-        let decoded = Box::pin(DecodedStream::new(inner, Some(protocol)));
+        let decoded = Box::pin(crate::sse::DecodedStream::new(inner, Some(protocol)));
         Self {
-            wire: SerializedStream::new(Box::pin(EventTransformStream::new(decoded, transform))),
+            wire: crate::sse::SerializedStream::new(Box::pin(EventTransformStream::new(
+                decoded, transform,
+            ))),
         }
     }
 }
 
+#[cfg(test)]
 impl Stream for SseTransformStream {
     type Item = Result<Bytes, ServiceError>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1965,7 +1978,7 @@ mod tests {
         }
         for block in wire.split("\n\n").filter(|block| !block.trim().is_empty()) {
             let parsed = decode_event(block);
-            let data = Some(parsed.data.as_str()).expect("event data");
+            let data = parsed.data.as_str();
             assert_ne!(data, "[DONE]", "Responses surface emitted [DONE]");
             let value: Value = serde_json::from_str(data).expect("Responses event JSON");
             assert_eq!(

@@ -555,8 +555,21 @@ async fn exact_wire_characterization_corpus() {
         .unwrap();
     } else {
         let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        for (actual, expected) in actual.iter().zip(expected.as_array().unwrap()) {
-            assert_eq!(actual, expected, "case {}", actual["name"]);
+        let corrections: Value =
+            serde_json::from_str(include_str!("../fixtures/streaming_corrections.json")).unwrap();
+        for (actual, baseline) in actual.iter().zip(expected.as_array().unwrap()) {
+            let name = actual["name"].as_str().unwrap();
+            let expected = if let Some(correction) = corrections.get(name) {
+                assert_eq!(
+                    correction["baseline_wire"], baseline["wire"],
+                    "original baseline for {name}"
+                );
+                assert!(!correction["reason"].as_str().unwrap().is_empty());
+                &correction["expected"]
+            } else {
+                baseline
+            };
+            assert_eq!(actual, expected, "case {name}");
         }
         assert_eq!(actual.len(), expected.as_array().unwrap().len());
     }

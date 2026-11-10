@@ -1377,7 +1377,7 @@ async fn streamed_success_hides_which_upstream_served_it() {
     let service = build_service_with_upstream_headers(
         200,
         b"data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"matched_stop\":424242}]}\n\ndata: [DONE]\n\n".to_vec(),
-        LEAKY_UPSTREAM_HEADERS.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.iter().copied().chain([("content-type", "text/event-stream")]).collect(),
     );
     let mut input = chat_input();
     input.stream = true;
@@ -6326,4 +6326,76 @@ async fn audio_requires_endpoint_opt_in() {
     .await;
     assert_eq!(status, 404);
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn typed_pipeline_meters_multiline_data_and_preserves_named_failures() {
+    let cases: &[(&str, &[u8], u16, bool)] = &[
+        ("openai", b"data: {\"choices\":[],\ndata: \"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n", 200, true),
+        ("anthropic", b"event: error\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"private failure\"}}\n\n", 502, false),
+        ("openai", b"data: \xff\n\n", 502, false),
+    ];
+    for (format, wire, expected_status, has_usage) in cases {
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow": true, "candidates": [{"routeId":"fixture:typed", "format":format}],
+                "pricing": {"inputCostPerToken":"1", "outputCostPerToken":"2"}
+            }),
+        )
+        .await;
+        let (service, _) = build_recording_service(200, wire.to_vec(), "text/event-stream");
+        let mut input = chat_input();
+        input.stream = true;
+        let (_, body) = raw_body(
+            middleware(control_url)
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        let report = wait_for_post(&posts, |r| r["selectedRouteId"] == "fixture:typed").await;
+        assert_eq!(report["status"], *expected_status, "{format}: {body}");
+        assert!(
+            report.get("errorSource").is_none_or(Value::is_null),
+            "upstream failures stay upstream: {report}"
+        );
+        if *has_usage {
+            assert_eq!(report["usage"]["prompt_tokens"], 2);
+            assert_eq!(report["usage"]["completion_tokens"], 3);
+            assert!(
+                sse_events(&body)
+                    .iter()
+                    .any(|e| !e["usage"]["cost"].is_null()),
+                "{body}"
+            );
+        } else {
+            assert!(body.contains("\"error\""), "{body}");
+            assert!(!body.contains("private failure"), "{body}");
+        }
+        assert_eq!(
+            posts.lock().unwrap().len(),
+            1,
+            "one response owner settles once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sanitized_response_error_retains_failure_after_renaming() {
+    let (control_url, posts) = spawn_control_capturing(200, json!({
+        "allow": true, "candidates": [{"routeId":"fixture:responses", "format":"openai", "supportedEndpoints":["/v1/responses"]}]
+    })).await;
+    let (service, _) = build_recording_service(200,
+        b"event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"message\":\"private failure\"}}\n\n".to_vec(), "text/event-stream");
+    let (_, body) = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, responses_input(true))
+            .await,
+    )
+    .await;
+    assert!(body.starts_with("event: error\n"), "{body}");
+    let report = wait_for_post(&posts, |r| r["selectedRouteId"] == "fixture:responses").await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_inband_error");
+    assert_eq!(posts.lock().unwrap().len(), 1);
 }

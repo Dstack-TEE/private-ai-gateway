@@ -8,8 +8,8 @@ use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
 use super::streaming::{
-    E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
-    MiddlewareResponseFinalizingStream,
+    finalize_sse_body, MiddlewareProviderResponseDraftingStream, ResponseContext, ResponseInput,
+    ResponseOwner,
 };
 use super::{
     AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
@@ -25,7 +25,8 @@ use crate::aci::upstream::{
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
-use crate::sse_framing::SseFramingObserver;
+use crate::middleware::sse::Accounting;
+use crate::sse::{DecodedStream, EventStream};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -715,6 +716,7 @@ impl AciService {
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                     let keyset_digest = keyset.digest().to_string();
+                    receipt_journal.set_source_status(status);
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         MiddlewareReceiptDraft {
@@ -726,8 +728,6 @@ impl AciService {
                             response_model: None,
                         },
                         receipt_journal,
-                        self.metrics.clone(),
-                        status,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
@@ -951,24 +951,26 @@ impl AciService {
         e2ee: Option<E2eeRequestContext>,
     ) -> Result<MiddlewareReceiptFinalization, ServiceError> {
         let is_sse = is_sse_content_type(content_type);
-        if is_sse {
-            let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(&final_cleartext_body);
-            if parser.chat_id().is_some() {
-                draft.builder.set_chat_id(parser.chat_id());
+        let wire_body = if is_sse {
+            let (wire, ids) =
+                finalize_sse_body(&final_cleartext_body, e2ee.as_ref(), &draft.endpoint_path)?;
+            if ids.chat_id.is_some() {
+                draft.builder.set_chat_id(ids.chat_id);
             }
-        } else if let Some(chat_id) = extract_chat_id(&final_cleartext_body) {
-            draft.builder.set_chat_id(Some(chat_id));
-        }
-
-        let wire_body = match e2ee.as_ref() {
-            Some(ctx) => encrypt_e2ee_final_response(
-                &final_cleartext_body,
-                ctx,
-                &draft.endpoint_path,
-                is_sse,
-            )?,
-            None => final_cleartext_body,
+            wire
+        } else {
+            if let Some(id) = extract_chat_id(&final_cleartext_body) {
+                draft.builder.set_chat_id(Some(id));
+            }
+            match e2ee.as_ref() {
+                Some(ctx) => encrypt_e2ee_final_response(
+                    &final_cleartext_body,
+                    ctx,
+                    &draft.endpoint_path,
+                    false,
+                )?,
+                None => final_cleartext_body,
+            }
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -1003,6 +1005,7 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         let wire_body = match e2ee.as_ref() {
             Some(ctx) => encrypt_e2ee_final_response(cleartext_body, ctx, endpoint_path, is_sse)?,
+            None if is_sse => finalize_sse_body(cleartext_body, None, endpoint_path)?.0,
             None => cleartext_body.to_vec(),
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
@@ -1034,23 +1037,77 @@ impl AciService {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let e2ee_transformer = e2ee
-            .clone()
-            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-        let body = MiddlewareResponseFinalizingStream::new(
+        let inner = if is_sse {
+            ResponseInput::Events(Box::pin(DecodedStream::new(
+                cleartext_stream,
+                Some(crate::sse_protocol::sse_protocol(endpoint_path)),
+            )))
+        } else {
+            ResponseInput::Bytes(cleartext_stream)
+        };
+        let body = ResponseOwner::middleware(
             self,
-            cleartext_stream,
+            inner,
             journal,
-            requester,
-            endpoint_path.to_string(),
-            e2ee_transformer,
-            request_id,
-            is_sse,
+            ResponseContext {
+                requester,
+                endpoint: endpoint_path.into(),
+                e2ee,
+                request_id,
+            },
+            None,
         );
         Ok(MiddlewareStreamFinalization {
             body: Box::pin(body),
             e2ee: e2ee_response,
         })
+    }
+    pub(crate) fn finalize_middleware_events(
+        &self,
+        journal: MiddlewareReceiptJournal,
+        events: EventStream,
+        context: ResponseContext,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        let info = context.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+            version: ctx.version.clone(),
+            algo: ctx.algo.clone(),
+        });
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Events(events),
+                journal,
+                context,
+                Some(accounting),
+            )),
+            e2ee: info,
+        }
+    }
+    pub(crate) fn finalize_middleware_bytes(
+        &self,
+        journal: MiddlewareReceiptJournal,
+        body: ServiceResponseStream,
+        endpoint: &str,
+        requester: Option<ReceiptOwner>,
+        request_id: Option<String>,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Bytes(body),
+                journal,
+                ResponseContext {
+                    requester,
+                    endpoint: endpoint.into(),
+                    e2ee: None,
+                    request_id,
+                },
+                Some(accounting),
+            )),
+            e2ee: None,
+        }
     }
 }
 

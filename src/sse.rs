@@ -8,7 +8,9 @@ use std::sync::{
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
+#[cfg(test)]
+use futures_util::StreamExt;
 use serde_json::Value;
 use sse_stream::{Sse, SseByteStream};
 
@@ -189,31 +191,55 @@ pub(crate) fn serialize(record: &Record) -> Result<Bytes, ServiceError> {
 /// Count bytes between blank lines without interpreting fields. Split chunks at
 /// block boundaries so a large chunk of small events never trips the event cap.
 /// The same state reports an undispatched EOF tail that the library discards.
-#[derive(Default)]
 struct BlockLimit {
+    max_bytes: usize,
     bytes: usize,
     line_bytes: usize,
     cr: bool,
+    bom_prefix: usize,
+    has_field: bool,
+    comment: bool,
 }
 impl BlockLimit {
     fn observe(&mut self, byte: u8) -> Result<bool, ServiceError> {
-        if std::mem::take(&mut self.cr) && byte == b'\n' {
+        let crlf = std::mem::take(&mut self.cr) && byte == b'\n';
+        if crlf && self.bytes == 0 {
             return Ok(false);
         }
         self.bytes += 1;
-        if self.bytes > MAX_EVENT_BYTES {
+        if self.bytes > self.max_bytes {
             return Err(upstream_error("sse line overflow"));
+        }
+        if crlf {
+            return Ok(false);
+        }
+        if self.bom_prefix < 3 {
+            if b"\xef\xbb\xbf"[self.bom_prefix] == byte {
+                self.bom_prefix += 1;
+                return Ok(false);
+            }
+            self.line_bytes += self.bom_prefix;
+            self.has_field |= self.bom_prefix != 0;
+            self.bom_prefix = 3;
         }
         if matches!(byte, b'\n' | b'\r') {
             self.cr = byte == b'\r';
             if std::mem::take(&mut self.line_bytes) == 0 {
                 self.bytes = 0;
+                self.has_field = false;
                 return Ok(true);
             }
         } else {
+            if self.line_bytes == 0 {
+                self.comment = byte == b':';
+            }
+            self.has_field |= !self.comment;
             self.line_bytes += 1;
         }
         Ok(false)
+    }
+    fn at_boundary(&self) -> bool {
+        (self.bytes == 0 || self.bom_prefix == 3) && !self.has_field && self.line_bytes == 0
     }
 }
 fn upstream_error(message: &'static str) -> ServiceError {
@@ -243,13 +269,14 @@ impl Stream for LimitedInput {
                         Ok(false) => {}
                         Err(error) => {
                             this.finished = true;
+                            this.boundary.store(false, Ordering::Relaxed);
                             this.pending = Bytes::new();
                             return Poll::Ready(Some(Err(error)));
                         }
                     }
                 }
                 this.boundary
-                    .store(this.limit.bytes == 0, Ordering::Relaxed);
+                    .store(this.limit.at_boundary(), Ordering::Relaxed);
                 return Poll::Ready(Some(Ok(this.pending.split_to(count))));
             }
             match this.inner.as_mut().poll_next(cx) {
@@ -268,21 +295,38 @@ pub(crate) struct DecodedStream {
     inner: SseByteStream<LimitedInput>,
     protocol: Option<SseProtocol>,
     boundary: Arc<AtomicBool>,
+    pending_error: Option<ServiceError>,
     finished: bool,
 }
 impl DecodedStream {
     pub fn new(inner: ServiceResponseStream, protocol: Option<SseProtocol>) -> Self {
+        Self::with_limit(inner, protocol, MAX_EVENT_BYTES)
+    }
+    fn with_limit(
+        inner: ServiceResponseStream,
+        protocol: Option<SseProtocol>,
+        max_bytes: usize,
+    ) -> Self {
         let boundary = Arc::new(AtomicBool::new(true));
         Self {
             inner: SseByteStream::new(LimitedInput {
                 inner,
                 pending: Bytes::new(),
-                limit: BlockLimit::default(),
+                limit: BlockLimit {
+                    max_bytes,
+                    bytes: 0,
+                    line_bytes: 0,
+                    cr: false,
+                    bom_prefix: 0,
+                    has_field: false,
+                    comment: false,
+                },
                 boundary: boundary.clone(),
                 finished: false,
             }),
             protocol,
             boundary,
+            pending_error: None,
             finished: false,
         }
     }
@@ -294,13 +338,28 @@ impl Stream for DecodedStream {
         if this.finished {
             return Poll::Ready(None);
         }
+        if let Some(error) = this.pending_error.take() {
+            this.finished = true;
+            return Poll::Ready(Some(Err(error)));
+        }
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(event))) => {
-                Poll::Ready(Some(Ok(Record::from_sse(event, this.protocol))))
+                let record = Record::from_sse(event, this.protocol);
+                if this.protocol.is_some()
+                    && record.event.as_ref().is_some_and(|event| {
+                        event.meaning.failure
+                            == Some(crate::sse_protocol::FailureEvidence::ConflictingType)
+                    })
+                {
+                    this.finished = true;
+                    return Poll::Ready(Some(Err(upstream_error(
+                        "provider SSE event has conflicting control types",
+                    ))));
+                }
+                Poll::Ready(Some(Ok(record)))
             }
             Poll::Ready(Some(Err(error))) => {
-                this.finished = true;
                 let error = match error {
                     sse_stream::Error::Body(error) => match error.downcast::<ServiceError>() {
                         Ok(error) => *error,
@@ -308,7 +367,16 @@ impl Stream for DecodedStream {
                     },
                     _ => upstream_error("provider sent invalid SSE encoding"),
                 };
-                Poll::Ready(Some(Err(error)))
+                if !this.boundary.load(Ordering::Relaxed) {
+                    this.pending_error = Some(error);
+                    Poll::Ready(Some(Ok(Record {
+                        residual: true,
+                        ..Record::from_sse(Sse::default(), None)
+                    })))
+                } else {
+                    this.finished = true;
+                    Poll::Ready(Some(Err(error)))
+                }
             }
             Poll::Ready(None) => {
                 this.finished = true;
@@ -321,6 +389,23 @@ impl Stream for DecodedStream {
             }
         }
     }
+}
+
+pub(crate) type EnvelopeStream = Pin<Box<dyn Stream<Item = Result<Record, UpstreamError>> + Send>>;
+pub(crate) fn decode_envelope(
+    inner: crate::aci::upstream::UpstreamBodyStream,
+    max_bytes: usize,
+) -> EnvelopeStream {
+    use futures_util::StreamExt;
+    let inner = Box::pin(inner.map(|item| item.map_err(ServiceError::Upstream)));
+    Box::pin(
+        DecodedStream::with_limit(inner, None, max_bytes).map(|item| {
+            item.map_err(|error| match error {
+                ServiceError::Upstream(error) => error,
+                _ => UpstreamError::Transport("invalid provider SSE envelope".into()),
+            })
+        }),
+    )
 }
 
 /// Buffered bodies use the same public stream decoder; an in-memory input never
@@ -346,14 +431,17 @@ pub(crate) fn decode_buffered(
     }
 }
 
+#[cfg(test)]
 pub(crate) struct SerializedStream {
     inner: EventStream,
 }
+#[cfg(test)]
 impl SerializedStream {
     pub fn new(inner: EventStream) -> Self {
         Self { inner }
     }
 }
+#[cfg(test)]
 impl Stream for SerializedStream {
     type Item = Result<Bytes, ServiceError>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -440,7 +528,7 @@ mod tests {
         .collect()
         .await;
         assert!(
-            matches!(&records[0], Err(ServiceError::Upstream(UpstreamError::Transport(message))) if message == "sse line overflow")
+            matches!(records.last().unwrap(), Err(ServiceError::Upstream(UpstreamError::Transport(message))) if message == "sse line overflow")
         );
         let records: Vec<_> = DecodedStream::new(
             Box::pin(futures_util::stream::iter([Err(ServiceError::Upstream(

@@ -2609,7 +2609,7 @@ async fn aci_verified_makes_an_unconstrained_request_fail_closed() {
 // --- SSE stream-repair suite (restored from main: c643fb5, 3ea864e, c26878d) ---
 
 #[tokio::test]
-async fn a_stream_cut_mid_event_is_not_given_an_error() {
+async fn a_stream_cut_mid_event_discards_the_pending_payload_without_a_tail() {
     let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\","),
@@ -2625,7 +2625,7 @@ async fn a_stream_cut_mid_event_is_not_given_an_error() {
 
     assert_eq!(
         resp.body,
-        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"id\":\"chat-stream-1\","
+        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"
     );
 }
 

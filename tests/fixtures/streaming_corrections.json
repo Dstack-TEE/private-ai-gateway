@@ -1,0 +1,160 @@
+{
+  "declared_non_sse": {
+    "reason": "Declared non-SSE JSON follows the JSON path without SSE blank lines.",
+    "baseline_wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[]}\n\n",
+    "expected": {
+      "name": "declared_non_sse",
+      "wire": "{\"id\":\"req-fixture\",\"model\":\"fixture-model\",\"choices\":[]}",
+      "wire_hash": "sha256:0008eb504bd837d799047d0635f1cef2ff746fe548bdd0053530d389d874213c",
+      "source_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": null,
+        "endpoint": "/v1/chat/completions",
+        "event_log": [
+          {
+            "body_hash": "sha256:d8f1f0b52433b719cc1e05e3fcb1eb4b92c959919ad87c76a965be0ed19cdf31",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:bb7c90756425315083fd61b6c796dc7043c608331bfe5025292ace73ec7ded11",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "fixture-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:06bbfdda6c0052e6959d4e6e6dd84fb9073d26942c8b5805c86d95c73193dbe4",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:0008eb504bd837d799047d0635f1cef2ff746fe548bdd0053530d389d874213c",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "766feda2a45a0ede27cc9913df7b1c5a4563bd963ef3f30bd205701a7de355a6df35350890c32d720f907796e8914871e1235ed7bdd3202a65bf29d486712305",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/chat/completions",
+          "status": 200,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          }
+        }
+      ]
+    }
+  },
+  "legacy_completion": {
+    "reason": "Legacy completion conversion emits one typed data terminal, removing the bare DONE block.",
+    "baseline_wire": "data: {\"id\":\"req-fixture\",\"object\":\"text_completion\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"text\":\"hi\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop_sequence\"}]}\n\n[DONE]\n\ndata: [DONE]\n\n",
+    "expected": {
+      "name": "legacy_completion",
+      "wire": "data: {\"id\":\"req-fixture\",\"object\":\"text_completion\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"text\":\"hi\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop_sequence\"}]}\n\ndata: [DONE]\n\n",
+      "wire_hash": "sha256:bec3ced14efaafaae3863ade73a13506128fccde9e8ba9e4d3a3b463e942c349",
+      "source_hash": "sha256:d90e770df325af312dcafbcaad93ef1dff01f1bcb60615e387b4fdf32f338a6d",
+      "status": 200,
+      "before_eof": {
+        "receipt": false,
+        "report": false
+      },
+      "receipt": {
+        "api_version": "aci/1",
+        "chat_id": "req-fixture",
+        "endpoint": "/v1/completions",
+        "event_log": [
+          {
+            "body_hash": "sha256:4e917ca0883ddd705870653704447814ba496549db3d84b16733865e834e98e0",
+            "type": "request.received"
+          },
+          {
+            "body_hash": "sha256:041380f1deb1038dab20c8fa7f3a02b229cac2d9aa17a968c038b75bb5da2686",
+            "type": "middleware.forwarded"
+          },
+          {
+            "target_route_id": "fixture:model",
+            "type": "route.selected"
+          },
+          {
+            "body_hash": "sha256:041380f1deb1038dab20c8fa7f3a02b229cac2d9aa17a968c038b75bb5da2686",
+            "type": "request.forwarded"
+          },
+          {
+            "model_id": "upstream-model",
+            "required": false,
+            "result": "verified",
+            "session_id": "51f1abbe1202885a9def858c591e08f0cbac10b8e92cde1676fd9eaa6d499dca",
+            "type": "upstream.verified"
+          },
+          {
+            "body_hash": "sha256:d90e770df325af312dcafbcaad93ef1dff01f1bcb60615e387b4fdf32f338a6d",
+            "type": "response.received"
+          },
+          {
+            "body_hash": "sha256:bec3ced14efaafaae3863ade73a13506128fccde9e8ba9e4d3a3b463e942c349",
+            "type": "response.returned"
+          }
+        ],
+        "key_id": "static-receipt-ed25519",
+        "method": "POST",
+        "model": "fixture-model",
+        "receipt_id": "rcpt-characterization",
+        "served_at": 1700000000,
+        "signature": "58858397b1d60bfa1695b6812be4e6cccfeff157ca0d7c17ccbfcf338c97a0f6271c4674890c8d20806ddaa262a7459ab53131c88794f3fa287960815ae00a05",
+        "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
+      },
+      "signature_valid": true,
+      "reports": [
+        {
+          "requestId": "req-fixture",
+          "endpoint": "/v1/completions",
+          "status": 200,
+          "durationMs": 0,
+          "ttftMs": 0,
+          "isStreaming": true,
+          "attemptIndex": 0,
+          "selectedRouteId": "fixture:model",
+          "requestModel": "fixture-model",
+          "usage": null,
+          "pricing": {
+            "inputCostPerToken": "1",
+            "outputCostPerToken": "2"
+          }
+        }
+      ]
+    }
+  }
+}

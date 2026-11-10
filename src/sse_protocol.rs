@@ -32,25 +32,6 @@ pub fn sse_protocol(endpoint_path: &str) -> SseProtocol {
     }
 }
 
-/// SSE bytes that complete the framing of a clean but terminator-less stream,
-/// or `None` if the protocol's terminal carries state the gateway cannot
-/// fabricate. A clean end is a success either way; this only decides whether a
-/// missing terminator can be filled in for the client.
-pub fn stream_success_terminator(protocol: SseProtocol) -> Option<&'static str> {
-    match protocol {
-        // `[DONE]` is a fixed marker carrying no state, so a chat provider that
-        // closed normally without it has still finished; the gateway completes
-        // the framing.
-        SseProtocol::OpenaiChat => Some("data: [DONE]\n\n"),
-        // The gateway does not fabricate a terminator for the other surfaces:
-        // supplying an event the upstream never sent would assert state it did
-        // not (a `message_stop` with no preceding `stop_reason`, or a
-        // `response.completed` with no usage). A clean end is still recorded
-        // complete; the client simply receives what the upstream sent.
-        SseProtocol::AnthropicMessages | SseProtocol::OpenaiResponses => None,
-    }
-}
-
 /// The chat error object the gateway emits for a failure it will not attribute
 /// to the caller. One definition for its two producers: the tail this module
 /// appends to a stream that broke, and the rebuild of an upstream's own
