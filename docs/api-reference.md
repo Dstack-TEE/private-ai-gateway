@@ -225,13 +225,50 @@ The normal provider-backed response path adds:
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
 For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
-is complete and stores the receipt after the finalizer observes the terminal
-body. An upstream non-2xx returned before streaming begins is buffered and does
-not receive a receipt.
+is complete and stores the receipt after upstream EOF and response finalization.
+Receiving a protocol terminal does not publish the receipt before EOF. An upstream
+non-2xx returned before streaming begins is buffered and does not receive a receipt.
 
 In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
 `200` before the upstream answers, and that response omits `X-Receipt-Id`; see
 [Streaming keepalives and early commit](configuration-reference.md#streaming-keepalives-and-early-commit).
+
+### Event-stream framing
+
+SSE fields use WHATWG parsing with LF, CRLF or bare CR line endings and an optional
+leading UTF-8 BOM. Only `data` fields dispatch payloads: a bare `[DONE]` or bare
+JSON line is an unknown field. A colonless `event` resets the event name. Data
+fields join with LF, including empty data fields. A pending block without its
+terminating blank line is discarded at EOF. Invalid UTF-8 in a recognized field
+fails the upstream read; it is never replaced with another character.
+
+The gateway returns canonical SSE framing: LF line endings, one space after each
+field colon, and fields in `event`, `data`, `id`, `retry` order. Repeated metadata
+fields keep the last valid value; invalid `id` or `retry` values and unknown fields
+are omitted. Retry values use decimal integer notation. Upstream comments and
+empty blocks are omitted; generated errors have no leading blank block. Unedited
+data strings retain their text, including JSON
+whitespace. JSON changes such as identity rewriting, cost injection or encryption
+produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments.
+
+Protocol event names and `[DONE]` data are matched exactly, including whitespace.
+Known control names that contradict the payload type fail the upstream stream.
+A bridge emits its destination's error and terminal events for an upstream error;
+the terminal cannot turn that failure into a successful usage report. Multiline
+JSON data is interpreted and metered once as one payload.
+
+Application blocks are limited to 16 MiB. A clean EOF between events retains the
+existing completion policy: Chat gets a missing `data: [DONE]` marker, while
+Messages and Responses receive no fabricated success terminal. Legacy Anthropic
+completion conversion emits exactly one typed `data: [DONE]` marker. A body that
+explicitly declares a non-SSE content type follows the JSON path and gets no SSE
+heartbeat, blank-line suffix or sentinel. Streaming E2EE still requires SSE.
+
+Receipt `response.received` hashes the provider adapter's application bytes before
+framing normalization or payload edits. `response.returned` hashes the exact bytes
+after all edits, heartbeats and optional E2EE. Chutes and 0G envelope opening keep
+their verification gates; 0G releases its application `[DONE]` only after verifying
+the provider signature.
 
 ### Require ACI verification
 

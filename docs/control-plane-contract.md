@@ -422,6 +422,14 @@ Streaming and cancellation do not erase accounting:
   the report carries the real failure status, not the HTTP `200` the client
   already received.
 
+One response owner settles a streaming request once, after response finalization
+at upstream EOF or when the client abandons the response. This includes the
+pending-forward phase after early commit. A source reaching EOF cannot emit an
+intermediate cancellation report. Named protocol errors retain their failure
+when bridged or sanitized, even when followed by a terminal event. Usage in
+multiline SSE data is read as one payload. Invalid UTF-8 in a recognized SSE field
+is an upstream transport failure.
+
 `errorMessage` takes one of these values:
 
 | Origin | `errorMessage` values |

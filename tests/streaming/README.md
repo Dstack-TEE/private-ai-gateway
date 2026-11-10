@@ -30,3 +30,19 @@ cargo test --locked -j 8 --lib exact_wire_characterization_corpus
 `UPDATE_STREAMING_CORPUS=1` records a baseline. Do not regenerate it to accommodate
 refactoring differences: preserve the original snapshot and explicitly identify
 any approved parsing correction with its old and new expectation.
+
+`streaming_corrections.json` keeps the two approved changed expectations alongside
+their original bytes and a reason. Sixteen cases remain identical to the original
+snapshot. The declared non-SSE JSON case loses its old SSE blank-line suffix;
+legacy completion loses the bare `[DONE]` block and emits one typed data terminal.
+Only the wire bytes, returned digest and receipt signature change in those cases.
+
+Framing normalization and rejection cases are pinned separately by
+`library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,
+CRLF and bare CR at every split, BOM removal, canonical field spacing and order,
+last valid duplicate metadata, numeric retry formatting, omitted unknown fields,
+comments and empty blocks, retained empty-data contributions, discarded pending
+EOF data, exact terminals, contradictory control types and strict UTF-8 rejection.
+Unedited JSON text retains its whitespace. `accounting.rs` exercises the production
+typed stages and response owner for cost, usage, timeout, cancellation and E2EE
+failure settlement, without a public byte-transform API.
