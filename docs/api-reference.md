@@ -254,13 +254,16 @@ produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments.
 Protocol event names and `[DONE]` data are matched exactly, including whitespace.
 Known control names that contradict the payload type fail the upstream stream.
 The middleware response owner uses the protocol meaning assigned at ingress. It
-records usage from a failed event before replacing upstream error text with the
-destination's sanitized failure. Chat emits an error and one `[DONE]`; Messages
-emits an `error` event. Native Responses retains its two terminal forms: `error`
-and `response.failed`, with usage and cost in the failed response object. A
-bridged Responses failure emits `response.failed`. Failure alone does not create
-bridge startup events. Multiline JSON data is interpreted and metered once as
-one payload.
+records usage from a failed event and sanitizes native records in place. Native
+Chat retains allowlisted chunk fields, content and failure finish reasons; a
+finish reason alone does not add an error object. Native Messages retains a
+failed delta's content and usage, while error events use the Messages error
+sanitizer. Native Responses retains its two terminal forms: `error` and
+`response.failed`, with output, usage and cost in the failed response object.
+For a failure crossing a bridge, Chat emits an error and one `[DONE]`, Messages
+emits an `error` event, and Responses emits `response.failed`. Failure alone does
+not create bridge startup events. Multiline JSON data is interpreted and metered
+once as one payload.
 
 Failure evidence remains sticky through the source protocol's terminal. Later
 source events cannot change that outcome; their bytes are still hashed through

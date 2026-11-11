@@ -239,8 +239,7 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
             let text = String::from_utf8(bytes).unwrap();
             assert!(!text.contains("CANARY"));
             match protocol {
-                Chat => assert!(text.ends_with("data: [DONE]\n\n")),
-                Messages => assert!(text.starts_with("event: error\n")),
+                Chat | Messages => assert_eq!(text, wire, "native failure content is preserved"),
                 Responses => assert!(text.starts_with("event: response.failed\n")),
             }
         } else {

@@ -255,10 +255,15 @@ pub(crate) fn classify(
         {
             meaning.failure.get_or_insert(FailureEvidence::Inband);
             // An extension event can still carry a protocol failure terminal.
-            if protocol == Some(SseProtocol::OpenaiResponses) && meaning.terminal.is_none() {
-                meaning.terminal = match payload_type {
-                    Some("response.failed") => Some(TerminalKind::Failed),
-                    Some("error" | "response.error") => Some(TerminalKind::Error),
+            if meaning.terminal.is_none() {
+                meaning.terminal = match (protocol, payload_type) {
+                    (Some(SseProtocol::OpenaiResponses), Some("response.failed")) => {
+                        Some(TerminalKind::Failed)
+                    }
+                    (Some(SseProtocol::OpenaiResponses), Some("error" | "response.error"))
+                    | (Some(SseProtocol::AnthropicMessages), Some("error")) => {
+                        Some(TerminalKind::Error)
+                    }
                     _ => None,
                 };
             }

@@ -342,15 +342,14 @@ impl ResponseOwner {
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
         let Some(event) = record.event.as_ref().filter(|_| failure) else {
-            // A native Chat error is not its [DONE] marker. Main forwards
-            // subsequent chunks, including any final usage before [DONE].
-            let native_chat = self.native_chat(
+            // Native streams retain their content and continuation records.
+            let native = self.native_source(
                 record
                     .event
                     .as_ref()
                     .and_then(|event| event.source_protocol),
             );
-            return if self.accounting.is_some() && self.failure.is_some() && !native_chat {
+            return if self.accounting.is_some() && self.failure.is_some() && !native {
                 Ok(Bytes::new())
             } else {
                 self.encode(record)
@@ -363,41 +362,98 @@ impl ResponseOwner {
             }
             return self.encode(record);
         }
-        if self.failure.is_some() {
-            return Ok(Bytes::new());
-        }
         let Some(protocol) = self.protocol else {
             return Ok(Bytes::new());
         };
-        if event.after_terminal {
-            // A late native error still has its safe representation. A bridge
-            // must not append a new failure terminal after a completed turn.
-            if event.source_protocol != Some(protocol) {
-                return Ok(Bytes::new());
-            }
-        } else {
-            self.failure = Some(inband_failure());
+        let native = self.native_source(event.source_protocol);
+        let already_failed = self.failure.is_some();
+        if !event.after_terminal {
+            self.failure.get_or_insert_with(inband_failure);
         }
-        let failure = self.canonical_failure(record, protocol, usage);
+        if native {
+            self.sanitize_native_failure(&mut record, protocol);
+            return self.encode(record);
+        }
+        // A bridge generates one destination failure, never a second terminal.
+        if already_failed || event.after_terminal {
+            return Ok(Bytes::new());
+        }
+        let failure = self.bridge_failure(record, protocol, usage);
         self.tail.extend(failure);
         Ok(Bytes::new())
     }
 
-    fn native_chat(&self, source: Option<SseProtocol>) -> bool {
-        self.endpoint == CHAT_COMPLETIONS_PATH && source == Some(SseProtocol::OpenaiChat)
+    fn native_source(&self, source: Option<SseProtocol>) -> bool {
+        source.is_some()
+            && source == self.protocol
+            && (self.protocol != Some(SseProtocol::OpenaiChat)
+                || self.endpoint == CHAT_COMPLETIONS_PATH)
     }
 
-    fn canonical_failure(
+    fn sanitize_native_failure(&self, record: &mut Record, protocol: SseProtocol) {
+        let Some(event) = &record.event else { return };
+        let mut meaning = event.meaning;
+        // Failure terminals carried by extension events keep their native
+        // schema. This selection uses ingress meaning, never payload re-detection.
+        let endpoint = match protocol {
+            SseProtocol::OpenaiChat => Endpoint::ChatComplete,
+            SseProtocol::AnthropicMessages => Endpoint::Messages,
+            SseProtocol::OpenaiResponses => {
+                if meaning.terminal == Some(TerminalKind::Failed) {
+                    meaning.kind = EventKind::ResponseFailed;
+                }
+                Endpoint::CreateModelResponse
+            }
+        };
+        record.edit_json(|body| {
+            if let Some(identity) = &self.identity {
+                response_transform::rewrite_stream_identity(body, identity, meaning.kind);
+            }
+            match (protocol, meaning.terminal) {
+                (SseProtocol::AnthropicMessages, Some(TerminalKind::Error)) => {
+                    if let Some(object) = body.as_object_mut() {
+                        response_transform::sanitize_messages_error_event(
+                            object,
+                            self.request_id.as_deref(),
+                        );
+                    }
+                }
+                (SseProtocol::OpenaiResponses, Some(TerminalKind::Error)) => {
+                    if let Some(object) = body.as_object_mut() {
+                        response_transform::sanitize_responses_error_event(object);
+                    }
+                }
+                _ => response_transform::canonicalize_stream(
+                    body,
+                    endpoint,
+                    meaning,
+                    self.request_id.as_deref(),
+                ),
+            }
+        });
+        match (protocol, meaning.terminal) {
+            (
+                SseProtocol::AnthropicMessages | SseProtocol::OpenaiResponses,
+                Some(TerminalKind::Error),
+            ) => {
+                record.set_event_name("error");
+            }
+            (SseProtocol::OpenaiResponses, Some(TerminalKind::Failed)) => {
+                record.set_event_name("response.failed");
+            }
+            _ => {}
+        }
+    }
+
+    fn bridge_failure(
         &mut self,
-        mut record: Record,
+        record: Record,
         protocol: SseProtocol,
         usage: Option<Value>,
     ) -> Vec<Record> {
         let Some(event) = &record.event else {
             return Vec::new();
         };
-        let terminal = event.meaning.terminal;
-        let late = event.after_terminal;
         let source = event.source_protocol;
         let error = record
             .json()
@@ -416,9 +472,6 @@ impl ResponseOwner {
                     self.ids.chat_id = self.request_id.clone();
                 }
                 let mut records = error_records(protocol, 502, request_id, None);
-                if protocol == SseProtocol::OpenaiChat && (late || self.native_chat(source)) {
-                    records.truncate(1);
-                }
                 if let Some(first) = records.first_mut() {
                     first.edit_json(|body| {
                         if let Some(error) = error {
@@ -438,57 +491,7 @@ impl ResponseOwner {
                 }
                 records
             }
-            SseProtocol::OpenaiResponses
-                if source == Some(protocol) && terminal != Some(TerminalKind::Failed) =>
-            {
-                let mut body = record
-                    .json()
-                    .and_then(Value::as_object)
-                    .cloned()
-                    .unwrap_or_default();
-                response_transform::sanitize_responses_error_event(&mut body);
-                vec![Record::generated(
-                    Some("error"),
-                    Payload::Json(Value::Object(body)),
-                    EventMeaning::generated(protocol, EventKind::Error),
-                )]
-            }
             SseProtocol::OpenaiResponses => {
-                if terminal == Some(TerminalKind::Failed)
-                    && record
-                        .json()
-                        .and_then(|body| body.get("response"))
-                        .is_some_and(Value::is_object)
-                {
-                    record.edit_json(|body| {
-                        if let Some(envelope) = body.as_object_mut() {
-                            envelope.retain(|field, _| {
-                                matches!(field.as_str(), "type" | "response" | "sequence_number")
-                            });
-                        }
-                        body["type"] = json!("response.failed");
-                        if body["response"]["error"].is_null() {
-                            body["response"]["error"] =
-                                error.unwrap_or_else(responses_failure_error);
-                        }
-                        body["response"]["status"] = json!("failed");
-                        if let Some(identity) = &self.identity {
-                            response_transform::rewrite_stream_identity(
-                                body,
-                                identity,
-                                EventKind::ResponseFailed,
-                            );
-                        }
-                        response_transform::canonicalize_stream(
-                            body,
-                            Endpoint::CreateModelResponse,
-                            EventMeaning::generated(protocol, EventKind::ResponseFailed),
-                            request_id,
-                        );
-                    });
-                    record.set_event_name("response.failed");
-                    return vec![record];
-                }
                 let usage = usage.or_else(|| {
                     self.accounting
                         .as_ref()

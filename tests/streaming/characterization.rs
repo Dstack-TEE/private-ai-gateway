@@ -957,6 +957,89 @@ async fn usage_after_native_chat_error_is_filtered_on_wire_and_in_report() {
 }
 
 #[tokio::test]
+async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() {
+    let baselines: Value =
+        serde_json::from_str(include_str!("../fixtures/streaming_wire.json")).unwrap();
+    for case in native_failure_content_cases() {
+        let snapshot = capture(&case).await;
+        let baseline = baselines
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|value| value["name"] == case.name)
+            .unwrap();
+        assert_eq!(&snapshot, baseline, "{}", case.name);
+        let wire = snapshot["wire"].as_str().unwrap();
+        assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"), "{wire}");
+        let payload: Value = serde_json::from_str(
+            wire.lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap(),
+        )
+        .unwrap();
+        match case.name.as_str() {
+            "native_chat_failure_chunk" => {
+                assert_eq!(payload["id"], "req-fixture");
+                assert_eq!(payload["object"], "chat.completion.chunk");
+                assert_eq!(payload["created"], 1_700_000_000);
+                assert_eq!(payload["model"], "fixture-model");
+                assert_eq!(payload["choices"][0]["delta"]["content"], "");
+                assert_eq!(payload["choices"][0]["finish_reason"], "error");
+                assert_eq!(payload["error"]["code"], 502);
+                assert!(wire.ends_with("data: [DONE]\n\n"));
+            }
+            "native_chat_failure_finish_only" => {
+                assert_eq!(payload["choices"][0]["delta"]["content"], "partial");
+                assert_eq!(payload["choices"][0]["finish_reason"], "error");
+                assert!(payload.get("error").is_none());
+                assert!(wire.ends_with("data: [DONE]\n\n"));
+            }
+            "native_messages_failure_content" => {
+                assert_eq!(payload["type"], "error");
+                assert_eq!(payload["error"]["type"], "api_error");
+                assert!(payload.get("content").is_none());
+                assert!(payload.get("delta").is_none());
+                assert_eq!(wire.matches("\n\n").count(), 1);
+            }
+            "native_messages_failure_delta" => {
+                assert_eq!(payload["delta"]["text"], "partial");
+                assert_eq!(payload["delta"]["stop_reason"], "error");
+                assert_eq!(payload["usage"]["cost"], 6);
+                assert!(payload.get("error").is_none());
+                assert!(
+                    wire.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+                );
+            }
+            "native_responses_failure_content" => {
+                assert_eq!(payload["type"], "response.failed");
+                assert_eq!(payload["sequence_number"], 4);
+                assert_eq!(payload["item_id"], "item-public");
+                assert_eq!(payload["delta"], "partial");
+                assert_eq!(
+                    payload["response"]["output"][0]["content"][0]["text"],
+                    "partial"
+                );
+                assert_eq!(payload["response"]["usage"]["cost"], 8);
+                assert_eq!(wire.matches("\n\n").count(), 1);
+            }
+            "native_responses_error_content" => {
+                assert_eq!(payload["type"], "error");
+                assert_eq!(payload["code"], "server_error");
+                assert_eq!(payload["sequence_number"], 4);
+                assert!(payload.get("item_id").is_none());
+                assert!(payload.get("delta").is_none());
+                assert_eq!(wire.matches("\n\n").count(), 1);
+            }
+            _ => panic!("unexpected native failure fixture {}", case.name),
+        }
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], 502);
+        assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+    }
+}
+
+#[tokio::test]
 async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
     let text = "x".repeat(crate::sse::MAX_EVENT_BYTES - 100);
     let event =
