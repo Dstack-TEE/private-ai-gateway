@@ -879,6 +879,25 @@ fn review_cases() -> Vec<Case> {
     cases
 }
 
+fn read_json_lines(input: &str) -> Vec<Value> {
+    input
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn corpus_corrections() -> HashMap<String, Value> {
+    read_json_lines(include_str!("../fixtures/streaming_corrections.jsonl"))
+        .into_iter()
+        .map(|correction| {
+            (
+                correction["expected"]["name"].as_str().unwrap().to_string(),
+                correction,
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn exact_wire_characterization_corpus() {
     const CHAT:&str="data: {\"id\":\"upstream-id\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n";
@@ -965,26 +984,26 @@ async fn exact_wire_characterization_corpus() {
     }
     actual.push(capture_buffered_sse(CHAT, false).await);
     actual.push(capture_buffered_sse(CHAT, true).await);
+    actual.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    let lines = actual
+        .iter()
+        .map(|case| serde_json::to_string(case).unwrap() + "\n")
+        .collect::<String>();
     if std::env::var_os("RECORD_STREAMING_ACTUAL").is_some() {
         std::fs::write(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/streaming/actual.tmp"),
-            serde_json::to_vec_pretty(&actual).unwrap(),
+            &lines,
         )
         .unwrap();
     }
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/streaming_wire.json");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/streaming_wire.jsonl");
     if std::env::var_os("UPDATE_STREAMING_CORPUS").is_some() {
-        std::fs::write(
-            path,
-            format!("{}\n", serde_json::to_string_pretty(&actual).unwrap()),
-        )
-        .unwrap();
+        std::fs::write(path, lines).unwrap();
     } else {
-        let expected: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let corrections: Value =
-            serde_json::from_str(include_str!("../fixtures/streaming_corrections.json")).unwrap();
-        for (actual, baseline) in actual.iter().zip(expected.as_array().unwrap()) {
+        let expected = read_json_lines(&std::fs::read_to_string(path).unwrap());
+        let corrections = corpus_corrections();
+        for (actual, baseline) in actual.iter().zip(&expected) {
             let name = actual["name"].as_str().unwrap();
             let expected = if let Some(correction) = corrections.get(name) {
                 assert_eq!(
@@ -998,7 +1017,7 @@ async fn exact_wire_characterization_corpus() {
             };
             assert_eq!(actual, expected, "case {name}");
         }
-        assert_eq!(actual.len(), expected.as_array().unwrap().len());
+        assert_eq!(actual.len(), expected.len());
     }
 }
 
@@ -1071,15 +1090,11 @@ async fn early_declared_non_sse_opaque_bodies_use_unbilled_byte_path() {
 
 #[tokio::test]
 async fn over_cap_non_sse_matches_main_on_normal_and_early_paths() {
-    let baselines: Value =
-        serde_json::from_str(include_str!("../fixtures/streaming_wire.json")).unwrap();
-    let corrections: Value =
-        serde_json::from_str(include_str!("../fixtures/streaming_corrections.json")).unwrap();
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let corrections = corpus_corrections();
     for case in review_cases().into_iter().take(2) {
         let actual = capture(&case).await;
         let baseline = baselines
-            .as_array()
-            .unwrap()
             .iter()
             .find(|value| value["name"] == case.name)
             .unwrap();
@@ -1232,13 +1247,10 @@ async fn usage_after_native_chat_error_is_filtered_on_wire_and_in_report() {
 
 #[tokio::test]
 async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() {
-    let baselines: Value =
-        serde_json::from_str(include_str!("../fixtures/streaming_wire.json")).unwrap();
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
     for case in native_failure_content_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines
-            .as_array()
-            .unwrap()
             .iter()
             .find(|value| value["name"] == case.name)
             .unwrap();

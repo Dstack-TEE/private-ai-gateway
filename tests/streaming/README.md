@@ -1,6 +1,6 @@
 # Streaming wire characterization
 
-`streaming_wire.json` records the unmodified streaming behavior at revision
+`streaming_wire.jsonl` records the unmodified streaming behavior at revision
 `0edde219`, before the typed event migration. The corpus compares concatenated
 HTTP entity bytes, source and returned SHA-256 hashes, complete signed receipts,
 signature validity, control-plane reports (including usage, cost and route
@@ -31,8 +31,10 @@ cargo test --locked -j 8 --lib exact_wire_characterization_corpus
 refactoring differences: preserve the original snapshot and explicitly identify
 any approved parsing correction with its old and new expectation.
 
-`streaming_corrections.json` records every approved difference with the original
-wire bytes and the corrected snapshot. Of the 93 cases, 47 match main exactly and 46 pin approved corrections.
+Both fixtures use compact JSON Lines, one object per case sorted by case name.
+`streaming_corrections.jsonl` records every approved difference with the original
+wire bytes and the corrected snapshot; its case name is `expected.name`.
+Of the 93 cases, 47 match main exactly and 46 pin approved corrections.
 The failure cases cover each destination and bridge. Native failures retain
 their canonical output, including rate-limit codes on Chat, Messages and both
 Responses terminal forms. Failed Chat usage keeps public token counts and cost
