@@ -204,6 +204,10 @@ forward the original `Host`.
 
 ### Streaming keepalives and early commit
 
+`middleware.sse_keepalive_ms` applies to middleware. Zero disables both middleware
+idle heartbeats and early commitment. Direct serving uses the same keep-alive stage
+with a fixed 5-second interval; it has no configuration setting or early commit.
+
 The interval starts when the gateway begins forwarding to an upstream. If an
 eligible stream has no upstream response headers after one interval, the
 gateway commits `200 text/event-stream` and emits `: PROCESSING` comments until

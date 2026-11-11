@@ -249,7 +249,11 @@ are omitted. Retry values use decimal integer notation. Upstream comments and
 empty blocks are omitted; generated errors have no leading blank block. Unedited
 data strings retain their text, including JSON
 whitespace. JSON changes such as identity rewriting, cost injection or encryption
-produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments.
+produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments. Direct
+serving emits this heartbeat after 5 seconds of upstream idleness through the same
+keep-alive stage as middleware. Its interval is fixed and is not configurable.
+Middleware uses `middleware.sse_keepalive_ms`; zero disables middleware heartbeats
+and early commitment.
 
 Protocol event names and `[DONE]` data are matched exactly, including whitespace.
 Known control names that contradict the payload type fail the upstream stream.
@@ -262,7 +266,11 @@ sanitizer. Native Responses retains its two terminal forms: `error` and
 `response.failed`, with output, usage and cost in the failed response object.
 For a failure crossing a bridge, Chat emits an error and one `[DONE]`, Messages
 emits an `error` event, and Responses emits `response.failed`. Failure alone does
-not create bridge startup events. Multiline JSON data is interpreted and metered
+not create bridge startup events. A bridge closes content already emitted before
+its failure terminal, preserving partial output in a failed Responses object.
+Sanitization follows every payload's existing schema and identity rules regardless
+of unknown or mismatched SSE names; ingress classification determines outcome.
+Unrepresentable bridge payloads are upstream transport failures. Multiline JSON data is interpreted and metered
 once as one payload.
 
 Failure evidence remains sticky through the source protocol's terminal. Later
