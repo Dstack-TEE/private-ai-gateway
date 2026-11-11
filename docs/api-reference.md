@@ -238,8 +238,10 @@ In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
 SSE fields use WHATWG parsing with LF, CRLF or bare CR line endings and an optional
 leading UTF-8 BOM. Only `data` fields dispatch payloads: a bare `[DONE]` or bare
 JSON line is an unknown field. A colonless `event` resets the event name. Data
-fields join with LF, including empty data fields. A pending block without its
-terminating blank line is discarded at EOF. Invalid UTF-8 in a recognized field
+fields join with LF, including empty data fields. At clean EOF, a final block
+ending on a complete field line is dispatched even without its blank delimiter;
+a genuinely incomplete final line is discarded. A read failure or truncated EOF
+before the destination terminal emits the protocol error tail. Invalid UTF-8 in a recognized field
 fails the upstream read; it is never replaced with another character.
 
 The gateway returns canonical SSE framing: LF line endings, one space after each
