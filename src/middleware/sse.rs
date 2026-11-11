@@ -157,6 +157,7 @@ struct AccountingState {
     last_usage: Option<Value>,
     start_usage: Option<Value>,
     upstream_usage: Option<UpstreamUsage>,
+    bridge: Option<super::stream_transform::BridgeHandle>,
     ttft_ms: Option<u64>,
     ingress_terminal: bool,
     settled: bool,
@@ -178,6 +179,7 @@ impl Accounting {
                 upstream_usage: None,
                 ttft_ms: None,
                 ingress_terminal: false,
+                bridge: None,
                 settled: false,
             }))),
             pending,
@@ -308,6 +310,27 @@ impl AccountingHandle {
         state.report.attempt_index = attempt;
         state.report.upstream_status = status;
     }
+    pub(crate) fn bridge(&self, bridge: super::stream_transform::BridgeHandle) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).bridge = Some(bridge);
+    }
+    pub(crate) fn has_bridge(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bridge
+            .is_some()
+    }
+    pub(crate) fn close_bridge(&self) -> super::stream_transform::BridgeClosure {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bridge
+            .as_ref()
+            .map_or_else(
+                Default::default,
+                super::stream_transform::BridgeHandle::close,
+            )
+    }
     pub fn upstream_usage(&self, usage: UpstreamUsage) {
         self.0
             .lock()
@@ -332,6 +355,12 @@ impl AccountingHandle {
         let destination = sse_protocol(&state.report.endpoint);
         let source = event.source_protocol;
         let bridged = source.is_some_and(|source| source != destination);
+        if record.unconverted
+            && (source != Some(SseProtocol::OpenaiChat)
+                || state.report.endpoint == crate::aggregator::service::COMPLETIONS_PATH)
+        {
+            return None;
+        }
         let mut wire_usage = None;
         record.edit_json(|parsed| {
             // Filter each usage object once, including when it is emitted but
@@ -374,7 +403,7 @@ impl AccountingHandle {
             if bridged {
                 billed = match (source, destination) {
                     (Some(SseProtocol::AnthropicMessages), _) => response_transform::chat_usage(
-                        Some(&billed),
+                        state.start_usage.as_ref(),
                         response_transform::i64_field(&billed, "output_tokens"),
                     ),
                     (_, SseProtocol::AnthropicMessages) => {

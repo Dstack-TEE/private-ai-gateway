@@ -199,6 +199,7 @@ struct Case {
     non_sse: bool,
     lease_handoff: bool,
     fail_publish: bool,
+    metrics: bool,
     chunk_size: usize,
     transport_error: bool,
     direct_idle: bool,
@@ -218,6 +219,7 @@ impl Case {
             non_sse: false,
             lease_handoff: false,
             fail_publish: false,
+            metrics: false,
             chunk_size: 7,
             transport_error: false,
             direct_idle: false,
@@ -493,7 +495,7 @@ async fn capture(case: &Case) -> Value {
     server.abort();
     let _ = server.await;
     let mut snapshot = json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports});
-    if case.fail_publish {
+    if case.fail_publish || case.metrics {
         snapshot["metrics"] = String::from_utf8(service.metrics().unwrap().body)
             .unwrap()
             .into();
@@ -655,6 +657,112 @@ fn final_review_cases() -> Vec<Case> {
     cases
 }
 
+fn differential_regression_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    {
+        let mut case = Case::new("diff_chat_chat_conflicting_types_1", Endpoint::ChatComplete, "event: message_stop\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"private\"}}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_messages_error_middle_1", Endpoint::Messages, "data: {\"id\":\"upstream-id\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_responses_valid_1", Endpoint::CreateModelResponse, "data: {\"id\":\"upstream-id\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_responses_error_middle_1", Endpoint::CreateModelResponse, "data: {\"id\":\"upstream-id\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_complete_error_after_terminal_1", Endpoint::Complete, "data: {\"id\":\"upstream-id\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\ndata: [DONE]\n\ndata: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_complete_usage_after_error_1", Endpoint::Complete, "data: {\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_chat_unknown_name_1", Endpoint::ChatComplete, "event: start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_chat_missing_type_1", Endpoint::ChatComplete, "event: message_start\ndata: {\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_chat_conflicting_types_1", Endpoint::ChatComplete, "event: message_stop\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_chat_usage_after_error_1", Endpoint::ChatComplete, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_messages_multiline_1", Endpoint::Messages, "data: {\"usage\":\ndata: {\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_responses_error_middle_1", Endpoint::CreateModelResponse, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_responses_usage_after_error_1", Endpoint::CreateModelResponse, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_legacy_complete_usage_after_terminal_1", Endpoint::Complete, "data: {\"completion\":\"hi\",\"model\":\"upstream-model\",\"log_id\":\"upstream-id\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\ndata: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_legacy_complete_terminal_transport_1", Endpoint::Complete, "data: {\"completion\":\"hi\",\"model\":\"upstream-model\",\"log_id\":\"upstream-id\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\n", "anthropic");
+        case.chunk_size = 1;
+        case.transport_error = true;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("native_responses_diff_responses_responses_conflicting_types_1", Endpoint::CreateModelResponse, "event: response.in_progress\ndata: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_chat_responses_multiline_1", Endpoint::CreateModelResponse, "data: {\"usage\":\ndata: {\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "openai");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_messages_chat_error_after_terminal_1", Endpoint::ChatComplete, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_legacy_complete_error_after_terminal_1", Endpoint::Complete, "data: {\"completion\":\"hi\",\"model\":\"upstream-model\",\"log_id\":\"upstream-id\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    {
+        let mut case = Case::new("diff_legacy_complete_usage_after_error_1", Endpoint::Complete, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\ndata: [DONE]\n\n", "anthropic");
+        case.chunk_size = 1;
+        cases.push(case);
+    }
+    cases
+}
+
 fn review_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     for early in [false, true] {
@@ -776,6 +884,7 @@ async fn exact_wire_characterization_corpus() {
     cases.push(usage_after_failure_case());
     cases.extend(native_failure_content_cases());
     cases.extend(final_review_cases());
+    cases.extend(differential_regression_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -1150,4 +1259,128 @@ async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
     assert_eq!(reports[0]["errorMessage"], "internal_error");
     assert_eq!(reports[0]["errorSource"], "gateway");
     assert!(snapshot["receipt"].is_null());
+}
+
+#[tokio::test]
+async fn unknown_event_names_cannot_disable_payload_sanitation() {
+    for case in final_review_cases().into_iter().take(4) {
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        assert!(!wire.contains("upstream-id"), "{wire}");
+        assert!(!wire.contains("upstream-model"), "{wire}");
+        assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"), "{wire}");
+        assert!(wire.contains("req-fixture"), "{wire}");
+        assert!(wire.contains("fixture-model"), "{wire}");
+        assert_eq!(snapshot["reports"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["reports"][0]["status"], 200);
+        assert_eq!(snapshot["before_eof"]["report"], false);
+        assert_eq!(snapshot["signature_valid"], true);
+    }
+}
+
+#[tokio::test]
+async fn malformed_bridge_payload_is_an_upstream_read_failure() {
+    for mut case in final_review_cases().into_iter().skip(4).take(4) {
+        case.metrics = true;
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        let after_terminal = case.name.contains("after_");
+        assert_eq!(reports[0]["status"], if after_terminal { 200 } else { 502 });
+        if after_terminal {
+            assert!(
+                !wire.contains("upstream provider returned an error"),
+                "{wire}"
+            );
+        } else {
+            assert_eq!(reports[0]["errorMessage"], "upstream_transport");
+            assert!(reports[0].get("errorSource").is_none());
+            assert!(wire.contains("The upstream provider returned an error"));
+        }
+        assert!(!wire.starts_with("\n\n"), "{wire}");
+        let metrics = snapshot["metrics"].as_str().unwrap();
+        if case.name != "malformed_after_chat_terminal" {
+            assert!(
+                metrics.lines().any(|line| line
+                    .starts_with("private_ai_gateway_stream_errors_total{")
+                    && line.contains("kind=\"upstream_read\"")
+                    && line.ends_with(" 1")),
+                "{metrics}"
+            );
+        }
+        assert!(
+            !metrics.lines().any(|line| line
+                .starts_with("private_ai_gateway_stream_errors_total{")
+                && line.contains("kind=\"transform\"")),
+            "{metrics}"
+        );
+        if case.endpoint == Endpoint::ChatComplete {
+            assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+        } else if !after_terminal {
+            assert!(wire.starts_with("event: error\n"), "{wire}");
+        } else {
+            assert!(
+                wire.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+                "{wire}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn direct_idle_stream_emits_the_default_gateway_heartbeat() {
+    let case = final_review_cases().pop().unwrap();
+    let snapshot = capture(&case).await;
+    assert_eq!(snapshot["wire"], ": PROCESSING\n\ndata: [DONE]\n\n");
+    assert_eq!(
+        snapshot["before_eof"],
+        json!({"receipt":false,"report":false})
+    );
+    assert_eq!(snapshot["reports"], json!([]));
+    assert_eq!(snapshot["signature_valid"], true);
+}
+
+#[tokio::test]
+async fn bridge_failures_close_existing_content_and_keep_continuation_accounting() {
+    for case in differential_regression_cases().into_iter().filter(|case| {
+        case.name.contains("error_middle") || case.name.contains("usage_after_error")
+    }) {
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], 502);
+        assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+        assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"), "{wire}");
+        assert!(!reports[0].to_string().contains("PRIVATE_UPSTREAM_DETAIL"));
+        if case.name.contains("error_middle") {
+            let stop = if case.endpoint == Endpoint::Messages {
+                "content_block_stop"
+            } else {
+                "response.output_item.done"
+            };
+            assert!(
+                wire.find(stop).unwrap()
+                    < wire
+                        .find("The upstream provider returned an error")
+                        .unwrap(),
+                "{wire}"
+            );
+            if case.endpoint == Endpoint::CreateModelResponse {
+                assert!(wire.contains("\"text\":\"hi\""), "{wire}");
+                assert!(wire.ends_with("\"sequence_number\":8}\n\n"), "{wire}");
+            }
+        } else if case.name.contains("messages_responses") {
+            assert!(reports[0]["usage"].is_null());
+        } else if case.name.contains("messages_chat") {
+            assert!(reports[0]["usage"].get("prompt_tokens").is_none());
+            assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
+            assert!(wire.contains("\"finish_reason\":\"stop\""), "{wire}");
+        } else if case.format == "anthropic" {
+            assert!(reports[0]["usage"].is_null());
+        } else {
+            assert!(wire.contains("\"choices\":[],\"usage\":"), "{wire}");
+        }
+    }
 }

@@ -182,35 +182,6 @@ pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
     }
 }
 
-/// Streaming identity uses the ingress kind, including named events whose
-/// payload omits a redundant top-level type.
-pub(crate) fn rewrite_stream_identity(
-    body: &mut Value,
-    identity: &ResponseIdentity,
-    kind: crate::sse_protocol::EventKind,
-) {
-    use crate::sse_protocol::EventKind;
-    let Some(object) = body.as_object_mut() else {
-        return;
-    };
-    let nested = match kind {
-        EventKind::MessageStart => Some("message"),
-        EventKind::ResponseCreated
-        | EventKind::ResponseInProgress
-        | EventKind::ResponseCompleted
-        | EventKind::ResponseIncomplete
-        | EventKind::ResponseFailed => Some("response"),
-        _ => None,
-    };
-    if let Some(key) = nested {
-        if let Some(object) = object.get_mut(key).and_then(Value::as_object_mut) {
-            rewrite_id_and_model(object, identity);
-        }
-    } else {
-        rewrite_id_and_model(object, identity);
-    }
-}
-
 /// Replace `id`/`model` where they already exist, on whichever object carries
 /// the response identity.
 fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &ResponseIdentity) {
@@ -655,7 +626,7 @@ fn canonicalize_body(
     match endpoint {
         Endpoint::ChatComplete => canonicalize_chat_completion(body, filter_usage_fields),
         Endpoint::Complete => canonicalize_text_completion(body, filter_usage_fields),
-        Endpoint::CreateModelResponse => canonicalize_responses(body),
+        Endpoint::CreateModelResponse => canonicalize_responses(body, filter_usage_fields),
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => {}
         Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
@@ -665,35 +636,12 @@ fn canonicalize_body(
     }
 }
 
-/// Sanitation changes representation; protocol identity and outcome come from
-/// ingress metadata rather than the payload's optional type field.
+/// Sanitation follows the payload schema even for unknown SSE event names.
+/// Ingress metadata remains authoritative for protocol identity and outcome.
 /// Streaming usage is filtered by accounting, including on failed turns.
-pub(crate) fn canonicalize_stream(
-    body: &mut Value,
-    endpoint: Endpoint,
-    meaning: crate::sse_protocol::EventMeaning,
-    request_id: Option<&str>,
-) {
-    use crate::sse_protocol::EventKind;
+pub(crate) fn canonicalize_stream(body: &mut Value, endpoint: Endpoint, request_id: Option<&str>) {
     match endpoint {
         Endpoint::Messages => {}
-        Endpoint::CreateModelResponse => {
-            let Some(object) = body.as_object_mut() else {
-                return;
-            };
-            match meaning.kind {
-                EventKind::ResponseCreated
-                | EventKind::ResponseInProgress
-                | EventKind::ResponseCompleted
-                | EventKind::ResponseIncomplete
-                | EventKind::ResponseFailed => {
-                    if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                        canonicalize_responses_object(inner, false);
-                    }
-                }
-                _ => {}
-            }
-        }
         _ => canonicalize_body(body, endpoint, request_id, false),
     }
 }
@@ -803,7 +751,7 @@ fn canonicalize_text_completion(body: &mut Value, filter_usage_fields: bool) {
 ///   envelope carrying no response object and nothing upstream-authored beyond
 ///   content — pass through verbatim. There is no schema to filter an envelope
 ///   against, and applying the final-object allowlist would empty it.
-fn canonicalize_responses(body: &mut Value) {
+fn canonicalize_responses(body: &mut Value, filter_usage_fields: bool) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
@@ -815,11 +763,11 @@ fn canonicalize_responses(body: &mut Value) {
         Some("error" | "response.error") => sanitize_responses_error_event(object),
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                canonicalize_responses_object(inner, true);
+                canonicalize_responses_object(inner, filter_usage_fields);
             }
         }
         Some(_) => {}
-        None => canonicalize_responses_object(object, true),
+        None => canonicalize_responses_object(object, filter_usage_fields),
     }
 }
 

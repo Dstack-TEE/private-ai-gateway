@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use super::e2ee_crypto::encrypt_e2ee_record;
 use super::{
     AciService, Clock, E2eeRequestContext, MiddlewareReceiptDraft, MiddlewareReceiptJournal,
-    ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream, CHAT_COMPLETIONS_PATH,
+    ReceiptOwner, ReceiptStore, ServiceError, ServiceResponseStream,
 };
 use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
@@ -22,7 +22,7 @@ use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
 use crate::middleware::request_transform::Endpoint;
 use crate::middleware::response_transform::{self, ResponseIdentity};
-use crate::middleware::sse::{Accounting, AccountingHandle, StreamFailure};
+use crate::middleware::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamFailure};
 use crate::middleware::types::{ErrorClass, ErrorSource};
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
@@ -342,14 +342,8 @@ impl ResponseOwner {
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
         let Some(event) = record.event.as_ref().filter(|_| failure) else {
-            // Native streams retain their content and continuation records.
-            let native = self.native_source(
-                record
-                    .event
-                    .as_ref()
-                    .and_then(|event| event.source_protocol),
-            );
-            return if self.accounting.is_some() && self.failure.is_some() && !native {
+            // Only records the bridge actually converted reach the destination.
+            return if self.accounting.is_some() && self.failure.is_some() && record.unconverted {
                 Ok(Bytes::new())
             } else {
                 self.encode(record)
@@ -384,30 +378,25 @@ impl ResponseOwner {
     }
 
     fn native_source(&self, source: Option<SseProtocol>) -> bool {
-        source.is_some()
-            && source == self.protocol
-            && (self.protocol != Some(SseProtocol::OpenaiChat)
-                || self.endpoint == CHAT_COMPLETIONS_PATH)
+        source.is_none()
+            || (source == self.protocol
+                && !self
+                    .accounting
+                    .as_ref()
+                    .is_some_and(|accounting| accounting.handle.has_bridge()))
     }
 
     fn sanitize_native_failure(&self, record: &mut Record, protocol: SseProtocol) {
         let Some(event) = &record.event else { return };
-        let mut meaning = event.meaning;
-        // Failure terminals carried by extension events keep their native
-        // schema. This selection uses ingress meaning, never payload re-detection.
+        let meaning = event.meaning;
         let endpoint = match protocol {
             SseProtocol::OpenaiChat => Endpoint::ChatComplete,
             SseProtocol::AnthropicMessages => Endpoint::Messages,
-            SseProtocol::OpenaiResponses => {
-                if meaning.terminal == Some(TerminalKind::Failed) {
-                    meaning.kind = EventKind::ResponseFailed;
-                }
-                Endpoint::CreateModelResponse
-            }
+            SseProtocol::OpenaiResponses => Endpoint::CreateModelResponse,
         };
         record.edit_json(|body| {
             if let Some(identity) = &self.identity {
-                response_transform::rewrite_stream_identity(body, identity, meaning.kind);
+                response_transform::rewrite_identity(body, identity);
             }
             match (protocol, meaning.terminal) {
                 (SseProtocol::AnthropicMessages, Some(TerminalKind::Error)) => {
@@ -426,7 +415,6 @@ impl ResponseOwner {
                 _ => response_transform::canonicalize_stream(
                     body,
                     endpoint,
-                    meaning,
                     self.request_id.as_deref(),
                 ),
             }
@@ -461,7 +449,13 @@ impl ResponseOwner {
             .filter(|error| !error.is_null())
             .cloned();
         let request_id = self.request_id.as_deref();
-        match protocol {
+        let closed = self
+            .accounting
+            .as_ref()
+            .map(|accounting| accounting.handle.close_bridge())
+            .unwrap_or_default();
+        let mut output = closed.records;
+        let failure = match protocol {
             SseProtocol::OpenaiChat | SseProtocol::AnthropicMessages => {
                 // The Chat envelope is omitted for a bridged failure, but its
                 // receipt still identifies the same response as before.
@@ -511,13 +505,25 @@ impl ResponseOwner {
                     "output":[],
                     "usage":usage,
                 }, "type":"response.failed", "sequence_number":self.sequence.map_or(0, |n| n.saturating_add(1))});
-                vec![Record::generated(
-                    Some("response.failed"),
-                    Payload::Json(body),
-                    EventMeaning::generated(protocol, EventKind::ResponseFailed),
-                )]
+                let mut terminal = closed.response.unwrap_or_else(|| {
+                    Record::generated(
+                        Some("response.failed"),
+                        Payload::Json(body.clone()),
+                        EventMeaning::generated(protocol, EventKind::ResponseFailed),
+                    )
+                });
+                terminal.edit_json(|existing| {
+                    if let Some(identity) = &self.identity {
+                        response_transform::rewrite_identity(existing, identity);
+                    }
+                    existing["response"]["error"] = body["response"]["error"].clone();
+                    existing["response"]["usage"] = body["response"]["usage"].clone();
+                });
+                vec![terminal]
             }
-        }
+        };
+        output.extend(failure);
+        output
     }
 
     fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
@@ -762,9 +768,10 @@ pub(super) fn direct_response(
         Box::pin(inner.map(|item| item.map_err(ServiceError::Upstream)));
     let protocol = is_sse.then(|| crate::sse_protocol::sse_protocol(&endpoint));
     let inner = match protocol {
-        Some(protocol) => {
-            ResponseInput::Events(Box::pin(DecodedStream::new(inner, Some(protocol))))
-        }
+        Some(protocol) => ResponseInput::Events(Box::pin(KeepAliveStream::new(
+            Box::pin(DecodedStream::new(inner, Some(protocol))),
+            Some(std::time::Duration::from_secs(5)),
+        ))),
         None => ResponseInput::Bytes(inner),
     };
     let mut owner = ResponseOwner::new(inner, None, e2ee, endpoint, protocol, request_id);

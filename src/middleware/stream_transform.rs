@@ -84,7 +84,8 @@ impl StreamTransform {
             .as_ref()
             .filter(|event| event.meaning.failure.is_some())
         {
-            state.passthrough |= !event.after_terminal;
+            state.passthrough |=
+                !event.after_terminal && !matches!(self, Self::AnthropicToOpenaiChat);
             return Ok(vec![record]);
         }
         match self {
@@ -93,28 +94,14 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
-                // A bridge that has stopped converting still forwards source
-                // usage for accounting. It has no destination payload to edit.
-                if state.passthrough
-                    && record
-                        .event
-                        .as_ref()
-                        .and_then(|event| event.source_protocol)
-                        != Some(crate::sse_protocol::sse_protocol(endpoint.path()))
-                {
+                if record.unconverted {
                     return Ok(vec![record]);
                 }
-                let meaning = record
-                    .event
-                    .as_ref()
-                    .map(|event| event.meaning)
-                    .unwrap_or_default();
                 record.edit_json(|body| {
-                    response_transform::rewrite_stream_identity(body, identity, meaning.kind);
+                    response_transform::rewrite_identity(body, identity);
                     response_transform::canonicalize_stream(
                         body,
                         *endpoint,
-                        meaning,
                         Some(identity.request_id.as_str()),
                     );
                 });
@@ -123,6 +110,7 @@ impl StreamTransform {
             _ => {}
         }
         if state.passthrough {
+            record.unconverted = true;
             return Ok(vec![record]);
         }
         if record.residual {
@@ -1269,13 +1257,53 @@ fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
     Ok(Some(vec![chat_event(body)]))
 }
 
+/// The owner can close content already emitted by a bridge before writing its
+/// failure terminal. This handle never detects errors or settles a response.
+#[derive(Clone)]
+pub(crate) struct BridgeHandle(Arc<Mutex<StreamState>>);
+
+#[derive(Default)]
+pub(crate) struct BridgeClosure {
+    pub records: Vec<Record>,
+    pub response: Option<Record>,
+}
+
+impl BridgeHandle {
+    pub(crate) fn close(&self) -> BridgeClosure {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut closed = BridgeClosure::default();
+        if let Some(stream) = &mut state.messages {
+            stream.close_text(true, &mut closed.records);
+        }
+        if let Some(stream) = &mut state.responses {
+            stream.close_text(true, &mut closed.records);
+            if stream.started() {
+                let response = stream
+                    .events
+                    .response("failed", Value::Null, Value::Null, None);
+                let mut terminal = Vec::new();
+                stream.events.emit(
+                    "response.failed",
+                    json!({"response": response}),
+                    &mut terminal,
+                );
+                closed.response = terminal.pop();
+            }
+        }
+        closed
+    }
+}
+
 /// Stateful event transforms. The source has already decoded and classified
 /// each payload, so neither conversion nor sanitation reparses wire bytes.
 pub(crate) struct EventTransformStream {
     inner: EventStream,
     transform: StreamTransform,
     fallback_id: String,
-    state: StreamState,
+    state: Arc<Mutex<StreamState>>,
     queue: VecDeque<Record>,
     inner_done: bool,
     pending_error: Option<ServiceError>,
@@ -1289,17 +1317,19 @@ impl EventTransformStream {
             inner,
             transform,
             fallback_id,
-            state: StreamState::default(),
+            state: Arc::default(),
             queue: VecDeque::new(),
             inner_done: false,
             pending_error: None,
             residual: false,
         }
     }
-    fn fail(&mut self, reason: &'static str) {
+    pub(crate) fn bridge(&self) -> BridgeHandle {
+        BridgeHandle(self.state.clone())
+    }
+    fn fail(&mut self, error: ServiceError) {
         self.inner_done = true;
-        self.pending_error
-            .get_or_insert(ServiceError::AdmissionInvariant(reason));
+        self.pending_error.get_or_insert(error);
     }
     fn enqueue(&mut self, records: Vec<Record>) {
         let bytes = records
@@ -1307,7 +1337,9 @@ impl EventTransformStream {
             .map(Record::buffered_bytes)
             .fold(0, usize::saturating_add);
         if bytes > MAX_EVENT_BYTES {
-            self.fail("converted SSE output exceeded the size cap");
+            self.fail(ServiceError::AdmissionInvariant(
+                "converted SSE output exceeded the size cap",
+            ));
         } else {
             self.queue.extend(records);
         }
@@ -1329,14 +1361,19 @@ impl Stream for EventTransformStream {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(record))) => {
                     this.residual |= record.residual;
-                    match this
-                        .transform
-                        .apply_record(record, &this.fallback_id, &mut this.state)
-                    {
+                    let output = this.transform.apply_record(
+                        record,
+                        &this.fallback_id,
+                        &mut this
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    match output {
                         Ok(records) => this.enqueue(records),
-                        Err(()) => {
-                            this.fail("provider sent an event this surface cannot represent")
-                        }
+                        Err(()) => this.fail(ServiceError::Upstream(UpstreamError::Transport(
+                            "provider sent an event this surface cannot represent".into(),
+                        ))),
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
@@ -1351,7 +1388,13 @@ impl Stream for EventTransformStream {
                         ));
                         continue;
                     }
-                    match this.transform.end_of_stream(&mut this.state) {
+                    let output = this.transform.end_of_stream(
+                        &mut this
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    match output {
                         Ok(Some(records)) => this.enqueue(records),
                         Ok(None) => {}
                         Err(()) => {

@@ -1294,18 +1294,26 @@ pub(super) fn build_metered_pipeline(
             Some(StreamTransform::OpenaiToAnthropicMessages(_))
         );
     let transformed: EventStream = match format_transform {
-        Some(transform) => Box::pin(EventTransformStream::new(visible, transform)),
+        Some(transform) => {
+            let stream = EventTransformStream::new(visible, transform);
+            accounting.bridge(stream.bridge());
+            Box::pin(stream)
+        }
         None => visible,
     };
     let surfaced: EventStream = match responses_bridge {
-        Some(echo) => Box::pin(EventTransformStream::new(
-            transformed,
-            StreamTransform::OpenaiChatToResponses(
-                echo.clone(),
-                inputs.identity.clone(),
-                upstream_usage.clone(),
-            ),
-        )),
+        Some(echo) => {
+            let stream = EventTransformStream::new(
+                transformed,
+                StreamTransform::OpenaiChatToResponses(
+                    echo.clone(),
+                    inputs.identity.clone(),
+                    upstream_usage.clone(),
+                ),
+            );
+            accounting.bridge(stream.bridge());
+            Box::pin(stream)
+        }
         None => transformed,
     };
     // Unconditional, unlike the two above: same-format streaming skips every
