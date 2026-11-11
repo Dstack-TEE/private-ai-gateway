@@ -66,6 +66,8 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
         UpstreamError::Upstream { .. }
         | UpstreamError::Routing(_)
         | UpstreamError::Transport(_)
+        | UpstreamError::SseLineOverflow
+        | UpstreamError::SseTruncated
         | UpstreamError::ResponseTooLarge
         | UpstreamError::ChannelBindingMismatch(_) => Some(502),
     }

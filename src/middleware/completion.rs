@@ -523,7 +523,6 @@ async fn run_inner(
                     };
                     return build_early_streaming_response(
                         service.clone(),
-                        control.clone(),
                         meter,
                         forward,
                         journal,
@@ -533,7 +532,6 @@ async fn run_inner(
                         received_body.clone(),
                         requester.clone(),
                         request_id.clone(),
-                        started,
                     );
                 }
             }
@@ -1101,7 +1099,6 @@ impl Meter {
 #[allow(clippy::too_many_arguments)]
 fn build_early_streaming_response(
     service: Arc<AciService>,
-    _control: ControlClient,
     mut meter: Meter,
     forward: Pin<Box<dyn Future<Output = Result<MiddlewareForwardResult, ServiceError>> + Send>>,
     journal: MiddlewareReceiptJournal,
@@ -1111,7 +1108,6 @@ fn build_early_streaming_response(
     received_body: Arc<Bytes>,
     requester: Option<ReceiptOwner>,
     request_id: String,
-    _started: Instant,
 ) -> Response {
     let endpoint_path = inputs.endpoint_path;
     let protocol = errors::sse_protocol(endpoint_path);
@@ -1651,6 +1647,8 @@ fn forward_error_status(err: &ServiceError) -> u16 {
         ServiceError::Upstream(
             UpstreamError::Upstream { .. }
             | UpstreamError::Transport(_)
+            | UpstreamError::SseLineOverflow
+            | UpstreamError::SseTruncated
             | UpstreamError::ResponseTooLarge
             | UpstreamError::ChannelBindingMismatch(_),
         )

@@ -1385,9 +1385,8 @@ impl Stream for EventTransformStream {
                 Poll::Ready(None) => {
                     this.inner_done = true;
                     if this.residual {
-                        this.pending_error = Some(ServiceError::Upstream(
-                            UpstreamError::Transport("provider ended mid-event".into()),
-                        ));
+                        this.pending_error =
+                            Some(ServiceError::Upstream(UpstreamError::SseTruncated));
                         continue;
                     }
                     let output = this.transform.end_of_stream(

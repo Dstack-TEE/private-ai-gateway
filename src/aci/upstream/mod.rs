@@ -134,6 +134,10 @@ pub enum UpstreamError {
     InvalidRequest(String),
     #[error("upstream transport error: {0}")]
     Transport(String),
+    #[error("upstream transport error: sse line overflow")]
+    SseLineOverflow,
+    #[error("upstream transport error: provider ended mid-event")]
+    SseTruncated,
     /// The buffered HTTP body or decompressed Chutes response exceeded the
     /// gateway's size limit. Reported to the client as a 502.
     #[error("buffered upstream response exceeds the endpoint size limit")]

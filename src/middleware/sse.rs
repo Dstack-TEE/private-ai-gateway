@@ -57,17 +57,13 @@ impl StreamFailure {
         };
         Self {
             status,
-            class: Some(
-                if matches!(err, ServiceError::Upstream(UpstreamError::Transport(message)) if message == "sse line overflow")
-                {
+            class: Some(match err {
+                ServiceError::Upstream(UpstreamError::SseLineOverflow) => {
                     ErrorClass::StreamLineOverflow
-                } else if matches!(err, ServiceError::Upstream(UpstreamError::Transport(message)) if message == "provider ended mid-event")
-                {
-                    ErrorClass::StreamTruncated
-                } else {
-                    ErrorClass::from(err)
-                },
-            ),
+                }
+                ServiceError::Upstream(UpstreamError::SseTruncated) => ErrorClass::StreamTruncated,
+                _ => ErrorClass::from(err),
+            }),
             source,
         }
     }

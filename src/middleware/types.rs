@@ -374,9 +374,10 @@ impl From<&UpstreamError> for ErrorClass {
         match err {
             UpstreamError::Routing(_) => Self::InternalError,
             UpstreamError::InvalidRequest(_) => Self::RequestShapingFailed,
-            UpstreamError::Transport(_) | UpstreamError::ResponseTooLarge => {
-                Self::UpstreamTransport
-            }
+            UpstreamError::Transport(_)
+            | UpstreamError::SseLineOverflow
+            | UpstreamError::SseTruncated
+            | UpstreamError::ResponseTooLarge => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
             UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,
             UpstreamError::Upstream { .. } => Self::UpstreamHttpError,

@@ -208,7 +208,7 @@ impl BlockLimit {
         }
         self.bytes += 1;
         if self.bytes > self.max_bytes {
-            return Err(upstream_error("sse line overflow"));
+            return Err(ServiceError::Upstream(UpstreamError::SseLineOverflow));
         }
         if crlf {
             return Ok(false);
@@ -615,9 +615,10 @@ mod tests {
         )
         .collect()
         .await;
-        assert!(
-            matches!(records.last().unwrap(), Err(ServiceError::Upstream(UpstreamError::Transport(message))) if message == "sse line overflow")
-        );
+        assert!(matches!(
+            records.last().unwrap(),
+            Err(ServiceError::Upstream(UpstreamError::SseLineOverflow))
+        ));
         let records: Vec<_> = DecodedStream::new(
             Box::pin(futures_util::stream::iter([Err(ServiceError::Upstream(
                 UpstreamError::Timeout("read".into()),
