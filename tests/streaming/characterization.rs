@@ -39,6 +39,7 @@ struct Gate {
 struct CheckpointStream {
     chunks: VecDeque<Bytes>,
     gate: Arc<Gate>,
+    transport_error: bool,
 }
 
 impl Stream for CheckpointStream {
@@ -49,6 +50,11 @@ impl Stream for CheckpointStream {
         }
         self.gate.waker.register(cx.waker());
         if self.gate.eof.load(Ordering::Acquire) {
+            if std::mem::take(&mut self.transport_error) {
+                return Poll::Ready(Some(Err(UpstreamError::Transport(
+                    "fixture read failed".into(),
+                ))));
+            }
             Poll::Ready(None)
         } else {
             Poll::Pending
@@ -102,6 +108,8 @@ struct Backend {
     content_type: &'static str,
     gate: Arc<Gate>,
     early: bool,
+    chunk_size: usize,
+    transport_error: bool,
 }
 
 #[async_trait]
@@ -127,11 +135,23 @@ impl UpstreamBackend for Backend {
     ) -> Result<UpstreamResponse, UpstreamError> {
         self.forward_prepared(req).await
     }
+    async fn forward_stream(
+        &self,
+        _: UpstreamRequest,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.stream().await
+    }
     async fn forward_stream_verified_prepared(
         &self,
         _: PreparedUpstreamRequest,
         _: &crate::aci::receipt::UpstreamVerifiedEvent,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.stream().await
+    }
+}
+
+impl Backend {
+    async fn stream(&self) -> Result<UpstreamStreamResponse, UpstreamError> {
         if self.early {
             self.gate.headers.notified().await;
         }
@@ -144,11 +164,12 @@ impl UpstreamBackend for Backend {
                     .chunks(if self.source.len() > 1024 * 1024 {
                         64 * 1024
                     } else {
-                        7
+                        self.chunk_size
                     })
                     .map(Bytes::copy_from_slice)
                     .collect(),
                 gate: self.gate.clone(),
+                transport_error: self.transport_error,
             }),
             served_instance_id: None,
         })
@@ -178,6 +199,9 @@ struct Case {
     non_sse: bool,
     lease_handoff: bool,
     fail_publish: bool,
+    chunk_size: usize,
+    transport_error: bool,
+    direct_idle: bool,
 }
 
 impl Case {
@@ -194,6 +218,9 @@ impl Case {
             non_sse: false,
             lease_handoff: false,
             fail_publish: false,
+            chunk_size: 7,
+            transport_error: false,
+            direct_idle: false,
         }
     }
 }
@@ -259,6 +286,8 @@ async fn capture(case: &Case) -> Value {
                 },
                 gate: gate.clone(),
                 early: case.early,
+                chunk_size: case.chunk_size,
+                transport_error: case.transport_error,
             }),
             Arc::new(Verifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -300,8 +329,32 @@ async fn capture(case: &Case) -> Value {
         nonce: Some("01".repeat(32)),
         timestamp: Some(1_700_000_000),
     });
-    let response = mw
-        .handle_completion(
+    let response = if case.direct_idle {
+        let StreamingForwardResult::Stream(forward) = service
+            .forward_chat_completion_stream_request(ChatCompletionRequest {
+                audio_form: None,
+                endpoint_path: path,
+                received_body: &serde_json::to_vec(&params).unwrap(),
+                forwarded_body: None,
+                aci_required: false,
+                aci_session_ids: vec![],
+                upstream_verification_event: None,
+                requester: None,
+                e2ee: None,
+                context: GatewayRequestContext {
+                    request_id: "req-fixture".into(),
+                    user_model: Some("fixture-model".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap()
+        else {
+            panic!("fixture must stream")
+        };
+        axum::response::Response::new(axum::body::Body::from_stream(forward.body))
+    } else {
+        mw.handle_completion(
             &service,
             CompletionInput {
                 audio_form: None,
@@ -326,7 +379,8 @@ async fn capture(case: &Case) -> Value {
                 tee_only: false,
             },
         )
-        .await;
+        .await
+    };
     let status = response.status().as_u16();
     let mut body = response.into_body().into_data_stream();
     let mut wire = Vec::new();
@@ -338,7 +392,15 @@ async fn capture(case: &Case) -> Value {
     while let Some(Some(chunk)) = body.next().now_or_never() {
         wire.extend_from_slice(&chunk.unwrap());
     }
-    let checkpoint_report = if case.buffered {
+    if case.direct_idle {
+        tokio::time::sleep(Duration::from_millis(5_010)).await;
+        while let Some(Some(chunk)) = body.next().now_or_never() {
+            wire.extend_from_slice(&chunk.unwrap());
+        }
+    }
+    let checkpoint_report = if case.direct_idle {
+        None
+    } else if case.buffered {
         Some(
             tokio::time::timeout(Duration::from_secs(3), reports.recv())
                 .await
@@ -372,14 +434,15 @@ async fn capture(case: &Case) -> Value {
             wire.extend_from_slice(&chunk.unwrap());
         }
     }
-    let report = match checkpoint_report {
-        Some(report) => report,
+    let mut all_reports = match checkpoint_report {
+        _ if case.direct_idle => vec![],
+        Some(report) => vec![report],
         None => tokio::time::timeout(Duration::from_secs(3), reports.recv())
             .await
             .unwrap()
+            .map(|report| vec![report])
             .unwrap(),
     };
-    let mut all_reports = vec![report];
     while let Ok(report) = reports.try_recv() {
         all_reports.push(report);
     }
@@ -448,6 +511,8 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
             content_type: "text/event-stream",
             gate: Arc::new(Gate::default()),
             early: false,
+            chunk_size: 7,
+            transport_error: false,
         }),
         Arc::new(InMemoryReceiptStore::default()),
         AciServiceConfig::for_test(),
@@ -563,6 +628,31 @@ fn native_failure_content_cases() -> Vec<Case> {
     .into_iter()
     .map(|(name, endpoint, source, format)| Case::new(name, endpoint, source, format))
     .collect()
+}
+
+fn final_review_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    for (name, endpoint, source, format) in [
+        ("native_responses_unknown_lifecycle", Endpoint::CreateModelResponse, "event: response.queued\ndata: {\"type\":\"response.queued\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"queued\",\"output\":[],\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai"),
+        ("native_responses_extension_identity", Endpoint::CreateModelResponse, "event: lifecycle\ndata: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"in_progress\",\"output\":[],\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai"),
+        ("messages_extension_identity", Endpoint::Messages, "event: start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\n", "anthropic"),
+        ("native_responses_missing_type", Endpoint::CreateModelResponse, "data: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"completed\",\"output\":[],\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai"),
+        ("malformed_chat_messages", Endpoint::Messages, "data: not JSON\n\n", "openai"),
+        ("malformed_messages_chat", Endpoint::ChatComplete, "data: not JSON\n\n", "anthropic"),
+        ("malformed_after_chat_terminal", Endpoint::Messages, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\ndata: not JSON\n\n", "openai"),
+        ("malformed_after_messages_terminal", Endpoint::ChatComplete, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: not JSON\n\n", "anthropic"),
+    ] {
+        cases.push(Case::new(name, endpoint, source, format));
+    }
+    let mut direct = Case::new(
+        "direct_idle_heartbeat",
+        Endpoint::ChatComplete,
+        ": upstream thinking\n\n",
+        "openai",
+    );
+    direct.direct_idle = true;
+    cases.push(direct);
+    cases
 }
 
 fn review_cases() -> Vec<Case> {
@@ -685,6 +775,7 @@ async fn exact_wire_characterization_corpus() {
     cases.push(failed_usage_case());
     cases.push(usage_after_failure_case());
     cases.extend(native_failure_content_cases());
+    cases.extend(final_review_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
