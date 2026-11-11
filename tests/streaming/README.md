@@ -61,44 +61,6 @@ Unedited JSON text retains its whitespace. `accounting.rs` exercises the product
 typed stages and response owner for cost, usage, timeout, cancellation and E2EE
 failure settlement, without a public byte-transform API.
 
-The reproducible differential in `differential.rs` uses seed `56320261111`: nine
-supported source/destination paths, 30 input patterns and two chunk splits per
-pattern (540 cases). The original 24 patterns cover unknown and mismatched
-names/types, missing types, extensions, failure and terminal positions, extra
-provider fields and usage, malformed/non-JSON payloads, transport errors and
-framing. The added patterns reset inside the field name, inside data, and after
-the final data line, or end cleanly on LF, CRLF and CR. Every split pair has
-identical snapshots on both revisions.
-
-`streaming_differential_main.jsonl` contains the main `0edde219` snapshots, one
-JSON object per line. `streaming_differential_corrections.json` retains a reason
-and the exact expected snapshot for every approved difference. The total new
-snapshot size is below 2 MB. Run the complete comparison without credentials:
-
-```sh
-cargo test --locked -j 8 --lib seeded_wire_differential -- --nocapture
-```
-
-Of the 540 cases, 264 match main exactly and 276 differ only in listed corrections.
-The 18 original pending-EOF inputs now dispatch complete final lines as main does:
-14 match exactly; the other four differ only in the existing legacy sentinel or
-bridged usage privacy corrections. Genuinely incomplete clean EOF emits a failure
-tail; resets retain main's 502 `upstream_transport` report and tail with canonical
-blank-free framing. No new tail is appended after a produced terminal.
-
-Usage follows main's payload schema independently of the classified control kind.
-Unknown/mismatched Messages names retain main's usage on native and bridged paths,
-while the approved classifier-based Chat preamble differences remain. Native
-Messages usage stays unfiltered as on main. Source receipt hashes remain unchanged;
-optional response identity can differ only where discarded incomplete data or a
-removed legacy failure completion previously supplied it. Minimal reproductions
-of fixed bugs remain in the ordinary corpus as well.
-
-`UPDATE_STREAMING_DIFFERENTIAL=1` records snapshots and must only be used with
-main's production code plus the test-only recording harness. The committed main
-snapshot was recorded in the owned checkout on the existing instrumentation-only
-baseline of `0edde219`, never on the typed implementation.
-
 Streaming sanitation always follows the existing payload schema, regardless of
 unknown event names. Unrepresentable bridge payloads are upstream read failures;
 queue overflow remains a gateway failure. Direct serving uses the existing idle

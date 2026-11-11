@@ -657,9 +657,6 @@ fn final_review_cases() -> Vec<Case> {
     cases
 }
 
-#[path = "differential.rs"]
-mod differential;
-
 fn eof_and_reset_cases() -> Vec<Case> {
     let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
     let messages = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
