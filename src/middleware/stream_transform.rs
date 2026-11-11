@@ -241,31 +241,33 @@ fn anthropic_chat_chunk(
     strict: bool,
 ) -> Option<Vec<Record>> {
     let model = state.model.clone().unwrap_or_default();
+    if let Some(usage) = super::sse::message_start_usage(parsed) {
+        state.usage = Some(usage.clone());
+    }
 
-    if kind == EventKind::MessageStart {
-        if let Some(usage) = parsed.get("message").and_then(|m| m.get("usage")) {
-            state.model = Some(
-                parsed["message"]["model"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .into(),
-            );
-            state.usage = Some(usage.clone());
-            let body = json!({
-                "id": fallback_id,
-                "object": "chat.completion.chunk",
-                "created": now_secs(),
-                "model": state.model.clone().unwrap_or_default(),
-                "provider": "anthropic",
-                "choices": [{
-                    "delta": { "content": "" },
-                    "index": 0,
-                    "logprobs": Value::Null,
-                    "finish_reason": Value::Null,
-                }],
-            });
-            return Some(vec![chat_event(body)]);
-        }
+    if kind == EventKind::MessageStart
+        && parsed.get("message").and_then(|m| m.get("usage")).is_some()
+    {
+        state.model = Some(
+            parsed["message"]["model"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+        );
+        let body = json!({
+            "id": fallback_id,
+            "object": "chat.completion.chunk",
+            "created": now_secs(),
+            "model": state.model.clone().unwrap_or_default(),
+            "provider": "anthropic",
+            "choices": [{
+                "delta": { "content": "" },
+                "index": 0,
+                "logprobs": Value::Null,
+                "finish_reason": Value::Null,
+            }],
+        });
+        return Some(vec![chat_event(body)]);
     }
 
     if kind == EventKind::MessageDelta {

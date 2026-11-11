@@ -54,6 +54,32 @@ async fn public_decoder_rejects_invalid_utf8_instead_of_replacing_it() {
     }
 }
 
+#[tokio::test]
+async fn public_decoder_discards_complete_field_lines_without_a_blank_line_at_eof() {
+    for input in [
+        b"data: [DONE]\n".as_slice(),
+        b"data: [DONE]\r\n",
+        b"data: [DONE]\r",
+        b"data: [DONE]",
+        b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n",
+    ] {
+        for split in 0..=input.len() {
+            assert!(
+                decode(input, split).await.is_empty(),
+                "{input:?} split {split}"
+            );
+        }
+    }
+    assert_eq!(
+        decode(b"data: [DONE]\n\n", 7)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>(),
+        vec![Sse::default().data("[DONE]")],
+    );
+}
+
 #[test]
 fn public_encoder_canonicalizes_fields_without_touching_data_text() {
     let data = " {\"value\" : 1 }\n";

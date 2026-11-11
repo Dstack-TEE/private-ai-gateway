@@ -281,6 +281,18 @@ impl Stream for LimitedInput {
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => this.pending = bytes,
+                Poll::Ready(None) if !this.limit.at_boundary() && this.limit.line_bytes == 0 => {
+                    // The library discards pending blocks at EOF. Complete the
+                    // delimiter only when the source ended on a complete line;
+                    // a CR needs another CR, since LF would only finish CRLF.
+                    this.finished = true;
+                    this.boundary.store(true, Ordering::Relaxed);
+                    return Poll::Ready(Some(Ok(Bytes::from_static(if this.limit.cr {
+                        b"\r"
+                    } else {
+                        b"\n"
+                    }))));
+                }
                 Poll::Ready(other) => {
                     this.finished = true;
                     return Poll::Ready(other);
@@ -455,8 +467,60 @@ mod tests {
                     serialize(&records[0]).unwrap(),
                     b"event: \ndata: { \"x\" : 1 }\nid: last\nretry: 7\n\n".as_slice()
                 );
-                assert!(records[1].residual);
-                assert!(serialize(&records[1]).unwrap().is_empty());
+                assert!(!records[1].residual);
+                assert_eq!(
+                    serialize(&records[1]).unwrap(),
+                    b"data: pending\n\n".as_slice()
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn clean_eof_completes_only_terminated_field_lines_at_every_split() {
+        for ending in ["\n", "\r\n", "\r", ""] {
+            for (body, protocol) in [
+                ("data: [DONE]".to_string(), SseProtocol::OpenaiChat),
+                (
+                    format!(
+                        "event: message_stop{}data: {{\"type\":\"message_stop\"}}",
+                        if ending.is_empty() { "\n" } else { ending }
+                    ),
+                    SseProtocol::AnthropicMessages,
+                ),
+            ] {
+                for blank in [false, true] {
+                    let input = format!("{body}{ending}{}", if blank { ending } else { "" });
+                    for split in 0..=input.len() {
+                        let source = futures_util::stream::iter([
+                            Ok(Bytes::copy_from_slice(&input.as_bytes()[..split])),
+                            Ok(Bytes::copy_from_slice(&input.as_bytes()[split..])),
+                        ]);
+                        let records: Vec<_> = DecodedStream::new(Box::pin(source), Some(protocol))
+                            .collect::<Vec<_>>()
+                            .await
+                            .into_iter()
+                            .map(Result::unwrap)
+                            .collect();
+                        assert_eq!(records.len(), 1, "{input:?} split {split}");
+                        assert_eq!(
+                            records[0].residual,
+                            ending.is_empty(),
+                            "{input:?} split {split}"
+                        );
+                        if !ending.is_empty() {
+                            assert!(
+                                records[0]
+                                    .event
+                                    .as_ref()
+                                    .unwrap()
+                                    .meaning
+                                    .terminal
+                                    .is_some(),
+                                "{input:?} split {split}"
+                            );
+                        }
+                    }
+                }
             }
         }
     }

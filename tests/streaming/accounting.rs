@@ -214,9 +214,9 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
         (Chat, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", 200, None),
         (Messages, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n", 200, None),
         (Responses, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1}\n\n", 200, None),
-        (Chat, "data: {\"choices\":[{\"delta\":{}}]}\n", 502, Some("stream_truncated")),
+        (Chat, "data: {\"choices\":[{\"delta\":{}}]}\n", 200, None),
         (Chat, "data: {\"choices\":[", 502, Some("stream_truncated")),
-        (Chat, "event: custom\n", 502, Some("stream_truncated")),
+        (Chat, "event: custom\n", 200, None),
         (Chat, "event: custom\n\n", 200, None),
         (Chat, "data: {\"choices\":[{\"finish_reason\":\"upstream_error\"}]}\n\ndata: [DONE]\n\n", 502, Some("stream_inband_error")),
         (Messages, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", 502, Some("stream_inband_error")),
@@ -243,7 +243,7 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
                 Responses => assert!(text.starts_with("event: response.failed\n")),
             }
         } else {
-            assert!(bytes.is_empty(), "discard pending data without a terminal");
+            assert!(String::from_utf8(bytes).unwrap().contains("\"error\""), "discard pending data and emit the protocol error tail");
         }
         assert_eq!(control.reports.lock().unwrap().len(), 1);
     }
@@ -283,7 +283,8 @@ async fn event_overflow_reports_an_upstream_failure_and_retains_partial_usage() 
     ]));
     let output: Vec<_> = owner(source, control.report()).collect().await;
     let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
-    assert!(!bytes.ends_with(b"data: [DONE]\n\n"));
+    assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+    assert!(String::from_utf8(bytes).unwrap().contains("\"error\""));
     let report = control.captured().await;
     assert_eq!(report["status"], 502);
     assert_eq!(report["errorMessage"], "stream_line_overflow");

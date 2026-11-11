@@ -2609,7 +2609,7 @@ async fn aci_verified_makes_an_unconstrained_request_fail_closed() {
 // --- SSE stream-repair suite (restored from main: c643fb5, 3ea864e, c26878d) ---
 
 #[tokio::test]
-async fn a_stream_cut_mid_event_discards_the_pending_payload_without_a_tail() {
+async fn a_stream_cut_mid_event_discards_the_pending_payload_and_emits_an_error_tail() {
     let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\","),
@@ -2625,7 +2625,7 @@ async fn a_stream_cut_mid_event_discards_the_pending_payload_without_a_tail() {
 
     assert_eq!(
         resp.body,
-        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"
+        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n"
     );
 }
 
@@ -2806,9 +2806,10 @@ async fn a_responses_stream_missing_its_terminal_is_completed_without_a_tail() {
 // upstream never sent would dispatch a fragment the client would otherwise
 // discard, and it would fail on that instead of reading the error.
 // A transport failure reaches the finalizer, which holds the protocol state
-// that decides whether the client can still be told. It appends the error only
-// when the stream stopped on a complete event without its terminal; a stream
-// that already ended, or stopped mid-event, is left as it is.
+// that decides whether the client can still be told. It appends the error before
+// the protocol terminal; a stream that already ended is left as it is. An
+// incomplete event never reaches the
+// client, so appending the protocol error is safe even after a mid-event reset.
 #[tokio::test]
 async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
     struct Case {
@@ -2863,8 +2864,8 @@ async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
             path: "/v1/chat/completions",
             request: chat,
             chunks: vec![Bytes::from_static(b"data: {\"id\":\"c\",")],
-            expect_error: false,
-            expect_in_error: "",
+            expect_error: true,
+            expect_in_error: "data: [DONE]",
         },
         Case {
             // The error continues the event numbering rather than restarting

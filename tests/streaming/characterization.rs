@@ -657,6 +657,79 @@ fn final_review_cases() -> Vec<Case> {
     cases
 }
 
+fn eof_and_reset_cases() -> Vec<Case> {
+    let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+    let messages = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
+    let responses = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":0,\"delta\":\"hi\"}\n\n";
+    let mut cases = Vec::new();
+    for (path, endpoint, source, format) in [
+        ("chat_chat", Endpoint::ChatComplete, chat, "openai"),
+        ("chat_messages", Endpoint::Messages, chat, "openai"),
+        (
+            "chat_responses",
+            Endpoint::CreateModelResponse,
+            chat,
+            "openai",
+        ),
+        (
+            "messages_chat",
+            Endpoint::ChatComplete,
+            messages,
+            "anthropic",
+        ),
+        (
+            "messages_messages",
+            Endpoint::Messages,
+            messages,
+            "anthropic",
+        ),
+        (
+            "messages_responses",
+            Endpoint::CreateModelResponse,
+            messages,
+            "anthropic",
+        ),
+        (
+            "native_responses_reset",
+            Endpoint::CreateModelResponse,
+            responses,
+            "openai",
+        ),
+    ] {
+        for reset in [false, true] {
+            let name = format!(
+                "{path}_{}",
+                if reset {
+                    "mid_event_reset"
+                } else {
+                    "truncated_eof"
+                }
+            );
+            let mut case = Case::new(
+                &name,
+                endpoint,
+                &format!("{source}data: {{\"unfinished\":"),
+                format,
+            );
+            case.transport_error = reset;
+            cases.push(case);
+        }
+    }
+    cases.push(Case::new(
+        "chat_complete_line_eof",
+        Endpoint::ChatComplete,
+        "data: [DONE]\n",
+        "openai",
+    ));
+    cases.push(Case::new(
+        "messages_complete_line_eof",
+        Endpoint::Messages,
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n",
+        "anthropic",
+    ));
+    cases
+}
+
 fn differential_regression_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     {
@@ -885,6 +958,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(native_failure_content_cases());
     cases.extend(final_review_cases());
     cases.extend(differential_regression_cases());
+    cases.extend(eof_and_reset_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -1384,6 +1458,51 @@ async fn bridge_failures_close_existing_content_and_keep_continuation_accounting
             assert!(reports[0]["usage"].is_null());
         } else {
             assert!(wire.contains("\"choices\":[],\"usage\":"), "{wire}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report() {
+    for case in eof_and_reset_cases() {
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1, "{}", case.name);
+        assert_eq!(
+            snapshot["before_eof"],
+            json!({"receipt":false,"report":false})
+        );
+        if case.name.contains("complete_line_eof") {
+            assert_eq!(reports[0]["status"], 200);
+            assert!(!wire.contains("\"error\""));
+            continue;
+        }
+        assert_eq!(reports[0]["status"], 502, "{}", case.name);
+        assert_eq!(
+            reports[0]["errorMessage"],
+            if case.transport_error {
+                "upstream_transport"
+            } else {
+                "stream_truncated"
+            }
+        );
+        assert!(reports[0]["errorSource"].is_null());
+        assert!(!wire.contains("unfinished"), "{wire}");
+        if case.endpoint == Endpoint::ChatComplete {
+            assert!(
+                wire.contains("\"error\":{\"message\":\"The upstream provider returned an error\""),
+                "{wire}"
+            );
+            assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+            assert_eq!(wire.matches("data: [DONE]").count(), 1);
+        } else {
+            assert_eq!(wire.matches("event: error\n").count(), 1, "{wire}");
+            assert!(
+                wire.contains("The upstream provider returned an error"),
+                "{wire}"
+            );
+            assert!(wire.ends_with("}\n\n"));
         }
     }
 }

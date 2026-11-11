@@ -14,7 +14,7 @@ use tokio::time::{sleep, Sleep};
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{MiddlewareReceiptJournal, ServiceError};
 use crate::sse::{EventStream, Record};
-use crate::sse_protocol::{sse_protocol, EventKind, SseProtocol};
+use crate::sse_protocol::{sse_protocol, SseProtocol};
 
 use super::control::ControlClient;
 use super::pricing;
@@ -300,8 +300,8 @@ impl AccountingHandle {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         event.after_terminal = state.ingress_terminal;
         state.ingress_terminal |= event.meaning.terminal.is_some();
-        if event.meaning.kind == EventKind::MessageStart {
-            state.start_usage = event.payload.json().and_then(message_start_usage).cloned();
+        if let Some(usage) = event.payload.json().and_then(message_start_usage) {
+            state.start_usage = Some(usage.clone());
         }
     }
     pub fn selected(&self, route: String, attempt: u32, status: u16) {
@@ -350,7 +350,6 @@ impl AccountingHandle {
         }
         self.first_byte();
         let event = record.event.as_ref()?;
-        let kind = event.meaning.kind;
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let destination = sse_protocol(&state.report.endpoint);
         let source = event.source_protocol;
@@ -374,14 +373,15 @@ impl AccountingHandle {
             };
             filter(parsed.get_mut("usage"));
             filter(parsed.get_mut("response").and_then(|r| r.get_mut("usage")));
-            if kind == EventKind::MessageStart {
+            if message_start_usage(parsed).is_some() {
                 filter(parsed.get_mut("message").and_then(|m| m.get_mut("usage")));
                 state.start_usage = message_start_usage(parsed).cloned();
             }
+            let message_delta = parsed.get("type").and_then(Value::as_str) == Some("message_delta");
             let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
             let usage = if top_usage {
                 parsed.get_mut("usage")
-            } else if include_start && kind == EventKind::MessageStart {
+            } else if include_start && message_start_usage(parsed).is_some() {
                 parsed.get_mut("message").and_then(|m| m.get_mut("usage"))
             } else {
                 parsed.get_mut("response").and_then(|r| r.get_mut("usage"))
@@ -390,16 +390,15 @@ impl AccountingHandle {
                 return;
             };
             response_transform::normalize_reasoning_usage_value(usage);
-            let mut billed = if kind == EventKind::MessageDelta
-                || (bridged && source == Some(SseProtocol::AnthropicMessages))
-            {
-                state
-                    .start_usage
-                    .clone()
-                    .map_or_else(|| usage.clone(), |start| complete_usage(start, usage))
-            } else {
-                usage.clone()
-            };
+            let mut billed =
+                if message_delta || (bridged && source == Some(SseProtocol::AnthropicMessages)) {
+                    state
+                        .start_usage
+                        .clone()
+                        .map_or_else(|| usage.clone(), |start| complete_usage(start, usage))
+                } else {
+                    usage.clone()
+                };
             if bridged {
                 billed = match (source, destination) {
                     (Some(SseProtocol::AnthropicMessages), _) => response_transform::chat_usage(
@@ -448,7 +447,12 @@ impl AccountingHandle {
     }
 }
 
-fn message_start_usage(value: &Value) -> Option<&Value> {
+pub(super) fn message_start_usage(value: &Value) -> Option<&Value> {
+    // Usage follows the payload schema, independently of the event's classified
+    // control meaning. This is the same extraction used before typed events.
+    if value.get("type").and_then(Value::as_str) != Some("message_start") {
+        return None;
+    }
     value
         .get("message")?
         .get("usage")

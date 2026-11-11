@@ -326,6 +326,14 @@ impl ResponseOwner {
                 class: Some(ErrorClass::StreamTruncated),
                 ..StreamFailure::default()
             });
+            if let Some(protocol) = self.protocol {
+                self.tail.extend(error_records(
+                    protocol,
+                    502,
+                    self.request_id.as_deref(),
+                    self.sequence,
+                ));
+            }
         } else if !self.non_sse && self.protocol == Some(SseProtocol::OpenaiChat) {
             self.tail.push_back(done_record());
         }
@@ -668,7 +676,7 @@ impl ResponseOwner {
         }
         tracing::warn!(target: "stream_abort", request_id = self.request_id.as_deref().unwrap_or_default(), error = %error, "response stream failed; ending the body gracefully");
         self.ended = true;
-        if !self.saw_terminal && !self.truncated && !already_failed {
+        if !self.saw_terminal && !already_failed {
             if let Some(protocol) = self.protocol {
                 self.tail.extend(error_records(
                     protocol,
@@ -827,13 +835,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2ee_only_passes_the_exact_done_marker_and_discards_pending_data() {
+    async fn e2ee_only_passes_the_exact_done_marker_and_dispatches_complete_final_lines() {
         for (wire, failed, expected) in [
             ("data: [DONE]\n\n", false, "data: [DONE]\n\n"),
             ("data: [DONE] \n\n", true, ""),
             ("data:\ndata: [DONE]\n\n", true, ""),
             ("[DONE]\n\n", false, "data: [DONE]\n\n"),
-            ("data: [DONE]\n", false, ""),
+            ("data: [DONE]\n", false, "data: [DONE]\n\n"),
         ] {
             let input = Box::pin(futures_util::stream::iter([Ok(Bytes::from(wire))]));
             let context = E2eeRequestContext {
