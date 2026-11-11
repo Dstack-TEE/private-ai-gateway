@@ -388,32 +388,32 @@ async fn transformed_response(
         accounting.handle.clone(),
     );
     if endpoint == Endpoint::Complete {
-        events = Box::pin(EventTransformStream::new(
-            events,
-            StreamTransform::AnthropicCompleteToOpenai,
-        ));
+        let bridge = EventTransformStream::new(events, StreamTransform::AnthropicCompleteToOpenai);
+        accounting.handle.bridge(bridge.bridge());
+        events = Box::pin(bridge);
     } else if source_protocol == SseProtocol::AnthropicMessages && endpoint != Endpoint::Messages {
-        events = Box::pin(EventTransformStream::new(
-            events,
-            StreamTransform::AnthropicToOpenaiChat,
-        ));
+        let bridge = EventTransformStream::new(events, StreamTransform::AnthropicToOpenaiChat);
+        accounting.handle.bridge(bridge.bridge());
+        events = Box::pin(bridge);
     }
     if endpoint == Endpoint::Messages && source_protocol != SseProtocol::AnthropicMessages {
         let usage = UpstreamUsage::default();
         accounting.handle.upstream_usage(usage.clone());
-        events = Box::pin(EventTransformStream::new(
-            events,
-            StreamTransform::OpenaiToAnthropicMessages(usage),
-        ));
+        let bridge =
+            EventTransformStream::new(events, StreamTransform::OpenaiToAnthropicMessages(usage));
+        accounting.handle.bridge(bridge.bridge());
+        events = Box::pin(bridge);
     }
     if endpoint == Endpoint::CreateModelResponse && source_protocol != SseProtocol::OpenaiResponses
     {
         let usage = UpstreamUsage::default();
         accounting.handle.upstream_usage(usage.clone());
-        events = Box::pin(EventTransformStream::new(
+        let bridge = EventTransformStream::new(
             events,
             StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity.clone(), usage),
-        ));
+        );
+        accounting.handle.bridge(bridge.bridge());
+        events = Box::pin(bridge);
     }
     let sanitized = Box::pin(EventTransformStream::new(
         events,

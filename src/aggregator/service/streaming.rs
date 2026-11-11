@@ -342,6 +342,20 @@ impl ResponseOwner {
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
         let Some(event) = record.event.as_ref().filter(|_| failure) else {
+            // A failed bridge has already emitted its destination terminal.
+            if self.failure.is_some()
+                && self.saw_terminal
+                && record
+                    .event
+                    .as_ref()
+                    .is_some_and(|event| event.meaning.terminal.is_some())
+                && self
+                    .accounting
+                    .as_ref()
+                    .is_some_and(|accounting| accounting.handle.has_bridge())
+            {
+                return Ok(Bytes::new());
+            }
             // Only records the bridge actually converted reach the destination.
             return if self.accounting.is_some() && self.failure.is_some() && record.unconverted {
                 Ok(Bytes::new())

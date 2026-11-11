@@ -1352,6 +1352,9 @@ async fn bridge_failures_close_existing_content_and_keep_continuation_accounting
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0]["status"], 502);
         assert_eq!(reports[0]["errorMessage"], "stream_inband_error");
+        if case.endpoint == Endpoint::ChatComplete || case.endpoint == Endpoint::Complete {
+            assert_eq!(wire.matches("data: [DONE]").count(), 1, "{wire}");
+        }
         assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"), "{wire}");
         assert!(!reports[0].to_string().contains("PRIVATE_UPSTREAM_DETAIL"));
         if case.name.contains("error_middle") {

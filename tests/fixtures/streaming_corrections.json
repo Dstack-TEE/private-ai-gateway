@@ -1512,8 +1512,8 @@
     "baseline_wire": "data: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null},\"choices\":[{\"finish_reason\":null,\"delta\":{\"content\":\"\"}}]}\n\ndata: [DONE]\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":3,\"total_tokens\":3,\"cost\":6}}\n\ndata: [DONE]\n\n",
     "expected": {
       "name": "diff_messages_chat_usage_after_error_1",
-      "wire": "data: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":3,\"total_tokens\":3,\"cost\":6}}\n\ndata: [DONE]\n\n",
-      "wire_hash": "sha256:8e21e456d42a7ceee6721ea31b6a3211f26300d3263ca36f7ff0be77e22a48f1",
+      "wire": "data: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\ndata: {\"id\":\"req-fixture\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":3,\"total_tokens\":3,\"cost\":6}}\n\n",
+      "wire_hash": "sha256:9c7397727bd71c673df110c549f4e3861cea851891d2cabc6a1d93d6e4e4a675",
       "source_hash": "sha256:0c147f20663c5fd2d813c75a1e718f0811b79574211c5a56c565e92190c40121",
       "status": 200,
       "before_eof": {
@@ -1553,7 +1553,7 @@
             "type": "response.received"
           },
           {
-            "body_hash": "sha256:8e21e456d42a7ceee6721ea31b6a3211f26300d3263ca36f7ff0be77e22a48f1",
+            "body_hash": "sha256:9c7397727bd71c673df110c549f4e3861cea851891d2cabc6a1d93d6e4e4a675",
             "type": "response.returned"
           }
         ],
@@ -1562,7 +1562,7 @@
         "model": "fixture-model",
         "receipt_id": "rcpt-characterization",
         "served_at": 1700000000,
-        "signature": "b40e0e3c2a8670731943097f562ba0bd00a2089179678584227feb2b6754f2e8f1de6e81234f7e2dfedaf4163bfc1c7334622fa11dff97fe46d20bada3f71a06",
+        "signature": "04058e58ff500d9aa9bdc315fa4b1744225146a25bd8be9276c4616162bc6979c69aad7980af3a4a10f1c7b6e86df819055e1f8e179f47e0a4c95dc397b40205",
         "workload_keyset_digest": "sha256:e338157d18d77aaa3d1186c9d96147c2d4edc0f1a169ace1243c0bc3ad701fad"
       },
       "signature_valid": true,
