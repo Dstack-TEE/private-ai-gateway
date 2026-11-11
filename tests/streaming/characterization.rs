@@ -545,6 +545,26 @@ fn usage_after_failure_case() -> Case {
     )
 }
 
+fn native_failure_content_cases() -> Vec<Case> {
+    [
+        ("native_chat_failure_chunk", Endpoint::ChatComplete,
+         "data: {\"id\":\"upstream-id\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"upstream-model\",\"error\":{\"code\":\"server_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":\"error\"}],\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\ndata: [DONE]\n\n", "openai"),
+        ("native_chat_failure_finish_only", Endpoint::ChatComplete,
+         "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"error\"}]}\n\ndata: [DONE]\n\n", "openai"),
+        ("native_messages_failure_content", Endpoint::Messages,
+         "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"content\":[{\"type\":\"text\",\"text\":\"partial\"}],\"delta\":{\"text\":\"extra\"},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\n", "anthropic"),
+        ("native_messages_failure_delta", Endpoint::Messages,
+         "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\",\"text\":\"partial\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic"),
+        ("native_responses_failure_content", Endpoint::CreateModelResponse,
+         "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":4,\"item_id\":\"item-public\",\"delta\":\"partial\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"failed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}],\"error\":{\"code\":\"server_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5},\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n", "openai"),
+        ("native_responses_error_content", Endpoint::CreateModelResponse,
+         "event: response.error\ndata: {\"type\":\"response.error\",\"sequence_number\":4,\"error\":{\"code\":\"server_error\",\"message\":\"PRIVATE_UPSTREAM_DETAIL\"},\"item_id\":\"item-public\",\"delta\":\"partial\",\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}\n\n", "openai"),
+    ]
+    .into_iter()
+    .map(|(name, endpoint, source, format)| Case::new(name, endpoint, source, format))
+    .collect()
+}
+
 fn review_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     for early in [false, true] {
@@ -664,6 +684,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(rate_limit_cases());
     cases.push(failed_usage_case());
     cases.push(usage_after_failure_case());
+    cases.extend(native_failure_content_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
