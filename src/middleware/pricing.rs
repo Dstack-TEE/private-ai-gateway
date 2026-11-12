@@ -17,27 +17,24 @@ struct ResolvedUsage {
 }
 
 /// A finite, non-negative integral counter, at most JavaScript's MAX_SAFE_INTEGER.
-/// Strings use JSON decimal grammar after trimming only space, tab, LF and CR.
+/// Strings contain one or more ASCII digits, including leading zeros.
 /// Shared with usage projection so pricing and bridge cache buckets agree.
 pub(super) fn usage_counter(value: &Value) -> Option<i64> {
-    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-    let parsed;
-    let number = match value {
-        Value::Number(number) => number,
-        Value::String(text) => {
-            parsed = serde_json::from_str::<serde_json::Number>(
-                text.trim_matches([' ', '\t', '\n', '\r']),
-            )
-            .ok()?;
-            &parsed
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    let count = match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            let count = number.as_f64()?;
+            (count >= 0.0 && count.fract() == 0.0 && count <= MAX_SAFE_INTEGER as f64)
+                .then_some(count as u64)
+        })?,
+        Value::String(text)
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u64>().ok()?
         }
         _ => return None,
     };
-    let count = number.as_f64()?;
-    if !count.is_finite() || count < 0.0 || count.fract() != 0.0 || count > MAX_SAFE_INTEGER {
-        return None;
-    }
-    Some(count as i64)
+    (count <= MAX_SAFE_INTEGER).then_some(count as i64)
 }
 
 // An absent/invalid counter consults the fallback; an explicit zero wins.
@@ -231,17 +228,17 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn usage_counters_share_json_decimal_integer_validation() {
+    fn usage_counters_share_integer_and_digit_string_validation() {
         for (value, expected) in [
             (json!(0), 0),
             (json!(-0.0), 0),
             (json!(10), 10),
             (json!(10.0), 10),
-            (json!(" 10.0 "), 10),
-            (json!(" \t\n\r10.0\r\n\t "), 10),
-            (json!("1e2"), 100),
-            (json!("1E+2"), 100),
-            (json!("100e-2"), 1),
+            (json!(1e2), 100),
+            (json!("0"), 0),
+            (json!("10"), 10),
+            (json!("01"), 1),
+            (json!("000"), 0),
             (json!(9_007_199_254_740_991_i64), 9_007_199_254_740_991),
             (json!("9007199254740991"), 9_007_199_254_740_991),
         ] {
@@ -250,15 +247,24 @@ mod tests {
         for value in [
             json!(10.5),
             json!(-1),
+            json!("10.0"),
             json!("10.5"),
             json!("-1"),
+            json!("-0"),
+            json!("1e2"),
+            json!("1E+2"),
+            json!("100e-2"),
+            json!(" 10"),
+            json!("10 "),
+            json!("\t10"),
+            json!("10\n"),
+            json!("10\r"),
             json!("0x10"),
             json!(""),
             json!("  "),
             json!("Infinity"),
             json!("NaN"),
             json!("+10"),
-            json!("01"),
             json!(".5"),
             json!("1."),
             json!("not a count"),
@@ -269,6 +275,8 @@ mod tests {
             json!(i64::MAX.to_string()),
             json!("9223372036854775808"),
             json!(u64::MAX),
+            json!("18446744073709551616"),
+            json!("１０"),
             json!("\u{feff}10"),
             json!("10\u{feff}"),
             json!("\u{0085}10"),
@@ -282,7 +290,7 @@ mod tests {
         ] {
             assert_eq!(usage_counter(&value), None, "{value}");
         }
-        let usage = json!({"prompt_tokens":"invalid","input_tokens":"10.0"});
+        let usage = json!({"prompt_tokens":"invalid","input_tokens":"10"});
         assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 10);
         let usage = json!({"prompt_tokens":0,"input_tokens":10});
         assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 0);

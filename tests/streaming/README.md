@@ -108,7 +108,8 @@ failure and cancellation while source observation is pending.
 checks 17 additional main-recorded cases: Chat cache writes on native and bridged
 paths, ignored inconsistent writes, explicit-zero precedence, numeric strings,
 start-only Messages at EOF/disconnect, and larger Messages delta input counts.
-The shared counter parser pins JSON decimal grammar, finite non-negative integral
-values up to JavaScript's maximum safe integer, and ASCII space/tab/LF/CR trimming
-in pricing unit tests. BOM and Unicode whitespace are rejected. Client-injected
-cost and report usage are asserted separately.
+The shared counter parser pins non-negative integer JSON numbers and ASCII
+digit-only strings (including leading zeros), bounded by JavaScript's maximum
+safe integer, in pricing unit tests. Strings are never trimmed; signs, decimal
+points, exponents and whitespace are rejected. Client-injected cost and report
+usage are asserted separately.
