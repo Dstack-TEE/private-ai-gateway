@@ -185,13 +185,14 @@ pub(crate) fn serialize(record: &Record) -> Result<Bytes, ServiceError> {
         .map_err(|_| ServiceError::AdmissionInvariant("SSE encoding failed"))
 }
 
-/// Count bytes between blank lines without interpreting fields. Split chunks at
-/// block boundaries so a large chunk of small events never trips the event cap.
-/// The same state reports an undispatched EOF tail that the library discards.
+/// The library exposes neither size caps nor source block boundaries. This
+/// wrapper bounds buffering and splits blocks for clean-EOF completion and source
+/// hashing. It recognizes line endings, the leading BOM and comments only;
+/// it must never parse SSE fields or payloads.
 struct BlockLimit {
     max_bytes: usize,
     bytes: usize,
-    line_bytes: usize,
+    line_nonempty: bool,
     cr: bool,
     bom_prefix: usize,
     has_field: bool,
@@ -215,28 +216,28 @@ impl BlockLimit {
                 self.bom_prefix += 1;
                 return Ok(false);
             }
-            self.line_bytes += self.bom_prefix;
+            self.line_nonempty |= self.bom_prefix != 0;
             self.has_field |= self.bom_prefix != 0;
             self.bom_prefix = 3;
         }
         if matches!(byte, b'\n' | b'\r') {
             self.cr = byte == b'\r';
-            if std::mem::take(&mut self.line_bytes) == 0 {
+            if !std::mem::take(&mut self.line_nonempty) {
                 self.bytes = 0;
                 self.has_field = false;
                 return Ok(true);
             }
         } else {
-            if self.line_bytes == 0 {
+            if !self.line_nonempty {
                 self.comment = byte == b':';
             }
             self.has_field |= !self.comment;
-            self.line_bytes += 1;
+            self.line_nonempty = true;
         }
         Ok(false)
     }
     fn at_boundary(&self) -> bool {
-        (self.bytes == 0 || self.bom_prefix == 3) && !self.has_field && self.line_bytes == 0
+        (self.bytes == 0 || self.bom_prefix == 3) && !self.has_field && !self.line_nonempty
     }
 }
 fn upstream_error(message: &'static str) -> ServiceError {
@@ -278,7 +279,7 @@ impl Stream for LimitedInput {
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => this.pending = bytes,
-                Poll::Ready(None) if !this.limit.at_boundary() && this.limit.line_bytes == 0 => {
+                Poll::Ready(None) if !this.limit.at_boundary() && !this.limit.line_nonempty => {
                     // The library discards pending blocks at EOF. Complete the
                     // delimiter only when the source ended on a complete line;
                     // a CR needs another CR, since LF would only finish CRLF.
@@ -324,7 +325,7 @@ impl DecodedStream {
                 limit: BlockLimit {
                     max_bytes,
                     bytes: 0,
-                    line_bytes: 0,
+                    line_nonempty: false,
                     cr: false,
                     bom_prefix: 0,
                     has_field: false,
