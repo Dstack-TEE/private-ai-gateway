@@ -43,36 +43,44 @@ Check the receipt and its cited session as described in [Audit the receipt](../a
 
 ## Prefix-cache isolation observation
 
-The following is a dated operational observation, not a protocol guarantee. As
-observed on 2026-07-13, the gateway preserved caller-supplied `cache_salt` but
-did not derive a tenant-specific cache partition for the active Tinfoil and
-Chutes routes:
+Middleware mode automatically partitions supported prompt caches by the
+control plane's authenticated `userId`. This supersedes the caller-controlled,
+cross-user sharing policy discussed in [#83](https://github.com/Dstack-TEE/private-ai-gateway/issues/83).
+The gateway removes caller `cache_salt` and `user_cache_secret` fields before
+request transforms, including native Responses and Messages passthrough. A
+non-empty string `cache_salt` subdivides the authenticated user's partition;
+it cannot opt into another user's cache. Other JSON values and empty strings
+are ignored. Anonymous requests receive no generated salt. Direct mode
+(without middleware) retains its existing caller-field behavior.
 
-- Tinfoil
-  [replaced `cache_salt`](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.118/cache_salt.go)
-  with a value derived from RedPill's shared upstream credential. Because the
-  gateway did not set `user_cache_secret`, RedPill tenants shared one provider
-  cache namespace.
-- Chutes passed `cache_salt` to vLLM but did not generate one. Unsalted
-  requests shared the serving instance's namespace.
+| Provider | Middleware field | Limitation |
+| --- | --- | --- |
+| Chutes | `cache_salt` | Passthrough to vLLM is an observed provider behavior, not an attested cache-isolation guarantee. |
+| Privatemode | `cache_salt` | The proxy uses the effective salt for cache/shard affinity; see [Prompt cache](privatemode/verification.md#prompt-cache). |
+| Tinfoil | `user_cache_secret` | Requires the provider router's `CACHE_SALT_ENABLED` policy. The router combines this secret with the shared upstream credential to derive its own salt. |
+| Phala Direct | None | The deployed `Dstack-TEE/vllm-proxy` revision and unknown-JSON-field forwarding have not been confirmed. |
+| Other providers | None | No supported cache partition field is established. |
 
-At that revision, Tinfoil's behavior was attestation-backed. The observed
-Chutes behavior came from control-plane evidence and was not bound by its
-attestation. The intended caller-controlled interface was to preserve
-`cache_salt` for Chutes and translate it to `user_cache_secret` for Tinfoil,
-without deriving or overriding it from RedPill tenant identity in the gateway.
+Injection applies only when the resolved upstream path ends in
+`/chat/completions`, `/completions`, `/responses`, or `/messages`, including
+buffered, streamed, and failover attempts. Audio forms, embeddings, image
+generation, and System One do not receive a generated cache field. Unsupported
+routes and anonymous middleware requests still lose both caller fields.
 
-As of 2026-10-19, the Privatemode reference Compose enables
-`--disable-prompt-cache=false`. Its default random salt is generated once per
-proxy startup, sharing a cache namespace across callers of that replica. A
-valid caller-supplied `cache_salt` takes precedence; the gateway does not derive
-a tenant salt. This removes the default per-request isolation. Privatemode's
-namespace is narrower than Tinfoil's: Tinfoil derives its namespace from the
-shared upstream credential, so it spans replicas and survives restarts. See
-[Privatemode prompt cache](privatemode/verification.md#prompt-cache) for salt
-lifetime, shard affinity, and the timing side channel. Production rollout
-remains unverified.
+The gateway derives a user secret from a separate TEE-held dstack KMS HMAC key,
+then derives a provider-specific 64-character lowercase hex value. Neither raw
+user IDs nor a common cross-provider pseudonym are exposed through these
+fields. Equal values remain linkable within one provider. Salts and caller
+salts are absent from control-plane reports and logs; receipts commit to the
+forwarded bytes through the request-body hash. See
+[Cache partition derivation and rotation](../configuration-reference.md#cache-partition-derivation-and-rotation)
+for the exact construction and lifecycle.
 
-Revalidate provider code and deployment configuration before relying on cache
-partitioning. Attestation can bind a provider implementation, but it does not
-turn an unreviewed cache policy into tenant isolation.
+The identity boundary assumes an honest control plane, which already owns
+authorization and billing. Reusing a `userId` for different people shares their
+partition. Key rotation changes every partition and causes a global cache cold
+start; retaining the same KMS application identity/key retains partitions
+across gateway restarts and replicas. Cache partitioning depends on the
+provider honoring the field. Attestation and a forwarded-body hash alone do
+not prove that the provider enforces cache isolation or remove every timing
+side channel. Live rollout of this policy remains unverified.

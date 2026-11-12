@@ -1774,6 +1774,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
     let prepared = backend
         .prepare(UpstreamRequest {
             content_type: None,
+            cache_salt: None,
             form: None,
             body: CHAT_REQUEST.to_vec().into(),
             headers: Default::default(),

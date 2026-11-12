@@ -325,6 +325,7 @@ async fn session_listing_matches_pin_gate_across_routes() {
     let middleware = Arc::new(
         Middleware::new(
             PrefixHashKey::new([7; 32]),
+            crate::middleware::CacheSaltKey::new([8; 32]),
             &MiddlewareConfig {
                 control_url: format!("http://{address}"),
                 control_token: None,

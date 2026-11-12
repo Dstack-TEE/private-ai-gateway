@@ -72,11 +72,22 @@ API; `bearer_token` is forbidden for Privatemode. To rotate the API key,
 rerender with the new `PRIVATEMODE_API_KEY` and redeploy both services; a
 mismatched secret fails closed.
 
-The proxy command sets `--disable-prompt-cache=false`, sharing one prompt-cache
-namespace across all callers of each proxy replica until it restarts. A valid
-caller-supplied `cache_salt` takes precedence. See
-[Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache) for
-salt lifetime, shard affinity, and the change from per-request isolation.
+The proxy command sets `--disable-prompt-cache=false`. With gateway middleware,
+authenticated requests receive a provider-specific per-user `cache_salt`; a
+caller's non-empty salt string subdivides that user's partition. Stable salts
+survive gateway/proxy restarts when the gateway's dstack KMS application key
+is unchanged. Anonymous middleware traffic has no generated salt and uses the
+proxy's startup-random namespace. Direct mode retains caller-salt behavior.
+
+Per-user partitioning lowers cross-user cache hit rates and can affect worker
+affinity, throughput, and rate limits. Privatemode's gateway can link a user's
+traffic through the salt-derived shard key. Use provider-approved quota rather
+than gateway workarounds. See
+[Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache) and
+[Cache partition derivation and rotation](../docs/configuration-reference.md#cache-partition-derivation-and-rotation)
+for privacy limits and the global cache cold start on key rotation. The
+reference Compose alone does not enable gateway middleware; configure its
+control-plane connection to activate per-user partitioning.
 
 After deployment, the gateway listens on port `8086` and serves inference like
 any other deployment. The admin API uses the admin token.

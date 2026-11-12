@@ -32,7 +32,11 @@ use common::{StaticKeyProvider, StubQuoter};
 /// A middleware with a fixed prefix-hash key; the gateway derives the real
 /// key from dstack KMS.
 fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-    Middleware::new(PrefixHashKey::new([7; 32]), config)
+    Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
+        config,
+    )
 }
 
 fn runtime_options() -> UpstreamRuntimeOptions {

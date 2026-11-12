@@ -410,6 +410,8 @@ impl ChatCompletionRequest<'_> {
 
 #[derive(Debug, Clone, Default)]
 pub struct GatewayRequestContext {
+    /// TEE-local user cache secret; absent outside authenticated middleware.
+    pub cache_salt: Option<crate::middleware::cache_salt::CacheSalt>,
     pub request_id: String,
     pub user_model: Option<String>,
     pub target_route_id: Option<String>,

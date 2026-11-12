@@ -71,6 +71,7 @@ AMD signature covers the whole report:
 
 ## Limitations
 
+- Middleware sends a per-user, provider-separated `user_cache_secret` on text-generation requests. Tinfoil's router must enable `CACHE_SALT_ENABLED` and honor that field for cache isolation; a verified channel and a forwarded-body hash alone do not establish this runtime policy. The router combines it with the shared upstream credential. Caller `cache_salt` strings only subdivide the user's partition, and raw caller cache fields are stripped. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
 - The gateway delegates the hardware, TCB, and source-provenance check set to the Tinfoil SDK version pinned in `pyproject.toml` and `uv.lock`. An upgrade changes the verifier trust root and must be reviewed.
 - The default path proves the confidential router channel. Per-model TEE coverage depends on the verified router's own model-enclave policy and is not independently recorded by this gateway.
 - `release_digest` is preserved as evidence but is not checked against a separate operator allowlist in gateway configuration.

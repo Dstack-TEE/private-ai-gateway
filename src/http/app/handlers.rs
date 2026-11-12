@@ -1078,6 +1078,7 @@ async fn dispatch_completion(
                 user_model: input.user_model,
                 target_route_id: None,
                 user_tier: None,
+                cache_salt: None,
             },
             endpoint_path: input.endpoint_path,
             received_body: input.received_body,

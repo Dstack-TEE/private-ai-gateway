@@ -240,6 +240,14 @@ async fn dstack_live_provider_keys_are_stable_for_same_paths() {
         a.prefix_hash_key().await.unwrap(),
         b.prefix_hash_key().await.unwrap()
     );
+    assert!(
+        a.cache_salt_key().await.unwrap() == b.cache_salt_key().await.unwrap(),
+        "cache salt keys must be stable between replicas"
+    );
+    assert!(
+        a.cache_salt_key().await.unwrap() != a.prefix_hash_key().await.unwrap(),
+        "cache isolation and prefix hashing must use different keys"
+    );
 }
 
 #[tokio::test]

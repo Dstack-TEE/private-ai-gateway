@@ -28,6 +28,7 @@ use futures_util::{stream, Stream};
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
 mod body;
+mod cache_salt;
 mod chutes;
 mod openai;
 mod privatemode;
@@ -38,6 +39,7 @@ mod zero_g;
 
 pub use body::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
 pub(crate) use body::{collect_buffered_upstream_body, read_buffered_upstream_response};
+pub use cache_salt::CacheSaltField;
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
@@ -60,6 +62,8 @@ pub const DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamRequest {
+    /// Internal user secret, consumed by model routing before forwarding.
+    pub cache_salt: Option<crate::middleware::cache_salt::CacheSalt>,
     /// Shared file bytes, encoded once after route selection and model rewrite.
     pub form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
     /// Matches `body`; absent for JSON requests.

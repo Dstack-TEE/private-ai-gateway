@@ -287,6 +287,52 @@ TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at
 request time.
 
+### Cache partition derivation and rotation
+
+Middleware cache partitioning is automatic, with no new configuration option.
+The selected provider determines the field: `chutes` and `privatemode` receive
+`cache_salt`; `tinfoil` receives `user_cache_secret` (its router must enable
+`CACHE_SALT_ENABLED`). Other providers, including `phala-direct` pending
+confirmation of the deployed proxy's body forwarding, receive neither field.
+Injection follows the resolved upstream path and applies to chat completions,
+legacy completions, Responses, and Messages. Audio, embeddings, images, and
+System One are excluded. See [provider limits](providers/README.md#prefix-cache-isolation-observation).
+
+Let `lp(x) = u32_be(byte_length(x)) || x`, and let `HMAC` mean HMAC-SHA256.
+The gateway obtains a dedicated 32-byte key `K` from dstack KMS using path
+`aci/cache-salt-hmac-sha256/v1` and purpose `aci.cache-salt.hmac-sha256.v1`.
+This key is separate from the request-feature `prefixHash` key.
+
+```text
+user_secret = HMAC(K,
+  "private-ai-gateway/cache-salt/v1" || lp(decimal_ASCII(userId)) || [lp(caller_salt)])
+provider_salt = lowercase_hex(HMAC(user_secret,
+  "private-ai-gateway/cache-salt/provider/v1" || lp(provider_tag)))
+```
+
+`caller_salt` is included only for a non-empty JSON string in `cache_salt`;
+other values are ignored. `provider_tag` is the stable serialized provider
+name (`chutes`, `privatemode`, or `tinfoil`). The result is 64 hex characters.
+The control plane's authenticated `userId` is the isolation boundary; this
+assumes an honest control plane. No user ID is sent in the salt field.
+
+The key stays in the TEE and is requested only when middleware is enabled;
+KMS release errors fail startup. Stable KMS application identity/key preserves
+partitions across restarts and replicas. To rotate, bump both the path and
+purpose version constants in `src/dstack.rs` and deploy that reviewed version.
+Rotation invalidates every old partition and causes a global cache cold start;
+there is no dual-read of old caches. Changing the KMS application/key has the
+same cache-lifecycle effect.
+
+Salts and caller salts are never logged or included in control reports.
+Receipts cover injected bytes only through `request.forwarded.body_hash`.
+Per-provider separation prevents sending a shared pseudonym to multiple
+providers; a stable value remains linkable within a provider. In particular,
+Privatemode shard keys may link one user's traffic and partitioning can change
+cache hit rates, throughput, and provider rate limits. Unsupported/anonymous
+middleware requests still have caller cache fields removed. Without
+middleware, caller cache-field forwarding is unchanged.
+
 ### Upstream fields
 
 | Field | Type | Default | Contract |

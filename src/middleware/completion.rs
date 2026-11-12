@@ -30,6 +30,7 @@ use crate::aggregator::service::{
     ServiceError, ServiceResponseStream, UpstreamVerificationError, RESPONSES_PATH,
 };
 
+use super::cache_salt::CacheSaltKey;
 use super::control::ControlClient;
 use super::errors::{self, Surface};
 use super::reasoning;
@@ -98,6 +99,7 @@ pub async fn run(
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
     prefix_hash_key: &PrefixHashKey,
+    cache_salt_key: &CacheSaltKey,
     input: CompletionInput,
 ) -> Response {
     let mut inference_permit = None;
@@ -106,7 +108,7 @@ pub async fn run(
         service,
         sse_keepalive_ms,
         send_request_features,
-        prefix_hash_key,
+        (prefix_hash_key, cache_salt_key),
         input,
         &mut inference_permit,
     )
@@ -119,17 +121,18 @@ async fn run_inner(
     service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
-    prefix_hash_key: &PrefixHashKey,
+    keys: (&PrefixHashKey, &CacheSaltKey),
     input: CompletionInput,
     inference_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
+    let (prefix_hash_key, cache_salt_key) = keys;
     let CompletionInput {
         audio_form,
         upload_permit,
         endpoint,
         endpoint_path,
         surface,
-        params,
+        mut params,
         received_body,
         api_key_hash,
         requester,
@@ -141,6 +144,18 @@ async fn run_inner(
         stream,
         tee_only,
     } = input;
+
+    // Capture the caller's optional sub-partition before bridges or allowlists
+    // discard it. No raw cache-control field may reach a middleware upstream.
+    let caller_salt = params
+        .get("cache_salt")
+        .and_then(Value::as_str)
+        .filter(|salt| !salt.is_empty())
+        .map(str::to_owned);
+    if let Some(object) = params.as_object_mut() {
+        object.remove("cache_salt");
+        object.remove("user_cache_secret");
+    }
 
     // What the client is told about who served the request. Built before
     // `user_model` moves into the request context, and shared with the streaming
@@ -406,6 +421,10 @@ async fn run_inner(
         user_model,
         target_route_id: None,
         user_tier: consult.user_tier.clone(),
+        cache_salt: consult
+            .tenant
+            .user_id
+            .map(|user_id| cache_salt_key.derive(user_id, caller_salt.as_deref())),
     };
 
     // The receipt-draft journal is only consumed by the streaming finalizer; the
