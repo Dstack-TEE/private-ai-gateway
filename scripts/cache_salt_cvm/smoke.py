@@ -9,7 +9,7 @@ Usage: smoke.py BASE_URL MODEL [MODEL ...]
        smoke.py BASE_URL --replay RESULTS_JSON
 
 Exit status: 0 pass, 1 an isolation check hit another namespace, 2 a warm-up
-never produced a hit (inconclusive; rerun).
+never produced a hit (inconclusive; rerun), 3 a request error (inconclusive).
 
 `--replay` repeats tenant A's no-salt prompt from an earlier run, for example
 after a restart: a hit shows the gateway derived the same salt again, so the
@@ -61,8 +61,12 @@ def call(base, model, key, nonce, caller_salt=None, stream=False):
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             raw = resp.read().decode()
+            if resp.status != 200:
+                return {"status": resp.status, "error": raw[:300]}
     except urllib.error.HTTPError as err:
         return {"status": err.code, "error": err.read().decode()[:300]}
+    except (urllib.error.URLError, TimeoutError) as err:
+        return {"status": 0, "error": str(err)[:300]}
     usage = None
     if stream:
         for line in raw.splitlines():
@@ -140,6 +144,7 @@ def replay(base, path, user_a):
     that spreads requests may miss on a cold replica, so misses alone are
     inconclusive."""
     hits = 0
+    request_error = False
     with open(path) as results:
         runs = json.load(results)
     for run in runs:
@@ -147,14 +152,22 @@ def replay(base, path, user_a):
             continue
         for nonce in run["nonces"]:
             result = call(base, run["model"], user_a, nonce)
+            request_error |= result["status"] != 200
             hit = result["status"] == 200 and is_hit(result)
             hits += hit
             print(
                 f"{'hit ' if hit else 'miss'} replay {run['model']} {nonce} cached={result.get('cached')}/{result.get('prompt_tokens')} status={result['status']}",
                 file=sys.stderr,
             )
-    print("PASS" if hits else "INCONCLUSIVE", file=sys.stderr)
-    sys.exit(0 if hits else 2)
+    print(
+        "INCONCLUSIVE (request error)"
+        if request_error
+        else "PASS"
+        if hits
+        else "INCONCLUSIVE",
+        file=sys.stderr,
+    )
+    sys.exit(3 if request_error else 0 if hits else 2)
 
 
 def main():
@@ -171,14 +184,27 @@ def main():
     ]
     json.dump(results, sys.stdout, indent=2)
     print()
-    # An isolation miss that fails is a leak. A warm-up that never hits only
-    # means every retry landed on a cold replica, so the run is inconclusive.
-    failed = inconclusive = False
+    # Only a successful isolation request reporting a hit proves a leak.
+    # Request errors and warm-ups without a hit make the run inconclusive.
+    failed = inconclusive = request_error = False
     for r in results:
         bad = [s for s in r["steps"] if not s["ok"]]
-        leaked = any(s["expect"] == "miss" for s in bad)
-        verdict = "FAIL" if leaked else "INCONCLUSIVE" if bad else "PASS"
+        leaked = any(
+            s["status"] == 200 and s["expect"] == "miss" and is_hit(s)
+            for s in r["steps"]
+        )
+        errors = any(s["status"] != 200 for s in r["steps"])
+        verdict = (
+            "INCONCLUSIVE (request error)"
+            if errors
+            else "FAIL"
+            if leaked
+            else "INCONCLUSIVE"
+            if bad
+            else "PASS"
+        )
         failed |= leaked
+        request_error |= errors
         inconclusive |= verdict == "INCONCLUSIVE"
         print(f"{verdict} {r['model']} stream={r['stream']}", file=sys.stderr)
         for s in r["steps"]:
@@ -187,7 +213,7 @@ def main():
                 f"  {mark} t{s['trial']} {s['step']:<24} expect={s['expect']:<4} cached={s.get('cached')}/{s.get('prompt_tokens')} attempts={s.get('attempts', 1)} status={s['status']}",
                 file=sys.stderr,
             )
-    sys.exit(1 if failed else 2 if inconclusive else 0)
+    sys.exit(3 if request_error else 1 if failed else 2 if inconclusive else 0)
 
 
 if __name__ == "__main__":

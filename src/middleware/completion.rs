@@ -108,7 +108,8 @@ pub async fn run(
         service,
         sse_keepalive_ms,
         send_request_features,
-        (prefix_hash_key, cache_salt_key),
+        prefix_hash_key,
+        cache_salt_key,
         input,
         &mut inference_permit,
     )
@@ -116,16 +117,17 @@ pub async fn run(
     super::admission::hold_permit(response, inference_permit)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_inner(
     control: &ControlClient,
     service: &Arc<AciService>,
     sse_keepalive_ms: Option<u64>,
     send_request_features: bool,
-    keys: (&PrefixHashKey, &CacheSaltKey),
+    prefix_hash_key: &PrefixHashKey,
+    cache_salt_key: &CacheSaltKey,
     input: CompletionInput,
     inference_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
-    let (prefix_hash_key, cache_salt_key) = keys;
     let CompletionInput {
         audio_form,
         upload_permit,

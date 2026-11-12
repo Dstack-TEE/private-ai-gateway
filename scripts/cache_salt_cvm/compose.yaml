@@ -3,8 +3,9 @@
 #
 # Mirrors redpill-ai/private-ai-launcher-compose docker-compose.no-ingress.yml:
 # the same launcher image, source pin, dstack KMS socket and middleware mode.
-# A two-tenant mock control plane (inlined below) replaces the real one, and
-# Privatemode, dstack-verifier and node-exporter are dropped. Replace
+# A two-tenant mock control plane (inlined below) replaces the real one, the
+# official Privatemode proxy runs beside the gateway as in production, and
+# dstack-verifier and node-exporter are dropped. Replace
 # COMMIT_SHA_PLACEHOLDER with a full commit pushed to the gateway repository.
 # Secret values arrive as dstack encrypted env; only their names appear here.
 
@@ -22,18 +23,45 @@ services:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - pal-cache:/var/lib/pag/cache
       - pal-state:/var/lib/pag/state
+      - privatemode-manifests:/run/privatemode-manifests:ro
     configs:
       - source: gateway-config
         target: /etc/private-ai-gateway/gateway.config.json
       - source: gateway-upstreams
         target: /etc/private-ai-gateway/upstreams.seed.json
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
     depends_on:
       - control
+      - privatemode-proxy
     environment:
       - PRIVATE_AI_GATEWAY_CONFIG_PATH=/etc/private-ai-gateway/gateway.config.json
       - RUST_LOG=info
       - PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
       - PRIVATE_AI_GATEWAY_REPO_COMMIT=COMMIT_SHA_PLACEHOLDER
+
+  privatemode-proxy:
+    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b
+    command:
+      - --workspace
+      - /var/lib/privatemode
+      - --port
+      - "8080"
+      - --api-key
+      - "@/run/secrets/privatemode-api-key"
+      - --api-key-fallback=always
+      - --disable-prompt-cache=false
+      - --nvidia-ocsp-allow-unknown=false
+      - --nvidia-ocsp-revoked-grace-period=0
+    tmpfs:
+      - /var/lib/privatemode:mode=0700
+    volumes:
+      - privatemode-manifests:/var/lib/privatemode/manifests
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
+    restart: unless-stopped
 
   control:
     image: python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
@@ -45,11 +73,16 @@ services:
     environment:
       - TEST_USER_A_KEY=${TEST_USER_A_KEY:?set TEST_USER_A_KEY}
       - TEST_USER_B_KEY=${TEST_USER_B_KEY:?set TEST_USER_B_KEY}
-      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"]}'
+      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-gpt-oss":["privatemode-test:p-gpt-oss"]}'
 
 volumes:
   pal-cache:
   pal-state:
+  privatemode-manifests:
+
+secrets:
+  privatemode-api-key:
+    environment: PRIVATEMODE_API_KEY
 
 configs:
   gateway-config:
@@ -62,6 +95,13 @@ configs:
         "middleware": {
           "control_url": "http://control:8080",
           "control_token": "${PRIVATE_AI_GATEWAY_CONTROL_TOKEN:?set PRIVATE_AI_GATEWAY_CONTROL_TOKEN}"
+        },
+        "privatemode_proxy": {
+          "base_url": "http://privatemode-proxy:8080",
+          "manifest_log_path": "/run/privatemode-manifests/log.txt",
+          "credential_path": "/run/secrets/privatemode-api-key",
+          "credential_sha256": "${PRIVATEMODE_API_KEY_SHA256:?set PRIVATEMODE_API_KEY_SHA256}",
+          "proxy_image_digest": "sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b"
         }
       }
   gateway-upstreams:
@@ -80,6 +120,12 @@ configs:
           "base_url": "https://api.chutes.ai",
           "models": {"c-glm": "zai-org/GLM-5.1-TEE", "c-kimi": "moonshotai/Kimi-K2.6-TEE"},
           "bearer_token": "${CHUTES_API_KEY:?set CHUTES_API_KEY}"
+        },
+        {
+          "name": "privatemode-test",
+          "provider": "privatemode",
+          "base_url": "http://privatemode-proxy:8080",
+          "models": {"p-gpt-oss": "gpt-oss-120b"}
         }
       ]
   mock-control:

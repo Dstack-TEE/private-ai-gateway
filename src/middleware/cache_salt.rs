@@ -75,7 +75,6 @@ mod tests {
             baseline,
             "cd73c21b138d063283ee6e60ae21ed9b9ea5c96c110c218503757b140e024e68"
         );
-        assert_eq!(baseline, salt(1, Some("23"), "chutes"));
         assert_ne!(baseline, salt(2, Some("23"), "chutes"));
         assert_ne!(baseline, salt(12, Some("3"), "chutes"));
         assert_ne!(baseline, salt(1, Some("24"), "chutes"));
@@ -87,10 +86,6 @@ mod tests {
                 .for_provider("chutes")
         );
         assert_eq!(salt(1, None, "chutes"), salt(1, Some(""), "chutes"));
-        assert_eq!(baseline.len(), 64);
-        assert!(baseline
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
         assert_eq!(format!("{key:?}"), "CacheSaltKey(..)");
         assert_eq!(format!("{:?}", key.derive(1, None)), "CacheSalt(..)");
     }

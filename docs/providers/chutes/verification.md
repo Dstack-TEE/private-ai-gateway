@@ -74,7 +74,7 @@ The bridge records a stale TCB status instead of rejecting it. Relying parties t
 
 ## Limitations
 
-- Middleware injects a per-user, provider-separated `cache_salt` into text-generation bodies before receipt hashing and Chutes encryption. Caller salt strings only subdivide the user's partition. Passthrough to vLLM is an observed provider behavior, not an attestation-backed cache-isolation guarantee. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
+- Middleware injects a per-user, provider-separated `cache_salt` into text-generation bodies before receipt hashing and Chutes encryption. Caller salt strings only subdivide the user's partition. Passthrough to vLLM is an observed provider behavior, not an attestation-backed cache-isolation guarantee. See the [live isolation observation](../README.md#prefix-cache-isolation-observation) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
 - Chutes decides which measurements count. The adapter fetches the accepted profiles from Chutes' own `/servers/tee/measurements` without authentication on every verification and does not compare them with a reviewed list.
 - GPU evidence is supplemental. Failure or absence does not reject an otherwise verified CPU and E2EE-key binding.
 - GPU evidence is not hardware-bound to the serving CPU TEE. A passing NRAS result shows a genuine confidential-computing GPU for the nonce, not that it served the request.

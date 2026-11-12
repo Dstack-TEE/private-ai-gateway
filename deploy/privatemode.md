@@ -79,15 +79,8 @@ survive gateway/proxy restarts when the gateway's dstack KMS application key
 is unchanged. Anonymous middleware traffic has no generated salt and uses the
 proxy's startup-random namespace. Direct mode retains caller-salt behavior.
 
-Per-user partitioning lowers cross-user cache hit rates and can affect worker
-affinity, throughput, and rate limits. Privatemode's gateway can link a user's
-traffic through the salt-derived shard key. Use provider-approved quota rather
-than gateway workarounds. See
-[Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache) and
-[Cache partition derivation and rotation](../docs/configuration-reference.md#cache-partition-derivation-and-rotation)
-for privacy limits and the global cache cold start on key rotation. The
-reference Compose alone does not enable gateway middleware; configure its
-control-plane connection to activate per-user partitioning.
+See [Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache)
+for cache policy and privacy limitations.
 
 After deployment, the gateway listens on port `8086` and serves inference like
 any other deployment. The admin API uses the admin token.

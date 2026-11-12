@@ -246,15 +246,13 @@ pub struct ResponsesCandidateInput<'a> {
 /// A request for an upstream that speaks its own protocol goes as the client
 /// wrote it, as CLIProxyAPI forwards it: fields the gateway has never heard of
 /// still reach the API that defines them. Only gateway routing metadata is
-/// removed, along with caller cache controls owned by the middleware.
+/// removed.
 fn native_passthrough(params: &Value) -> Result<Value, TransformError> {
     let mut body = params
         .as_object()
         .cloned()
         .ok_or_else(|| TransformError::invalid_request("request body must be a JSON object"))?;
     body.remove("provider");
-    body.remove("cache_salt");
-    body.remove("user_cache_secret");
     Ok(Value::Object(body))
 }
 

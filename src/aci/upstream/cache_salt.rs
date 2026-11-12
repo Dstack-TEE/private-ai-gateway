@@ -21,8 +21,7 @@ impl CacheSaltField {
     ) -> Result<(), UpstreamError> {
         if request.form.is_some()
             || !request.path.as_deref().is_some_and(|path| {
-                path.ends_with("/chat/completions")
-                    || path.ends_with("/completions")
+                path.ends_with("/completions")
                     || path.ends_with("/responses")
                     || path.ends_with("/messages")
             })

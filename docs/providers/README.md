@@ -67,23 +67,13 @@ buffered, streamed, and failover attempts. Audio forms, embeddings, image
 generation, and System One do not receive a generated cache field. Unsupported
 routes and anonymous middleware requests still lose both caller fields.
 
-The gateway derives a user secret from a separate TEE-held dstack KMS HMAC key,
-then derives a provider-specific 64-character lowercase hex value. Neither raw
-user IDs nor a common cross-provider pseudonym are exposed through these
-fields. Equal values remain linkable within one provider. Salts and caller
-salts are absent from control-plane reports and logs; receipts commit to the
-forwarded bytes through the request-body hash. See
+The gateway uses a separate TEE-held dstack KMS key to derive provider-specific
+salts, keeps salts out of logs and control reports, and covers forwarded bytes
+only through receipt hashes. Isolation assumes an honest control plane and a
+provider that honors the field; stable values remain linkable within one
+provider, and attestation alone does not prove cache enforcement. See
 [Cache partition derivation and rotation](../configuration-reference.md#cache-partition-derivation-and-rotation)
 for the exact construction and lifecycle.
-
-The identity boundary assumes an honest control plane, which already owns
-authorization and billing. Reusing a `userId` for different people shares their
-partition. Key rotation changes every partition and causes a global cache cold
-start; retaining the same KMS application identity/key retains partitions
-across gateway restarts and replicas. Cache partitioning depends on the
-provider honoring the field. Attestation and a forwarded-body hash alone do
-not prove that the provider enforces cache isolation or remove every timing
-side channel.
 
 As observed on 2026-11-12 on a disposable CVM running commit `534a33d2`,
 Tinfoil (`gpt-oss-120b`) and Chutes (`GLM-5.1-TEE`, `Kimi-K2.6-TEE`) behaved

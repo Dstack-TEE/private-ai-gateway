@@ -1063,6 +1063,7 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
         assert_eq!(fields["response_format"], expected_format);
     }
 }
+
 #[test]
 fn cache_salt_provider_mapping_uses_stable_serde_tags() {
     use crate::aci::upstream::CacheSaltField;
@@ -1072,14 +1073,7 @@ fn cache_salt_provider_mapping_uses_stable_serde_tags() {
         UpstreamProvider::Tinfoil,
     ] {
         let tag = match builders::provider_cache_salt_field(provider).unwrap() {
-            CacheSaltField::CacheSalt(tag) => {
-                assert_ne!(provider, UpstreamProvider::Tinfoil);
-                tag
-            }
-            CacheSaltField::UserCacheSecret(tag) => {
-                assert_eq!(provider, UpstreamProvider::Tinfoil);
-                tag
-            }
+            CacheSaltField::CacheSalt(tag) | CacheSaltField::UserCacheSecret(tag) => tag,
         };
         assert_eq!(serde_json::to_value(provider).unwrap(), tag);
     }

@@ -290,13 +290,8 @@ request time.
 ### Cache partition derivation and rotation
 
 Middleware cache partitioning is automatic, with no new configuration option.
-The selected provider determines the field: `chutes` and `privatemode` receive
-`cache_salt`; `tinfoil` receives `user_cache_secret` (its router must enable
-`CACHE_SALT_ENABLED`). Other providers, including `phala-direct` pending
-confirmation of the deployed proxy's body forwarding, receive neither field.
-Injection follows the resolved upstream path and applies to chat completions,
-legacy completions, Responses, and Messages. Audio, embeddings, images, and
-System One are excluded. See [provider limits](providers/README.md#prefix-cache-isolation-observation).
+See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)
+for provider mapping and supported request paths.
 
 Let `lp(x) = u32_be(byte_length(x)) || x`, and let `HMAC` mean HMAC-SHA256.
 The gateway obtains a dedicated 32-byte key `K` from dstack KMS using path
@@ -324,14 +319,8 @@ Rotation invalidates every old partition and causes a global cache cold start;
 there is no dual-read of old caches. Changing the KMS application/key has the
 same cache-lifecycle effect.
 
-Salts and caller salts are never logged or included in control reports.
-Receipts cover injected bytes only through `request.forwarded.body_hash`.
-Per-provider separation prevents sending a shared pseudonym to multiple
-providers; a stable value remains linkable within a provider. In particular,
-Privatemode shard keys may link one user's traffic and partitioning can change
-cache hit rates, throughput, and provider rate limits. Unsupported/anonymous
-middleware requests still have caller cache fields removed. Without
-middleware, caller cache-field forwarding is unchanged.
+See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)
+for privacy, provider limitations, and anonymous/direct-mode behavior.
 
 ### Upstream fields
 
