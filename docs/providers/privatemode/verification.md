@@ -214,7 +214,10 @@ See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
 [shard-key implementation][shard-source]. Hermetic gateway coverage:
 `cargo test --test middleware_completion cache_salt` checks authenticated and
 anonymous requests, streaming, failover, caller sub-partitions, and receipt
-hashes. This does not verify a live Privatemode rollout.
+hashes. A disposable-CVM run on 2026-11-12 confirmed per-user isolation
+with the pinned proxy; see
+[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+Production rollout remains unverified.
 
 ## Session binding and claims
 

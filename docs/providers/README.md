@@ -75,11 +75,12 @@ provider, and attestation alone does not prove cache enforcement. See
 [Cache partition derivation and rotation](../configuration-reference.md#cache-partition-derivation-and-rotation)
 for the exact construction and lifecycle.
 
-As observed on 2026-11-12 on a disposable CVM running commit `534a33d2`,
-Tinfoil (`gpt-oss-120b`) and Chutes (`GLM-5.1-TEE`, `Kimi-K2.6-TEE`) behaved
-as intended for buffered and streamed chat: a tenant's repeated prompt hit
-the cache, while another tenant, the same caller salt under another tenant,
-and an anonymous request missed in every trial, and a restart kept the
-partition. Privatemode and production rollout remain unverified.
+As observed on 2026-11-12 on disposable CVMs (last at commit `26affaa4`),
+Tinfoil (`gpt-oss-120b`), Chutes (`GLM-5.1-TEE`, `Kimi-K2.6-TEE`) and
+Privatemode (`glm-5.3-flash`) behaved as intended for buffered and streamed
+chat: a tenant's repeated prompt hit the cache, while another tenant, the same
+caller salt under another tenant, and an anonymous request missed in every
+trial, and a restart kept the partition. Phala Direct and production rollout
+remain unverified.
 [Test per-user cache salts on a disposable CVM](../cache-salt-cvm-test.md)
 reproduces the check.

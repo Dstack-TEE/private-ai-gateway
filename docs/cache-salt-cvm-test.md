@@ -169,7 +169,7 @@ rm -rf "$WORK"
 
 - Tinfoil derives the final salt from the shared upstream credential and
   `user_cache_secret`. Hits arrived on the first repeat.
-- Chutes spreads requests over several instances. Warm-ups took three to eight
+- Chutes spreads requests over several instances. Warm-ups took two to ten
   attempts.
 - Privatemode uses the effective `cache_salt` for cache/shard affinity; the
   default compose includes its official proxy sidecar. See
