@@ -10,8 +10,8 @@
 
 use serde_json::{json, Value};
 
-use crate::aggregator::service::{MESSAGES_PATH, RESPONSES_PATH};
-use crate::error_payload::{envelope, error_type, upstream_message, Surface};
+use crate::error_payload::{error_type, upstream_message, Surface};
+use crate::middleware::{request_transform::Endpoint, types::ProviderFormat};
 
 /// Streaming protocol of a downstream endpoint. Narrower than [`Surface`],
 /// which groups all OpenAI-compatible endpoints together: the chat/completions
@@ -23,31 +23,35 @@ pub enum SseProtocol {
     AnthropicMessages,
 }
 
-/// The streaming protocol an endpoint speaks.
-pub fn sse_protocol(endpoint_path: &str) -> SseProtocol {
-    match endpoint_path {
-        MESSAGES_PATH => SseProtocol::AnthropicMessages,
-        RESPONSES_PATH => SseProtocol::OpenaiResponses,
-        _ => SseProtocol::OpenaiChat,
+impl From<Endpoint> for SseProtocol {
+    fn from(endpoint: Endpoint) -> Self {
+        match endpoint {
+            Endpoint::Messages => Self::AnthropicMessages,
+            Endpoint::CreateModelResponse => Self::OpenaiResponses,
+            _ => Self::OpenaiChat,
+        }
     }
 }
 
-/// SSE bytes that complete the framing of a clean but terminator-less stream,
-/// or `None` if the protocol's terminal carries state the gateway cannot
-/// fabricate. A clean end is a success either way; this only decides whether a
-/// missing terminator can be filled in for the client.
-pub fn stream_success_terminator(protocol: SseProtocol) -> Option<&'static str> {
-    match protocol {
-        // `[DONE]` is a fixed marker carrying no state, so a chat provider that
-        // closed normally without it has still finished; the gateway completes
-        // the framing.
-        SseProtocol::OpenaiChat => Some("data: [DONE]\n\n"),
-        // The gateway does not fabricate a terminator for the other surfaces:
-        // supplying an event the upstream never sent would assert state it did
-        // not (a `message_stop` with no preceding `stop_reason`, or a
-        // `response.completed` with no usage). A clean end is still recorded
-        // complete; the client simply receives what the upstream sent.
-        SseProtocol::AnthropicMessages | SseProtocol::OpenaiResponses => None,
+impl From<(ProviderFormat, Endpoint)> for SseProtocol {
+    fn from((format, endpoint): (ProviderFormat, Endpoint)) -> Self {
+        match (format, endpoint) {
+            (ProviderFormat::Anthropic, endpoint) if endpoint != Endpoint::Complete => {
+                Self::AnthropicMessages
+            }
+            (ProviderFormat::Openai, Endpoint::CreateModelResponse) => Self::OpenaiResponses,
+            _ => Self::OpenaiChat,
+        }
+    }
+}
+
+impl From<SseProtocol> for Endpoint {
+    fn from(protocol: SseProtocol) -> Self {
+        match protocol {
+            SseProtocol::OpenaiChat => Self::ChatComplete,
+            SseProtocol::AnthropicMessages => Self::Messages,
+            SseProtocol::OpenaiResponses => Self::CreateModelResponse,
+        }
     }
 }
 
@@ -116,73 +120,282 @@ pub fn responses_error_event(
     event
 }
 
-/// SSE bytes that end a broken response stream visibly to the client.
-///
-/// A broken stream is ended gracefully rather than failed — a body `Err` would
-/// make hyper abort the connection — but a graceful end alone reads as a
-/// complete response. These events say it failed, in the shape the protocol
-/// defines. Only the chat stream has a `[DONE]` sentinel to follow with; on the
-/// other two the error event is itself terminal.
-///
-/// The message is the generic 502 text; the underlying error is only logged.
-pub fn stream_error_tail(
-    protocol: SseProtocol,
-    request_id: Option<&str>,
-    last_sequence_number: Option<u64>,
-) -> String {
-    stream_error_event(protocol, 502, request_id, last_sequence_number)
+/// Protocol meaning is assigned at application ingress and survives all edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EventKind {
+    #[default]
+    Data,
+    Done,
+    MessageStart,
+    MessageDelta,
+    MessageStop,
+    Ping,
+    ContentBlockStart,
+    ContentBlockDelta,
+    ContentBlockStop,
+    ResponseCreated,
+    ResponseInProgress,
+    ResponseCompleted,
+    ResponseIncomplete,
+    ResponseFailed,
+    ResponseError,
+    Error,
 }
 
-/// Like [`stream_error_tail`], but for a chosen status. Used where the gateway
-/// commits a 200 stream before the upstream answers (the pre-first-byte
-/// keep-alive) and then has to deliver the real failure in-band: the client
-/// reads `code`/`type` as the status the request would otherwise have had.
-pub fn stream_error_event(
-    protocol: SseProtocol,
-    status: u16,
-    request_id: Option<&str>,
-    last_sequence_number: Option<u64>,
-) -> String {
-    let message = upstream_message(status);
-    // The leading blank line dispatches an event written but not yet dispatched
-    // (a `data:` line with no blank line after it), so these start their own
-    // event instead of folding into it as extra `data:` lines. Two newlines,
-    // not one: after a `\r` a single `\n` completes a CRLF, which is one line
-    // terminator, and the next `data:` line would join the same event. Against
-    // an already dispatched stream the extra blank lines are ignored.
-    match protocol {
-        SseProtocol::AnthropicMessages => {
-            let body = envelope(
-                Surface::Anthropic,
-                error_type(Surface::Anthropic, status),
-                message,
-                request_id,
-            );
-            format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
-        }
-        SseProtocol::OpenaiResponses => {
-            // The protocol numbers its events, so the error continues the
-            // sequence rather than restarting it. A caller with no view of the
-            // stream has none to continue from. The code is the one the
-            // gateway emits for any unattributed failure: a null here would
-            // let a client tell a gateway-detected break from an
-            // upstream-reported error, which are deliberately
-            // indistinguishable.
-            let body = responses_error_event(
-                Some(responses_gateway_code(status)),
-                message,
-                None,
-                Some(last_sequence_number.map_or(0, |last| last.saturating_add(1))),
-            );
-            format!("\n\nevent: error\ndata: {}\n\n", json_str(&body))
-        }
-        SseProtocol::OpenaiChat => {
-            let body = json!({ "error": chat_gateway_error(status) });
-            format!("\n\ndata: {}\n\ndata: [DONE]\n\n", json_str(&body))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalKind {
+    Success,
+    Incomplete,
+    Failed,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureEvidence {
+    Inband,
+    ConflictingType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct EventMeaning {
+    pub kind: EventKind,
+    pub terminal: Option<TerminalKind>,
+    pub failure: Option<FailureEvidence>,
+}
+
+impl EventMeaning {
+    /// Constructors for converted/generated events use their known kind. They
+    /// never parse wire bytes or reclassify an edited payload.
+    pub fn generated(protocol: SseProtocol, kind: EventKind) -> Self {
+        let terminal = match (protocol, kind) {
+            (SseProtocol::OpenaiChat, EventKind::Done)
+            | (SseProtocol::AnthropicMessages, EventKind::MessageStop)
+            | (SseProtocol::OpenaiResponses, EventKind::ResponseCompleted) => {
+                Some(TerminalKind::Success)
+            }
+            (SseProtocol::OpenaiResponses, EventKind::ResponseIncomplete) => {
+                Some(TerminalKind::Incomplete)
+            }
+            (SseProtocol::OpenaiResponses, EventKind::ResponseFailed) => Some(TerminalKind::Failed),
+            (
+                SseProtocol::OpenaiResponses | SseProtocol::AnthropicMessages,
+                EventKind::Error | EventKind::ResponseError,
+            ) => Some(TerminalKind::Error),
+            _ => None,
+        };
+        let failure = matches!(
+            kind,
+            EventKind::Error | EventKind::ResponseError | EventKind::ResponseFailed
+        )
+        .then_some(FailureEvidence::Inband);
+        Self {
+            kind,
+            terminal,
+            failure,
         }
     }
 }
 
-fn json_str(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
+pub(crate) fn event_kind(name: &str) -> EventKind {
+    match name {
+        "message_start" => EventKind::MessageStart,
+        "message_delta" => EventKind::MessageDelta,
+        "message_stop" => EventKind::MessageStop,
+        "ping" => EventKind::Ping,
+        "content_block_start" => EventKind::ContentBlockStart,
+        "content_block_delta" => EventKind::ContentBlockDelta,
+        "content_block_stop" => EventKind::ContentBlockStop,
+        "response.created" => EventKind::ResponseCreated,
+        "response.in_progress" => EventKind::ResponseInProgress,
+        "response.completed" => EventKind::ResponseCompleted,
+        "response.incomplete" => EventKind::ResponseIncomplete,
+        "response.failed" => EventKind::ResponseFailed,
+        "response.error" => EventKind::ResponseError,
+        "error" => EventKind::Error,
+        _ => EventKind::Data,
+    }
+}
+
+pub(crate) fn classify(
+    protocol: Option<SseProtocol>,
+    name: Option<&str>,
+    payload: &crate::sse::Payload,
+) -> EventMeaning {
+    use crate::sse::Payload;
+    if matches!(payload, Payload::Text(text) if text == "[DONE]") {
+        return protocol.map_or_else(
+            || EventMeaning {
+                kind: EventKind::Done,
+                ..EventMeaning::default()
+            },
+            |protocol| EventMeaning::generated(protocol, EventKind::Done),
+        );
+    }
+    let value = payload.json();
+    let payload_type = value.and_then(|v| v.get("type")).and_then(Value::as_str);
+    let name = name.filter(|name| !name.is_empty());
+    let payload_kind = event_kind(payload_type.unwrap_or_default());
+    let kind = name.map_or(payload_kind, event_kind);
+    let mut meaning = protocol.map_or(
+        EventMeaning {
+            kind,
+            ..EventMeaning::default()
+        },
+        |protocol| EventMeaning::generated(protocol, kind),
+    );
+    if let (Some(name), Some(payload_type)) = (name, payload_type) {
+        let named_kind = kind;
+        // Known control names and payload types must agree. Unknown extensions
+        // remain opaque; a trailing space never acquires a control meaning.
+        if named_kind != EventKind::Data && payload_kind != EventKind::Data && name != payload_type
+        {
+            meaning.failure = Some(FailureEvidence::ConflictingType);
+        }
+    }
+    if let Some(value) = value {
+        let error_reason = |reason: &str| reason == "error" || reason.ends_with("_error");
+        let choices_error = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .is_some_and(|choices| {
+                choices.iter().any(|choice| {
+                    choice
+                        .get("finish_reason")
+                        .and_then(Value::as_str)
+                        .is_some_and(error_reason)
+                })
+            });
+        let stop_error = value
+            .get("delta")
+            .and_then(|delta| delta.get("stop_reason"))
+            .and_then(Value::as_str)
+            .is_some_and(error_reason);
+        let nested_error = value
+            .get("response")
+            .and_then(|response| response.get("error"))
+            .is_some_and(|error| !error.is_null());
+        if value.get("error").is_some_and(|error| !error.is_null())
+            || nested_error
+            || choices_error
+            || stop_error
+            || matches!(
+                payload_kind,
+                EventKind::Error | EventKind::ResponseError | EventKind::ResponseFailed
+            )
+        {
+            meaning.failure.get_or_insert(FailureEvidence::Inband);
+            // An extension event can still carry a protocol failure terminal.
+            if meaning.terminal.is_none() {
+                meaning.terminal = match (protocol, payload_kind) {
+                    (Some(SseProtocol::OpenaiResponses), EventKind::ResponseFailed) => {
+                        Some(TerminalKind::Failed)
+                    }
+                    (
+                        Some(SseProtocol::OpenaiResponses),
+                        EventKind::Error | EventKind::ResponseError,
+                    )
+                    | (Some(SseProtocol::AnthropicMessages), EventKind::Error) => {
+                        Some(TerminalKind::Error)
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    meaning
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use crate::sse::Payload;
+
+    #[test]
+    fn messages_extension_response_error_is_failed_but_not_terminal() {
+        for payload_type in ["error", "response.error"] {
+            let payload = Payload::Json(json!({"type": payload_type}));
+            for protocol in [
+                SseProtocol::OpenaiChat,
+                SseProtocol::AnthropicMessages,
+                SseProtocol::OpenaiResponses,
+            ] {
+                let meaning = classify(Some(protocol), Some("extension"), &payload);
+                assert_eq!(meaning.kind, EventKind::Data);
+                assert_eq!(meaning.failure, Some(FailureEvidence::Inband));
+                let terminal = match protocol {
+                    SseProtocol::OpenaiChat => None,
+                    SseProtocol::AnthropicMessages if payload_type == "response.error" => None,
+                    _ => Some(TerminalKind::Error),
+                };
+                assert_eq!(meaning.terminal, terminal, "{protocol:?} {payload_type}");
+            }
+            // Named or unnamed effective error kinds retain their existing
+            // terminal semantics; only the extension payload override differs.
+            for name in [None, Some(payload_type)] {
+                let meaning = classify(Some(SseProtocol::AnthropicMessages), name, &payload);
+                assert_eq!(meaning.failure, Some(FailureEvidence::Inband));
+                assert_eq!(meaning.terminal, Some(TerminalKind::Error));
+            }
+        }
+    }
+
+    #[test]
+    fn terminals_and_names_are_exact() {
+        for protocol in [
+            SseProtocol::OpenaiChat,
+            SseProtocol::AnthropicMessages,
+            SseProtocol::OpenaiResponses,
+        ] {
+            assert!(
+                classify(Some(protocol), None, &Payload::Text(" [DONE] ".into()))
+                    .terminal
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            classify(
+                Some(SseProtocol::OpenaiChat),
+                None,
+                &Payload::Text("[DONE]".into())
+            )
+            .terminal,
+            Some(TerminalKind::Success)
+        );
+        let payload = Payload::Json(json!({"type":"message_stop"}));
+        assert!(classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop "),
+            &payload
+        )
+        .terminal
+        .is_none());
+        assert!(classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop"),
+            &payload
+        )
+        .terminal
+        .is_some());
+    }
+    #[test]
+    fn failure_is_independent_of_terminal_and_conflicts_fail() {
+        let error = Payload::Json(json!({"error":{"message":"failed"}}));
+        let meaning = classify(Some(SseProtocol::OpenaiChat), None, &error);
+        assert!(meaning.failure.is_some());
+        assert!(meaning.terminal.is_none());
+        let conflict = classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("message_stop"),
+            &Payload::Json(json!({"type":"error"})),
+        );
+        assert_eq!(conflict.failure, Some(FailureEvidence::ConflictingType));
+        assert_eq!(conflict.terminal, Some(TerminalKind::Success));
+        let named_error = classify(
+            Some(SseProtocol::AnthropicMessages),
+            Some("error"),
+            &Payload::Json(json!({})),
+        );
+        assert_eq!(named_error.terminal, Some(TerminalKind::Error));
+        assert!(named_error.failure.is_some());
+    }
 }

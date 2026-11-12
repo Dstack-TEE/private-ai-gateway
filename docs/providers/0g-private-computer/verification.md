@@ -85,6 +85,13 @@ The §8 signature is fetched from `<record url>/v1/proxy/signature/<ZG-Res-Key>`
 - **Buffered:** returned only after the signature verifies. A fetch failure (`signature_unavailable`) or a bad signature (`signature_invalid`) fails the request; both are logged under target `zero_g`.
 - **Streamed:** frames are delivered as they open, but the provider's `[DONE]` is withheld. The gateway emits `[DONE]` only after the final frame and a verified signature. Truncation, a bad frame or a bad signature ends the stream with an error, so the gateway appends its error tail, never a success terminator. Frames already delivered are provisional until `[DONE]`.
 
+The outer SSE envelope uses the shared `sse-stream` decoder with a 4 MiB block
+cap. It accepts LF, CRLF and bare CR framing, compares `[DONE]` exactly, discards
+incomplete blocks at EOF and rejects invalid UTF-8. Opened application values and
+the verified terminal use the library encoder. Application decoding happens once
+after this provider boundary; it cannot release the terminal before the signature
+check above.
+
 A receipt cites the session of the provider that served it. That session's claims hold the provider address, signer, encryption key and the enforced binding. A buffered receipt exists only for a verified response. A streamed receipt covers bytes that end in `[DONE]` only when the signature verified; there is no separate per-response signature field.
 
 ## Provider behavior

@@ -246,13 +246,8 @@ pub fn canonicalize(body: &mut Value) {
     // SDKs require the complete token shape even for providers that meter only
     // images. This happens after middleware captures raw usage for billing.
     let usage = object.entry("usage").or_insert_with(|| json!({}));
+    filter_usage(Some(usage));
     if let Some(usage) = usage.as_object_mut() {
-        usage.retain(|key, value| match key.as_str() {
-            "input_tokens" | "output_tokens" | "total_tokens" => value.is_u64(),
-            "input_tokens_details" | "output_tokens_details" => value.is_object(),
-            "cost" => value.is_number(),
-            _ => false,
-        });
         for key in ["input_tokens", "output_tokens", "total_tokens"] {
             usage.entry(key).or_insert(json!(0));
         }
@@ -261,15 +256,31 @@ pub fn canonicalize(body: &mut Value) {
             .or_insert_with(|| json!({}));
         for key in ["input_tokens_details", "output_tokens_details"] {
             if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
+                for key in ["text_tokens", "image_tokens"] {
+                    details.entry(key).or_insert(json!(0));
+                }
+            }
+        }
+    }
+}
+
+/// Filter reported image usage without adding client SDK defaults.
+pub(super) fn filter_usage(usage: Option<&mut Value>) {
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        usage.retain(|key, value| match key.as_str() {
+            "input_tokens" | "output_tokens" | "total_tokens" => value.is_u64(),
+            "input_tokens_details" | "output_tokens_details" => value.is_object(),
+            "cost" => value.is_number(),
+            _ => false,
+        });
+        for key in ["input_tokens_details", "output_tokens_details"] {
+            if let Some(details) = usage.get_mut(key).and_then(Value::as_object_mut) {
                 details.retain(|key, value| {
                     matches!(
                         key.as_str(),
                         "text_tokens" | "image_tokens" | "cached_tokens"
                     ) && value.is_u64()
                 });
-                for key in ["text_tokens", "image_tokens"] {
-                    details.entry(key).or_insert(json!(0));
-                }
             }
         }
     }

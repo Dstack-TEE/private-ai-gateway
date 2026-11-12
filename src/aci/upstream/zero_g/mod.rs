@@ -233,14 +233,22 @@ struct SignatureCheck {
 impl SignatureCheck {
     async fn verify(&self, expected_text: &str) -> Result<(), UpstreamError> {
         let signature = self.fetch().await.map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_unavailable", %reason, "0G response signature could not be fetched");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_unavailable", %reason,
+                "0G response signature could not be fetched"
+            );
             match reason {
                 UpstreamError::ResponseTooLarge => reason,
                 _ => UpstreamError::Transport("0G response signature unavailable".to_string()),
             }
         })?;
         verify_signature(&signature, expected_text, &self.signer).map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_invalid", %reason, "0G response signature failed verification");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_invalid", %reason,
+                "0G response signature failed verification"
+            );
             UpstreamError::Transport("0G response signature invalid".to_string())
         })
     }
@@ -356,51 +364,30 @@ fn verified_event_stream(
     check: SignatureCheck,
 ) -> UpstreamBodyStream {
     Box::pin(async_stream::try_stream! {
-        let mut raw = Box::pin(raw);
-        let mut buffer = Vec::new();
-        let mut data: Option<Vec<u8>> = None;
-        'read: loop {
-            let chunk = raw.next().await.transpose()?;
-            let at_end = chunk.is_none();
-            // At EOF a final event without its blank line still counts.
-            buffer.extend_from_slice(chunk.as_deref().unwrap_or(b"\n\n"));
-            if buffer.len() > MAX_SSE_BUFFER_BYTES {
-                Err(rejected("SSE line too long"))?;
-            }
-            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                let line = line.trim_ascii_end();
-                if let Some(value) = line.strip_prefix(b"data:") {
-                    let value = value.strip_prefix(b" ").unwrap_or(value);
-                    let data = data.get_or_insert_with(Vec::new);
-                    if !data.is_empty() {
-                        data.push(b'\n');
-                    }
-                    data.extend_from_slice(value);
-                } else if line.is_empty() {
-                    let Some(event) = data.take() else { continue };
-                    if event.trim_ascii() == b"[DONE]" {
-                        break 'read;
-                    }
-                    let frame = serde_json::from_slice(&event).map_err(rejected)?;
-                    let opened = opener.open_frame(frame)?;
-                    // Opening drops the unbound fields; a frame left without
-                    // a value carries nothing for the caller.
-                    if opened.values().all(is_empty) {
-                        continue;
-                    }
-                    let mut out = b"data: ".to_vec();
-                    out.extend(serde_json::to_vec(&opened).map_err(rejected)?);
-                    out.extend_from_slice(b"\n\n");
-                    yield Bytes::from(out);
-                }
-            }
-            if at_end {
+        let mut events = crate::sse::decode_envelope(Box::pin(raw), MAX_SSE_BUFFER_BYTES);
+        while let Some(record) = events.next().await {
+            let record = record?;
+            let crate::sse::Record::Event(event) = record else {
+                continue;
+            };
+            if event.meaning.kind == crate::sse_protocol::EventKind::Done {
                 break;
             }
+            let frame = match event.payload {
+                crate::sse::Payload::Json(Value::Object(frame)) => Ok(frame),
+                _ => Err(rejected("invalid SSE frame JSON")),
+            }?;
+            let opened = opener.open_frame(frame)?;
+            // Opening removes unbound fields; an otherwise empty frame carries
+            // no authenticated value for the caller.
+            if opened.values().all(is_empty) {
+                continue;
+            }
+            let data = serde_json::to_string(&opened).map_err(rejected)?;
+            yield sse_stream::Sse::default().data(data).encode().map_err(rejected)?;
         }
         check.verify(&opener.signed_text(true)?).await?;
-        yield Bytes::from_static(b"data: [DONE]\n\n");
+        yield sse_stream::Sse::default().data("[DONE]").encode().map_err(rejected)?;
     })
 }
 
@@ -414,4 +401,4 @@ fn is_empty(value: &Value) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

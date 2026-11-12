@@ -12,7 +12,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
 
-mod crypto;
+pub(super) mod crypto;
 mod session;
 
 pub use session::ChutesSessionStore;

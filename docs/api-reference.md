@@ -225,13 +225,107 @@ The normal provider-backed response path adds:
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
 For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
-is complete and stores the receipt after the finalizer observes the terminal
-body. An upstream non-2xx returned before streaming begins is buffered and does
-not receive a receipt.
+is complete and stores the receipt after upstream EOF and response finalization.
+Receiving a protocol terminal does not publish the receipt before EOF. An upstream
+non-2xx returned before streaming begins is buffered and does not receive a receipt.
 
 In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
 `200` before the upstream answers, and that response omits `X-Receipt-Id`; see
 [Streaming keepalives and early commit](configuration-reference.md#streaming-keepalives-and-early-commit).
+
+### Event-stream framing
+
+SSE fields use WHATWG parsing with LF, CRLF or bare CR line endings and an optional
+leading UTF-8 BOM. Only `data` fields dispatch payloads: a bare `[DONE]` or bare
+JSON line is an unknown field. A colonless `event` resets the event name. Data
+fields join with LF, including empty data fields. At clean EOF, a final block
+ending on a complete field line is dispatched even without its blank delimiter;
+a genuinely incomplete final line is discarded. A read failure or truncated EOF
+before the destination terminal emits the protocol error tail. Invalid UTF-8 in a recognized field
+fails the upstream read; it is never replaced with another character.
+
+The gateway returns canonical SSE framing: LF line endings, one space after each
+field colon, and fields in `event`, `data`, `id`, `retry` order. Repeated metadata
+fields keep the last valid value; invalid `id` or `retry` values and unknown fields
+are omitted. Retry values use decimal integer notation. Upstream comments and
+empty blocks are omitted; generated errors have no leading blank block. Unedited
+data strings retain their text, including JSON
+whitespace. JSON changes such as identity rewriting, cost injection or encryption
+produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments. Direct
+serving emits this heartbeat after 5 seconds of upstream idleness through the same
+keep-alive stage as middleware. Its interval is fixed and is not configurable.
+Middleware uses `middleware.sse_keepalive_ms`; zero disables middleware heartbeats
+and early commitment.
+
+Protocol event names and `[DONE]` data are matched exactly, including whitespace.
+Known control names that contradict the payload type fail client output at the
+source-control boundary after readable usage is observed. Source observation
+continues; invalid UTF-8 and size overflow remain fatal decoder errors.
+The middleware response owner uses the protocol meaning assigned at ingress. It
+records usage from a failed event and sanitizes native records in place. Native
+Chat retains allowlisted chunk fields, content and failure finish reasons; a
+finish reason alone does not add an error object. Native Messages retains a
+failed delta's content and usage, while error events use the Messages error
+sanitizer. Native Responses retains its two terminal forms: `error` and
+`response.failed`, with output, usage and cost in the failed response object.
+For a failure crossing a bridge, Chat emits an error and one `[DONE]`, Messages
+emits an `error` event, and Responses emits `response.failed`. Failure alone does
+not create bridge startup events. A bridge closes content already emitted before
+its failure terminal, preserving partial output in a failed Responses object.
+Sanitization follows every payload's existing schema and identity rules regardless
+of unknown or mismatched SSE names; ingress classification determines outcome.
+Unrepresentable bridge payloads are upstream transport failures. Multiline JSON data is interpreted and metered
+once as one payload.
+
+Failure evidence remains sticky through the source protocol's terminal. Later
+source events cannot change that outcome; their bytes are still hashed through
+EOF. Accounting reads usage only from source payloads in the source protocol,
+before conversion. It observes usage through source EOF or client disconnect,
+including usage after terminals, failures and malformed records. Chat uses the
+latest cumulative usage; Messages merges start and delta counters; Responses uses
+its reported response usage. Repeated cumulative values are never added together.
+Every usage object is filtered by the source protocol's allowlist before pricing
+and reporting, including native Messages and buffered responses. Client usage is a
+projection and never a billing input.
+After the owner emits a destination terminal for a failed response, no further
+records are converted or sent to the client. A native failure record without a
+terminal continues normally until its protocol terminal arrives. When conversion,
+encoding or E2EE fails, source observation continues synchronously to EOF or client
+disconnect, without further client output. The report retains its failure status,
+attribution and label and includes usage observed so far; its publication is
+delayed until that observation ends. Receipts remain suppressed where the previous
+abort path suppressed them. A buffered response that parses but fails conversion
+likewise retains filtered source usage on its existing 502 report.
+A source terminal alone does not prove a conversion succeeded: the destination
+terminal must be produced. Gateway stage failures still fail the response, even
+if the destination terminal has already been sent; no error tail is appended
+after that terminal.
+After an in-band failure, a later upstream read error supplies the report status
+and class, including after a failure terminal: a timeout reports 504
+`upstream_timeout`, and a reset reports 502 `upstream_transport`. Usage follows
+the source rule above.
+
+Application blocks are limited to 16 MiB. A clean EOF between events retains the
+existing completion policy: Chat gets a missing `data: [DONE]` marker, while
+Messages and Responses receive no fabricated success terminal. Legacy Anthropic
+completion conversion emits exactly one typed `data: [DONE]` marker. A body that
+explicitly declares a non-SSE content type follows a byte path: valid
+JSON objects report filtered source usage before identity rewriting and sanitization,
+without adding cost to the client body, while invalid JSON and
+non-object bodies pass through. It gets no SSE blank-line suffix or sentinel.
+This path retains the 16 MiB buffering bound. Overflow ends the body and records
+an upstream `502` with `upstream_transport` and no usage.
+If early commit already emitted a heartbeat before upstream headers arrived,
+that comment precedes the non-SSE body. Normal non-SSE responses have no heartbeat.
+An overflow after early commit retains the protocol's error tail and terminal,
+since the gateway already committed event-stream headers.
+Streaming E2EE still requires SSE.
+
+Receipt `response.received` hashes the provider adapter's application bytes before
+framing normalization or payload edits. `response.returned` hashes the exact bytes
+after all edits, heartbeats and optional E2EE. Chutes and 0G envelope opening keep
+their verification gates; 0G releases its application `[DONE]` only after verifying
+the provider signature.
 
 ### Require ACI verification
 

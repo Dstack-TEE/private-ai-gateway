@@ -164,6 +164,37 @@ token_cost = uncached_input * input_rate + cache_read * cache_read_rate
 cost = count * image_unit_rate + token_cost
 ```
 
+Token usage reports always use the upstream's source schema, independently of the
+client's format. Streaming usage is observed through EOF or client disconnect,
+even after a terminal, failure or malformed record. Chat reports its latest
+cumulative value; Messages merges start and delta counters; Responses reports its
+response usage. Duplicate cumulative values are not summed. Source usage is
+allowlisted before pricing or reporting, including native Messages and buffered
+responses. Readable usage from a buffered body that fails conversion is retained
+on its existing failure report. Valid declared non-SSE JSON objects on streaming
+requests also report filtered source usage, including after early commitment;
+opaque, invalid, non-object and over-cap bodies report no usage. This byte path
+does not inject client cost. Stream conversion, encoding or E2EE failures retain
+their status and attribution while source observation continues synchronously;
+the report is emitted at EOF or disconnect with the usage observed so far.
+
+Token counters accept non-negative integer JSON numbers or strings containing one
+or more ASCII digits, including leading zeros (`"01"` counts as 1). Both are
+bounded by `9007199254740991` (JavaScript's maximum safe integer). Integral JSON
+numbers such as `10.0` count; strings with whitespace, signs, decimal points or
+exponents are absent, as are empty strings and larger counters. No string is
+trimmed and no counter is truncated. Chat cache creation uses
+`cache_creation_input_tokens` first, including zero. Otherwise, for Chat usage
+with `prompt_tokens`, `prompt_tokens_details.cache_write_tokens` supplies creation
+only if it fits within prompt tokens minus the resolved cache read. An inconsistent
+write counter is ignored without changing cache-read behavior. Uncached input is
+prompt tokens minus cache read and creation. Source reports retain their schema.
+
+Start-only Messages usage is retained on EOF and client disconnect, including the
+start event's output tokens. A later Messages delta can raise the input counter;
+bridges use the same merged source usage as the native path. Numeric-string Chat
+counters are priced from the source rather than a bridge's integer-only projection.
+
 Token rates and usage follow the existing token normalization rules; absent
 usage or rates contribute zero. Arithmetic is checked: if an image or token
 component or their sum cannot be represented, the gateway logs a warning and
@@ -173,8 +204,8 @@ plane computes billing independently from its pricing snapshot and reported
 usage; the gateway's `usage.cost` is informational. On a successful image
 response with representable pricing, the gateway adds `usage.cost`. Client
 image responses always contain the SDK-required token usage fields, filled
-with zero when the provider reports none. The post report preserves raw
-provider usage before these defaults and cost injection, and never bills image
+with zero when the provider reports none. The post report preserves filtered source
+usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
 
@@ -394,7 +425,7 @@ The stable fields are:
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
-| `usage` | Always, nullable | Raw provider usage before client cost injection, except audio transcription uses duration-only usage with no provider token counters or cost. |
+| `usage` | Always, nullable | Filtered source-protocol usage before client conversion and cost injection; audio transcription uses duration-only usage with no provider token counters or cost. |
 | `audio` | Successful transcription only | `{seconds, raw_duration?}`; `seconds` is a positive ceil integer. See [Audio transcription](#audio-transcription). |
 | `images` | Successful image generation only | `{count, size, quality}`: upstream image count before canonicalization; size and quality resolved from response, then request, then `"auto"`. Used with `imageCostPerImage` as described above. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
@@ -413,7 +444,8 @@ no-route result, or the summary after the candidate chain failed.
 Streaming and cancellation do not erase accounting:
 
 - a client disconnect before the first upstream byte produces status `499`,
-  names the route in flight, and omits `ttftMs`;
+  names the route in flight, carries `client_disconnected`, and omits `ttftMs`,
+  including while the forward is pending after early commit;
 - a gateway-enforced connect or read deadline produces status `504` for the
   attempt and request outcome;
 - attempts already completed during failover are reported even if the client
@@ -421,6 +453,20 @@ Streaming and cancellation do not erase accounting:
 - after an [early commit](configuration-reference.md#streaming-keepalives-and-early-commit),
   the report carries the real failure status, not the HTTP `200` the client
   already received.
+
+One response owner settles a streaming request once, after response finalization
+at upstream EOF or when the client abandons the response. This includes the
+pending-forward phase after early commit. A source reaching EOF cannot emit an
+intermediate cancellation report. Named protocol errors retain their failure
+when bridged or sanitized, even when followed by a terminal event. Usage in
+multiline SSE data is read as one payload. Invalid UTF-8 in a recognized SSE field
+is an upstream transport failure.
+
+If receipt signing or persistence fails at EOF, that owner emits one `502`
+report with `errorSource: gateway`, `errorMessage: downstream_finalizer_failed`
+and the usage already observed. It does not emit a success report first. The
+upstream-response metric still records the source's EOF, and the publication
+failure increments the receipt-finalize stream-error metric.
 
 `errorMessage` takes one of these values:
 

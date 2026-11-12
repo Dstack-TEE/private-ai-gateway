@@ -336,3 +336,10 @@ fn validate_keyset(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use streaming::{
+    decode_source, done_record, error_records, ResponseContext, StreamControl,
+};

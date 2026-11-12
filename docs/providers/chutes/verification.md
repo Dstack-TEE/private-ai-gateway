@@ -55,7 +55,7 @@ For the request, the gateway:
 Only the gateway holds the response private key, and it keeps a separate one for each request. The instance encrypts its answer to the response public key:
 
 - **Buffered response.** The body has the same `ML-KEM ciphertext || nonce || ciphertext` layout. The gateway decapsulates with the response private key, derives the key with info `e2e-resp-v1`, decrypts, and gunzips.
-- **Streaming response.** An `e2e_init` SSE event carries an ML-KEM ciphertext. The gateway decapsulates it and derives one stream key with info `e2e-stream-v1`. Each later `e2e` event carries `nonce || ciphertext`, which decrypts to one plaintext SSE event. A chunk before `e2e_init` is rejected. `usage` events pass through unchanged, and an `e2e_error` event becomes an `error` event.
+- **Streaming response.** An `e2e_init` SSE event carries an ML-KEM ciphertext. The gateway decapsulates it and derives one stream key with info `e2e-stream-v1`. Each later `e2e` event carries `nonce || ciphertext`, which decrypts to one plaintext SSE event. A chunk before `e2e_init` is rejected. `usage` data text passes through, and an `e2e_error` event becomes an `error` event. The outer SSE envelope uses the shared `sse-stream` decoder with a 16 MiB block cap. Generated application events use the library encoder; incomplete outer blocks are discarded, and invalid UTF-8 fails the stream. These framing rules do not bypass ML-KEM initialization or chunk authentication.
 
 The gateway decrypts before receipt finalization, so the receipt's response hash covers the plaintext returned to the client. A key digest mismatch, a malformed blob, or an authentication failure rejects that attempt.
 

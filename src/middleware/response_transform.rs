@@ -21,6 +21,7 @@ use super::errors::{
 use super::request_transform::{effective_responses_tools, Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
+use crate::sse_protocol::SseProtocol;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
@@ -95,7 +96,8 @@ pub(super) fn normalize_reasoning_usage_value(usage: &mut Value) -> Option<bool>
 ///
 /// Must cover every field the canonical schema treats as reasoning output — the
 /// allowlist keeps them all, so any this misses would survive an opt-out.
-pub fn exclude_reasoning(body: &mut Value) {
+pub fn exclude_reasoning(body: &mut Value) -> bool {
+    let mut changed = false;
     for choice in body
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -111,11 +113,12 @@ pub fn exclude_reasoning(body: &mut Value) {
                     "thinking_blocks",
                     "reasoning_items",
                 ] {
-                    object.remove(key);
+                    changed |= object.remove(key).is_some();
                 }
             }
         }
     }
+    changed
 }
 
 /// What the client is told about who served the request: our own request id and
@@ -155,21 +158,25 @@ pub struct ResponseIdentity {
 /// Only ever *replaces* `id`/`model`, never adds them: an Anthropic
 /// `content_block_delta` legitimately carries neither, and inventing them would
 /// corrupt the event.
-pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
+pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     match object.get("type").and_then(Value::as_str) {
         // Anthropic streaming: identity is in `message_start`'s `message`.
         Some("message_start") => {
             if let Some(message) = object.get_mut("message").and_then(Value::as_object_mut) {
-                rewrite_id_and_model(message, identity);
+                rewrite_id_and_model(message, identity)
+            } else {
+                false
             }
         }
         // Responses API streaming: lifecycle events nest identity in `response`.
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                rewrite_id_and_model(inner, identity);
+                rewrite_id_and_model(inner, identity)
+            } else {
+                false
             }
         }
         // Everything else — the buffered body (OpenAI chat/completion/responses, or
@@ -183,13 +190,24 @@ pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
 
 /// Replace `id`/`model` where they already exist, on whichever object carries
 /// the response identity.
-fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &ResponseIdentity) {
-    if object.contains_key("id") {
-        object.insert("id".to_string(), Value::String(identity.request_id.clone()));
+fn rewrite_id_and_model(
+    object: &mut serde_json::Map<String, Value>,
+    identity: &ResponseIdentity,
+) -> bool {
+    let mut changed = false;
+    if let Some(id) = object.get_mut("id") {
+        if id.as_str() != Some(&identity.request_id) {
+            *id = Value::String(identity.request_id.clone());
+            changed = true;
+        }
     }
-    if let (true, Some(model)) = (object.contains_key("model"), identity.user_model.as_ref()) {
-        object.insert("model".to_string(), Value::String(model.clone()));
+    if let (Some(model), Some(target)) = (object.get_mut("model"), identity.user_model.as_ref()) {
+        if model.as_str() != Some(target) {
+            *model = Value::String(target.clone());
+            changed = true;
+        }
     }
+    changed
 }
 
 // ── Canonical output schema (allowlist) ──────────────────────────────────────
@@ -201,7 +219,7 @@ fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &
 // leaks nothing by construction: a field the schema does not name never reaches
 // the client, whether or not we have seen it.
 //
-// This is why `rewrite_identity` no longer strips engine fields —
+// `rewrite_identity` handles values; canonicalization removes engine fields —
 // `matched_stop` and its kind are simply not on the allowlist. Identity that is
 // a *value*, not a field (`id`/`model`), is still rewritten there; the allowlist
 // only decides which fields survive.
@@ -280,6 +298,20 @@ const CHAT_USAGE: &[&str] = &[
     "reasoning_tokens",
     "server_tool_use",
     "server_tool_use_details",
+    "cost",
+    "cost_details",
+];
+// Messages counters plus the token-detail fallbacks understood by pricing.
+const MESSAGES_USAGE: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "prompt_tokens_details",
+    "input_tokens_details",
     "cost",
     "cost_details",
 ];
@@ -613,52 +645,89 @@ const SYSTEMONE_USAGE: &[&str] = &["input_tokens", "output_tokens", "cost"];
 /// event — the gateway's error tail carries it, and a rebuilt upstream error
 /// must be indistinguishable from it (and stay correlatable with the receipt).
 pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&str>) {
+    canonicalize_body(body, endpoint, request_id, true);
+}
+
+fn canonicalize_body(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+    filter_usage_fields: bool,
+) -> bool {
     match endpoint {
-        Endpoint::ChatComplete => canonicalize_chat_completion(body),
-        Endpoint::Complete => canonicalize_text_completion(body),
-        Endpoint::CreateModelResponse => canonicalize_responses(body),
+        Endpoint::ChatComplete => canonicalize_chat_completion(body, filter_usage_fields),
+        Endpoint::Complete => canonicalize_text_completion(body, filter_usage_fields),
+        Endpoint::CreateModelResponse => canonicalize_responses(body, filter_usage_fields),
         Endpoint::Messages => canonicalize_messages(body, request_id),
-        Endpoint::Embed => {}
-        Endpoint::SystemOne => canonicalize_systemone(body),
+        Endpoint::Embed => false,
+        Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
-        Endpoint::AudioTranscriptions => {}
-        Endpoint::ImagesGenerations => super::images::canonicalize(body),
+        Endpoint::AudioTranscriptions => false,
+        Endpoint::ImagesGenerations => {
+            super::images::canonicalize(body);
+            true
+        }
     }
 }
 
-fn canonicalize_systemone(body: &mut Value) {
+/// Sanitation follows the payload schema even for unknown SSE event names.
+/// Ingress metadata remains authoritative for protocol identity and outcome.
+/// Streaming usage is filtered by accounting, including on failed turns.
+pub(crate) fn canonicalize_stream(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+) -> bool {
+    match endpoint {
+        Endpoint::Messages => false,
+        _ => canonicalize_body(body, endpoint, request_id, false),
+    }
+}
+
+fn canonicalize_systemone(body: &mut Value, filter_usage_fields: bool) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
+    let mut changed = false;
     if object.get("type").and_then(Value::as_str) == Some("error")
         && object.get("error").is_none_or(Value::is_null)
     {
+        changed = true;
         object.insert("error".into(), Value::Object(object.clone()));
     }
     if object.get("error").is_some_and(Value::is_null) {
+        changed = true;
         object.remove("error");
     }
-    retain_allowed(object, SYSTEMONE_TOP);
-    sanitize_error(object.get_mut("error"));
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, SYSTEMONE_USAGE);
+    changed |= retain_allowed(object, SYSTEMONE_TOP);
+    changed |= sanitize_error(object.get_mut("error"));
+    if filter_usage_fields {
+        changed |= filter_systemone_usage(object.get_mut("usage"));
     }
+    changed
 }
 
 /// The Messages surface is left as the upstream (or the format conversion)
 /// shaped it, except for the in-band `error` event, which carries
 /// upstream-controlled kind and prose. It is rebuilt in the shape
-/// `stream_error_tail` emits for this protocol, dropping everything beside
+/// the response owner emits for this protocol, dropping everything beside
 /// `type`/`message` by construction; the rebuilt event keeps `type: "error"`
-/// and a non-null `error` member, which the meter and the framing observer
-/// classify a failed stream by.
-fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
+/// and a non-null `error` member. Classified failure evidence stays with the
+/// record while the response owner sanitizes its representation.
+fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     if object.get("type").and_then(Value::as_str) != Some("error") {
-        return;
+        return false;
     }
+    sanitize_messages_error_event(object, request_id)
+}
+
+pub(crate) fn sanitize_messages_error_event(
+    object: &mut serde_json::Map<String, Value>,
+    request_id: Option<&str>,
+) -> bool {
     // The same kind resolution and the same suppressed-status rules as every
     // other surface: read code-first, and let the account check outrank the
     // kind. Reading the `type` slot alone would relay an unpaid provider as a
@@ -679,19 +748,23 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
         )
     };
     if let Value::Object(event) = envelope(Surface::Anthropic, &kind, &message, request_id) {
-        *object = event;
+        let before = std::mem::replace(object, event);
+        before != *object
+    } else {
+        false
     }
 }
 
-fn canonicalize_text_completion(body: &mut Value) {
+fn canonicalize_text_completion(body: &mut Value, filter_usage_fields: bool) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
-    retain_allowed(object, COMPLETION_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
+    let mut changed = false;
+    changed |= retain_allowed(object, COMPLETION_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
     }
-    sanitize_error(object.get_mut("error"));
+    changed |= sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -699,10 +772,11 @@ fn canonicalize_text_completion(body: &mut Value) {
         .flatten()
     {
         if let Some(choice) = choice.as_object_mut() {
-            retain_allowed(choice, COMPLETION_CHOICE);
-            sanitize_error(choice.get_mut("error"));
+            changed |= retain_allowed(choice, COMPLETION_CHOICE);
+            changed |= sanitize_error(choice.get_mut("error"));
         }
     }
+    changed
 }
 
 /// The Responses API is the one surface whose streaming events do *not* share
@@ -711,9 +785,8 @@ fn canonicalize_text_completion(body: &mut Value) {
 /// `{"type":"response.completed","response":{…}}`, `{"type":"error",…}`), while
 /// the buffered body *is* the response object (`{"object":"response",…}`, no
 /// top-level `type`). Applying the final-object allowlist to an event envelope
-/// would empty it and destroy the stream — and, because metering keys on the
-/// envelope's `type`/`response.status`/`error`, misreport a successful stream as
-/// failed. So dispatch on the envelope `type`:
+/// would empty it and destroy the client-visible stream. Choose the sanitation
+/// schema from the envelope `type`, independently of ingress control meaning:
 /// - No `type`: the buffered response object — canonicalize it directly.
 /// - `response.*` lifecycle: the full object is nested under `response` — that is
 ///   the only identity-bearing part; canonicalize it and leave the envelope's
@@ -724,38 +797,39 @@ fn canonicalize_text_completion(body: &mut Value) {
 ///   envelope carrying no response object and nothing upstream-authored beyond
 ///   content — pass through verbatim. There is no schema to filter an envelope
 ///   against, and applying the final-object allowlist would empty it.
-fn canonicalize_responses(body: &mut Value) {
+fn canonicalize_responses(body: &mut Value, filter_usage_fields: bool) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     match object.get("type").and_then(Value::as_str) {
         // `response.error` must be matched before the lifecycle prefix: it
         // carries the error at the top level with no `response` member, so the
         // lifecycle arm would pass it through verbatim. Rebuilt as the
-        // canonical `error` event, which metering also classifies by.
+        // canonical `error` event without changing its ingress meaning.
         Some("error" | "response.error") => sanitize_responses_error_event(object),
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                canonicalize_responses_object(inner);
+                canonicalize_responses_object(inner, filter_usage_fields)
+            } else {
+                false
             }
         }
-        Some(_) => {}
-        None => canonicalize_responses_object(object),
+        Some(_) => false,
+        None => canonicalize_responses_object(object, filter_usage_fields),
     }
 }
 
 /// Rebuild a Responses in-band `error` event as the gateway's own.
 ///
 /// This is the one non-`response.*` event with a gateway-side canonical shape:
-/// `stream_error_tail` already emits it when the gateway ends a broken
+/// The response owner already emits it when the gateway ends a broken
 /// Responses stream itself, and a client should not be able to tell the two
 /// apart. Two upstream shapes arrive — the documented flat event, and an
 /// `error` object nested under the envelope — and both collapse into that one
 /// shape. `sequence_number` is preserved: the protocol numbers its events, and
-/// the framing observer continues that numbering when it appends a tail of its
-/// own. The rebuilt event keeps `type: "error"`, which the meter and the
-/// framing observer classify a failed stream by.
-fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
+/// response owner continues that numbering when it appends an error tail.
+/// Rebuilding the representation preserves the ingress failure classification.
+pub(crate) fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) -> bool {
     let nested = object.get("error");
     // Prefer the nested object's fields over the envelope's. The kind is the
     // `code`, falling back to the nested `type`; the top-level `type` is the
@@ -799,18 +873,26 @@ fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
         )
     };
     if let Value::Object(event) = event {
-        *object = event;
+        let before = std::mem::replace(object, event);
+        before != *object
+    } else {
+        false
     }
 }
 
-fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
-    retain_allowed(object, RESPONSES_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, RESPONSES_USAGE);
+fn canonicalize_responses_object(
+    object: &mut serde_json::Map<String, Value>,
+    filter_usage_fields: bool,
+) -> bool {
+    let mut changed = false;
+    changed |= retain_allowed(object, RESPONSES_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiResponses);
     }
     // `output[]` items are content (message/reasoning/function_call, …) and left
     // intact; the identifying fields ride at the top level, dropped above.
-    sanitize_responses_error_field(object.get_mut("error"));
+    changed |= sanitize_responses_error_field(object.get_mut("error"));
+    changed
 }
 
 /// The response object's `error` field is `{code, message}` — string code,
@@ -821,11 +903,11 @@ fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
 /// kind keeps its name and its scrubbed message; a suppressed kind becomes the
 /// gateway's own vocabulary; no kind at all relays the scrubbed message under
 /// the generic code.
-fn sanitize_responses_error_field(error: Option<&mut Value>) {
-    let Some(error) = error else { return };
+pub(crate) fn sanitize_responses_error_field(error: Option<&mut Value>) -> bool {
+    let Some(error) = error else { return false };
     let (code, message) = match &*error {
         // A null error is the healthy value; there is nothing to rebuild.
-        Value::Null => return,
+        Value::Null => return false,
         // A bare-string error (some providers send one) becomes the object.
         Value::String(text) => (
             responses_gateway_code(502).to_string(),
@@ -863,26 +945,50 @@ fn sanitize_responses_error_field(error: Option<&mut Value>) {
             upstream_message(502).to_string(),
         ),
     };
-    *error = json!({ "code": code, "message": message });
+    let before = std::mem::replace(error, json!({ "code": code, "message": message }));
+    before != *error
 }
 
-fn retain_allowed(object: &mut serde_json::Map<String, Value>, allowed: &[&str]) {
+fn retain_allowed(object: &mut serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    let before = object.len();
     object.retain(|key, _| allowed.contains(&key.as_str()));
+    object.len() != before
 }
 
-fn canonicalize_chat_completion(body: &mut Value) {
-    let Some(object) = body.as_object_mut() else {
-        return;
+pub(crate) fn filter_usage(usage: Option<&mut Value>, protocol: SseProtocol) -> bool {
+    let allowed = match protocol {
+        SseProtocol::OpenaiChat => CHAT_USAGE,
+        SseProtocol::OpenaiResponses => RESPONSES_USAGE,
+        SseProtocol::AnthropicMessages => MESSAGES_USAGE,
     };
-    retain_allowed(object, CHAT_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, allowed)
+    } else {
+        false
     }
-    // The allowlist keeps the `error` field (so the client sees an in-band error
-    // and metering classifies the stream), but the error object's interior is
+}
+
+pub(crate) fn filter_systemone_usage(usage: Option<&mut Value>) -> bool {
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, SYSTEMONE_USAGE)
+    } else {
+        false
+    }
+}
+
+fn canonicalize_chat_completion(body: &mut Value, filter_usage_fields: bool) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    changed |= retain_allowed(object, CHAT_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    }
+    // The allowlist keeps the client-visible `error` field, but its interior is
     // upstream-controlled — filter it to the standard fields and scrub its
     // message, so no `metadata.provider_name`/`raw` or unknown sub-field leaks.
-    sanitize_error(object.get_mut("error"));
+    changed |= sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -892,15 +998,16 @@ fn canonicalize_chat_completion(body: &mut Value) {
         let Some(choice) = choice.as_object_mut() else {
             continue;
         };
-        retain_allowed(choice, CHAT_CHOICE);
-        sanitize_error(choice.get_mut("error"));
+        changed |= retain_allowed(choice, CHAT_CHOICE);
+        changed |= sanitize_error(choice.get_mut("error"));
         // A buffered choice carries `message`; a streaming choice carries `delta`.
         for container in ["message", "delta"] {
             if let Some(part) = choice.get_mut(container).and_then(Value::as_object_mut) {
-                retain_allowed(part, CHAT_MESSAGE);
+                changed |= retain_allowed(part, CHAT_MESSAGE);
             }
         }
     }
+    changed
 }
 
 /// Make an in-band error client-safe. An object whose kind is not relayable is
@@ -910,30 +1017,30 @@ fn canonicalize_chat_completion(body: &mut Value) {
 /// `{message, type, param, code}` object (a client indexing those keys must
 /// never miss one) with its message scrubbed; a bare-string error becomes the
 /// same object; any other non-null shape folds into the generic error.
-fn sanitize_error(error: Option<&mut Value>) {
-    let Some(error) = error else { return };
+pub(crate) fn sanitize_error(error: Option<&mut Value>) -> bool {
+    let Some(error) = error else { return false };
     if error.is_null() {
-        return;
+        return false;
     }
     // A bare-string error (some providers send one) becomes the standard
     // object — a client parsing that shape must never meet a string.
     if let Value::String(text) = error {
         let mut generic = chat_gateway_error(502);
         generic["message"] = Value::String(client_safe_error_text(text));
-        *error = generic;
-        return;
+        let before = std::mem::replace(error, generic);
+        return before != *error;
     }
     let Some(object) = error.as_object() else {
         // Any other non-null shape (an array, a number, a boolean) claims
         // nothing parseable and its interior is upstream-controlled — fold it
         // rather than relay it.
-        *error = chat_gateway_error(502);
-        return;
+        let before = std::mem::replace(error, chat_gateway_error(502));
+        return before != *error;
     };
     if !is_relayable_error(object) {
         let status = suppressed_status_for(object, object.get("type"));
-        *error = chat_gateway_error(status);
-        return;
+        let before = std::mem::replace(error, chat_gateway_error(status));
+        return before != *error;
     }
     // Relayable: rebuild rather than filter, so every key is present. `code`
     // is always the numeric status on this surface — aggregator-style clients
@@ -956,15 +1063,19 @@ fn sanitize_error(error: Option<&mut Value>) {
         _ => client_safe_error_text(""),
     };
     let param = client_error_param(object.get("param"));
-    *error = json!({
-        "message": message,
-        "type": error_kind,
-        "param": param,
-        "code": code,
-    });
+    let before = std::mem::replace(
+        error,
+        json!({
+            "message": message,
+            "type": error_kind,
+            "param": param,
+            "code": code,
+        }),
+    );
+    before != *error
 }
 
-pub(super) fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -981,16 +1092,8 @@ pub(super) fn now_millis() -> u128 {
 /// The cache counters of a Chat usage object: tokens read from and written
 /// to the cache, each under either name an upstream uses.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
-    // Read as the control plane reads a counter: a numeric string counts, and
-    // anything unreadable, negative included, is absent rather than zero, so
-    // the other name for the same bucket is still consulted.
-    let counter = |value: Option<&Value>| {
-        let number = match value? {
-            Value::String(text) => text.trim().parse::<f64>().ok()?,
-            other => other.as_f64()?,
-        };
-        (number.is_finite() && number >= 0.0).then_some(number as i64)
-    };
+    // Use the pricing parser: invalid counters are absent, while zero wins.
+    let counter = |value: Option<&Value>| value.and_then(super::pricing::usage_counter);
     let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
         counter(
             usage
@@ -1006,6 +1109,27 @@ pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
         )
     });
     (cache_read, cache_creation)
+}
+
+/// Chat usage for the input counts from Messages and the latest output count.
+pub(super) fn chat_usage(start: Option<&Value>, output: i64) -> Value {
+    let mut usage = json!({"completion_tokens": output});
+    let mut prompt = 0;
+    if let Some(start) = start {
+        let read = i64_field(start, "cache_read_input_tokens");
+        let creation = i64_field(start, "cache_creation_input_tokens");
+        prompt = i64_field(start, "input_tokens") + read + creation;
+        usage["prompt_tokens"] = json!(prompt);
+        if read != 0 || creation != 0 {
+            for key in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+                if let Some(value) = start.get(key) {
+                    usage[key] = value.clone();
+                }
+            }
+        }
+    }
+    usage["total_tokens"] = json!(prompt + output);
+    usage
 }
 
 /// Anthropic usage for a Chat usage object.
@@ -2265,7 +2389,7 @@ mod identity_tests {
     /// message would survive the scrubber's shape checks yet still leak who
     /// served the request and blame the caller's quota for ours. An actionable
     /// kind (the documented flat shape) is relayed. `sequence_number` survives
-    /// either way; the framing observer continues the numbering from it.
+    /// either way; the response owner continues error-tail numbering from it.
     #[test]
     fn canonicalize_responses_rebuilds_an_in_band_error() {
         let mut body = json!({

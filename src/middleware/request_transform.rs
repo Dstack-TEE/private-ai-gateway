@@ -44,6 +44,20 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
+    /// Resolve the HTTP boundary to the typed endpoint used inside the pipeline.
+    pub(crate) fn from_path(path: &str) -> Self {
+        match path {
+            COMPLETIONS_PATH => Self::Complete,
+            EMBEDDINGS_PATH => Self::Embed,
+            MESSAGES_PATH => Self::Messages,
+            RESPONSES_PATH => Self::CreateModelResponse,
+            SYSTEMONE_PATH => Self::SystemOne,
+            IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
+            AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            _ => Self::ChatComplete,
+        }
+    }
+
     /// The path this endpoint is served on downstream and forwarded to upstream.
     pub fn path(self) -> &'static str {
         match self {

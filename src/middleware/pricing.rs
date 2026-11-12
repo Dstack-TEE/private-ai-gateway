@@ -16,12 +16,30 @@ struct ResolvedUsage {
     cache_creation: i128,
 }
 
-// Read a token count, accepting integer- or float-encoded numbers (a provider
-// may send `10.0`). Returns None only for missing/null/non-numeric values, so the
-// `??`-style chain: a numeric `0` stops the chain (not treated as missing).
+/// A finite, non-negative integral counter, at most JavaScript's MAX_SAFE_INTEGER.
+/// Strings contain one or more ASCII digits, including leading zeros.
+/// Shared with usage projection so pricing and bridge cache buckets agree.
+pub(super) fn usage_counter(value: &Value) -> Option<i64> {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    let count = match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            let count = number.as_f64()?;
+            (count >= 0.0 && count.fract() == 0.0 && count <= MAX_SAFE_INTEGER as f64)
+                .then_some(count as u64)
+        })?,
+        Value::String(text)
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u64>().ok()?
+        }
+        _ => return None,
+    };
+    (count <= MAX_SAFE_INTEGER).then_some(count as i64)
+}
+
+// An absent/invalid counter consults the fallback; an explicit zero wins.
 fn token_value(value: &Value, key: &str) -> Option<i64> {
-    let field = value.get(key)?;
-    field.as_i64().or_else(|| field.as_f64().map(|f| f as i64))
+    value.get(key).and_then(usage_counter)
 }
 
 fn token_field(usage: &Value, keys: &[&str]) -> i64 {
@@ -71,7 +89,15 @@ fn resolve_usage(usage: &Value) -> ResolvedUsage {
         })
         .or(responses_cached)
         .unwrap_or(0);
-    let cache_creation = token_value(usage, "cache_creation_input_tokens").unwrap_or(0);
+    let cache_creation = token_value(usage, "cache_creation_input_tokens")
+        .or_else(|| {
+            let prompt = token_value(usage, "prompt_tokens")?;
+            let write = usage
+                .get("prompt_tokens_details")
+                .and_then(|details| token_value(details, "cache_write_tokens"))?;
+            (i128::from(write) <= i128::from(prompt) - i128::from(cache_read)).then_some(write)
+        })
+        .unwrap_or(0);
     // OpenAI's `prompt_tokens` already includes cached tokens; Anthropic's
     // `input_tokens` excludes them (cache_read/cache_creation are separate,
     // additive buckets). Normalize to the OpenAI convention (prompt includes
@@ -202,6 +228,75 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn usage_counters_share_integer_and_digit_string_validation() {
+        for (value, expected) in [
+            (json!(0), 0),
+            (json!(-0.0), 0),
+            (json!(10), 10),
+            (json!(10.0), 10),
+            (json!(1e2), 100),
+            (json!("0"), 0),
+            (json!("10"), 10),
+            (json!("01"), 1),
+            (json!("000"), 0),
+            (json!(9_007_199_254_740_991_i64), 9_007_199_254_740_991),
+            (json!("9007199254740991"), 9_007_199_254_740_991),
+        ] {
+            assert_eq!(usage_counter(&value), Some(expected), "{value}");
+        }
+        for value in [
+            json!(10.5),
+            json!(-1),
+            json!("10.0"),
+            json!("10.5"),
+            json!("-1"),
+            json!("-0"),
+            json!("1e2"),
+            json!("1E+2"),
+            json!("100e-2"),
+            json!(" 10"),
+            json!("10 "),
+            json!("\t10"),
+            json!("10\n"),
+            json!("10\r"),
+            json!("0x10"),
+            json!(""),
+            json!("  "),
+            json!("Infinity"),
+            json!("NaN"),
+            json!("+10"),
+            json!(".5"),
+            json!("1."),
+            json!("not a count"),
+            json!("1e400"),
+            json!(9_007_199_254_740_992_i64),
+            json!("9007199254740992"),
+            json!(i64::MAX),
+            json!(i64::MAX.to_string()),
+            json!("9223372036854775808"),
+            json!(u64::MAX),
+            json!("18446744073709551616"),
+            json!("１０"),
+            json!("\u{feff}10"),
+            json!("10\u{feff}"),
+            json!("\u{0085}10"),
+            json!("10\u{0085}"),
+            json!("\u{000b}10"),
+            json!("10\u{000c}"),
+            Value::Null,
+            json!(true),
+            json!([]),
+            json!({}),
+        ] {
+            assert_eq!(usage_counter(&value), None, "{value}");
+        }
+        let usage = json!({"prompt_tokens":"invalid","input_tokens":"10"});
+        assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 10);
+        let usage = json!({"prompt_tokens":0,"input_tokens":10});
+        assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 0);
+    }
+
+    #[test]
     fn resolve_handles_openai_and_anthropic_shapes() {
         let openai = resolve_usage(&json!({
             "prompt_tokens": 100, "completion_tokens": 20,
@@ -281,6 +376,48 @@ mod tests {
                 json!({ "prompt_tokens": 100, "completion_tokens": 5,
                         "prompt_tokens_details": { "cached_tokens": 40 } }),
                 74.0,
+            ),
+            (
+                "OpenAI chat with read and write cache buckets",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                81.5,
+            ),
+            (
+                "numeric strings use the same cache buckets",
+                json!({"prompt_tokens":"100","completion_tokens":"5",
+                    "prompt_tokens_details":{"cached_tokens":"40","cache_write_tokens":"30"}}),
+                81.5,
+            ),
+            (
+                "an inconsistent nested write bucket is ignored",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":61}}),
+                74.0,
+            ),
+            (
+                "top-level zero creation takes precedence",
+                json!({"prompt_tokens":100,"completion_tokens":5,"cache_creation_input_tokens":0,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                74.0,
+            ),
+            (
+                "top-level creation takes precedence",
+                json!({"prompt_tokens":100,"completion_tokens":5,"cache_creation_input_tokens":10,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                76.5,
+            ),
+            (
+                "nested write requires Chat prompt_tokens",
+                json!({"input_tokens":100,"output_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                114.0,
+            ),
+            (
+                "existing Chat read bucket is not clamped",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":140,"cache_write_tokens":30}}),
+                24.0,
             ),
             (
                 "Anthropic native, cache buckets added to the total",
@@ -426,7 +563,9 @@ mod image_tests {
         );
         assert_eq!(
             compute_image_cost(
-                Some(&json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":i64::MAX})),
+                Some(
+                    &json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":9_007_199_254_740_991_i64})
+                ),
                 &pricing,
                 &images,
             ),

@@ -5,21 +5,25 @@
 //! Provider conversions are selected by upstream format and client surface.
 //! Same-format streaming reaches this module too: every stream is sanitized
 //! here (identity rewrite + canonicalize, per chunk), and reasoning is excluded
-//! when the client opts out. Cost injection, TTFT, and outcome are a separate
-//! metering pass downstream (`sse`).
+//! when the client opts out. Ingress accounts source usage; the response owner
+//! chooses failure terminals and writes the client stream.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+#[cfg(test)]
 use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::{json, Map, Value};
 
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{ServiceError, ServiceResponseStream};
+use crate::aggregator::service::done_record;
+use crate::aggregator::service::ServiceError;
+#[cfg(test)]
+use crate::aggregator::service::ServiceResponseStream;
 
 use super::request_transform::{Endpoint, ResponsesToolMap};
 use super::response_transform::{
@@ -30,19 +34,11 @@ use super::response_transform::{
     responses_usage, synthesized_call_id, thinking_block, transform_finish_reason,
     unusable_tool_calls_error, ChatFinish, ChatToolCall, ResponseIdentity, ResponsesHead,
 };
-use super::sse::MAX_SSE_LINE_BYTES;
 use super::types::ProviderFormat;
+use crate::sse::{Event, EventStream, Payload, Record, MAX_EVENT_BYTES};
+use crate::sse_protocol::{event_kind, EventKind, EventMeaning, SseProtocol};
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
-
-/// Where a Chat bridge leaves the usage the meter reports: the shape the
-/// buffered path reports for the same surface, known even when the converted
-/// stream ends in an error that carries none.
-///
-/// For Responses it is the upstream's own chat usage: the Responses shape has
-/// no field for cache-creation tokens, and its `input_tokens` is a total where
-/// the control plane reads the same name as cache-excluded.
-pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
 
 /// Which streaming transform applies.
 ///
@@ -51,20 +47,19 @@ pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
 #[derive(Debug, Clone)]
 pub enum StreamTransform {
     AnthropicToOpenaiChat,
-    OpenaiToAnthropicMessages(UpstreamUsage),
-    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>, UpstreamUsage),
+    OpenaiToAnthropicMessages,
+    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
-    /// Applied to every stream, including same-format passthrough, which is the
-    /// one path that previously relayed provider bytes verbatim. Carries the
-    /// endpoint so each chunk is canonicalized to that surface's output schema.
+    /// Applied to every stream, including native passthrough. The endpoint
+    /// selects the canonical output schema for each payload.
     SanitizeResponse(Arc<ResponseIdentity>, Endpoint),
 }
 
 impl StreamTransform {
     fn provider(&self) -> &'static str {
         match self {
-            StreamTransform::OpenaiToAnthropicMessages(_) => "openai",
+            StreamTransform::OpenaiToAnthropicMessages => "openai",
             StreamTransform::OpenaiChatToResponses(..) => "openai",
             StreamTransform::ExcludeReasoning => "openai",
             StreamTransform::SanitizeResponse(_, _) => "openai",
@@ -72,69 +67,80 @@ impl StreamTransform {
         }
     }
 
-    // Parse a raw event text (lines joined by `\n`) and transform it.
-    // `Err(())` means the provider sent an unparseable event; this ends the
-    // stream and classifies it failed rather than skipping a truncated payload.
-    // Each transform dispatches known control events by name first, then skips
-    // any event whose payload is empty (per the SSE spec an empty data buffer
-    // aborts dispatch — covers `: PROCESSING` heartbeats, ignored fields, and
-    // name-only or empty-`data:` keep-alives).
-    fn apply(
+    fn apply_record(
         &self,
-        event: &str,
+        mut record: Record,
         fallback_id: &str,
         state: &mut StreamState,
-    ) -> Result<Option<String>, ()> {
+    ) -> Result<Vec<Record>, BridgeError> {
+        // Failure evidence belongs to the response owner. Preserve the complete
+        // source record, including usage, through every content stage.
+        if record
+            .event()
+            .is_some_and(|event| event.meaning.failure.is_some())
+        {
+            return Ok(vec![record]);
+        }
         match self {
             StreamTransform::ExcludeReasoning => {
-                return Ok(Some(edit_event_body(
-                    event,
-                    response_transform::exclude_reasoning,
-                )))
+                record.edit_json(response_transform::exclude_reasoning);
+                return Ok(vec![record]);
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
-                return Ok(Some(edit_event_body(event, |body| {
-                    response_transform::rewrite_identity(body, identity);
-                    response_transform::canonicalize(
+                record.edit_json(|body| {
+                    let changed = response_transform::rewrite_identity(body, identity);
+                    response_transform::canonicalize_stream(
                         body,
                         *endpoint,
                         Some(identity.request_id.as_str()),
-                    );
-                })))
+                    ) | changed
+                });
+                return Ok(vec![record]);
             }
             _ => {}
         }
-        let event = parse_event(event);
-        match self {
+        if matches!(record, Record::Residual) {
+            return Ok(vec![record]);
+        }
+        let Some(event) = record.event() else {
+            return Ok(Vec::new());
+        };
+        let output = match self {
             StreamTransform::AnthropicToOpenaiChat => {
-                anthropic_chat_stream(&event, fallback_id, state, STRICT_OPENAI_COMPLIANCE)
+                anthropic_chat_stream(event, fallback_id, state, STRICT_OPENAI_COMPLIANCE)
             }
-            StreamTransform::OpenaiToAnthropicMessages(upstream_usage) => state
+            StreamTransform::OpenaiToAnthropicMessages => state
                 .messages
-                .get_or_insert_with(|| ChatStream::new(MessagesEvents::new(upstream_usage.clone())))
-                .event(&event, fallback_id),
-            StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) => state
+                .get_or_insert_with(|| ChatStream::new(MessagesEvents::new()))
+                .event(event, fallback_id),
+            StreamTransform::OpenaiChatToResponses(echo, identity) => state
                 .responses
                 .get_or_insert_with(|| {
-                    ChatStream::new(ResponsesEvents::new(
-                        echo.clone(),
-                        identity.clone(),
-                        upstream_usage.clone(),
-                    ))
+                    ChatStream::new(ResponsesEvents::new(echo.clone(), identity.clone()))
                 })
-                .event(&event, fallback_id),
-            StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(&event),
+                .event(event, fallback_id),
+            StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(event),
             StreamTransform::ExcludeReasoning | StreamTransform::SanitizeResponse(_, _) => {
                 unreachable!("handled above")
             }
+        }?;
+        let mut output = output.unwrap_or_default();
+        for record in &mut output {
+            if let Some(output) = record.event_mut() {
+                output.after_terminal = event.after_terminal;
+            }
         }
+        Ok(output)
     }
 
-    /// Close what the stream left open when the upstream ends it. `Err(())`
+    /// Close what the stream left open when the upstream ends it. An error
     /// means it ended before the response was complete.
-    fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<String>, ()> {
+    fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, BridgeError> {
+        if state.output_closed {
+            return Ok(None);
+        }
         match self {
-            StreamTransform::OpenaiToAnthropicMessages(_) => state
+            StreamTransform::OpenaiToAnthropicMessages => state
                 .messages
                 .as_mut()
                 .map_or(Ok(None), ChatStream::end_of_stream),
@@ -148,21 +154,17 @@ impl StreamTransform {
 }
 
 /// Select the streaming transform for a committed route format + endpoint, or
-/// `None` for native passthrough. A Chat bridge reports its usage through
-/// `upstream_usage`.
+/// `None` for native passthrough.
 pub fn select_stream_transform(
     format: ProviderFormat,
     endpoint: Endpoint,
-    upstream_usage: &UpstreamUsage,
 ) -> Option<StreamTransform> {
     use Endpoint::*;
     use ProviderFormat::*;
     match (format, endpoint) {
         (Anthropic, ChatComplete) => Some(StreamTransform::AnthropicToOpenaiChat),
         (Anthropic, Complete) => Some(StreamTransform::AnthropicCompleteToOpenai),
-        (Openai, Messages) => Some(StreamTransform::OpenaiToAnthropicMessages(
-            upstream_usage.clone(),
-        )),
+        (Openai, Messages) => Some(StreamTransform::OpenaiToAnthropicMessages),
         _ => None,
     }
 }
@@ -171,6 +173,8 @@ pub fn select_stream_transform(
 /// touches the part for its transform.
 #[derive(Default)]
 struct StreamState {
+    // Client closure must not stop validation before the source terminal.
+    output_closed: bool,
     // Anthropic -> OpenAI chat.
     tool_index: Option<i64>,
     usage: Option<Value>,
@@ -180,192 +184,77 @@ struct StreamState {
     responses: Option<ChatStream<ResponsesEvents>>,
 }
 
-/// One SSE event reduced to the fields the transforms consume: the last
-/// `event:` name and the `data:` lines joined with `\n` (per the SSE spec).
-struct ParsedEvent {
-    name: Option<String>,
-    data: Option<String>,
-}
-
-// Parse an event's text per the SSE field rules: `:`-prefixed lines are
-// comments, a field's value starts after the colon with at most one leading
-// space stripped, and every field other than `event:`/`data:` (`id:`,
-// `retry:`, vendor extensions) is ignored per the spec. Lines with no field
-// shape at all — bare `[DONE]`, bare JSON (colons inside JSON do not make it a
-// field: a `{`/`[`/`"` opener marks a payload line), plain garbage — are
-// collected and become the data when no `data:` field is present, so a
-// prefix-less payload survives even when a comment or `event:` line shares
-// the event block, and garbage still reaches the transforms' fail-fast parse.
-fn parse_event(event: &str) -> ParsedEvent {
-    let mut name = None;
-    let mut data: Option<String> = None;
-    let mut bare: Option<String> = None;
-    for line in event.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        // Judge the JSON opener on the trimmed line (upstreams may indent a
-        // bare payload) but keep the raw line as the payload.
-        let json_like = matches!(
-            line.trim_start().as_bytes().first(),
-            Some(b'{' | b'[' | b'"')
-        );
-        let colon = if json_like { None } else { line.find(':') };
-        match colon {
-            Some(idx) => {
-                let value = &line[idx + 1..];
-                let value = value.strip_prefix(' ').unwrap_or(value);
-                match &line[..idx] {
-                    // The name is trimmed: exact-match dispatch must tolerate
-                    // trailing whitespace an upstream leaves after the value.
-                    "event" => name = Some(value.trim().to_string()),
-                    "data" => {
-                        let buf = data.get_or_insert_with(String::new);
-                        if !buf.is_empty() {
-                            buf.push('\n');
-                        }
-                        buf.push_str(value);
-                    }
-                    _ => {}
-                }
-            }
-            None => {
-                let buf = bare.get_or_insert_with(String::new);
-                if !buf.is_empty() {
-                    buf.push('\n');
-                }
-                buf.push_str(line);
-            }
-        }
-    }
-    if data.is_none() {
-        data = bare.filter(|b| !b.trim().is_empty());
-    }
-    ParsedEvent { name, data }
-}
-
 // ── Anthropic Messages SSE → OpenAI chat.completion.chunk ────────────────────
 
 fn anthropic_chat_stream(
-    event: &ParsedEvent,
+    event: &Event,
     fallback_id: &str,
     state: &mut StreamState,
     strict: bool,
-) -> Result<Option<String>, ()> {
-    match event.name.as_deref() {
-        Some("ping") | Some("content_block_stop") => return Ok(None),
-        Some("message_stop") => return Ok(Some("data: [DONE]\n\n".to_string())),
+) -> Result<Option<Vec<Record>>, BridgeError> {
+    if event.meaning.terminal.is_some() {
+        return Ok(Some(vec![done_record()]));
+    }
+    match event.meaning.kind {
+        EventKind::Ping | EventKind::ContentBlockStop => return Ok(None),
         _ => {}
     }
-    let payload = event.data.as_deref().unwrap_or("").trim();
-    // No payload → no dispatch (name-only keep-alives included); a non-empty
-    // malformed payload must still fail the stream rather than be skipped.
-    if payload.is_empty() {
+    if matches!(&event.payload, Payload::Text(text) if text.is_empty()) {
         return Ok(None);
     }
-    let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
-    Ok(anthropic_chat_chunk(&parsed, fallback_id, state, strict))
+    let parsed = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
+    Ok(anthropic_chat_chunk(
+        parsed,
+        event.meaning.kind,
+        fallback_id,
+        state,
+        strict,
+    ))
 }
 
 fn anthropic_chat_chunk(
     parsed: &Value,
+    kind: EventKind,
     fallback_id: &str,
     state: &mut StreamState,
     strict: bool,
-) -> Option<String> {
+) -> Option<Vec<Record>> {
     let model = state.model.clone().unwrap_or_default();
-
-    if parsed.get("type").and_then(Value::as_str) == Some("error") {
-        if let Some(error) = parsed.get("error") {
-            // The error rides in the chunk's `error` member, as it does on the
-            // same-format path: that is the member a client detects a failed
-            // 200 stream by, and the sanitize stage rebuilds its interior into
-            // this surface's vocabulary. Putting the upstream's error type in
-            // `finish_reason` instead left the client no error to find and
-            // relayed a word this surface does not use.
-            let body = json!({
-                "id": fallback_id,
-                "object": "chat.completion.chunk",
-                "created": now_secs(),
-                "model": "",
-                "error": error.clone(),
-                // No finish reason: the stream did not finish, it failed, and
-                // `stop` would tell a client reading only this field that a
-                // truncated response completed normally. The `error` member
-                // above is what says what happened.
-                "choices": [{
-                    "finish_reason": Value::Null,
-                    "delta": { "content": "" },
-                }],
-            });
-            return Some(format!("data: {}\n\ndata: [DONE]\n\n", json_str(&body)));
-        }
+    if let Some(usage) = super::sse::message_start_usage(parsed) {
+        state.usage = Some(usage.clone());
     }
 
-    let message_usage = parsed.get("message").and_then(|m| m.get("usage"));
-    if parsed.get("type").and_then(Value::as_str) == Some("message_start") {
-        if let Some(usage) = message_usage {
-            let input = i64_field(usage, "input_tokens");
-            let cache_read = i64_field(usage, "cache_read_input_tokens");
-            let cache_creation = i64_field(usage, "cache_creation_input_tokens");
-            state.model = Some(
-                parsed
-                    .get("message")
-                    .and_then(|m| m.get("model"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-            );
-            let mut usage_state = json!({ "prompt_tokens": input + cache_read + cache_creation });
-            if cache_read != 0 || cache_creation != 0 {
-                let map = usage_state.as_object_mut().unwrap();
-                if let Some(v) = usage.get("cache_read_input_tokens") {
-                    map.insert("cache_read_input_tokens".into(), v.clone());
-                }
-                if let Some(v) = usage.get("cache_creation_input_tokens") {
-                    map.insert("cache_creation_input_tokens".into(), v.clone());
-                }
-            }
-            state.usage = Some(usage_state);
-            let body = json!({
-                "id": fallback_id,
-                "object": "chat.completion.chunk",
-                "created": now_secs(),
-                "model": state.model.clone().unwrap_or_default(),
-                "provider": "anthropic",
-                "choices": [{
-                    "delta": { "content": "" },
-                    "index": 0,
-                    "logprobs": Value::Null,
-                    "finish_reason": Value::Null,
-                }],
-            });
-            return Some(format!("data: {}\n\n", json_str(&body)));
-        }
+    if kind == EventKind::MessageStart
+        && parsed.get("message").and_then(|m| m.get("usage")).is_some()
+    {
+        state.model = Some(
+            parsed["message"]["model"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+        );
+        let body = json!({
+            "id": fallback_id,
+            "object": "chat.completion.chunk",
+            "created": now_secs(),
+            "model": state.model.clone().unwrap_or_default(),
+            "provider": "anthropic",
+            "choices": [{
+                "delta": { "content": "" },
+                "index": 0,
+                "logprobs": Value::Null,
+                "finish_reason": Value::Null,
+            }],
+        });
+        return Some(vec![chat_event(body)]);
     }
 
-    if parsed.get("type").and_then(Value::as_str) == Some("message_delta") {
+    if kind == EventKind::MessageDelta {
         if let Some(usage) = parsed.get("usage") {
-            let output = i64_field(usage, "output_tokens");
-            let prompt = state
-                .usage
-                .as_ref()
-                .map(|u| i64_field(u, "prompt_tokens"))
-                .unwrap_or(0);
-            let mut usage_out = json!({ "completion_tokens": output });
-            if let Some(state_usage) = state.usage.as_ref().and_then(Value::as_object) {
-                for (k, v) in state_usage {
-                    usage_out
-                        .as_object_mut()
-                        .unwrap()
-                        .insert(k.clone(), v.clone());
-                }
-            }
-            usage_out
-                .as_object_mut()
-                .unwrap()
-                .insert("total_tokens".into(), json!(prompt + output));
+            let usage_out = response_transform::chat_usage(
+                state.usage.as_ref(),
+                i64_field(usage, "output_tokens"),
+            );
             let stop_reason = parsed
                 .get("delta")
                 .and_then(|d| d.get("stop_reason"))
@@ -383,14 +272,13 @@ fn anthropic_chat_chunk(
                 }],
                 "usage": usage_out,
             });
-            return Some(format!("data: {}\n\n", json_str(&body)));
+            return Some(vec![chat_event(body)]);
         }
     }
 
     // Tool-call and text deltas.
     let mut tool_calls: Vec<Value> = Vec::new();
-    let is_tool_block_start = parsed.get("type").and_then(Value::as_str)
-        == Some("content_block_start")
+    let is_tool_block_start = kind == EventKind::ContentBlockStart
         && parsed
             .get("content_block")
             .and_then(|b| b.get("type"))
@@ -408,9 +296,7 @@ fn anthropic_chat_chunk(
         .get("delta")
         .and_then(|d| d.get("partial_json"))
         .filter(|v| !v.is_null());
-    let is_tool_block_delta = parsed.get("type").and_then(Value::as_str)
-        == Some("content_block_delta")
-        && partial_json.is_some();
+    let is_tool_block_delta = kind == EventKind::ContentBlockDelta && partial_json.is_some();
 
     if is_tool_block_start {
         if let Some(block) = parsed.get("content_block") {
@@ -448,7 +334,7 @@ fn anthropic_chat_chunk(
             "finish_reason": Value::Null,
         }],
     });
-    Some(format!("data: {}\n\n", json_str(&body)))
+    Some(vec![chat_event(body)])
 }
 
 // ── OpenAI chat.completion SSE → Messages / Responses SSE ────────────────────
@@ -458,8 +344,20 @@ fn anthropic_chat_chunk(
 // assembly, the terminal decision — and drives a `ChatEvents` writer for the
 // client's surface.
 
-fn sse_event(event: &str, data: &Value) -> String {
-    format!("event: {event}\ndata: {}\n\n", json_str(data))
+fn chat_event(body: Value) -> Record {
+    Record::generated(None, Payload::Json(body), EventMeaning::default())
+}
+
+fn sse_event(event: &str, data: Value) -> Record {
+    named_event(SseProtocol::AnthropicMessages, event, data)
+}
+
+fn named_event(protocol: SseProtocol, name: &str, body: Value) -> Record {
+    Record::generated(
+        Some(name),
+        Payload::Json(body),
+        EventMeaning::generated(protocol, event_kind(name)),
+    )
 }
 
 fn stream_str<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> &'a str {
@@ -474,7 +372,6 @@ fn stream_str<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> &'a str 
 struct ChatChunk<'a> {
     has_choice: bool,
     usage: Option<&'a Value>,
-    error: Option<&'a Value>,
     reasoning: &'a str,
     content: Cow<'a, str>,
     refusal: Cow<'a, str>,
@@ -521,7 +418,6 @@ fn parse_chat_chunk(chunk: &Value) -> ChatChunk<'_> {
     ChatChunk {
         has_choice: choice.is_some(),
         usage: chunk.get("usage").filter(|usage| usage.is_object()),
-        error: chunk.get("error").filter(|error| !error.is_null()),
         reasoning: choice
             .and_then(|choice| choice.get("delta"))
             .and_then(reasoning_text)
@@ -552,36 +448,37 @@ struct ToolCall {
 }
 
 /// Why a stream that ended in-band has no answer to give.
-enum Failure<'a> {
-    /// The upstream reported an error.
-    Upstream(&'a Value),
+enum Failure {
     /// The stream never carried a choice.
     Empty,
     /// Every tool call lacked a name, so none can be run.
     UnusableToolCalls,
 }
 
-enum Outcome<'a> {
+enum Outcome {
     Finished { finish: ChatFinish, tool_use: bool },
-    Failed(Failure<'a>),
+    Failed(Failure),
 }
 
 /// The events one client surface writes for a Chat stream.
 trait ChatEvents {
     /// The first chunk arrived: the message or response begins.
-    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut String);
-    /// The upstream reported usage (reasoning tokens already normalized).
-    fn usage(&mut self, _usage: &Value) {}
-    fn open_text(&mut self, kind: TextKind, out: &mut String);
-    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String);
+    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut Vec<Record>);
+    fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>);
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut Vec<Record>);
     /// A citation in the open text, in Responses form.
-    fn annotation(&mut self, _annotation: Value, _out: &mut String) {}
+    fn annotation(&mut self, _annotation: Value, _out: &mut Vec<Record>) {}
     /// `finished`: false for text the upstream was cut off in.
-    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut String);
+    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut Vec<Record>);
     /// Write one complete tool call; false when the surface leaves it out.
     /// `truncated`: the upstream was cut off, so the call may be unfinished.
-    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool;
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String);
+    fn tool_call(
+        &mut self,
+        call: &ChatToolCall<'_>,
+        truncated: bool,
+        out: &mut Vec<Record>,
+    ) -> bool;
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>);
 }
 
 /// Reads a Chat stream for a client surface. Text and reasoning stream as
@@ -610,7 +507,6 @@ struct ChatStream<E> {
     last_call: Option<(usize, usize)>,
     finish_reason: Option<String>,
     usage: Option<Value>,
-    error: Option<Value>,
 }
 
 impl<E: ChatEvents> ChatStream<E> {
@@ -628,7 +524,6 @@ impl<E: ChatEvents> ChatStream<E> {
             last_call: None,
             finish_reason: None,
             usage: None,
-            error: None,
         }
     }
 
@@ -636,17 +531,24 @@ impl<E: ChatEvents> ChatStream<E> {
         !self.response_id.is_empty()
     }
 
-    /// Apply one SSE event. `Err(())` only for a payload that is not JSON:
+    /// Apply one SSE event. A non-JSON payload or incomplete response fails:
     /// the stream is corrupt, and skipping the event could silently drop part
     /// of the answer.
-    fn event(&mut self, event: &ParsedEvent, fallback_id: &str) -> Result<Option<String>, ()> {
-        let payload = event.data.as_deref().unwrap_or("").trim();
-        let mut out = String::new();
-        if payload == "[DONE]" {
+    fn event(
+        &mut self,
+        event: &Event,
+        fallback_id: &str,
+    ) -> Result<Option<Vec<Record>>, BridgeError> {
+        let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
+        let mut out = Vec::new();
+        if self.terminated {
+            return Ok(None);
+        }
+        if event.meaning.terminal.is_some() {
             self.finish(&mut out)?;
-        } else if !payload.is_empty() && !self.terminated {
-            let chunk: Value = serde_json::from_str(payload).map_err(|_| ())?;
-            self.chunk(&chunk, fallback_id, &mut out);
+        } else if !empty {
+            let chunk = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
+            self.chunk(chunk, fallback_id, &mut out);
         }
         Ok((!out.is_empty()).then_some(out))
     }
@@ -655,20 +557,19 @@ impl<E: ChatEvents> ChatStream<E> {
     /// some upstreams omit, so a stream that already declared its finish (or
     /// its error) still terminates; one that did not, or said nothing, was
     /// cut off.
-    fn end_of_stream(&mut self) -> Result<Option<String>, ()> {
+    fn end_of_stream(&mut self) -> Result<Option<Vec<Record>>, BridgeError> {
         if self.terminated {
             return Ok(None);
         }
-        if self.finish_reason.is_none() && self.error.is_none() {
-            return Err(());
+        if self.finish_reason.is_none() {
+            return Err(BridgeError::IncompleteResponse);
         }
-        let mut out = String::new();
+        let mut out = Vec::new();
         self.finish(&mut out)?;
         Ok((!out.is_empty()).then_some(out))
     }
 
-    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut String) {
-        let chunk = parse_chat_chunk(value);
+    fn start(&mut self, value: &Value, fallback_id: &str, out: &mut Vec<Record>) {
         if !self.started() {
             self.response_id = value
                 .get("id")
@@ -678,14 +579,15 @@ impl<E: ChatEvents> ChatStream<E> {
                 .to_string();
             self.events.start(value, fallback_id, out);
         }
+    }
+
+    fn chunk(&mut self, value: &Value, fallback_id: &str, out: &mut Vec<Record>) {
+        let chunk = parse_chat_chunk(value);
+        self.start(value, fallback_id, out);
         if let Some(usage) = chunk.usage {
             let mut usage = usage.clone();
             let _ = normalize_reasoning_usage_value(&mut usage);
-            self.events.usage(&usage);
             self.usage = Some(usage);
-        }
-        if let Some(error) = chunk.error {
-            self.error = Some(error.clone());
         }
         self.answered |= chunk.has_choice;
         let mut annotations = chunk.annotations.into_iter();
@@ -712,7 +614,7 @@ impl<E: ChatEvents> ChatStream<E> {
         }
     }
 
-    fn text(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+    fn text(&mut self, kind: TextKind, delta: &str, out: &mut Vec<Record>) {
         if self.open != Some(kind) {
             self.close_text(true, out);
             self.open = Some(kind);
@@ -723,7 +625,7 @@ impl<E: ChatEvents> ChatStream<E> {
         self.events.text_delta(kind, delta, out);
     }
 
-    fn close_text(&mut self, finished: bool, out: &mut String) {
+    fn close_text(&mut self, finished: bool, out: &mut Vec<Record>) {
         if let Some(kind) = self.open.take() {
             self.events.close_text(kind, &self.text, finished, out);
             self.text.clear();
@@ -782,21 +684,19 @@ impl<E: ChatEvents> ChatStream<E> {
         call.arguments.push_str(delta.arguments);
     }
 
-    fn finish(&mut self, out: &mut String) -> Result<(), ()> {
+    fn finish(&mut self, out: &mut Vec<Record>) -> Result<(), BridgeError> {
         if self.terminated {
             return Ok(());
         }
+        self.terminated = true;
         // `[DONE]` with nothing before it: there is no response to close.
         if !self.started() {
-            return Err(());
+            return Err(BridgeError::IncompleteResponse);
         }
-        self.terminated = true;
         let finish = ChatFinish::parse(self.finish_reason.as_deref());
         // Text the turn was cut off in is unfinished, unless calls followed it.
         self.close_text(!finish.truncated() || self.called_after_text, out);
-        let outcome = if let Some(error) = &self.error {
-            Outcome::Failed(Failure::Upstream(error))
-        } else if !self.answered {
+        let outcome = if !self.answered {
             Outcome::Failed(Failure::Empty)
         } else {
             let mut named = 0;
@@ -834,46 +734,38 @@ impl<E: ChatEvents> ChatStream<E> {
 struct MessagesEvents {
     /// The index the next content block takes.
     next_index: usize,
-    upstream_usage: UpstreamUsage,
 }
 
 impl MessagesEvents {
-    fn new(upstream_usage: UpstreamUsage) -> Self {
-        Self {
-            next_index: 0,
-            upstream_usage,
-        }
+    fn new() -> Self {
+        Self { next_index: 0 }
     }
 
-    fn block_start(&mut self, block: Value, out: &mut String) {
-        out.push_str(&sse_event(
+    fn block_start(&mut self, block: Value, out: &mut Vec<Record>) {
+        out.push(sse_event(
             "content_block_start",
-            &json!({ "type": "content_block_start", "index": self.next_index, "content_block": block }),
+            json!({ "type": "content_block_start", "index": self.next_index, "content_block": block }),
         ));
     }
 
-    fn block_delta(&self, delta: Value, out: &mut String) {
-        out.push_str(&sse_event(
+    fn block_delta(&self, delta: Value, out: &mut Vec<Record>) {
+        out.push(sse_event(
             "content_block_delta",
-            &json!({ "type": "content_block_delta", "index": self.next_index, "delta": delta }),
+            json!({ "type": "content_block_delta", "index": self.next_index, "delta": delta }),
         ));
     }
 
-    fn block_stop(&mut self, out: &mut String) {
-        out.push_str(&sse_event(
+    fn block_stop(&mut self, out: &mut Vec<Record>) {
+        out.push(sse_event(
             "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": self.next_index }),
+            json!({ "type": "content_block_stop", "index": self.next_index }),
         ));
         self.next_index += 1;
     }
 }
 
-fn report_usage(slot: &UpstreamUsage, usage: Value) {
-    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(usage);
-}
-
 impl ChatEvents for MessagesEvents {
-    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut String) {
+    fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut Vec<Record>) {
         let text = |key| {
             chunk
                 .get(key)
@@ -892,9 +784,9 @@ impl ChatEvents for MessagesEvents {
         // Responses bridge, state usage only once it is final, in
         // `message_delta`.
         let usage = messages_usage(None);
-        out.push_str(&sse_event(
+        out.push(sse_event(
             "message_start",
-            &json!({
+            json!({
                 "type": "message_start",
                 "message": {
                     "id": id, "type": "message", "role": "assistant", "content": [],
@@ -906,11 +798,7 @@ impl ChatEvents for MessagesEvents {
         ));
     }
 
-    fn usage(&mut self, usage: &Value) {
-        report_usage(&self.upstream_usage, messages_usage(Some(usage)));
-    }
-
-    fn open_text(&mut self, kind: TextKind, out: &mut String) {
+    fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {
         let block = match kind {
             TextKind::Reasoning => thinking_block(""),
             TextKind::Text | TextKind::Refusal => json!({ "type": "text", "text": "" }),
@@ -918,7 +806,7 @@ impl ChatEvents for MessagesEvents {
         self.block_start(block, out);
     }
 
-    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut Vec<Record>) {
         self.block_delta(
             match kind {
                 TextKind::Reasoning => json!({ "type": "thinking_delta", "thinking": delta }),
@@ -930,13 +818,18 @@ impl ChatEvents for MessagesEvents {
         );
     }
 
-    fn close_text(&mut self, _kind: TextKind, _text: &str, _finished: bool, out: &mut String) {
+    fn close_text(&mut self, _kind: TextKind, _text: &str, _finished: bool, out: &mut Vec<Record>) {
         self.block_stop(out);
     }
 
     /// Malformed arguments become an empty input, as in the buffered
     /// message; a call cut off by a limit is dropped, as Anthropic drops it.
-    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
+    fn tool_call(
+        &mut self,
+        call: &ChatToolCall<'_>,
+        truncated: bool,
+        out: &mut Vec<Record>,
+    ) -> bool {
         let input = match function_call_arguments(call.arguments) {
             Some(input) => input,
             None if truncated => return false,
@@ -954,13 +847,12 @@ impl ChatEvents for MessagesEvents {
         true
     }
 
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>) {
         let (finish, tool_use) = match outcome {
             Outcome::Finished { finish, tool_use } => (finish, tool_use),
             Outcome::Failed(failure) => {
                 // Rebuilt by the sanitize stage; only a relayable kind survives.
                 let error = match failure {
-                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => json!({
                         "type": "api_error",
                         "message": "The upstream provider returned no response",
@@ -970,25 +862,22 @@ impl ChatEvents for MessagesEvents {
                         "message": "The upstream provider returned tool calls without a name",
                     }),
                 };
-                out.push_str(&sse_event(
+                out.push(sse_event(
                     "error",
-                    &json!({ "type": "error", "error": error }),
+                    json!({ "type": "error", "error": error }),
                 ));
                 return;
             }
         };
-        out.push_str(&sse_event(
+        out.push(sse_event(
             "message_delta",
-            &json!({
+            json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": finish.stop_reason(tool_use), "stop_sequence": Value::Null },
                 "usage": messages_usage(usage),
             }),
         ));
-        out.push_str(&sse_event(
-            "message_stop",
-            &json!({ "type": "message_stop" }),
-        ));
+        out.push(sse_event("message_stop", json!({ "type": "message_stop" })));
     }
 }
 
@@ -997,7 +886,6 @@ impl ChatEvents for MessagesEvents {
 struct ResponsesEvents {
     echo: Arc<Value>,
     identity: Arc<ResponseIdentity>,
-    upstream_usage: UpstreamUsage,
     tools: ResponsesToolMap,
     sequence: u64,
     model: Value,
@@ -1015,16 +903,11 @@ struct ActiveItem {
 }
 
 impl ResponsesEvents {
-    fn new(
-        echo: Arc<Value>,
-        identity: Arc<ResponseIdentity>,
-        upstream_usage: UpstreamUsage,
-    ) -> Self {
+    fn new(echo: Arc<Value>, identity: Arc<ResponseIdentity>) -> Self {
         let tools = ResponsesToolMap::from_echo(&echo);
         Self {
             echo,
             identity,
-            upstream_usage,
             tools,
             sequence: 0,
             model: Value::Null,
@@ -1035,11 +918,11 @@ impl ResponsesEvents {
         }
     }
 
-    fn emit(&mut self, kind: &str, mut body: Value, out: &mut String) {
+    fn emit(&mut self, kind: &str, mut body: Value, out: &mut Vec<Record>) {
         body["type"] = json!(kind);
         body["sequence_number"] = json!(self.sequence);
         self.sequence += 1;
-        out.push_str(&sse_event(kind, &body));
+        out.push(named_event(SseProtocol::OpenaiResponses, kind, body));
     }
 
     fn response(
@@ -1070,7 +953,7 @@ impl ResponsesEvents {
     }
 
     /// Add an item. Its content starts empty and grows through part events.
-    fn add_item(&mut self, mut item: Value, out: &mut String) {
+    fn add_item(&mut self, mut item: Value, out: &mut Vec<Record>) {
         if item.get("content").is_some() {
             item["content"] = json!([]);
         }
@@ -1087,7 +970,7 @@ impl ResponsesEvents {
         );
     }
 
-    fn done_item(&mut self, item: Value, out: &mut String) {
+    fn done_item(&mut self, item: Value, out: &mut Vec<Record>) {
         let output_index = self.active.take().expect("an item is open").output_index;
         self.output[output_index] = item.clone();
         self.emit(
@@ -1133,7 +1016,7 @@ fn text_event(kind: TextKind, suffix: &str) -> String {
 }
 
 impl ChatEvents for ResponsesEvents {
-    fn start(&mut self, chunk: &Value, _fallback_id: &str, out: &mut String) {
+    fn start(&mut self, chunk: &Value, _fallback_id: &str, out: &mut Vec<Record>) {
         self.model = chunk.get("model").cloned().unwrap_or(Value::Null);
         self.created_at = chat_created(chunk);
         for kind in ["response.created", "response.in_progress"] {
@@ -1142,11 +1025,7 @@ impl ChatEvents for ResponsesEvents {
         }
     }
 
-    fn usage(&mut self, usage: &Value) {
-        report_usage(&self.upstream_usage, usage.clone());
-    }
-
-    fn open_text(&mut self, kind: TextKind, out: &mut String) {
+    fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {
         self.annotations.clear();
         let part = self.text_part(kind, "");
         let item = self.text_item(kind, self.output.len(), part, "in_progress");
@@ -1164,7 +1043,7 @@ impl ChatEvents for ResponsesEvents {
         );
     }
 
-    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut String) {
+    fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut Vec<Record>) {
         let (output_index, item_id) = self.active();
         let mut body = json!({ "item_id": item_id, "output_index": output_index, "content_index": 0, "delta": delta });
         if kind == TextKind::Text {
@@ -1173,7 +1052,7 @@ impl ChatEvents for ResponsesEvents {
         self.emit(&text_event(kind, "delta"), body, out);
     }
 
-    fn annotation(&mut self, annotation: Value, out: &mut String) {
+    fn annotation(&mut self, annotation: Value, out: &mut Vec<Record>) {
         let (output_index, item_id) = self.active();
         self.emit(
             "response.output_text.annotation.added",
@@ -1189,7 +1068,7 @@ impl ChatEvents for ResponsesEvents {
         self.annotations.push(annotation);
     }
 
-    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut String) {
+    fn close_text(&mut self, kind: TextKind, text: &str, finished: bool, out: &mut Vec<Record>) {
         let (output_index, item_id) = self.active();
         let mut body =
             json!({ "item_id": item_id, "output_index": output_index, "content_index": 0 });
@@ -1220,7 +1099,12 @@ impl ChatEvents for ResponsesEvents {
     /// A call reaches the client complete: added, its input in one delta and
     /// its done event (a tool search carries its arguments in the item), then
     /// done. One cut off by a limit is reported incomplete.
-    fn tool_call(&mut self, call: &ChatToolCall<'_>, truncated: bool, out: &mut String) -> bool {
+    fn tool_call(
+        &mut self,
+        call: &ChatToolCall<'_>,
+        truncated: bool,
+        out: &mut Vec<Record>,
+    ) -> bool {
         let item = responses_call_item(&self.tools, &call.id, call.name, "", "in_progress");
         let kind = item["type"].clone();
         self.add_item(item, out);
@@ -1257,7 +1141,7 @@ impl ChatEvents for ResponsesEvents {
         true
     }
 
-    fn finish(&mut self, outcome: Outcome<'_>, usage: Option<&Value>, out: &mut String) {
+    fn finish(&mut self, outcome: Outcome, usage: Option<&Value>, out: &mut Vec<Record>) {
         let (event, status, incomplete_details, error) = match outcome {
             Outcome::Finished { finish, .. } => {
                 let (status, details) = finish.responses_status();
@@ -1270,7 +1154,6 @@ impl ChatEvents for ResponsesEvents {
             }
             Outcome::Failed(failure) => {
                 let error = match failure {
-                    Failure::Upstream(error) => error.clone(),
                     Failure::Empty => malformed_response_error(),
                     Failure::UnusableToolCalls => unusable_tool_calls_error(),
                 };
@@ -1289,20 +1172,20 @@ impl ChatEvents for ResponsesEvents {
 
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
 
-fn anthropic_complete_stream(event: &ParsedEvent) -> Result<Option<String>, ()> {
-    if event.name.as_deref() == Some("ping") {
+fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, BridgeError> {
+    if event.meaning.kind == EventKind::Ping {
         return Ok(None);
     }
-    let payload = event.data.as_deref().unwrap_or("").trim();
+    let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
     // No payload → no dispatch, mirroring the chat path.
-    if payload.is_empty() {
+    if empty {
         return Ok(None);
     }
-    if payload == "[DONE]" {
-        return Ok(Some("[DONE]".to_string()));
+    if event.meaning.kind == EventKind::Done {
+        return Ok(Some(vec![done_record()]));
     }
     // Fail the stream on a malformed event rather than skip it.
-    let parsed: Value = serde_json::from_str(payload).map_err(|_| ())?;
+    let parsed = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
     let body = json!({
         "id": parsed.get("log_id").cloned().unwrap_or(Value::Null),
         "object": "text_completion",
@@ -1316,305 +1199,206 @@ fn anthropic_complete_stream(event: &ParsedEvent) -> Result<Option<String>, ()> 
             "finish_reason": parsed.get("stop_reason").cloned().unwrap_or(Value::Null),
         }],
     });
-    Ok(Some(format!("data: {}\n\n", json_str(&body))))
+    Ok(Some(vec![chat_event(body)]))
 }
 
-fn json_str(value: &Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
-}
-
-// ── Stream adapter ───────────────────────────────────────────────────────────
-
-/// Incremental SSE tokenizer: splits raw upstream bytes into events at blank
-/// lines. A line terminator is LF, CRLF, or bare CR — a CR-LF pair counts as a
-/// single terminator, tracked across chunk boundaries via `pending_cr`, so a
-/// chunk ending in `\r` never mis-splits. The pending event is one contiguous
-/// byte buffer (lines joined by `\n`), so the cap on its length — the same cap
-/// as the meter's line buffer, and covering the open line as a prefix of it —
-/// bounds actual memory, not just a logical byte count. Exceeding it is
-/// reported as an error (the caller ends the stream as failed).
-#[derive(Default)]
-struct SseEventReader {
-    event_buf: Vec<u8>,
-    // Start offset of the open (unterminated) line within `event_buf`.
-    line_start: usize,
-    pending_cr: bool,
-}
-
-impl SseEventReader {
-    // Feed one upstream chunk; events completed by it are appended to `events`.
-    // `Err(())` means the pending event (hence any single line) ran past the cap.
-    fn push_chunk(&mut self, chunk: &[u8], events: &mut Vec<String>) -> Result<(), ()> {
-        for &byte in chunk {
-            if std::mem::take(&mut self.pending_cr) && byte == b'\n' {
-                continue;
-            }
-            match byte {
-                b'\r' | b'\n' => {
-                    self.pending_cr = byte == b'\r';
-                    self.end_line(events);
-                }
-                _ => self.event_buf.push(byte),
-            }
-            if self.event_buf.len() > MAX_SSE_LINE_BYTES {
-                return Err(());
-            }
-        }
-        Ok(())
-    }
-
-    fn end_line(&mut self, events: &mut Vec<String>) {
-        if self.event_buf.len() == self.line_start {
-            // Blank line: dispatch the pending event, if any. Consecutive blank
-            // lines are empty events and dispatch nothing.
-            if !self.event_buf.is_empty() {
-                events.push(event_string(std::mem::take(&mut self.event_buf)));
-            }
-            self.line_start = 0;
-            return;
-        }
-        self.event_buf.push(b'\n');
-        self.line_start = self.event_buf.len();
-    }
-
-    // Flush the residual at a clean end of stream: an event without a trailing
-    // blank line is still dispatched. The cap already held during accumulation.
-    fn finish(&mut self) -> Option<String> {
-        self.line_start = 0;
-        (!self.event_buf.is_empty()).then(|| event_string(std::mem::take(&mut self.event_buf)))
-    }
-}
-
-// Reuse the event buffer's allocation when it is valid UTF-8 (the
-// overwhelmingly common case); fall back to a lossy copy only on invalid bytes.
-fn event_string(buf: Vec<u8>) -> String {
-    String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
-
-fn framed_event(event: &str) -> String {
-    let mut output = event.to_string();
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-    output.push('\n');
-    output
-}
-
-fn replace_data_fields(event: &str, replacement: &str, event_name: Option<&str>) -> String {
-    let has_data_field = event.lines().any(|line| {
-        line.trim_end_matches('\r')
-            .split_once(':')
-            .is_some_and(|(field, _)| field == "data")
-    });
-    let mut output = String::new();
-    let mut replaced = false;
-    for line in event.lines() {
-        let line = line.trim_end_matches('\r');
-        let is_data = line
-            .split_once(':')
-            .is_some_and(|(field, _)| field == "data");
-        let trimmed = line.trim_start();
-        let json_like = matches!(trimmed.as_bytes().first(), Some(b'{' | b'[' | b'"'));
-        let is_bare_payload = !has_data_field
-            && !line.is_empty()
-            && !line.starts_with(':')
-            && (json_like || !line.contains(':'));
-        if is_data || is_bare_payload {
-            if !replaced {
-                if has_data_field {
-                    output.push_str("data: ");
-                }
-                output.push_str(replacement);
-                output.push('\n');
-                replaced = true;
-            }
-        } else if event_name.is_some()
-            && line
-                .split_once(':')
-                .is_some_and(|(field, _)| field == "event")
-        {
-            output.push_str("event: ");
-            output.push_str(event_name.unwrap_or_default());
-            output.push('\n');
-        } else {
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output.push('\n');
-    output
-}
-
-/// Apply an in-place body edit to one SSE event, leaving the framing alone.
-///
-/// Shared by the two same-format transforms (reasoning exclusion and response
-/// sanitization): both parse the payload, edit it, and re-emit only if it changed.
-/// Keep-alives, empty payloads and `[DONE]` pass through untouched.
-///
-/// Never fails the stream. Both callers are cleanup passes layered on top of a
-/// response that is already the client's surface — unlike a format conversion,
-/// which must parse every frame to produce valid output, an edit that cannot
-/// parse a frame has nothing to remove and passes it through verbatim. This is
-/// deliberately more tolerant than the conversions: sanitization is applied to
-/// every stream including same-format passthrough, which historically forwarded
-/// bytes without parsing at all, so a single non-JSON frame must not turn a stream
-/// that used to succeed into a failure.
-fn edit_event_body(event: &str, edit: impl FnOnce(&mut Value)) -> String {
-    let parsed = parse_event(event);
-    let Some(payload) = parsed.data.as_deref() else {
-        return framed_event(event);
-    };
-    let payload = payload.trim();
-    if payload.is_empty() || payload == "[DONE]" {
-        return framed_event(event);
-    }
-    let Ok(mut body) = serde_json::from_str::<Value>(payload) else {
-        return framed_event(event);
-    };
-    let original = body.clone();
-    edit(&mut body);
-    if body == original {
-        return framed_event(event);
-    }
-    // An edit that renames the payload's `type` (the `response.error` →
-    // canonical `error` rebuild) must rename the SSE event field with it — a
-    // client subscribing by event name would otherwise never see it.
-    let renamed = match (
-        original.get("type").and_then(Value::as_str),
-        body.get("type").and_then(Value::as_str),
-    ) {
-        (Some(old), Some(new)) if old != new => Some(new.to_string()),
-        _ => None,
-    };
-    replace_data_fields(event, &json_str(&body), renamed.as_deref())
-}
-
-/// Splits the provider byte stream into SSE events and applies a stateful
-/// transform to each, emitting client-surface bytes.
-pub struct SseTransformStream {
-    inner: ServiceResponseStream,
+/// Validation and content closure share the bridge's actual conversion state.
+/// The owner discards continuation output after its failure terminal.
+#[derive(Clone)]
+pub(crate) struct BridgeHandle {
+    state: Arc<Mutex<StreamState>>,
     transform: StreamTransform,
     fallback_id: String,
-    state: StreamState,
-    reader: SseEventReader,
-    queue: VecDeque<Bytes>,
-    inner_done: bool,
-    // Why the stream ended, when it ended badly. Held until the queue drains so
-    // events completed before the failure still reach the client, then yielded
-    // as the final item. Ending on a plain `None` would instead read downstream
-    // as a clean end-of-stream.
-    pending_error: Option<ServiceError>,
 }
 
-impl SseTransformStream {
-    pub fn new(inner: ServiceResponseStream, transform: StreamTransform) -> Self {
+#[derive(Debug)]
+pub(crate) enum BridgeError {
+    InvalidPayload,
+    IncompleteResponse,
+}
+
+impl From<BridgeError> for ServiceError {
+    fn from(error: BridgeError) -> Self {
+        let message = match error {
+            BridgeError::InvalidPayload => "provider sent an event this surface cannot represent",
+            BridgeError::IncompleteResponse => "provider ended before finishing its response",
+        };
+        ServiceError::Upstream(UpstreamError::Transport(message.into()))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct BridgeClosure {
+    pub records: Vec<Record>,
+    pub response: Option<Record>,
+    pub chat_id: Option<String>,
+}
+
+impl BridgeHandle {
+    pub(crate) fn continuation(&self, record: Record) -> Result<Vec<Record>, BridgeError> {
+        self.transform.apply_record(
+            record,
+            &self.fallback_id,
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+    pub(crate) fn close(&self, request_id: Option<&str>) -> BridgeClosure {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output_closed = true;
+        let mut closed = BridgeClosure {
+            chat_id: matches!(self.transform, StreamTransform::AnthropicToOpenaiChat)
+                .then(|| request_id.map(str::to_owned))
+                .flatten(),
+            ..BridgeClosure::default()
+        };
+        if let Some(stream) = &mut state.messages {
+            stream.close_text(true, &mut closed.records);
+        }
+        if let Some(stream) = &mut state.responses {
+            stream.close_text(true, &mut closed.records);
+            if stream.started() {
+                let response = stream
+                    .events
+                    .response("failed", Value::Null, Value::Null, None);
+                let mut terminal = Vec::new();
+                stream.events.emit(
+                    "response.failed",
+                    json!({"response": response}),
+                    &mut terminal,
+                );
+                closed.response = terminal.pop();
+            }
+        }
+        closed
+    }
+}
+
+/// Stateful event transforms. The source has already decoded and classified
+/// each payload, so neither conversion nor sanitation reparses wire bytes.
+pub(crate) struct EventTransformStream {
+    inner: EventStream,
+    transform: StreamTransform,
+    fallback_id: String,
+    state: Arc<Mutex<StreamState>>,
+    queue: VecDeque<Record>,
+    inner_done: bool,
+    pending_error: Option<ServiceError>,
+    draining: bool,
+    residual: bool,
+}
+
+impl EventTransformStream {
+    pub(crate) fn new(inner: EventStream, transform: StreamTransform) -> Self {
         let fallback_id = format!("{}-{}", transform.provider(), now_millis());
         Self {
             inner,
             transform,
             fallback_id,
-            state: StreamState::default(),
-            reader: SseEventReader::default(),
+            state: Arc::default(),
             queue: VecDeque::new(),
             inner_done: false,
             pending_error: None,
+            draining: false,
+            residual: false,
         }
     }
-
-    // A transform-side failure is still an upstream failure: the provider sent
-    // bytes this surface cannot represent.
-    fn fail(&mut self, reason: &'static str) {
-        self.inner_done = true;
-        self.pending_error.get_or_insert_with(|| {
-            ServiceError::Upstream(UpstreamError::Transport(reason.to_string()))
-        });
+    pub(crate) fn bridge(&self) -> BridgeHandle {
+        BridgeHandle {
+            state: self.state.clone(),
+            transform: self.transform.clone(),
+            fallback_id: self.fallback_id.clone(),
+        }
     }
-
-    // Returns false if the transform rejected the event (unparseable provider
-    // data): the stream must end there, with no terminal marker emitted, so the
-    // meter classifies it as failed.
-    fn emit(&mut self, event: &str) -> bool {
-        match self
-            .transform
-            .apply(event, &self.fallback_id, &mut self.state)
-        {
-            Ok(Some(out)) => {
-                self.queue.push_back(Bytes::from(out));
-                true
-            }
-            Ok(None) => true,
-            Err(()) => false,
+    fn fail(&mut self, error: ServiceError) {
+        // Keep polling the same source for accounting after conversion fails.
+        // No further output is converted and the first error stays authoritative.
+        self.draining = true;
+        self.pending_error.get_or_insert(error);
+    }
+    fn enqueue(&mut self, records: Vec<Record>) {
+        let bytes = records
+            .iter()
+            .map(Record::buffered_bytes)
+            .fold(0, usize::saturating_add);
+        if bytes > MAX_EVENT_BYTES {
+            self.fail(ServiceError::AdmissionInvariant(
+                "converted SSE output exceeded the size cap",
+            ));
+        } else {
+            self.queue.extend(records);
         }
     }
 }
 
-impl Stream for SseTransformStream {
-    type Item = Result<Bytes, ServiceError>;
-
+impl Stream for EventTransformStream {
+    type Item = Result<Record, ServiceError>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
-            if let Some(bytes) = this.queue.pop_front() {
-                return Poll::Ready(Some(Ok(bytes)));
+            if let Some(record) = this.queue.pop_front() {
+                return Poll::Ready(Some(Ok(record)));
+            }
+            if let Some(error) = this.pending_error.take() {
+                return Poll::Ready(Some(Err(error)));
             }
             if this.inner_done {
-                // The queue is drained; surface why the stream ended, once.
-                return Poll::Ready(this.pending_error.take().map(Err));
+                return Poll::Ready(None);
             }
             match this.inner.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(bytes))) => {
-                    let mut events = Vec::new();
-                    // A cap overflow ends the stream, but events completed
-                    // earlier in the same chunk are still emitted first.
-                    let overflowed = this.reader.push_chunk(&bytes, &mut events).is_err();
-                    for event in &events {
-                        if !this.emit(event) {
-                            this.fail("provider sent an event this surface cannot represent");
-                            break;
-                        }
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(record))) => {
+                    if this.draining {
+                        continue;
                     }
-                    if overflowed {
-                        this.fail("provider SSE event exceeded the size cap");
+                    this.residual |= matches!(record, Record::Residual);
+                    let output = this.transform.apply_record(
+                        record,
+                        &this.fallback_id,
+                        &mut this
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    match output {
+                        Ok(records) => this.enqueue(records),
+                        Err(error) => this.fail(error.into()),
                     }
-                    // loop to flush the queue or poll again
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    if this.draining {
+                        continue;
+                    }
+                    this.draining = true;
+                    this.pending_error = Some(error);
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
-                    // Flush a residual event once (no trailing blank line).
-                    // Deliberate cross-format framing normalization: a final
-                    // event whose lines are complete but which the upstream
-                    // never closed with a blank line is salvaged and re-framed,
-                    // rather than dropped as WHATWG would at EOF. Delivering a
-                    // valid last event beats losing it; a truncated (unparseable)
-                    // one still fails in `emit`. A byte passthrough cannot do
-                    // this, so the two paths differ for this one malformed shape.
-                    if let Some(event) = this.reader.finish() {
-                        if !this.emit(&event) {
-                            this.fail("provider sent an event this surface cannot represent");
-                        }
+                    if this.draining {
+                        continue;
                     }
-                    // `[DONE]` is an OpenAI convention some upstreams omit, so
-                    // a bridged stream is closed here too. Only on a clean end:
-                    // after a transport failure a synthesized terminal would make
-                    // a truncated generation look complete.
-                    if this.pending_error.is_none() {
-                        match this.transform.end_of_stream(&mut this.state) {
-                            Ok(Some(tail)) => this.queue.push_back(Bytes::from(tail)),
-                            Ok(None) => {}
-                            Err(()) => this.fail("provider ended before finishing its response"),
-                        }
+                    if this.residual {
+                        this.pending_error =
+                            Some(ServiceError::Upstream(UpstreamError::SseTruncated));
+                        continue;
                     }
-                    // loop to drain any queued output, then end.
+                    let output = this.transform.end_of_stream(
+                        &mut this
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    );
+                    match output {
+                        Ok(Some(records)) => this.enqueue(records),
+                        Ok(None) => {}
+                        Err(error) => this.pending_error = Some(error.into()),
+                    }
                 }
-                // On an upstream error, end without flushing the (truncated)
-                // residual, so a partial event can't synthesize a spurious
-                // terminal marker. The error itself is propagated: swallowing
-                // it would read downstream as a clean end-of-stream.
-                Poll::Ready(Some(Err(err))) => {
-                    this.inner_done = true;
-                    this.pending_error.get_or_insert(err);
-                }
-                Poll::Pending => return Poll::Pending,
             }
         }
     }
@@ -1624,8 +1408,65 @@ impl Stream for SseTransformStream {
 mod tests {
     use super::*;
 
+    fn wire(
+        stream: impl Stream<Item = Result<Record, ServiceError>> + Send + 'static,
+    ) -> ServiceResponseStream {
+        Box::pin(stream.filter_map(|item| {
+            std::future::ready(match item {
+                Ok(record) => match crate::sse::serialize(&record) {
+                    Ok(bytes) if bytes.is_empty() => None,
+                    result => Some(result),
+                },
+                Err(error) => Some(Err(error)),
+            })
+        }))
+    }
+
+    fn decode_record(text: &str) -> Record {
+        crate::sse::decode_buffered(
+            Bytes::from(format!("{text}\n\n")),
+            Some(SseProtocol::OpenaiChat),
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
+    }
+    fn edit_event_body(text: &str, edit: impl FnOnce(&mut Value) -> bool) -> String {
+        let mut record = decode_record(text);
+        record.edit_json(edit);
+        String::from_utf8(crate::sse::serialize(&record).unwrap().to_vec()).unwrap()
+    }
+    impl StreamTransform {
+        fn apply(
+            &self,
+            text: &str,
+            fallback: &str,
+            state: &mut StreamState,
+        ) -> Result<Option<String>, BridgeError> {
+            let protocol = match self {
+                StreamTransform::AnthropicToOpenaiChat => SseProtocol::AnthropicMessages,
+                _ => SseProtocol::OpenaiChat,
+            };
+            let record =
+                crate::sse::decode_buffered(Bytes::from(format!("{text}\n\n")), Some(protocol))
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        Record::from_sse(sse_stream::Sse::default(), Some(protocol))
+                    });
+            let records = self.apply_record(record, fallback, state)?;
+            let mut bytes = Vec::new();
+            for record in records {
+                bytes.extend_from_slice(&crate::sse::serialize(&record).unwrap());
+            }
+            Ok((!bytes.is_empty()).then(|| String::from_utf8(bytes).unwrap()))
+        }
+    }
+
     fn messages_transform() -> StreamTransform {
-        StreamTransform::OpenaiToAnthropicMessages(UpstreamUsage::default())
+        StreamTransform::OpenaiToAnthropicMessages
     }
     use futures_util::StreamExt;
     use std::collections::BTreeSet;
@@ -1644,8 +1485,12 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(
             collected.last().expect("stream yielded items").is_err(),
             "a malformed event ends the stream as an error, not a clean EOF"
@@ -1678,8 +1523,12 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1710,8 +1559,12 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1738,8 +1591,12 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
-        let collected: Vec<Bytes> = stream.map(|r| r.unwrap()).collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::AnthropicMessages),
+        ));
+        let stream = EventTransformStream::new(inner, StreamTransform::AnthropicToOpenaiChat);
+        let collected: Vec<Bytes> = wire(stream).map(|r| r.unwrap()).collect().await;
         let text: String = collected
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1768,62 +1625,25 @@ mod tests {
         assert!(out.contains("[DONE]"), "{out}");
     }
 
-    // Regressions of the field parser against the old prefix-stripping code:
-    // a bare (data:-less) payload must survive an `event:` line or an injected
-    // comment in the same event block; `id:`/`retry:`-only and empty-data
-    // events must dispatch nothing instead of failing the stream; a trailing
-    // space after an event name must not break exact-match dispatch.
+    // Intentional WHATWG correction: bare payloads are unknown fields.
     #[test]
-    fn bare_payloads_and_ignorable_events_are_handled() {
+    fn bare_payloads_never_dispatch_and_event_names_are_exact() {
         let mut state = StreamState::default();
-        let out = StreamTransform::AnthropicCompleteToOpenai
-            .apply(
-                "event: completion\n  {\"completion\":\"hi\"}",
-                "fb",
-                &mut state,
-            )
-            .unwrap()
-            .expect("bare payload after an event line still transforms");
-        assert!(out.contains("\"text\":\"hi\""), "{out}");
-
-        let mut state = started_messages_state();
-        let out = messages_transform()
-            .apply(": keepalive\n[DONE]", "fb", &mut state)
-            .unwrap()
-            .expect("a comment must not swallow the bare terminal");
-        assert!(out.contains("message_stop"), "{out}");
-
-        let mut state = StreamState::default();
-        for ignorable in [
-            "retry: 3000",
-            "id: 7",
-            "x-proxy: heartbeat",
-            "data:",
-            "data: ",
-            "event: heartbeat",
-            "event: heartbeat\ndata:",
-        ] {
-            assert!(
-                matches!(
-                    StreamTransform::AnthropicToOpenaiChat.apply(ignorable, "fb", &mut state),
-                    Ok(None)
-                ),
-                "{ignorable:?} dispatches nothing"
-            );
-        }
-
-        let mut state = StreamState::default();
+        let output = StreamTransform::AnthropicToOpenaiChat
+            .apply("event: ping \ndata: {}", "fb", &mut state)
+            .unwrap();
         assert!(
-            matches!(
-                StreamTransform::AnthropicToOpenaiChat.apply(
-                    "event: ping \ndata: {}",
-                    "fb",
-                    &mut state
-                ),
-                Ok(None)
-            ),
-            "trailing space after the event name is tolerated"
+            output.is_some(),
+            "a trailing space is part of the event name"
         );
+        let record = decode_record("event: message_stop\nevent\ndata: {}");
+        assert_eq!(record.event_name(), "message");
+        let output = StreamTransform::AnthropicToOpenaiChat
+            .apply_record(record, "fb", &mut state)
+            .unwrap();
+        assert!(output
+            .iter()
+            .all(|record| record.event().unwrap().meaning.terminal.is_none()));
     }
 
     fn started_messages_state() -> StreamState {
@@ -1856,12 +1676,16 @@ mod tests {
     #[tokio::test]
     async fn boundless_body_is_capped() {
         let events: Vec<Result<Bytes, ServiceError>> = vec![
-            Ok(Bytes::from(vec![b'x'; MAX_SSE_LINE_BYTES + 1])),
+            Ok(Bytes::from(vec![b'x'; MAX_EVENT_BYTES + 1])),
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert_eq!(collected.len(), 1, "no payload, only the failure");
         assert!(collected[0].is_err(), "and not a clean EOF");
     }
@@ -1882,7 +1706,11 @@ mod tests {
             Ok(Bytes::from("data: [DONE]\n\n")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let converted = Box::pin(SseTransformStream::new(inner, messages_transform()));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let converted = Box::pin(EventTransformStream::new(inner, messages_transform()));
         let identity = Arc::new(ResponseIdentity {
             request_id: "req_ours".to_string(),
             user_model: Some("acme/model-a".to_string()),
@@ -1890,11 +1718,11 @@ mod tests {
         // Messages surface: canonicalize touches only an in-band `error` event
         // on this unschematized surface, so the anthropic events here are left
         // intact and only id/model are rewritten.
-        let sanitized = SseTransformStream::new(
+        let sanitized = EventTransformStream::new(
             converted,
             StreamTransform::SanitizeResponse(identity, Endpoint::Messages),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(sanitized).collect().await;
 
         let wire: String = collected
             .into_iter()
@@ -1906,39 +1734,6 @@ mod tests {
         assert!(wire.contains("req_ours"), "{wire}");
         assert!(wire.contains("acme/model-a"), "{wire}");
         assert!(wire.contains("\"text\":\"hi\""), "content survived: {wire}");
-    }
-
-    /// A `response.error`-framed upstream error through the sanitize stage: the
-    /// payload is rebuilt as the canonical `error` event, and the SSE `event:`
-    /// field must be renamed with it — a client subscribing by event name would
-    /// otherwise never see the error the payload now claims to be.
-    #[tokio::test]
-    async fn sanitize_renames_the_sse_event_with_the_rebuilt_payload() {
-        let upstream = concat!(
-            "event: response.error\n",
-            "data: {\"type\":\"response.error\",\"sequence_number\":2,\"error\":{\"type\":\"insufficient_quota\",\"code\":\"credit_balance_exhausted\",\"message\":\"no credits, top up at https://console.acme.ai/billing\"}}\n\n",
-        );
-        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
-        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let identity = Arc::new(ResponseIdentity {
-            request_id: "req_ours".to_string(),
-            user_model: Some("acme/model-a".to_string()),
-        });
-        let sanitized = SseTransformStream::new(
-            inner,
-            StreamTransform::SanitizeResponse(identity, Endpoint::CreateModelResponse),
-        );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
-        let wire: String = collected
-            .into_iter()
-            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
-            .collect();
-        assert!(wire.contains("event: error\n"), "{wire}");
-        assert!(!wire.contains("response.error"), "{wire}");
-        assert!(wire.contains("\"type\":\"error\""), "{wire}");
-        assert!(wire.contains("\"sequence_number\":2"), "{wire}");
-        assert!(!wire.contains("credit_balance_exhausted"), "{wire}");
-        assert!(!wire.contains("console.acme.ai"), "{wire}");
     }
 
     // Replay a fixture's input events through the transform (fixed fallback id),
@@ -1992,9 +1787,17 @@ mod tests {
             };
             let events = case["events"].as_array().unwrap();
             let output = replay_fixture(transform, events);
+            let mut expected = case["output"].clone();
+            // The legacy bridge now emits one properly framed typed terminal.
+            if case["fn"] == json!("complete") {
+                expected
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"__done":true}));
+            }
             assert_eq!(
                 Value::Array(output),
-                case["output"],
+                expected,
                 "stream case {name} diverges from Node"
             );
         }
@@ -2123,19 +1926,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(chunks));
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
         let identity = Arc::new(ResponseIdentity {
             request_id: "resp_fixture".to_string(),
             user_model: Some("gpt-test".to_string()),
         });
-        let stream = SseTransformStream::new(
+        let stream = EventTransformStream::new(
             inner,
-            StreamTransform::OpenaiChatToResponses(
-                Arc::new(json!({})),
-                identity,
-                UpstreamUsage::default(),
-            ),
+            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity),
         );
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         let mut events = Vec::new();
         let mut wire = String::new();
         let mut error = None;
@@ -2146,12 +1949,12 @@ mod tests {
             }
         }
         for block in wire.split("\n\n").filter(|block| !block.trim().is_empty()) {
-            let parsed = parse_event(block);
-            let data = parsed.data.as_deref().expect("event data");
+            let parsed = decode_record(block);
+            let data = parsed.event().unwrap().data.as_str();
             assert_ne!(data, "[DONE]", "Responses surface emitted [DONE]");
             let value: Value = serde_json::from_str(data).expect("Responses event JSON");
             assert_eq!(
-                parsed.name.as_deref(),
+                Some(parsed.event_name()),
                 value["type"].as_str(),
                 "SSE event name must match payload type"
             );
@@ -2168,12 +1971,10 @@ mod tests {
         let nameless =
             tool_event(json!({ "index": 0, "id": "c", "function": { "arguments": "{" } }));
         let length = chat_event(json!({}), Some("length"));
-        let error = format!("data: {}", json!({ "error": { "message": "failed" } }));
         let no_choice = "data: {}".to_string();
         for (events, terminal) in [
             // Cut off mid-call: incomplete, even with no named call.
             (vec![&text, &nameless, &length], "response.incomplete"),
-            (vec![&text, &error], "response.failed"),
             (vec![&no_choice], "response.failed"),
         ] {
             let mut events: Vec<&str> = events.into_iter().map(String::as_str).collect();
@@ -2221,7 +2022,6 @@ mod tests {
                 request_id: "resp".into(),
                 user_model: None,
             }),
-            UpstreamUsage::default(),
         );
         let call = tool_event(json!({
             "index": 0, "id": "ts_1",
@@ -2369,7 +2169,7 @@ mod tests {
         for event in events {
             let result = transform
                 .apply(event, "fallback-1", &mut state)
-                .unwrap_or_else(|()| panic!("transform rejected {event}"));
+                .unwrap_or_else(|error| panic!("transform rejected {event}: {error:?}"));
             if let Some(result) = result {
                 // A transform may emit multiple concatenated SSE events.
                 for piece in result.split("\n\n") {
@@ -2403,8 +2203,8 @@ mod tests {
         chat_event(json!({ "tool_calls": [call] }), None)
     }
 
-    #[test]
-    fn openai_to_anthropic_states_usage_only_once_final() {
+    #[tokio::test]
+    async fn openai_to_anthropic_states_usage_only_once_final() {
         // vLLM-style continuous usage puts a running total on every chunk, and
         // only the last carries the cache split. A per-field max over
         // message_start and message_delta must not bill cached input in full.
@@ -2413,14 +2213,30 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":80}}}".to_string(),
             "data: [DONE]".to_string(),
         ];
-        let refs: Vec<&str> = events.iter().map(String::as_str).collect();
-        let out = run(messages_transform(), &refs);
+        let wire = format!("{}\n\n", events.join("\n\n"));
+        let chunks: Vec<_> = wire
+            .as_bytes()
+            .chunks(7)
+            .map(|bytes| Ok(Bytes::copy_from_slice(bytes)))
+            .collect();
+        let source = Box::pin(crate::sse::DecodedStream::new(
+            Box::pin(futures_util::stream::iter(chunks)),
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let out: Vec<Value> = EventTransformStream::new(source, messages_transform())
+            .filter_map(|record| std::future::ready(record.unwrap().json().cloned()))
+            .collect()
+            .await;
         let start = out.iter().find(|e| e["type"] == "message_start").unwrap();
         assert_eq!(
             start["message"]["usage"],
             json!({ "input_tokens": 0, "output_tokens": 0 })
         );
         let delta = out.iter().find(|e| e["type"] == "message_delta").unwrap();
+        assert_eq!(
+            out.iter().filter(|e| e["type"] == "message_delta").count(),
+            1
+        );
         assert_eq!(
             delta["usage"],
             json!({ "input_tokens": 20, "output_tokens": 2, "cache_read_input_tokens": 80 })
@@ -2545,7 +2361,7 @@ mod tests {
             );
         }
         // Reasons outside the OpenAI vocabulary end the turn.
-        for reason in ["eos", "abort", "overloaded_error"] {
+        for reason in ["eos", "abort"] {
             let event = chat_event(json!({ "content": "hi" }), Some(reason));
             assert_eq!(
                 stop_reason(&[&event, "data: [DONE]"]),
@@ -2579,7 +2395,11 @@ mod tests {
             json!({ "error": { "type": "overloaded_error", "message": "busy" } })
         );
         let out = run(transform.clone(), &[&text, &error, "data: [DONE]"]);
-        assert_eq!(out.last().unwrap()["error"]["type"], "overloaded_error");
+        // The owner chooses the failure terminal; content transforms retain
+        // the upstream failure record and its retry classification.
+        assert!(out
+            .iter()
+            .any(|event| event["error"]["type"] == "overloaded_error"));
     }
 
     #[test]
@@ -2667,40 +2487,6 @@ mod tests {
             .is_err());
     }
 
-    /// An Anthropic upstream's error on the chat surface must reach the client
-    /// as this surface's own in-band error — the `error` member a client
-    /// detects a failed 200 stream by — not as the upstream's error type in
-    /// `finish_reason`, which left nothing to detect and named a vocabulary
-    /// this surface does not use. Run through the production pair
-    /// (convert, then sanitize), since the rebuild happens in the second stage.
-    #[tokio::test]
-    async fn anthropic_stream_error_reaches_the_chat_client_as_an_error_member() {
-        let upstream = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"billing_error\",\"message\":\"credit balance too low\"}}\n\n";
-        let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(upstream))];
-        let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let converted = Box::pin(SseTransformStream::new(
-            inner,
-            StreamTransform::AnthropicToOpenaiChat,
-        ));
-        let identity = Arc::new(ResponseIdentity {
-            request_id: "req_ours".to_string(),
-            user_model: Some("acme/model-a".to_string()),
-        });
-        let sanitized = SseTransformStream::new(
-            converted,
-            StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete),
-        );
-        let collected: Vec<Result<Bytes, ServiceError>> = sanitized.collect().await;
-        let wire: String = collected
-            .into_iter()
-            .map(|c| String::from_utf8(c.unwrap().to_vec()).unwrap())
-            .collect();
-        assert!(wire.contains("\"error\""), "no error member: {wire}");
-        assert!(!wire.contains("billing_error"), "leaked kind: {wire}");
-        assert!(!wire.contains("credit balance"), "leaked message: {wire}");
-        assert!(wire.contains("data: [DONE]"), "{wire}");
-    }
-
     #[tokio::test]
     async fn upstream_that_omits_done_still_terminates_the_anthropic_message() {
         // `[DONE]` is an OpenAI convention, not an SSE requirement. GMI's
@@ -2715,8 +2501,12 @@ mod tests {
             )),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let text: String = stream
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let text: String = wire(stream)
             .collect::<Vec<_>>()
             .await
             .iter()
@@ -2750,8 +2540,12 @@ mod tests {
             ))),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected
             .iter()
@@ -2773,8 +2567,12 @@ mod tests {
             Ok(Bytes::from("data: {\"choices\":[")),
         ];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected
@@ -2794,8 +2592,12 @@ mod tests {
             "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
         ))];
         let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-        let stream = SseTransformStream::new(inner, messages_transform());
-        let collected: Vec<Result<Bytes, ServiceError>> = stream.collect().await;
+        let inner: EventStream = Box::pin(crate::sse::DecodedStream::new(
+            inner,
+            Some(SseProtocol::OpenaiChat),
+        ));
+        let stream = EventTransformStream::new(inner, messages_transform());
+        let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
 
         assert!(collected.last().expect("stream yielded items").is_err());
         let text: String = collected
@@ -2812,13 +2614,16 @@ mod tests {
     #[test]
     fn reasoning_exclusion_preserves_non_data_sse_fields() {
         let output = edit_event_body(
-            "event: chunk\nid: 7\nretry: 100\n: keep\n{\"choices\":[{\"delta\":{\"content\":\"answer\",\"reasoning\":\"hidden\"}}],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
+            "event: chunk\nid: 7\nretry: 100\n: keep\ndata: {\"choices\":[{\"delta\":{\"content\":\"answer\",\"reasoning\":\"hidden\"}}],\"usage\":{\"completion_tokens_details\":{\"reasoning_tokens\":3}}}",
             response_transform::exclude_reasoning,
         );
         assert!(output.contains("event: chunk\n"), "{output}");
         assert!(output.contains("id: 7\n"), "{output}");
         assert!(output.contains("retry: 100\n"), "{output}");
-        assert!(output.contains(": keep\n"), "{output}");
+        assert!(
+            !output.contains(": keep\n"),
+            "upstream comments are dropped: {output}"
+        );
         assert!(output.contains("\"content\":\"answer\""), "{output}");
         assert!(output.contains("\"reasoning_tokens\":3"), "{output}");
         assert!(!output.contains("hidden"), "{output}");
@@ -2886,7 +2691,7 @@ mod tests {
         });
         let transform = StreamTransform::SanitizeResponse(identity, Endpoint::ChatComplete);
         let mut state = StreamState::default();
-        for event in ["data: [DONE]", ": PROCESSING", "data: "] {
+        for event in ["data: [DONE]", "data: "] {
             let output = transform
                 .apply(event, "fb", &mut state)
                 .unwrap_or_else(|_| panic!("rejected {event}"))

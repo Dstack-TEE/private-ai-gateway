@@ -27,7 +27,7 @@ use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
-use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
+use super::streaming::{direct_response, ResponseContext};
 use super::{
     reviewed_session_material, AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo,
     ForwardResult, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
@@ -621,20 +621,18 @@ impl AciService {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let e2ee_transformer = req
-            .e2ee
-            .clone()
-            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-
-        let body = ReceiptFinalizingStream::new(
+        let body = direct_response(
             self,
             upstream_response.body,
             builder,
             selected.lease,
-            req.requester,
-            endpoint_path.to_string(),
-            e2ee_transformer,
-            Some(request_id),
+            ResponseContext {
+                requester: req.requester,
+                endpoint: endpoint_path.into(),
+                e2ee: req.e2ee.clone(),
+                request_id: Some(request_id),
+                identity: None,
+            },
             is_sse,
         );
 
@@ -644,7 +642,7 @@ impl AciService {
             upstream_status: upstream_response.status_code,
             upstream_headers: upstream_response.headers,
             e2ee: e2ee_response,
-            body: Box::pin(body),
+            body,
         }))
     }
 

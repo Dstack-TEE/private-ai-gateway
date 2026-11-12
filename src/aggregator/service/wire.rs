@@ -197,6 +197,7 @@ struct MiddlewareReceiptJournalState {
     /// them. Never read on a completed request (the forward result carries
     /// the authoritative list).
     abandoned: Vec<FailedAttempt>,
+    source_finished: bool,
 }
 
 impl MiddlewareReceiptJournal {
@@ -280,6 +281,45 @@ impl MiddlewareReceiptJournal {
             .expect("middleware receipt journal poisoned")
             .draft
             .take()
+    }
+
+    pub(crate) fn response_model(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.response_model.clone())
+    }
+    pub(crate) fn source_finished(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("middleware receipt journal poisoned")
+            .source_finished
+    }
+    pub(crate) fn finish_source(&self, hash: String) -> Result<(), ServiceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("middleware receipt journal poisoned");
+        if let Some(draft) = &mut inner.draft {
+            draft.builder.add_response_received_hash(hash)?;
+        }
+        inner.source_finished = true;
+        Ok(())
+    }
+    pub(crate) fn observe_source(&self, ids: &super::streaming::Identifiers) {
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("middleware receipt journal poisoned");
+        if let Some(draft) = &mut inner.draft {
+            draft.builder.set_chat_id(ids.chat_id.clone());
+            draft
+                .builder
+                .set_upstream_verified_model_id(ids.model_id.clone());
+            draft.response_model = ids.model_id.clone();
+        }
     }
 
     pub fn peek_receipt_id(&self) -> Option<String> {
