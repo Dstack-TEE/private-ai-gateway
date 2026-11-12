@@ -20,6 +20,7 @@ use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
+use crate::endpoint::Endpoint;
 use crate::middleware::response_transform::{self, ResponseIdentity};
 use crate::middleware::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamFailure};
 use crate::middleware::stream_transform::{BridgeError, BridgeHandle};
@@ -30,7 +31,7 @@ use crate::sse_protocol::{
     FailureEvidence, SseProtocol, TerminalKind,
 };
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct Identifiers {
     pub chat_id: Option<String>,
     pub model_id: Option<String>,
@@ -493,11 +494,8 @@ impl ResponseOwner {
             request_id,
             identity,
         } = context;
-        let protocol = matches!(&inner, ResponseInput::Events(_)).then(|| {
-            SseProtocol::from(crate::middleware::request_transform::Endpoint::from_path(
-                &endpoint,
-            ))
-        });
+        let protocol = matches!(&inner, ResponseInput::Events(_))
+            .then(|| SseProtocol::from(Endpoint::from_path(&endpoint)));
         let mut owner = Self::new(
             inner,
             ResponseMode::Middleware(accounting),
@@ -759,7 +757,10 @@ impl ResponseOwner {
                         ReceiptDraft::Direct { .. } => true,
                     });
             let source_finished = self.receipt.as_ref().is_some_and(|receipt| {
-                matches!(&receipt.draft, ReceiptDraft::Middleware(journal) if journal.source_finished())
+                matches!(
+                    &receipt.draft,
+                    ReceiptDraft::Middleware(journal) if journal.source_finished()
+                )
             });
             publish_at_terminal = terminal && (self.ended || source_terminal || source_finished);
             self.saw_terminal |= terminal;
@@ -798,9 +799,7 @@ impl ResponseOwner {
             hex::encode(self.wire_hasher.clone().finalize())
         );
         if let Some(receipt) = &mut self.receipt {
-            // Publication snapshots ids; later source observations only affect EOF metrics.
-            let ids = self.ids.clone();
-            receipt.publish(&ids, hash, &self.endpoint, at_terminal)?;
+            receipt.publish(&self.ids, hash, &self.endpoint, at_terminal)?;
         }
         Ok(())
     }
@@ -1086,11 +1085,7 @@ pub(super) fn direct_response(
     } = context;
     let inner: ServiceResponseStream =
         Box::pin(inner.map(|item| item.map_err(ServiceError::Upstream)));
-    let protocol = is_sse.then(|| {
-        SseProtocol::from(crate::middleware::request_transform::Endpoint::from_path(
-            &endpoint,
-        ))
-    });
+    let protocol = is_sse.then(|| SseProtocol::from(Endpoint::from_path(&endpoint)));
     let inner = match protocol {
         Some(protocol) => ResponseInput::Events(Box::pin(KeepAliveStream::new(
             Box::pin(DecodedStream::new(inner, Some(protocol)).map(|record| {

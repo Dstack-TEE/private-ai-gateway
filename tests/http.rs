@@ -1727,6 +1727,17 @@ async fn direct_messages_timeout_is_an_anthropic_504() {
 
 #[tokio::test]
 async fn configured_backend_publishes_receipt_before_terminal_then_pending_disconnect() {
+    configured_backend_terminal_receipt("text/event-stream", false).await;
+}
+
+#[tokio::test]
+async fn empty_content_type_uses_one_source_hash_writer_on_normal_and_early_streams() {
+    for early in [false, true] {
+        configured_backend_terminal_receipt("", early).await;
+    }
+}
+
+async fn configured_backend_terminal_receipt(content_type: &'static str, early: bool) {
     use std::time::Duration;
 
     use axum::routing::post;
@@ -1742,19 +1753,27 @@ async fn configured_backend_publishes_receipt_before_terminal_then_pending_disco
         "data: [DONE]\n\n"
     ).as_bytes();
     let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let headers_ready = Arc::new(tokio::sync::Notify::new());
+    let upstream_headers = headers_ready.clone();
     let fixture = Router::new()
         .route(
             "/v1/chat/completions",
-            post(|| async {
-                (
-                    [("content-type", "text/event-stream")],
-                    Body::from_stream(
-                        futures_util::stream::once(async {
-                            Ok::<_, std::io::Error>(Bytes::from_static(SOURCE))
-                        })
-                        .chain(futures_util::stream::pending()),
-                    ),
-                )
+            post(move || {
+                let headers_ready = upstream_headers.clone();
+                async move {
+                    if early {
+                        headers_ready.notified().await;
+                    }
+                    (
+                        [("content-type", content_type)],
+                        Body::from_stream(
+                            futures_util::stream::once(async {
+                                Ok::<_, std::io::Error>(Bytes::from_static(SOURCE))
+                            })
+                            .chain(futures_util::stream::pending()),
+                        ),
+                    )
+                }
             }),
         )
         .route(
@@ -1800,14 +1819,14 @@ async fn configured_backend_publishes_receipt_before_terminal_then_pending_disco
                 control_token: None,
                 control_timeout_ms: Some(2_000),
                 control_post_timeout_ms: Some(2_000),
-                sse_keepalive_ms: Some(0),
+                sse_keepalive_ms: Some(if early { 1 } else { 0 }),
                 send_request_features: Some(false),
                 tee_only_domains: vec![],
             },
         )
         .unwrap(),
     );
-    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+    let app = build_router_with_admin_and_middleware(service.clone(), manager, None, middleware);
     let response = app
         .clone()
         .oneshot(
@@ -1824,12 +1843,17 @@ async fn configured_backend_publishes_receipt_before_terminal_then_pending_disco
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let receipt_id = response.headers()["x-receipt-id"]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    let header_receipt_id = response
+        .headers()
+        .get("x-receipt-id")
+        .map(|value| value.to_str().unwrap().to_owned());
     let mut body = response.into_body().into_data_stream();
     let mut wire = Vec::new();
+    if early {
+        wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+        assert_eq!(wire, b": PROCESSING\n\n");
+        headers_ready.notify_one();
+    }
     while !wire.ends_with(b"data: [DONE]\n\n") {
         wire.extend_from_slice(
             &tokio::time::timeout(Duration::from_secs(2), body.next())
@@ -1838,6 +1862,24 @@ async fn configured_backend_publishes_receipt_before_terminal_then_pending_disco
                 .unwrap()
                 .unwrap(),
         );
+    }
+    // Early headers precede candidate selection and can have no reserved id.
+    let response_id = std::str::from_utf8(&wire)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find_map(|data| {
+            serde_json::from_str::<Value>(data)
+                .ok()
+                .and_then(|value| value["id"].as_str().map(str::to_owned))
+        })
+        .unwrap();
+    let receipt_id = service
+        .get_receipt_by_chat_id(&response_id)
+        .unwrap()
+        .receipt_id;
+    if let Some(header_receipt_id) = header_receipt_id {
+        assert_eq!(header_receipt_id, receipt_id);
     }
     // No EOF has arrived and the client never polls the body after the terminal.
     let receipt = app
@@ -1851,6 +1893,18 @@ async fn configured_backend_publishes_receipt_before_terminal_then_pending_disco
         .await
         .unwrap();
     assert_eq!(receipt.status(), StatusCode::OK);
+    let document: Value = serde_json::from_slice(&body_bytes(receipt.into_body()).await).unwrap();
+    let events = document["event_log"].as_array().unwrap();
+    for (kind, bytes) in [
+        ("response.received", SOURCE),
+        ("response.returned", wire.as_slice()),
+    ] {
+        assert_eq!(
+            events.iter().find(|event| event["type"] == kind).unwrap()["body_hash"],
+            private_ai_gateway::aci::digest::sha256_hex(bytes),
+            "{kind}: content_type={content_type:?}, early={early}"
+        );
+    }
     assert!(reports.try_recv().is_err());
     drop(body);
     let report = tokio::time::timeout(Duration::from_secs(2), reports.recv())

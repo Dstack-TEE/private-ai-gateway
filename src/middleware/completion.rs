@@ -24,11 +24,10 @@ use serde_json::Value;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::ResponseContext;
 use crate::aggregator::service::{
-    decode_source, error_records, is_sse_content_type, AciService, ChatCompletionRequest,
-    E2eeError, E2eeRequestContext, E2eeResponseInfo, FailedAttempt, ForwardCandidate,
-    GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptDraft,
-    MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
-    UpstreamVerificationError,
+    decode_source, error_records, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
+    E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
+    MiddlewareForwardResult, MiddlewareReceiptDraft, MiddlewareReceiptJournal, ReceiptOwner,
+    ServiceError, ServiceResponseStream, UpstreamVerificationError,
 };
 
 use super::cache_salt::CacheSaltKey;
@@ -810,7 +809,7 @@ async fn run_inner(
             // answered as such — a 400 with no usage report, like the other
             // client-attributable failures — rather than reaching the
             // finalizer, which would refuse a stream already built.
-            if e2ee.is_some() && !is_sse_content_type(Some(&content_type)) {
+            if e2ee.is_some() && !forward.is_sse {
                 let err = ServiceError::E2ee(E2eeError::EncryptionFailed);
                 meter.disarm();
                 return service_error_response(outcome_ctx, err, None);
@@ -830,7 +829,7 @@ async fn run_inner(
                 echo: echo.clone(),
             };
             let receipt_id = journal.peek_receipt_id();
-            let finalized = if is_sse_content_type(Some(&content_type)) {
+            let finalized = if forward.is_sse {
                 let events = build_metered_pipeline(
                     forward.body,
                     forward.selected_format,
@@ -1153,10 +1152,7 @@ fn build_early_streaming_response(
                     &f.failed_attempts,
                     f.upstream_status,
                 );
-                if f.upstream_headers
-                    .get("content-type")
-                    .is_some_and(|value| !is_sse_content_type(Some(value)))
-                {
+                if !f.is_sse {
                     // Switch the response owner to the explicit byte path before
                     // polling the body, so EOF cannot synthesize an SSE terminal.
                     yield Ok(Record::BeginNonSse);

@@ -718,6 +718,11 @@ impl AciService {
 
                     // Commit this candidate.
                     let upstream_headers = upstream_response.headers;
+                    let content_type = upstream_headers
+                        .get("content-type")
+                        .map(|value| value.split(';').next().unwrap_or("").trim())
+                        .filter(|base| !base.is_empty());
+                    let is_sse = content_type.is_none_or(|value| is_sse_content_type(Some(value)));
                     let receipt_id = generate_receipt_id();
                     let served_at = admission.admitted_at;
                     // Early SSE headers may already cite a keyset. Preserve
@@ -762,13 +767,12 @@ impl AciService {
                         receipt_journal,
                         self.metrics.clone(),
                         status,
-                        upstream_headers
-                            .get("content-type")
-                            .is_some_and(|value| !is_sse_content_type(Some(value))),
+                        !is_sse,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
+                            is_sse,
                             receipt_id: receipt_id.clone(),
                             keyset_digest,
                             upstream_status: status,

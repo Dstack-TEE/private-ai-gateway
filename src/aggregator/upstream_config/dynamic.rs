@@ -13,7 +13,7 @@ use crate::aci::upstream::{
     UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
-use crate::middleware::request_transform::Endpoint;
+use crate::endpoint::Endpoint;
 
 pub(super) struct EmptyUpstreamBackend;
 

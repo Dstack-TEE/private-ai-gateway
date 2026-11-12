@@ -139,6 +139,8 @@ pub struct MiddlewareForwarded {
 }
 
 pub struct MiddlewareStreamingForwarded {
+    /// One selected body mode shared by source hashing and response decoding.
+    pub is_sse: bool,
     pub receipt_id: String,
     pub keyset_digest: String,
     pub upstream_status: u16,
@@ -209,13 +211,13 @@ impl MiddlewareReceiptJournal {
     pub(crate) fn set_early_publication(&self, eligible: bool) {
         self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("middleware receipt journal poisoned")
             .early_publication = eligible;
     }
     pub(crate) fn early_publication(&self) -> bool {
         self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("middleware receipt journal poisoned")
             .early_publication
     }
     pub(crate) fn set_early_response_keyset(&self, keyset: Arc<SealedWorkloadKeyset>) {
@@ -314,7 +316,7 @@ impl MiddlewareReceiptJournal {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("middleware receipt journal poisoned");
         inner.source_finished = true;
         Ok(())
     }
@@ -323,7 +325,7 @@ impl MiddlewareReceiptJournal {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("middleware receipt journal poisoned");
         if inner.source_hash_finished {
             return Ok(());
         }
@@ -338,7 +340,7 @@ impl MiddlewareReceiptJournal {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("middleware receipt journal poisoned");
         if let Some(model) = &ids.model_id {
             self.response_model.get_or_init(|| model.clone());
         }
