@@ -1063,3 +1063,30 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
         assert_eq!(fields["response_format"], expected_format);
     }
 }
+
+#[test]
+fn cache_salt_provider_mapping_uses_stable_serde_tags() {
+    use crate::aci::upstream::CacheSaltField;
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::Privatemode,
+        UpstreamProvider::Tinfoil,
+        UpstreamProvider::PhalaDirect,
+        UpstreamProvider::NearAi,
+        UpstreamProvider::ArmetAi,
+        UpstreamProvider::ZeroGPrivateComputer,
+    ] {
+        let tag = match builders::provider_cache_salt_field(provider).unwrap() {
+            CacheSaltField::CacheSalt(tag) | CacheSaltField::UserCacheSecret(tag) => tag,
+        };
+        assert_eq!(serde_json::to_value(provider).unwrap(), tag);
+    }
+    for provider in [
+        UpstreamProvider::OpenAiCompatible,
+        UpstreamProvider::Anthropic,
+        UpstreamProvider::AciService,
+        UpstreamProvider::SecretAi,
+    ] {
+        assert!(builders::provider_cache_salt_field(provider).is_none());
+    }
+}

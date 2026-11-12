@@ -270,6 +270,7 @@ impl AciService {
         let audio_metadata = (endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH)
             .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
         let mut prepared = self.upstream.prepare(UpstreamRequest {
+            cache_salt: req.context.cache_salt.clone(),
             body: backend_input_body.into(),
             form: req.audio_form,
             path: Some(endpoint_path.to_string()),
@@ -487,6 +488,7 @@ impl AciService {
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
+            cache_salt: req.context.cache_salt.clone(),
             body: backend_input_body.into(),
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),

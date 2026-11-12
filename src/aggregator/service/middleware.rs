@@ -449,6 +449,7 @@ impl AciService {
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
                 let prepared = match self.upstream.prepare(UpstreamRequest {
+                    cache_salt: req.context.cache_salt.clone(),
                     body: candidate.body.clone().into(),
                     form: req.audio_form.clone(),
                     content_type: None,

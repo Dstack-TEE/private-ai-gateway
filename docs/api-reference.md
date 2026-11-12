@@ -40,9 +40,17 @@ error behavior below.
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
-| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
+| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the native request with gateway routing and cache controls removed; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
 | `POST /v1/systemone` | System One structured decisions | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Accepts native `model`, `state`, and `questions` fields and returns native `model`, `answers`, and `usage` fields. Middleware forwards only to candidates that list `/v1/systemone` in `supportedEndpoints`, and sends no other endpoint to them; it never converts the request to chat. |
+
+In middleware mode, `cache_salt` and `user_cache_secret` are gateway-owned
+upstream controls. A non-empty string `cache_salt` can subdivide the
+authenticated user's cache partition; caller fields are removed before
+forwarding. Supported providers receive a derived per-user, provider-specific
+field on text-generation routes. Anonymous requests receive no generated
+salt. Direct mode retains existing caller-field behavior. See
+[Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation).
 
 System One requests and responses are buffered JSON. Middleware preserves in-band
 `error` using the shared public error sanitizer, removing upstream metadata.

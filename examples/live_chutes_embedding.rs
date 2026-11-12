@@ -130,6 +130,7 @@ async fn run() -> Result<(), String> {
     }))
     .map_err(|e| format!("serialize body: {e}"))?;
     let request = UpstreamRequest {
+        cache_salt: None,
         form: None,
         content_type: None,
         body: body.into(),

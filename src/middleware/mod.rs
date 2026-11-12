@@ -7,6 +7,7 @@
 
 pub mod admission;
 pub mod audio;
+pub mod cache_salt;
 pub mod completion;
 pub mod config;
 pub mod control;
@@ -28,6 +29,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+pub use cache_salt::CacheSaltKey;
 pub use completion::CompletionInput;
 pub use config::MiddlewareConfig;
 pub use control::{hash_api_key, ControlClient};
@@ -57,17 +59,23 @@ pub struct Middleware {
     send_request_features: bool,
     /// Keys the consult `prefixHash`; see `request_features::PrefixHashKey`.
     prefix_hash_key: PrefixHashKey,
+    cache_salt_key: CacheSaltKey,
     /// Normalized (lowercased) TEE-only host set; see `MiddlewareConfig::tee_only_domains`.
     tee_only_domains: HashSet<String>,
 }
 
 impl Middleware {
-    pub fn new(prefix_hash_key: PrefixHashKey, config: &MiddlewareConfig) -> Result<Self, String> {
+    pub fn new(
+        prefix_hash_key: PrefixHashKey,
+        cache_salt_key: CacheSaltKey,
+        config: &MiddlewareConfig,
+    ) -> Result<Self, String> {
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
             send_request_features: config.send_request_features.unwrap_or(true),
             prefix_hash_key,
+            cache_salt_key,
             tee_only_domains: config
                 .tee_only_domains
                 .iter()
@@ -132,6 +140,7 @@ impl Middleware {
             self.sse_keepalive_ms,
             self.send_request_features,
             &self.prefix_hash_key,
+            &self.cache_salt_key,
             input,
         )
         .await;
@@ -148,7 +157,11 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-        Middleware::new(PrefixHashKey::new([7; 32]), config)
+        Middleware::new(
+            PrefixHashKey::new([7; 32]),
+            CacheSaltKey::new([8; 32]),
+            config,
+        )
     }
 
     // Spawn a minimal stub control plane and return its base URL.

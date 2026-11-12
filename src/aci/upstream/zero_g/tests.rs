@@ -351,6 +351,7 @@ impl Fixture {
     fn request(&self, body: Value) -> PreparedUpstreamRequest {
         PreparedUpstreamRequest {
             request: UpstreamRequest {
+                cache_salt: None,
                 form: None,
                 content_type: None,
                 body: serde_json::to_vec(&body).unwrap().into(),

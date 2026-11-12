@@ -1,0 +1,230 @@
+# Disposable CVM for the per-user cache-salt live test.
+# Runbook: docs/cache-salt-cvm-test.md. Never deploy this as a real gateway.
+#
+# Mirrors redpill-ai/private-ai-launcher-compose docker-compose.no-ingress.yml:
+# the same launcher image, source pin, dstack KMS socket and middleware mode.
+# A two-tenant mock control plane (inlined below) replaces the real one, the
+# official Privatemode proxy and dstack-verifier run beside the gateway as in
+# production, and node-exporter is dropped. Replace
+# COMMIT_SHA_PLACEHOLDER with a full commit pushed to the gateway repository.
+# Secret values arrive as dstack encrypted env; only their names appear here.
+
+services:
+  launcher:
+    image: ghcr.io/redpill-ai/private-ai-launcher@sha256:c083ff9e6a5ddf10f6c9e9bb1f74cc618deebecfea5208b563c574399db4637c
+    restart: always
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "8086:8086"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - pal-cache:/var/lib/pag/cache
+      - pal-state:/var/lib/pag/state
+      - privatemode-manifests:/run/privatemode-manifests:ro
+    configs:
+      - source: gateway-config
+        target: /etc/private-ai-gateway/gateway.config.json
+      - source: gateway-upstreams
+        target: /etc/private-ai-gateway/upstreams.seed.json
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
+    depends_on:
+      - control
+      - privatemode-proxy
+      - dstack-verifier
+    environment:
+      - PRIVATE_AI_GATEWAY_CONFIG_PATH=/etc/private-ai-gateway/gateway.config.json
+      - RUST_LOG=info
+      - PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
+      - PRIVATE_AI_GATEWAY_REPO_COMMIT=COMMIT_SHA_PLACEHOLDER
+      - DSTACK_VERIFIER_URL=http://dstack-verifier:8080
+
+  privatemode-proxy:
+    image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b
+    command:
+      - --workspace
+      - /var/lib/privatemode
+      - --port
+      - "8080"
+      - --api-key
+      - "@/run/secrets/privatemode-api-key"
+      - --api-key-fallback=always
+      - --disable-prompt-cache=false
+      - --nvidia-ocsp-allow-unknown=false
+      - --nvidia-ocsp-revoked-grace-period=0
+    tmpfs:
+      - /var/lib/privatemode:mode=0700
+    volumes:
+      - privatemode-manifests:/var/lib/privatemode/manifests
+    secrets:
+      - source: privatemode-api-key
+        target: privatemode-api-key
+    restart: unless-stopped
+
+  dstack-verifier:
+    image: ghcr.io/dstack-tee/dstack-verifier:0.6.3@sha256:22aeb6808e38a56115f843d4d66f4852407e72f6080d5f8781fd82d9f819db41
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  control:
+    image: python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
+    restart: unless-stopped
+    command: ["python3", "-u", "/srv/control.py"]
+    configs:
+      - source: mock-control
+        target: /srv/control.py
+    environment:
+      - TEST_USER_A_KEY=${TEST_USER_A_KEY:?set TEST_USER_A_KEY}
+      - TEST_USER_B_KEY=${TEST_USER_B_KEY:?set TEST_USER_B_KEY}
+      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-glm":["privatemode-test:p-glm"],"n-glm":["near-test:n-glm"],"n-qwen":["near-test:n-qwen"],"a-glm":["armet-test:a-glm"],"pd-qwen":["pd-qwen-test:pd-qwen"],"pd-glm":["pd-glm-test:pd-glm"]}'
+
+volumes:
+  pal-cache:
+  pal-state:
+  privatemode-manifests:
+
+secrets:
+  privatemode-api-key:
+    environment: PRIVATEMODE_API_KEY
+
+configs:
+  gateway-config:
+    content: |
+      {
+        "bind": "0.0.0.0:8086",
+        "state_dir": "/var/lib/pag/state",
+        "upstream_config_seed_path": "/etc/private-ai-gateway/upstreams.seed.json",
+        "admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN:?set PRIVATE_AI_GATEWAY_ADMIN_TOKEN}",
+        "middleware": {
+          "control_url": "http://control:8080",
+          "control_token": "${PRIVATE_AI_GATEWAY_CONTROL_TOKEN:?set PRIVATE_AI_GATEWAY_CONTROL_TOKEN}"
+        },
+        "privatemode_proxy": {
+          "base_url": "http://privatemode-proxy:8080",
+          "manifest_log_path": "/run/privatemode-manifests/log.txt",
+          "credential_path": "/run/secrets/privatemode-api-key",
+          "credential_sha256": "${PRIVATEMODE_API_KEY_SHA256:?set PRIVATEMODE_API_KEY_SHA256}",
+          "proxy_image_digest": "sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b"
+        }
+      }
+  gateway-upstreams:
+    content: |
+      [
+        {
+          "name": "tinfoil-test",
+          "provider": "tinfoil",
+          "base_url": "https://inference.tinfoil.sh",
+          "models": {"t-gpt-oss": "gpt-oss-120b"},
+          "bearer_token": "${TINFOIL_API_KEY:?set TINFOIL_API_KEY}"
+        },
+        {
+          "name": "chutes-test",
+          "provider": "chutes",
+          "base_url": "https://api.chutes.ai",
+          "models": {"c-glm": "zai-org/GLM-5.1-TEE", "c-kimi": "moonshotai/Kimi-K2.6-TEE"},
+          "bearer_token": "${CHUTES_API_KEY:?set CHUTES_API_KEY}"
+        },
+        {
+          "name": "privatemode-test",
+          "provider": "privatemode",
+          "base_url": "http://privatemode-proxy:8080",
+          "models": {"p-glm": "glm-5.3-flash"}
+        },
+        {
+          "name": "near-test",
+          "provider": "near-ai",
+          "base_url": "https://cloud-api.near.ai",
+          "models": {"n-glm": "z-ai/glm-5.3-flash", "n-qwen": "Qwen/Qwen3.6-35B-A3B-FP8"},
+          "bearer_token": "${NEAR_AI_API_KEY:?set NEAR_AI_API_KEY}"
+        },
+        {
+          "name": "armet-test",
+          "provider": "armet-ai",
+          "base_url": "https://ctf.armet.ai",
+          "models": {"a-glm": "GLM-5.3-Flash"},
+          "accepted_subjects": ["tdx-measurement:sha256:4b1a5d29dd1f8d617b6c156c02859140ff17c46c9becb68bf2e25df830571529"],
+          "bearer_token": "${ARMET_AI_API_KEY:?set ARMET_AI_API_KEY}"
+        },
+        {
+          "name": "pd-qwen-test",
+          "provider": "phala-direct",
+          "base_url": "https://qwen3-8-27b.usc2-87.phala.com",
+          "models": {"pd-qwen": "qwen/qwen3.8-27b"},
+          "verifier_request_timeout_seconds": 600,
+          "bearer_token": "${PHALA_DIRECT_QWEN_TOKEN:?set PHALA_DIRECT_QWEN_TOKEN}"
+        },
+        {
+          "name": "pd-glm-test",
+          "provider": "phala-direct",
+          "base_url": "https://glm-5-3.gpu16.phala.com",
+          "models": {"pd-glm": "z-ai/glm-5.3"},
+          "verifier_request_timeout_seconds": 600,
+          "bearer_token": "${PHALA_DIRECT_GLM_TOKEN:?set PHALA_DIRECT_GLM_TOKEN}"
+        }
+      ]
+  mock-control:
+    content: |
+      """Throwaway control plane for the per-user cache-salt CVM smoke test.
+
+      Maps the SHA-256 of two test bearer keys to two tenants, allows anonymous
+      requests without identity, and returns one candidate per public model.
+      Never use outside a disposable test deployment.
+      """
+      import hashlib, json, os
+      from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+      def h(s): return hashlib.sha256(s.encode()).hexdigest()
+      USERS = {
+          h(os.environ["TEST_USER_A_KEY"]): (1001, 501, 601),
+          h(os.environ["TEST_USER_B_KEY"]): (1002, 502, 602),
+      }
+      MODELS = json.loads(os.environ["TEST_MODELS"])  # {"public": ["upstream:public", ...]}
+
+      class H(BaseHTTPRequestHandler):
+          def _send(self, code, body):
+              data = json.dumps(body).encode()
+              self.send_response(code)
+              self.send_header("content-type", "application/json")
+              self.send_header("content-length", str(len(data)))
+              self.end_headers()
+              self.wfile.write(data)
+
+          def do_GET(self):
+              if self.path.startswith("/models"):
+                  return self._send(200, {"object": "list", "data": [{"id": m, "object": "model"} for m in MODELS]})
+              self._send(200, {"ok": True})
+
+          def do_POST(self):
+              req = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+              if self.path == "/consult/post":
+                  return self._send(200, {"ok": True})
+              if self.path != "/consult/pre":
+                  return self._send(404, {"error": "not found"})
+              routes = MODELS.get(req.get("model"))
+              if not routes:
+                  return self._send(200, {"allow": False, "status": 404, "message": "unknown model"})
+              resp = {
+                  "allow": True,
+                  "pricing": {"inputCostPerToken": "0", "outputCostPerToken": "0"},
+                  "candidates": [{"routeId": r, "format": "openai"} for r in routes],
+              }
+              key = req.get("apiKeyHash")
+              if key is not None:
+                  if key not in USERS:
+                      return self._send(200, {"allow": False, "status": 401, "message": "invalid key"})
+                  u, o, w = USERS[key]
+                  resp.update(userId=u, organizationId=o, workspaceId=w)
+              self._send(200, resp)
+
+          def log_message(self, *args):
+              pass
+
+      ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()

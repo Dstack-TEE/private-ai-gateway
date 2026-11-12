@@ -8,8 +8,8 @@ use serde_json::json;
 
 use super::openai::{request_model_id, rewrite_request_model};
 use super::{
-    PreparedUpstreamRequest, StreamingUsage, UpstreamBackend, UpstreamError, UpstreamRequest,
-    UpstreamResponse, UpstreamStreamResponse,
+    CacheSaltField, PreparedUpstreamRequest, StreamingUsage, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::UpstreamVerifiedEvent;
 
@@ -27,6 +27,8 @@ pub struct ModelRoute {
     pub path: Option<String>,
     /// Usage flags requested from this configured upstream deployment.
     pub streaming_usage: Option<StreamingUsage>,
+    /// Middleware cache field supported by this provider deployment.
+    pub cache_salt_field: Option<CacheSaltField>,
     /// Whether this route's provider is an attested (TEE) provider. `None`
     /// means unclassified and therefore ineligible for requests constrained by
     /// `provider.aci_verified`. See [`PreparedUpstreamRequest::is_tee`].
@@ -66,6 +68,7 @@ impl ModelRoute {
             route_id,
             path: None,
             streaming_usage: None,
+            cache_salt_field: None,
             is_tee: None,
         })
     }
@@ -89,6 +92,11 @@ impl ModelRoute {
 
     pub fn with_streaming_usage(mut self, policy: Option<StreamingUsage>) -> Self {
         self.streaming_usage = policy;
+        self
+    }
+
+    pub fn with_cache_salt_field(mut self, field: Option<CacheSaltField>) -> Self {
+        self.cache_salt_field = field;
         self
     }
 
@@ -221,6 +229,11 @@ impl UpstreamBackend for ModelRouterBackend {
         if let Some(policy) = route.streaming_usage {
             policy.apply(&mut request)?;
         }
+        // Consume even on unsupported routes, so no user secret reaches a
+        // provider backend. Re-preparing a request cannot apply the salt twice.
+        if let (Some(salt), Some(field)) = (request.cache_salt.take(), route.cache_salt_field) {
+            field.apply(&mut request, salt)?;
+        }
         Ok(PreparedUpstreamRequest {
             request,
             upstream_name: route.upstream.name().to_string(),
@@ -348,6 +361,100 @@ mod tests {
         async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             Err(UpstreamError::Transport("not used".to_string()))
         }
+    }
+
+    #[test]
+    fn cache_salt_respects_resolved_path_and_preserves_direct_requests() {
+        use crate::middleware::CacheSaltKey;
+        let mut router = ModelRouterBackend::new("router");
+        router
+            .add_route(
+                ModelRoute::new(
+                    "public",
+                    "public",
+                    Arc::new(StubBackend { name: "stub" }),
+                    "route",
+                )
+                .unwrap()
+                .with_cache_salt_field(Some(CacheSaltField::CacheSalt("chutes"))),
+            )
+            .unwrap();
+        let original = json!({"model":"public","cache_salt":"caller","user_cache_secret":"raw"});
+        for path in [
+            "/v1/chat/completions",
+            "/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/transcriptions",
+            "/v1/systemone",
+        ] {
+            let input = UpstreamRequest {
+                body: serde_json::to_vec(&original).unwrap().into(),
+                path: Some(path.into()),
+                ..Default::default()
+            };
+            let direct = router.prepare(input.clone()).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&direct.request.body).unwrap(),
+                original
+            );
+            let middleware = router
+                .prepare(UpstreamRequest {
+                    cache_salt: Some(CacheSaltKey::new([7; 32]).derive(1, None)),
+                    ..input
+                })
+                .unwrap();
+            assert!(middleware.request.cache_salt.is_none());
+            let body: serde_json::Value = serde_json::from_slice(&middleware.request.body).unwrap();
+            if [
+                "/v1/chat/completions",
+                "/completions",
+                "/v1/responses",
+                "/v1/messages",
+            ]
+            .contains(&path)
+            {
+                assert_eq!(body["cache_salt"].as_str().unwrap().len(), 64);
+                assert!(body.get("user_cache_secret").is_none());
+                let once = middleware.request.body.clone();
+                assert_eq!(
+                    router.prepare(middleware.request).unwrap().request.body,
+                    once
+                );
+            } else {
+                assert_eq!(body, original);
+            }
+        }
+        // The configured upstream path, rather than the downstream chat path,
+        // controls injection.
+        let mut custom = ModelRouterBackend::new("router");
+        custom
+            .add_route(
+                ModelRoute::new(
+                    "public",
+                    "public",
+                    Arc::new(StubBackend { name: "stub" }),
+                    "route",
+                )
+                .unwrap()
+                .with_path(Some("/v1/embeddings".into()))
+                .with_cache_salt_field(Some(CacheSaltField::CacheSalt("chutes"))),
+            )
+            .unwrap();
+        let prepared = custom
+            .prepare(UpstreamRequest {
+                body: serde_json::to_vec(&original).unwrap().into(),
+                path: Some("/v1/chat/completions".into()),
+                cache_salt: Some(CacheSaltKey::new([7; 32]).derive(1, None)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&prepared.request.body).unwrap(),
+            original
+        );
     }
 
     #[test]

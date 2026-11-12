@@ -72,6 +72,8 @@ The backend uses the first provider, in preview order, whose recorded key hashes
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response keeps its status and loses its body: failover, the capacity retry, the recorded attempt and the client's status treat it like that status from any upstream, and its body is not returned.
 
+Middleware injects a per-user `cache_salt`, sealed by the adapter and merged into the served request by the broker; see [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation) for observed enforcement and limitations.
+
 ## Responses
 
 Every frame must be sealed, seal `choices`, not seal `usage` or `model`, not unbind `usage`, and decrypt to exactly its declared fields. Frames open in order under one HPKE context, so reordering, dropping or tampering fails.

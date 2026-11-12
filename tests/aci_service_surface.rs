@@ -486,6 +486,7 @@ async fn media_missing_authorization_refuses_streamed_uploads_before_consult() {
             Arc::new(
                 Middleware::new(
                     PrefixHashKey::new([7; 32]),
+                    private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
                     &serde_json::from_value(
                         serde_json::json!({"control_url":format!("http://{address}")}),
                     )

@@ -119,7 +119,7 @@ An allow response:
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
 | `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
-| `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. Partial groups, zero, and negative values make the consult response invalid. |
+| `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. `userId` also keys the middleware prompt-cache partition on supported providers; organization/workspace IDs do not change that partition. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
 | `spendMode` | No | `regular`, `subscription`, or `subscription_overflow`. |
 | `userTier` | No | Sent to every upstream attempt as the `x-user-tier` header. |
@@ -294,6 +294,17 @@ A reasoning config has `effort` (`max`, `xhigh`, `high`, `medium`, `low`,
 `minimal`, or `none`), `maxTokens`, and `enabled`. An unknown key in
 `reasoningPolicy` or in a reasoning config makes the whole pre-consult response
 invalid, and the gateway denies the request with `503`.
+
+### Per-user prompt caches
+
+After an allowed consult, the gateway derives a provider-specific cache
+partition from `userId` using a separate dstack KMS key. The control plane is
+the trusted identity source: returning the same ID for different people makes
+them share a partition. Anonymous consults have no generated cache salt.
+Non-empty caller `cache_salt` strings subdivide one user's partition; neither
+caller cache field reaches the provider unchanged. Salts are absent from
+consult requests and post reports. See [provider mapping and limitations](providers/README.md#prefix-cache-isolation-observation)
+and [derivation/rotation](configuration-reference.md#cache-partition-derivation-and-rotation).
 
 ### Denials
 

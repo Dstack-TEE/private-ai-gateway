@@ -10,7 +10,7 @@ use super::{
 };
 use crate::aci::digest;
 use crate::aci::upstream::{
-    ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
+    CacheSaltField, ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
     UpstreamBackend, ZeroGProviderBackend,
 };
@@ -63,6 +63,7 @@ fn build_model_router(
                     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
                     .with_path(cfg.path.clone())
                     .with_streaming_usage(cfg.streaming_usage)
+                    .with_cache_salt_field(provider_cache_salt_field(cfg.provider))
                     // NEAR's native JSON contains only text, without duration.
                     .with_force_verbose_json(cfg.provider == UpstreamProvider::NearAi)
                     .with_is_tee(Some(provider_is_tee(cfg.provider))),
@@ -71,6 +72,26 @@ fn build_model_router(
         }
     }
     Ok(router)
+}
+
+/// Cache controls are an explicit provider capability, not inferred from an
+/// OpenAI-compatible wire format. Tags match `UpstreamProvider`'s serde names.
+pub(super) fn provider_cache_salt_field(provider: UpstreamProvider) -> Option<CacheSaltField> {
+    match provider {
+        UpstreamProvider::Chutes => Some(CacheSaltField::CacheSalt("chutes")),
+        UpstreamProvider::Privatemode => Some(CacheSaltField::CacheSalt("privatemode")),
+        UpstreamProvider::Tinfoil => Some(CacheSaltField::UserCacheSecret("tinfoil")),
+        UpstreamProvider::PhalaDirect => Some(CacheSaltField::CacheSalt("phala-direct")),
+        UpstreamProvider::NearAi => Some(CacheSaltField::CacheSalt("near-ai")),
+        UpstreamProvider::ArmetAi => Some(CacheSaltField::CacheSalt("armet-ai")),
+        UpstreamProvider::ZeroGPrivateComputer => {
+            Some(CacheSaltField::CacheSalt("0g-private-computer"))
+        }
+        UpstreamProvider::OpenAiCompatible
+        | UpstreamProvider::Anthropic
+        | UpstreamProvider::AciService
+        | UpstreamProvider::SecretAi => None,
+    }
 }
 
 /// Whether a provider route may serve `provider.aci_verified` requests. Plain

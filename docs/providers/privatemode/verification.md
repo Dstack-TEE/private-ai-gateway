@@ -186,24 +186,38 @@ secret exchange, and strict OCSP settings; see [review.md](review.md).
 
 ## Prompt cache
 
-The reference Compose sets `--disable-prompt-cache=false`. The default
-`--prompt-cache-salt random` generates one salt per proxy startup, so requests
-without a caller-supplied salt share one cache namespace across all callers of
-that proxy replica. Restarts generate a new namespace; replicas do not share
-their startup salts. This removes the proxy's default per-request cache
-isolation. Tinfoil's namespace is broader: it derives from the shared upstream
-credential, spans replicas, and survives restarts. See
-[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+The reference Compose sets `--disable-prompt-cache=false`. In authenticated
+middleware mode, the gateway supplies a per-user, provider-separated
+`cache_salt` (64 lowercase hex characters, satisfying the proxy's minimum 32
+bytes). A non-empty caller `cache_salt` string subdivides that user's partition;
+the caller's raw salt and `user_cache_secret` are removed. This replaces the
+shared namespace implied by the proxy's default startup-random salt. See
+[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation) for
+identity trust, provider limitations, and rotation.
 
-Sharing a prefix cache creates a cross-tenant prefix-timing side channel: a
-caller can infer whether another caller recently sent the same prompt prefix.
-Callers that need isolation can supply their own `cache_salt` (at least 32
-bytes), which takes precedence. The proxy derives shard affinity from the
-effective salt and prompt content, helping repeated prefixes reach the same
-workers. This does not guarantee a cache hit or a particular worker. The
-gateway preserves caller salts and does not derive a tenant salt.
+Without a generated or valid caller salt (including anonymous middleware
+traffic), the proxy's default `--prompt-cache-salt random` generates one salt
+per startup. Those requests share a namespace within that replica until it
+restarts. Direct gateway mode retains its existing caller-salt behavior.
+
+The proxy derives shard affinity from the effective salt and prompt content.
+The stable per-user salt can therefore make a user's traffic linkable through
+shard keys visible to Privatemode's gateway. Provider separation prevents the
+same pseudonym being sent to other providers, but does not remove this
+within-provider linkability. Partitioning also reduces cache reuse between
+users and can change worker affinity, throughput, and the frequency of
+provider rate-limit responses. It guarantees neither a cache hit nor a
+particular worker. Obtain appropriate provider quota; do not add quota
+workarounds. The provider must honor the salt for isolation to hold.
+
 See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
-[shard-key implementation][shard-source].
+[shard-key implementation][shard-source]. Hermetic gateway coverage:
+`cargo test --test middleware_completion cache_salt` checks authenticated and
+anonymous requests, streaming, failover, caller sub-partitions, and receipt
+hashes. A disposable-CVM run on 2026-11-12 confirmed per-user isolation
+with the pinned proxy; see
+[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+Production rollout remains unverified.
 
 ## Session binding and claims
 

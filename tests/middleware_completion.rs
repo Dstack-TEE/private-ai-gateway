@@ -16,9 +16,9 @@ use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
 use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
-    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
-    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
-    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+    CacheSaltField, ModelRoute, ModelRouterBackend, OpenAICompatibleBackend,
+    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
@@ -45,7 +45,11 @@ use common::{event_from_request, StaticKeyProvider, StubQuoter};
 /// A middleware with a fixed prefix-hash key; the gateway derives the real
 /// key from dstack KMS.
 fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-    Middleware::new(PrefixHashKey::new([7; 32]), config)
+    Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
+        config,
+    )
 }
 
 // A mock upstream that returns a fixed response for any forward.
@@ -634,6 +638,320 @@ fn middleware(control_url: String) -> Middleware {
         tee_only_domains: Vec::new(),
     })
     .unwrap()
+}
+
+fn cache_salt_service(
+    routes: &[(&str, Option<CacheSaltField>, u16)],
+    upstream_path: Option<&str>,
+    stream: bool,
+) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut router = ModelRouterBackend::new("cache-salt-router");
+    let response = json!({
+        "id":"upstream", "object":"chat.completion", "model":"actual-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"delta":{"content":"hi"},"finish_reason":"stop"}],
+        "role":"assistant", "content":[{"type":"text","text":"hi"}],
+        "stop_reason":"end_turn", "output":[], "status":"completed",
+        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"input_tokens":1,"output_tokens":1}
+    });
+    for (route_id, field, status) in routes {
+        let body = if stream {
+            format!("data: {response}\n\ndata: [DONE]\n\n").into_bytes()
+        } else {
+            serde_json::to_vec(&response).unwrap()
+        };
+        router
+            .add_route(
+                ModelRoute::new(
+                    "gpt-test",
+                    "actual-model",
+                    Arc::new(RecordingUpstream {
+                        requests: requests.clone(),
+                        status: *status,
+                        body,
+                        content_type: if stream {
+                            "text/event-stream"
+                        } else {
+                            "application/json"
+                        },
+                    }),
+                    *route_id,
+                )
+                .unwrap()
+                .with_path(upstream_path.map(str::to_owned))
+                .with_cache_salt_field(*field),
+            )
+            .unwrap();
+    }
+    (build_service_with_backend(Arc::new(router)), requests)
+}
+
+#[tokio::test]
+async fn cache_salt_is_user_and_provider_scoped_in_buffered_and_streaming_middleware() {
+    use private_ai_gateway::aci::digest::sha256_hex;
+    let _ = captured_logs();
+    let mut salts = HashMap::new();
+    for (provider, field, name) in [
+        (
+            "chutes",
+            Some(CacheSaltField::CacheSalt("chutes")),
+            "cache_salt",
+        ),
+        (
+            "privatemode",
+            Some(CacheSaltField::CacheSalt("privatemode")),
+            "cache_salt",
+        ),
+        (
+            "tinfoil",
+            Some(CacheSaltField::UserCacheSecret("tinfoil")),
+            "user_cache_secret",
+        ),
+        ("unsupported", None, "cache_salt"),
+    ] {
+        for streaming in [false, true] {
+            for user in [Some(7), Some(8), None] {
+                let mut pre = json!({"allow":true,"candidates":[{"routeId":"route:gpt-test","format":"openai"}]});
+                if let Some(user) = user {
+                    pre["userId"] = json!(user);
+                    pre["organizationId"] = json!(11);
+                    pre["workspaceId"] = json!(13);
+                }
+                let (control_url, pres, posts) = spawn_control_capturing_pre(pre).await;
+                let (service, requests) =
+                    cache_salt_service(&[("route:gpt-test", field, 200)], None, streaming);
+                let mut input = chat_input();
+                input.stream = streaming;
+                input.params["stream"] = json!(streaming);
+                input.params["cache_salt"] = json!("caller-cache-canary");
+                input.params["user_cache_secret"] = json!("raw-secret-canary");
+                input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+                let received_hash = sha256_hex(&input.received_body);
+                let response = middleware(control_url)
+                    .handle_completion(&service, input)
+                    .await;
+                assert_eq!(response.status(), 200);
+                let (headers, _) = raw_body(response).await;
+                let request = requests.lock().unwrap()[0].clone();
+                let derived = request.body.get(name).and_then(Value::as_str);
+                if let (Some(_), Some(user)) = (field, user) {
+                    let derived = derived.unwrap();
+                    assert_eq!(derived.len(), 64);
+                    let key = (provider, user);
+                    if let Some(previous) = salts.insert(key, derived.to_owned()) {
+                        assert_eq!(previous, derived, "stream mode must not change the salt");
+                    }
+                    assert!(!request.body.as_object().unwrap().contains_key(
+                        if name == "cache_salt" {
+                            "user_cache_secret"
+                        } else {
+                            "cache_salt"
+                        }
+                    ));
+                } else {
+                    assert!(request.body.get("cache_salt").is_none());
+                    assert!(request.body.get("user_cache_secret").is_none());
+                }
+                let receipt = service
+                    .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+                    .unwrap()
+                    .document_json()
+                    .unwrap();
+                let events = receipt["event_log"].as_array().unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .find(|e| e["type"] == "request.received")
+                        .unwrap()["body_hash"],
+                    received_hash
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .find(|e| e["type"] == "request.forwarded")
+                        .unwrap()["body_hash"],
+                    sha256_hex(&request.raw_body)
+                );
+                assert_ne!(received_hash, sha256_hex(&request.raw_body));
+                let report = wait_for_post(&posts, |p| p["status"] == 200).await;
+                for document in [
+                    report.to_string(),
+                    pres.lock().unwrap()[0].to_string(),
+                    receipt.to_string(),
+                    captured_logs().text(),
+                ] {
+                    assert!(!document.contains("caller-cache-canary"));
+                    assert!(!document.contains("raw-secret-canary"));
+                    if let Some(derived) = derived {
+                        assert!(!document.contains(derived));
+                    }
+                }
+            }
+        }
+    }
+    for provider in ["chutes", "privatemode", "tinfoil"] {
+        assert_ne!(salts[&(provider, 7)], salts[&(provider, 8)]);
+    }
+    assert_ne!(salts[&("chutes", 7)], salts[&("privatemode", 7)]);
+    assert_ne!(salts[&("chutes", 7)], salts[&("tinfoil", 7)]);
+}
+
+#[tokio::test]
+async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller_fields() {
+    let mut values = Vec::new();
+    for (surface, format, native_path) in [
+        (Endpoint::ChatComplete, "openai", None),
+        (Endpoint::Complete, "openai", None),
+        (
+            Endpoint::CreateModelResponse,
+            "openai",
+            Some("/v1/responses"),
+        ),
+        (Endpoint::CreateModelResponse, "openai", None),
+        (Endpoint::Messages, "anthropic", Some("/v1/messages")),
+        (Endpoint::Messages, "openai", None),
+    ] {
+        let pre = json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
+            "candidates":[{"routeId":"route:gpt-test","format":format,
+                "supportedEndpoints":native_path.into_iter().collect::<Vec<_>>() }]});
+        let control_url = spawn_control(200, pre).await;
+        let (service, requests) = cache_salt_service(
+            &[(
+                "route:gpt-test",
+                Some(CacheSaltField::UserCacheSecret("tinfoil")),
+                200,
+            )],
+            native_path,
+            false,
+        );
+        let mw = middleware(control_url);
+        for (index, caller) in [
+            Value::Null,
+            json!(17),
+            json!({"bad":true}),
+            json!(""),
+            json!("subpartition"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = match surface {
+                Endpoint::Messages => messages_input(false),
+                Endpoint::CreateModelResponse => responses_input(false),
+                Endpoint::Complete => CompletionInput {
+                    endpoint: surface,
+                    endpoint_path: "/v1/completions",
+                    params: json!({"model":"gpt-test","prompt":"hi"}),
+                    ..chat_input()
+                },
+                _ => chat_input(),
+            };
+            input.request_id = format!("cache-salt-{index}");
+            if !caller.is_null() {
+                input.params["cache_salt"] = caller;
+            }
+            input.params["user_cache_secret"] = json!("raw-secret-canary");
+            input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+            let response = mw.handle_completion(&service, input).await;
+            assert_eq!(response.status(), 200, "{surface:?}, {format}, {index}");
+            let _ = raw_body(response).await;
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let salt = requests[0].body["user_cache_secret"].as_str().unwrap();
+        for request in &requests[..4] {
+            assert_eq!(request.body["user_cache_secret"], salt);
+            assert!(request.body.get("cache_salt").is_none());
+        }
+        assert_ne!(requests[4].body["user_cache_secret"], salt);
+        if let Some(path) = native_path {
+            assert_eq!(requests[0].path.as_deref(), Some(path));
+        }
+        values.push(salt.to_owned());
+    }
+    assert!(
+        values.iter().all(|salt| salt == &values[0]),
+        "bridging must preserve the original user partition"
+    );
+}
+
+#[tokio::test]
+async fn cache_salt_failover_uses_each_selected_providers_partition() {
+    for stream in [false, true] {
+        let control_url = spawn_control(200, json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
+            "candidates":[{"routeId":"first:gpt-test","format":"openai"},{"routeId":"second:gpt-test","format":"openai"}]})).await;
+        let (service, requests) = cache_salt_service(
+            &[
+                (
+                    "first:gpt-test",
+                    Some(CacheSaltField::CacheSalt("chutes")),
+                    503,
+                ),
+                (
+                    "second:gpt-test",
+                    Some(CacheSaltField::CacheSalt("privatemode")),
+                    200,
+                ),
+            ],
+            None,
+            stream,
+        );
+        let mut input = chat_input();
+        input.stream = stream;
+        input.params["stream"] = json!(stream);
+        let response = middleware(control_url)
+            .handle_completion(&service, input)
+            .await;
+        assert_eq!(response.status(), 200);
+        let _ = raw_body(response).await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body["cache_salt"].as_str().unwrap().len(), 64);
+        assert_eq!(requests[1].body["cache_salt"].as_str().unwrap().len(), 64);
+        assert_ne!(
+            requests[0].body["cache_salt"],
+            requests[1].body["cache_salt"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn cache_salt_direct_http_topology_preserves_caller_fields() {
+    use axum::{body::Body, http::Request};
+    use private_ai_gateway::http::build_router;
+    use tower::ServiceExt;
+
+    let (service, requests) = cache_salt_service(
+        &[(
+            "route:gpt-test",
+            Some(CacheSaltField::UserCacheSecret("tinfoil")),
+            200,
+        )],
+        None,
+        false,
+    );
+    let original = json!({"model":"gpt-test","messages":[],"cache_salt":"caller-cache","user_cache_secret":"caller-secret"});
+    let response = build_router(service)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&original).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let _ = raw_body(response).await;
+    let mut expected = original;
+    expected["model"] = json!("actual-model");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body, expected,
+        "direct mode only performs its existing model rewrite"
+    );
 }
 
 /// The (route, status) view of a failover chain; per-attempt timing is not

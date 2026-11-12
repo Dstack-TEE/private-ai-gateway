@@ -497,6 +497,7 @@ impl UpstreamConfigManager {
                     return Vec::new();
                 };
                 let Ok(prepared) = state.backend.prepare(UpstreamRequest {
+                    cache_salt: None,
                     form: None,
                     content_type: None,
                     body: body.into(),

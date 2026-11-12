@@ -43,36 +43,50 @@ Check the receipt and its cited session as described in [Audit the receipt](../a
 
 ## Prefix-cache isolation observation
 
-The following is a dated operational observation, not a protocol guarantee. As
-observed on 2026-07-13, the gateway preserved caller-supplied `cache_salt` but
-did not derive a tenant-specific cache partition for the active Tinfoil and
-Chutes routes:
+Middleware mode automatically partitions supported prompt caches by the
+control plane's authenticated `userId`. This supersedes the caller-controlled,
+cross-user sharing policy discussed in [#83](https://github.com/Dstack-TEE/private-ai-gateway/issues/83).
+The gateway removes caller `cache_salt` and `user_cache_secret` fields before
+request transforms, including native Responses and Messages passthrough. A
+non-empty string `cache_salt` subdivides the authenticated user's partition;
+it cannot opt into another user's cache. Other JSON values and empty strings
+are ignored. Anonymous requests receive no generated salt. Direct mode
+(without middleware) retains its existing caller-field behavior.
 
-- Tinfoil
-  [replaced `cache_salt`](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.118/cache_salt.go)
-  with a value derived from RedPill's shared upstream credential. Because the
-  gateway did not set `user_cache_secret`, RedPill tenants shared one provider
-  cache namespace.
-- Chutes passed `cache_salt` to vLLM but did not generate one. Unsalted
-  requests shared the serving instance's namespace.
+| Provider | Middleware field | Limitation |
+| --- | --- | --- |
+| Chutes | `cache_salt` | Passthrough to vLLM is an observed provider behavior, not an attested cache-isolation guarantee. It was observed on the gateway's end-to-end-encrypted instance path; the public `llm.chutes.ai` API ignored `cache_salt` when called directly. |
+| Privatemode | `cache_salt` | The proxy uses the effective salt for cache/shard affinity; see [Prompt cache](privatemode/verification.md#prompt-cache). |
+| Tinfoil | `user_cache_secret` | Requires the provider router's `CACHE_SALT_ENABLED` policy. The router combines this secret with the shared upstream credential to derive its own salt. |
+| Phala Direct | `cache_salt` | The production chain (PIG → vllm-router → SGLang or vLLM) forwards the field; the engine enforces isolation. With an SGLang storage tier (HiCache/Mooncake), require SGLang ≥ 0.5.20, whose storage keys include the salt; 0.5.19 partitions only GPU cache. |
+| NEAR AI | `cache_salt` | Honored by NEAR's TEE vLLM models. |
+| ArmetAI | `cache_salt` | Enforced by vLLM in the measured TD. |
+| 0G Private Computer | `cache_salt` | The adapter seals the field and the broker merges it into the served request; honored by the tested models. The engine is set by unmeasured broker config, so re-test when 0G providers change. |
+| Other providers | None | Secret AI uses Ollama, which has no partition field. Non-TEE providers receive no field. |
 
-At that revision, Tinfoil's behavior was attestation-backed. The observed
-Chutes behavior came from control-plane evidence and was not bound by its
-attestation. The intended caller-controlled interface was to preserve
-`cache_salt` for Chutes and translate it to `user_cache_secret` for Tinfoil,
-without deriving or overriding it from RedPill tenant identity in the gateway.
+Injection applies only when the resolved upstream path ends in
+`/chat/completions`, `/completions`, `/responses`, or `/messages`, including
+buffered, streamed, and failover attempts. Audio forms, embeddings, image
+generation, and System One do not receive a generated cache field. Unsupported
+routes and anonymous middleware requests still lose both caller fields.
 
-As of 2026-10-19, the Privatemode reference Compose enables
-`--disable-prompt-cache=false`. Its default random salt is generated once per
-proxy startup, sharing a cache namespace across callers of that replica. A
-valid caller-supplied `cache_salt` takes precedence; the gateway does not derive
-a tenant salt. This removes the default per-request isolation. Privatemode's
-namespace is narrower than Tinfoil's: Tinfoil derives its namespace from the
-shared upstream credential, so it spans replicas and survives restarts. See
-[Privatemode prompt cache](privatemode/verification.md#prompt-cache) for salt
-lifetime, shard affinity, and the timing side channel. Production rollout
-remains unverified.
+The gateway uses a separate TEE-held dstack KMS key to derive provider-specific
+salts, keeps salts out of logs and control reports, and covers forwarded bytes
+only through receipt hashes. Isolation assumes an honest control plane and a
+provider that honors the field; stable values remain linkable within one
+provider, and attestation alone does not prove cache enforcement. See
+[Cache partition derivation and rotation](../configuration-reference.md#cache-partition-derivation-and-rotation)
+for the exact construction and lifecycle.
 
-Revalidate provider code and deployment configuration before relying on cache
-partitioning. Attestation can bind a provider implementation, but it does not
-turn an unreviewed cache policy into tenant isolation.
+As observed on 2026-11-12 on disposable CVMs (last at commit `99e28f1d`),
+Tinfoil (`gpt-oss-120b`), Chutes (`GLM-5.1-TEE`, `Kimi-K2.6-TEE`),
+Privatemode (`glm-5.3-flash`), NEAR AI (`glm-5.3-flash`,
+`Qwen3.6-35B-A3B-FP8`), ArmetAI (`GLM-5.3-Flash`) and Phala Direct
+(`qwen3.8-27b`, `glm-5.3`) behaved as intended for buffered and streamed chat:
+a tenant's repeated prompt hit the cache, while another tenant, the same
+caller salt under another tenant, and an anonymous request missed in every
+trial, and a restart kept the partition. A direct-mode probe on the same
+day showed 0G Private Computer (`glm-5.3`, `0GM-1.0-35B-A3B`) honoring a sealed
+`cache_salt` the same way. Production rollout remains unverified.
+[Test per-user cache salts on a disposable CVM](../cache-salt-cvm-test.md)
+reproduces the check.
