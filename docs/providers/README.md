@@ -85,7 +85,8 @@ Privatemode (`glm-5.3-flash`), NEAR AI (`glm-5.3-flash`,
 (`qwen3.8-27b`, `glm-5.3`) behaved as intended for buffered and streamed chat:
 a tenant's repeated prompt hit the cache, while another tenant, the same
 caller salt under another tenant, and an anonymous request missed in every
-trial, and a restart kept the partition. Production rollout remains
-unverified.
+trial, and a restart kept the partition. A direct-mode probe on the same
+day showed 0G Private Computer (`glm-5.3`, `0GM-1.0-35B-A3B`) honoring a sealed
+`cache_salt` the same way. Production rollout remains unverified.
 [Test per-user cache salts on a disposable CVM](../cache-salt-cvm-test.md)
 reproduces the check.
