@@ -53,7 +53,7 @@ Privatemode proxy sidecar, and seeds three upstreams:
 | `t-gpt-oss` | Tinfoil `gpt-oss-120b` | `user_cache_secret` |
 | `c-glm` | Chutes `zai-org/GLM-5.1-TEE` | `cache_salt` |
 | `c-kimi` | Chutes `moonshotai/Kimi-K2.6-TEE` | `cache_salt` |
-| `p-gpt-oss` | Privatemode `gpt-oss-120b` | `cache_salt` |
+| `p-glm` | Privatemode `glm-5.3-flash` | `cache_salt` |
 
 Its mock control plane maps the SHA-256 of `TEST_USER_A_KEY` to `userId`
 1001 and of `TEST_USER_B_KEY` to 1002, and allows anonymous requests without
@@ -121,7 +121,7 @@ cd "$WORK"
 env -i PATH="$PATH" \
   TEST_USER_A_KEY="$(grep '^TEST_USER_A_KEY=' secrets.env | cut -d= -f2-)" \
   TEST_USER_B_KEY="$(grep '^TEST_USER_B_KEY=' secrets.env | cut -d= -f2-)" \
-  python3 smoke.py "$URL" t-gpt-oss c-glm c-kimi p-gpt-oss > results.json
+  python3 smoke.py "$URL" t-gpt-oss c-glm c-kimi p-glm > results.json
 ```
 
 The summary goes to stderr; `results.json` holds every request's counters.
@@ -161,6 +161,7 @@ no longer exists:
 cd /
 phala cvms delete "$NAME" --profile "$PROFILE" --force
 phala cvms list --profile "$PROFILE" | grep "$NAME" || echo "$NAME is no longer listed"
+cp "$WORK/results.json" ~/cache-salt-results-"$NAME".json 2>/dev/null   # optional; holds no credentials
 rm -rf "$WORK"
 ```
 
@@ -173,4 +174,8 @@ rm -rf "$WORK"
 - Privatemode uses the effective `cache_salt` for cache/shard affinity; the
   default compose includes its official proxy sidecar. See
   [Prompt cache](providers/privatemode/verification.md#prompt-cache).
+  Privatemode licenses cover only some models, and `/v1/models` lists more
+  than a key may use. A 502 on every `p-glm` request usually means the key's
+  license excludes the model: the proxy answers 403 "your license does not
+  allow access to model". Pick a model the key can call.
 - PhalaDirect is not covered by the default compose.

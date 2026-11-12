@@ -73,7 +73,7 @@ services:
     environment:
       - TEST_USER_A_KEY=${TEST_USER_A_KEY:?set TEST_USER_A_KEY}
       - TEST_USER_B_KEY=${TEST_USER_B_KEY:?set TEST_USER_B_KEY}
-      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-gpt-oss":["privatemode-test:p-gpt-oss"]}'
+      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-glm":["privatemode-test:p-glm"]}'
 
 volumes:
   pal-cache:
@@ -125,7 +125,7 @@ configs:
           "name": "privatemode-test",
           "provider": "privatemode",
           "base_url": "http://privatemode-proxy:8080",
-          "models": {"p-gpt-oss": "gpt-oss-120b"}
+          "models": {"p-glm": "glm-5.3-flash"}
         }
       ]
   mock-control:
