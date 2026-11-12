@@ -356,6 +356,8 @@ The main runner does not dispatch every script in the directory. Run these separ
 | `bfcl_v4.py` | BFCL tool-calling evaluation. See [Run the BFCL evaluation](#run-the-bfcl-evaluation). |
 | `user_verify.py` | Verifies a received response. See [Verify a received response](#verify-a-received-response). |
 
+[Test per-user cache salts on a disposable CVM](cache-salt-cvm-test.md) covers prompt-cache partitioning against a deployed gateway; its scripts live in `scripts/cache_salt_cvm/`.
+
 Read each script's `--help` output before use. These tools call live systems and can consume provider quota. Run the router smokes from `scripts/`, for example `uv run python live_e2e/router_session_smoke.py tinfoil`.
 
 ## Verify a received response

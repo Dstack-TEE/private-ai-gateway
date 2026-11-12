@@ -55,7 +55,7 @@ are ignored. Anonymous requests receive no generated salt. Direct mode
 
 | Provider | Middleware field | Limitation |
 | --- | --- | --- |
-| Chutes | `cache_salt` | Passthrough to vLLM is an observed provider behavior, not an attested cache-isolation guarantee. |
+| Chutes | `cache_salt` | Passthrough to vLLM is an observed provider behavior, not an attested cache-isolation guarantee. It was observed on the gateway's end-to-end-encrypted instance path; the public `llm.chutes.ai` API ignored `cache_salt` when called directly. |
 | Privatemode | `cache_salt` | The proxy uses the effective salt for cache/shard affinity; see [Prompt cache](privatemode/verification.md#prompt-cache). |
 | Tinfoil | `user_cache_secret` | Requires the provider router's `CACHE_SALT_ENABLED` policy. The router combines this secret with the shared upstream credential to derive its own salt. |
 | Phala Direct | None | The deployed `Dstack-TEE/vllm-proxy` revision and unknown-JSON-field forwarding have not been confirmed. |
@@ -83,4 +83,13 @@ start; retaining the same KMS application identity/key retains partitions
 across gateway restarts and replicas. Cache partitioning depends on the
 provider honoring the field. Attestation and a forwarded-body hash alone do
 not prove that the provider enforces cache isolation or remove every timing
-side channel. Live rollout of this policy remains unverified.
+side channel.
+
+As observed on 2026-11-12 on a disposable CVM running commit `534a33d2`,
+Tinfoil (`gpt-oss-120b`) and Chutes (`GLM-5.1-TEE`, `Kimi-K2.6-TEE`) behaved
+as intended for buffered and streamed chat: a tenant's repeated prompt hit
+the cache, while another tenant, the same caller salt under another tenant,
+and an anonymous request missed in every trial, and a restart kept the
+partition. Privatemode and production rollout remain unverified.
+[Test per-user cache salts on a disposable CVM](../cache-salt-cvm-test.md)
+reproduces the check.

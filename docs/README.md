@@ -40,6 +40,7 @@ For operators and contributors.
 | Configure runtime policy and upstreams | [Configuration reference](configuration-reference.md) | Reference |
 | Implement a control plane | [Control-plane contract](control-plane-contract.md) | Reference |
 | Run unit, smoke, and live-provider tests | [Testing guide](live-e2e-test-suite.md) | How-to |
+| Test per-user cache salts on a disposable CVM | [Cache-salt CVM test](cache-salt-cvm-test.md) | How-to |
 | Prepare and validate a change | [Contributing](../CONTRIBUTING.md) | How-to and policy |
 
 ## Maintainer records
