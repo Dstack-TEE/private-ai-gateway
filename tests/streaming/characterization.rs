@@ -210,6 +210,7 @@ struct Case {
     chunk_size: usize,
     read_error: Option<ReadError>,
     direct_idle: bool,
+    pricing: Value,
 }
 
 impl Case {
@@ -230,6 +231,7 @@ impl Case {
             chunk_size: 7,
             read_error: None,
             direct_idle: false,
+            pricing: json!({"inputCostPerToken":"1","outputCostPerToken":"2"}),
         }
     }
 }
@@ -250,7 +252,7 @@ async fn capture(case: &Case) -> Value {
     } else {
         json!({"routeId":"fixture:model", "format":case.format})
     };
-    let pre = json!({"allow":true,"candidates":[candidate],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}});
+    let pre = json!({"allow":true,"candidates":[candidate],"pricing":case.pricing});
     let app = Router::new()
         .route(
             "/consult/pre",
@@ -1020,6 +1022,54 @@ fn source_billing_cases() -> Vec<Case> {
     cases
 }
 
+fn cache_billing_cases() -> Vec<Case> {
+    let mut cases = Vec::new();
+    for (destination, endpoint) in [
+        ("chat", Endpoint::ChatComplete),
+        ("messages", Endpoint::Messages),
+        ("responses", Endpoint::CreateModelResponse),
+    ] {
+        let mut cache = Case::new(&format!("billing_cache_write_chat_{destination}"), endpoint,
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":40,\"cache_write_tokens\":30}}}\n\ndata: [DONE]\n\n", "openai");
+        cache.pricing = json!({"inputCostPerToken":"1","outputCostPerToken":"2","cacheReadCostPerToken":"0.1","cacheCreationCostPerToken":"1.25"});
+        cases.push(cache);
+        cases.push(Case::new(&format!("billing_numeric_strings_chat_{destination}"), endpoint,
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":\"2\",\"completion_tokens\":\"3\"}}\n\ndata: [DONE]\n\n", "openai"));
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n";
+        for disconnect in [false, true] {
+            let ending = if disconnect { "disconnect" } else { "eof" };
+            let mut case = Case::new(
+                &format!("billing_start_only_messages_{destination}_{ending}"),
+                endpoint,
+                start,
+                "anthropic",
+            );
+            case.disconnect = disconnect;
+            cases.push(case);
+        }
+        cases.push(Case::new(&format!("billing_larger_delta_messages_{destination}"), endpoint,
+            &format!("{start}event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":5,\"output_tokens\":3}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"), "anthropic"));
+    }
+    for (name, extra, write) in [
+        ("billing_cache_write_inconsistent_ignored", "", 61),
+        (
+            "billing_cache_write_top_level_zero_wins",
+            ",\"cache_creation_input_tokens\":0",
+            30,
+        ),
+    ] {
+        let mut case = Case::new(name, Endpoint::ChatComplete,
+            &format!("data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":100,\"completion_tokens\":5{extra},\"prompt_tokens_details\":{{\"cached_tokens\":40,\"cache_write_tokens\":{write}}}}}}}\n\ndata: [DONE]\n\n"), "openai");
+        case.pricing = json!({"inputCostPerToken":"1","outputCostPerToken":"2","cacheReadCostPerToken":"0.1","cacheCreationCostPerToken":"1.25"});
+        cases.push(case);
+    }
+    for case in &mut cases {
+        if case.format == "openai" {
+            case.source.insert_str(0, "data: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n");
+        }
+    }
+    cases
+}
 fn read_json_lines(input: &str) -> Vec<Value> {
     input
         .lines()
@@ -1122,6 +1172,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(failed_bridge_accounting_cases());
     cases.extend(inband_timeout_cases());
     cases.extend(source_billing_cases());
+    cases.extend(cache_billing_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -2009,6 +2060,76 @@ async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_posi
                     .as_str()
                     .unwrap()
                     .replace("\n\n\n\n", "\n\n")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn source_billing_prices_cache_writes_strings_and_partial_messages_on_every_bridge() {
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    for case in cache_billing_cases() {
+        let snapshot = capture(&case).await;
+        let baseline = baselines
+            .iter()
+            .find(|value| value["name"] == case.name)
+            .unwrap();
+        assert_report_outcomes(&snapshot, baseline);
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1, "{}", case.name);
+        let usage = &reports[0]["usage"];
+        let expected_cost = if case.name.contains("start_only") {
+            assert_eq!(
+                reports[0]["status"],
+                if case.disconnect {
+                    499
+                } else {
+                    baseline["reports"][0]["status"].as_u64().unwrap()
+                }
+            );
+            assert_eq!(usage, &json!({"input_tokens":2,"output_tokens":1}));
+            4.0
+        } else if case.name.contains("larger_delta") {
+            assert_eq!(usage, &json!({"input_tokens":5,"output_tokens":3}));
+            11.0
+        } else if case.name.contains("numeric_strings") {
+            assert_eq!(usage, &json!({"prompt_tokens":"2","completion_tokens":"3"}));
+            8.0
+        } else if case.name.contains("ignored") || case.name.contains("zero_wins") {
+            74.0
+        } else {
+            assert_eq!(usage["prompt_tokens"], 100);
+            assert_eq!(usage["prompt_tokens_details"]["cache_write_tokens"], 30);
+            assert!(usage.get("cache_creation_input_tokens").is_none());
+            81.5
+        };
+        assert_eq!(
+            crate::middleware::pricing::compute_cost(usage, &reports[0]["pricing"]),
+            expected_cost,
+            "{}",
+            case.name
+        );
+        let mut costs = Vec::new();
+        for value in snapshot["wire"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.strip_prefix("data: ")?).ok())
+        {
+            if let Some(cost) = value
+                .get("usage")
+                .or_else(|| value.get("response")?.get("usage"))
+                .and_then(|usage| usage.get("cost"))
+            {
+                costs.push(cost.as_f64().unwrap());
+            }
+        }
+        if !case.name.contains("start_only") {
+            assert!(!costs.is_empty(), "{}: {}", case.name, snapshot["wire"]);
+            assert!(
+                costs.iter().all(|cost| *cost == expected_cost),
+                "{}: {costs:?}",
+                case.name
             );
         }
     }

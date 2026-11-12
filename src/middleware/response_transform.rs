@@ -1071,16 +1071,8 @@ pub(super) fn now_millis() -> u128 {
 /// The cache counters of a Chat usage object: tokens read from and written
 /// to the cache, each under either name an upstream uses.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
-    // Read as the control plane reads a counter: a numeric string counts, and
-    // anything unreadable, negative included, is absent rather than zero, so
-    // the other name for the same bucket is still consulted.
-    let counter = |value: Option<&Value>| {
-        let number = match value? {
-            Value::String(text) => text.trim().parse::<f64>().ok()?,
-            other => other.as_f64()?,
-        };
-        (number.is_finite() && number >= 0.0).then_some(number as i64)
-    };
+    // Use the pricing parser: invalid counters are absent, while zero wins.
+    let counter = |value: Option<&Value>| value.and_then(super::pricing::usage_counter);
     let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
         counter(
             usage
