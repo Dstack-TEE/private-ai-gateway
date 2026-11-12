@@ -356,17 +356,6 @@ impl Stream for DecodedStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(event))) => {
                 let record = Record::from_sse(event, this.protocol);
-                if this.protocol.is_some()
-                    && record.event().is_some_and(|event| {
-                        event.meaning.failure
-                            == Some(crate::sse_protocol::FailureEvidence::ConflictingType)
-                    })
-                {
-                    this.finished = true;
-                    return Poll::Ready(Some(Err(upstream_error(
-                        "provider SSE event has conflicting control types",
-                    ))));
-                }
                 Poll::Ready(Some(Ok(record)))
             }
             Poll::Ready(Some(Err(error))) => {
@@ -554,12 +543,16 @@ mod tests {
         assert!(records.last().unwrap().is_err());
     }
     #[test]
-    fn contradictory_named_control_types_are_an_upstream_failure() {
+    fn contradictory_controls_retain_classified_failure_in_a_decoded_record() {
         let result = decode_buffered(
             Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"error\"}\n\n"),
             Some(SseProtocol::AnthropicMessages),
         );
-        assert!(matches!(result, Err(ServiceError::Upstream(_))));
+        let records = result.unwrap();
+        assert_eq!(
+            records[0].event().unwrap().meaning.failure,
+            Some(crate::sse_protocol::FailureEvidence::ConflictingType)
+        );
     }
     #[tokio::test]
     async fn invalid_utf8_is_an_upstream_failure() {

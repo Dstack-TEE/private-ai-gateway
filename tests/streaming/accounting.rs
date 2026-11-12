@@ -107,6 +107,7 @@ fn owner_for(
         protocol,
         MiddlewareReceiptJournal::default(),
         accounting.handle.clone(),
+        accounting.control.clone(),
     );
     ResponseOwner::new(
         ResponseInput::Events(events),
@@ -359,9 +360,7 @@ async fn transformed_response(
 ) -> String {
     use crate::middleware::request_transform::Endpoint;
     use crate::middleware::response_transform::ResponseIdentity;
-    use crate::middleware::stream_transform::{
-        EventTransformStream, StreamTransform, UpstreamUsage,
-    };
+    use crate::middleware::stream_transform::{EventTransformStream, StreamTransform};
     let endpoint_path = match endpoint {
         Endpoint::CreateModelResponse => "/v1/responses",
         Endpoint::Messages => "/v1/messages",
@@ -387,33 +386,29 @@ async fn transformed_response(
         source_protocol,
         MiddlewareReceiptJournal::default(),
         accounting.handle.clone(),
+        accounting.control.clone(),
     );
     if endpoint == Endpoint::Complete {
         let bridge = EventTransformStream::new(events, StreamTransform::AnthropicCompleteToOpenai);
-        accounting.handle.bridge(bridge.bridge());
+        accounting.control.bridge(bridge.bridge());
         events = Box::pin(bridge);
     } else if source_protocol == SseProtocol::AnthropicMessages && endpoint != Endpoint::Messages {
         let bridge = EventTransformStream::new(events, StreamTransform::AnthropicToOpenaiChat);
-        accounting.handle.bridge(bridge.bridge());
+        accounting.control.bridge(bridge.bridge());
         events = Box::pin(bridge);
     }
     if endpoint == Endpoint::Messages && source_protocol != SseProtocol::AnthropicMessages {
-        let usage = UpstreamUsage::default();
-        accounting.handle.upstream_usage(usage.clone());
-        let bridge =
-            EventTransformStream::new(events, StreamTransform::OpenaiToAnthropicMessages(usage));
-        accounting.handle.bridge(bridge.bridge());
+        let bridge = EventTransformStream::new(events, StreamTransform::OpenaiToAnthropicMessages);
+        accounting.control.bridge(bridge.bridge());
         events = Box::pin(bridge);
     }
     if endpoint == Endpoint::CreateModelResponse && source_protocol != SseProtocol::OpenaiResponses
     {
-        let usage = UpstreamUsage::default();
-        accounting.handle.upstream_usage(usage.clone());
         let bridge = EventTransformStream::new(
             events,
-            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity.clone(), usage),
+            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity.clone()),
         );
-        accounting.handle.bridge(bridge.bridge());
+        accounting.control.bridge(bridge.bridge());
         events = Box::pin(bridge);
     }
     let sanitized = Box::pin(EventTransformStream::new(
@@ -632,8 +627,8 @@ async fn failed_anthropic_delta_retains_its_usage_and_cost() {
     assert!(output.ends_with("data: [DONE]\n\n"));
     let report = control.captured().await;
     assert_eq!(report["status"], 502);
-    assert_eq!(report["usage"]["prompt_tokens"], 2);
-    assert_eq!(report["usage"]["completion_tokens"], 3);
+    assert_eq!(report["usage"]["input_tokens"], 2);
+    assert_eq!(report["usage"]["output_tokens"], 3);
     assert_eq!(control.reports.lock().unwrap().len(), 1);
 }
 
@@ -747,4 +742,81 @@ async fn sanitize_renaming_preserves_terminal_failure_metadata() {
         assert!(report["errorSource"].is_null());
         assert_eq!(control.reports.lock().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect() {
+    use futures_util::FutureExt;
+    for disconnect in [false, true] {
+        let control = Control::new().await;
+        let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+        let source = futures_util::stream::unfold(receive, |mut receive| async {
+            receive.recv().await.map(|record| (record, receive))
+        });
+        let mut stream = owner(Box::pin(source), control.report());
+        stream.e2ee = Some(E2eeRequestContext {
+            version: "2".into(),
+            algo: crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM.into(),
+            aad_mode: super::super::wire::E2eeAadMode::AciV2,
+            request_model: "fixture".into(),
+            client_public_key_hex: "11".repeat(32),
+            nonce: None,
+            timestamp: None,
+        });
+        send.send(Ok(Bytes::from_static(b"data: invalid JSON\n\n")))
+            .unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        assert!(control.reports.lock().unwrap().is_empty());
+        send.send(Ok(Bytes::from_static(b"data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n"))).unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        if disconnect {
+            drop(stream);
+        } else {
+            drop(send);
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(ServiceError::E2ee(_)))
+            ));
+            assert!(stream.next().await.is_none());
+        }
+        let report = control.captured().await;
+        assert_eq!(report["status"], 502);
+        assert_eq!(report["errorSource"], "gateway");
+        assert_eq!(report["errorMessage"], "downstream_finalizer_failed");
+        assert_eq!(
+            report["usage"],
+            json!({"prompt_tokens":2,"completion_tokens":3})
+        );
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn contradictory_source_control_fails_output_but_retains_its_and_later_usage() {
+    let control = Control::new().await;
+    let source = concat!(
+        "event: message_stop\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2}}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let inner = Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+        source.as_bytes(),
+    ))]));
+    let bytes: Vec<_> = owner_for(inner, control.report(), SseProtocol::AnthropicMessages)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flat_map(Result::unwrap)
+        .collect();
+    let expected: Vec<_> = error_records(SseProtocol::AnthropicMessages, 502, None, None)
+        .iter()
+        .flat_map(|r| serialize(r).unwrap())
+        .collect();
+    assert_eq!(bytes, expected);
+    let report = control.captured().await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "upstream_transport");
+    assert!(report["errorSource"].is_null());
+    assert_eq!(report["usage"], json!({"input_tokens":2,"output_tokens":3}));
+    assert_eq!(control.reports.lock().unwrap().len(), 1);
 }

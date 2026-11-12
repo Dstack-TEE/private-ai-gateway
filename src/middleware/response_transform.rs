@@ -284,6 +284,20 @@ const CHAT_USAGE: &[&str] = &[
     "cost",
     "cost_details",
 ];
+// Messages counters plus the token-detail fallbacks understood by pricing.
+const MESSAGES_USAGE: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "prompt_tokens_details",
+    "input_tokens_details",
+    "cost",
+    "cost_details",
+];
 // ── In-band error kinds (allowlist) ──────────────────────────────────────────
 //
 // An upstream error's `type`/`code` is a claim about whose problem it is, and
@@ -917,7 +931,7 @@ pub(crate) fn filter_usage(usage: Option<&mut Value>, protocol: SseProtocol) {
     let allowed = match protocol {
         SseProtocol::OpenaiChat => CHAT_USAGE,
         SseProtocol::OpenaiResponses => RESPONSES_USAGE,
-        SseProtocol::AnthropicMessages => return,
+        SseProtocol::AnthropicMessages => MESSAGES_USAGE,
     };
     if let Some(usage) = usage.and_then(Value::as_object_mut) {
         retain_allowed(usage, allowed);

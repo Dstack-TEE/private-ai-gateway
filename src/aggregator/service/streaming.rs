@@ -2,7 +2,7 @@
 //! Sources hash accepted provider bytes; typed stages never serialize/reparse.
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -26,7 +26,7 @@ use crate::middleware::types::{ErrorClass, ErrorSource};
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
     chat_gateway_error, responses_error_event, responses_gateway_code, EventKind, EventMeaning,
-    SseProtocol, TerminalKind,
+    FailureEvidence, SseProtocol, TerminalKind,
 };
 
 #[derive(Default)]
@@ -113,21 +113,141 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
     }
 }
 
+/// Response phase and output control shared with ingress. Billing observes every
+/// source record independently; only the owner decides when output has ended.
+#[derive(Clone, Default)]
+pub(crate) struct StreamControl(Arc<Mutex<StreamControlState>>);
+#[derive(Default)]
+struct StreamControlState {
+    source_terminal: bool,
+    output_ended: bool,
+    bridge: Option<crate::middleware::stream_transform::BridgeHandle>,
+    continuation_failure: Option<StreamFailure>,
+    aborted: Option<StreamFailure>,
+}
+impl StreamControl {
+    fn ingress(&self, record: &mut Record) -> Result<bool, ServiceError> {
+        validate_source_record(record)?;
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(event) = record.event_mut() else {
+            return Ok(!state.output_ended);
+        };
+        event.after_terminal = state.source_terminal;
+        state.source_terminal |= event.meaning.terminal.is_some();
+        if !state.output_ended {
+            return Ok(true);
+        }
+        // Preserve the report label of a bridge that would have rejected this
+        // continuation, while source accounting keeps observing through EOF.
+        let ignored_control = event.source_protocol == Some(SseProtocol::AnthropicMessages)
+            && matches!(
+                event.meaning.kind,
+                EventKind::Ping | EventKind::ContentBlockStop | EventKind::MessageStop
+            );
+        if state.bridge.is_some()
+            && !ignored_control
+            && !event.data.trim().is_empty()
+            && event.payload.json().is_none()
+            && !(event.source_protocol == Some(SseProtocol::OpenaiChat) && state.source_terminal)
+        {
+            state
+                .continuation_failure
+                .get_or_insert(StreamFailure::from_error(&ServiceError::Upstream(
+                    crate::aci::upstream::UpstreamError::Transport(
+                        "provider sent an event this surface cannot represent".into(),
+                    ),
+                )));
+        }
+        Ok(false)
+    }
+    pub(crate) fn bridge(&self, bridge: crate::middleware::stream_transform::BridgeHandle) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).bridge = Some(bridge);
+    }
+    fn has_bridge(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bridge
+            .is_some()
+    }
+    fn close_bridge(&self) -> crate::middleware::stream_transform::BridgeClosure {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bridge
+            .as_ref()
+            .map_or_else(
+                Default::default,
+                crate::middleware::stream_transform::BridgeHandle::close,
+            )
+    }
+    fn failure_terminal(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .output_ended = true;
+    }
+    fn abort(&self, failure: StreamFailure) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.output_ended = true;
+        if failure.source == Some(ErrorSource::Gateway) {
+            state.aborted = Some(failure);
+        } else {
+            state.aborted.get_or_insert(failure);
+        }
+    }
+    pub(crate) fn aborted(&self) -> Option<StreamFailure> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .aborted
+    }
+    fn report_failure(&self, failure: Option<StreamFailure>) -> Option<StreamFailure> {
+        if failure.is_some_and(|f| f.source == Some(ErrorSource::Gateway)) {
+            return failure;
+        }
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .continuation_failure
+            .or(failure)
+    }
+}
+
+fn validate_source_record(record: &Record) -> Result<(), ServiceError> {
+    if record
+        .event()
+        .is_some_and(|event| event.meaning.failure == Some(FailureEvidence::ConflictingType))
+    {
+        Err(ServiceError::Upstream(
+            crate::aci::upstream::UpstreamError::Transport(
+                "provider SSE event has conflicting control types".into(),
+            ),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn decode_source(
     inner: ServiceResponseStream,
     protocol: SseProtocol,
     journal: MiddlewareReceiptJournal,
     accounting: AccountingHandle,
+    control: StreamControl,
 ) -> EventStream {
     let mut ids = Identifiers::default();
     Box::pin(
         DecodedStream::new(inner, Some(protocol)).filter_map(move |mut record| {
             if let Ok(record) = &mut record {
-                let forward = accounting.ingress(record);
+                accounting.observe_source(record);
+                let forward = control.ingress(record);
                 ids.observe(record);
                 journal.observe_source(&ids);
-                if !forward {
-                    return std::future::ready(None);
+                match forward {
+                    Ok(true) => {}
+                    Ok(false) => return std::future::ready(None),
+                    Err(error) => return std::future::ready(Some(Err(error))),
                 }
             }
             std::future::ready(Some(record))
@@ -157,6 +277,7 @@ struct ReceiptContext {
     clock: Arc<dyn Clock>,
     metrics: Arc<ServiceMetrics>,
     draft: ReceiptDraft,
+    suppressed: bool,
 }
 enum ReceiptDraft {
     Middleware(MiddlewareReceiptJournal),
@@ -177,6 +298,7 @@ impl ReceiptContext {
             clock: service.clock.clone(),
             metrics: service.metrics.clone(),
             draft,
+            suppressed: false,
         }
     }
     fn publish(
@@ -185,6 +307,9 @@ impl ReceiptContext {
         hash: String,
         endpoint: &str,
     ) -> Result<(), ServiceError> {
+        if self.suppressed {
+            return Ok(());
+        }
         let (mut builder, lease, response_model, status) = match &mut self.draft {
             ReceiptDraft::Middleware(journal) => {
                 let Some(draft) = journal.take() else {
@@ -262,6 +387,7 @@ pub(crate) struct ResponseOwner {
     ended: bool,
     finished: bool,
     tail: VecDeque<Record>,
+    output_error: Option<ServiceError>,
 }
 impl ResponseOwner {
     fn new(
@@ -291,6 +417,7 @@ impl ResponseOwner {
             ended: false,
             finished: false,
             tail: VecDeque::new(),
+            output_error: None,
         }
     }
     pub(crate) fn middleware(
@@ -352,7 +479,7 @@ impl ResponseOwner {
         let usage = self
             .accounting
             .as_ref()
-            .and_then(|accounting| accounting.handle.observe(&mut record, failure));
+            .and_then(|accounting| accounting.handle.decorate(&mut record, failure));
         let Some(event) = record.event().filter(|_| failure) else {
             return self.encode(record);
         };
@@ -389,7 +516,7 @@ impl ResponseOwner {
                 && !self
                     .accounting
                     .as_ref()
-                    .is_some_and(|accounting| accounting.handle.has_bridge()))
+                    .is_some_and(|accounting| accounting.control.has_bridge()))
     }
 
     fn sanitize_native_failure(&self, record: &mut Record, protocol: SseProtocol) {
@@ -453,7 +580,7 @@ impl ResponseOwner {
         let closed = self
             .accounting
             .as_ref()
-            .map(|accounting| accounting.handle.close_bridge())
+            .map(|accounting| accounting.control.close_bridge())
             .unwrap_or_default();
         let mut output = closed.records;
         let failure = match protocol {
@@ -547,20 +674,12 @@ impl ResponseOwner {
         }
         if self.failure.is_some() && self.saw_terminal {
             if let Some(accounting) = &self.accounting {
-                accounting.handle.failure_terminal();
+                accounting.control.failure_terminal();
             }
         }
         Ok(bytes)
     }
-    fn fail(&mut self, error: &ServiceError) {
-        self.finished = true;
-        if let Some(accounting) = &mut self.accounting {
-            accounting.settle(Some(StreamFailure {
-                status: 502,
-                class: Some(ErrorClass::DownstreamFinalizerFailed),
-                source: Some(ErrorSource::Gateway),
-            }));
-        }
+    fn record_finalizer_error(&self, error: &ServiceError) {
         if let Some(receipt) = &self.receipt {
             receipt.metrics.record_stream_error(
                 &self.endpoint,
@@ -570,6 +689,26 @@ impl ResponseOwner {
                 },
             );
         }
+    }
+    fn encoding_failed(&mut self, error: ServiceError) {
+        let failure = finalizer_failure();
+        self.failure = Some(failure);
+        if let Some(accounting) = &self.accounting {
+            accounting.control.abort(failure);
+        }
+        if let Some(receipt) = &mut self.receipt {
+            receipt.suppressed = true;
+        }
+        self.tail.clear();
+        self.record_finalizer_error(&error);
+        self.output_error = Some(error);
+    }
+    fn fail(&mut self, error: &ServiceError) {
+        self.finished = true;
+        if let Some(accounting) = &mut self.accounting {
+            accounting.settle(Some(finalizer_failure()));
+        }
+        self.record_finalizer_error(error);
     }
 }
 impl Stream for ResponseOwner {
@@ -594,15 +733,21 @@ impl Stream for ResponseOwner {
                 if let Err(error) = &result {
                     this.fail(error);
                 } else if let Some(accounting) = &mut this.accounting {
-                    accounting.settle(this.failure);
+                    accounting.settle(accounting.control.report_failure(this.failure));
                 }
-                return Poll::Ready(result.err().map(Err));
+                return Poll::Ready(this.output_error.take().or_else(|| result.err()).map(Err));
             } else {
                 let result = match &mut this.inner {
                     ResponseInput::Events(stream) => match stream.as_mut().poll_next(cx) {
-                        Poll::Ready(Some(Ok(record))) => Some(this.accept(record)),
+                        Poll::Ready(Some(Ok(record))) => Some(if this.output_error.is_some() {
+                            Ok(Bytes::new())
+                        } else {
+                            this.accept(record)
+                        }),
                         Poll::Ready(Some(Err(error))) => {
-                            this.stream_error(&error);
+                            if this.output_error.is_none() {
+                                this.stream_error(&error);
+                            }
                             None
                         }
                         Poll::Ready(None) => {
@@ -614,7 +759,9 @@ impl Stream for ResponseOwner {
                     ResponseInput::Bytes(stream) => match stream.as_mut().poll_next(cx) {
                         Poll::Ready(Some(Ok(bytes))) => Some(Ok(bytes)),
                         Poll::Ready(Some(Err(error))) => {
-                            this.stream_error(&error);
+                            if this.output_error.is_none() {
+                                this.stream_error(&error);
+                            }
                             None
                         }
                         Poll::Ready(None) => {
@@ -634,8 +781,7 @@ impl Stream for ResponseOwner {
                     return Poll::Ready(Some(Ok(bytes)));
                 }
                 Err(error) => {
-                    this.fail(&error);
-                    return Poll::Ready(Some(Err(error)));
+                    this.encoding_failed(error);
                 }
             }
         }
@@ -659,7 +805,19 @@ impl ResponseOwner {
             );
         }
         tracing::warn!(target: "stream_abort", request_id = self.request_id.as_deref().unwrap_or_default(), error = %error, "response stream failed; ending the body gracefully");
-        self.ended = true;
+        if let (Some(accounting), Some(failure)) = (&self.accounting, self.failure) {
+            accounting.control.abort(failure);
+        }
+        if matches!(self.inner, ResponseInput::Bytes(_)) {
+            self.ended = true;
+        }
+        if let Some(receipt) = &mut self.receipt {
+            if let ReceiptDraft::Middleware(journal) = &receipt.draft {
+                if !journal.source_finished() {
+                    receipt.suppressed = true;
+                }
+            }
+        }
         if !self.saw_terminal && !already_failed {
             if let Some(protocol) = self.protocol {
                 self.tail.extend(error_records(
@@ -670,6 +828,14 @@ impl ResponseOwner {
                 ));
             }
         }
+    }
+}
+
+fn finalizer_failure() -> StreamFailure {
+    StreamFailure {
+        status: 502,
+        class: Some(ErrorClass::DownstreamFinalizerFailed),
+        source: Some(ErrorSource::Gateway),
     }
 }
 
@@ -775,7 +941,12 @@ pub(super) fn direct_response(
     let protocol = is_sse.then(|| crate::sse_protocol::sse_protocol(&endpoint));
     let inner = match protocol {
         Some(protocol) => ResponseInput::Events(Box::pin(KeepAliveStream::new(
-            Box::pin(DecodedStream::new(inner, Some(protocol))),
+            Box::pin(DecodedStream::new(inner, Some(protocol)).map(|record| {
+                record.and_then(|record| {
+                    validate_source_record(&record)?;
+                    Ok(record)
+                })
+            })),
             Some(std::time::Duration::from_secs(5)),
         ))),
         None => ResponseInput::Bytes(inner),

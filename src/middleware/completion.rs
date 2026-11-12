@@ -41,7 +41,7 @@ use super::request_transform::{
     Endpoint, ResponsesCandidateInput, TransformError,
 };
 use super::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamReport};
-use super::stream_transform::{EventTransformStream, StreamTransform, UpstreamUsage};
+use super::stream_transform::{EventTransformStream, StreamTransform};
 use super::types::{
     ErrorClass, ErrorSource, PostReport, ProviderFormat, RouteCandidate, SpendMode, TenantIdentity,
 };
@@ -557,17 +557,38 @@ async fn run_inner(
             // may name a route twice) cannot disagree on format — and
             // same-id copies shape identically, so a skip can never split
             // them either.
-            let SelectedRoute {
-                format: selected_format,
-                endpoint: upstream_endpoint,
-                responses_passthrough,
-            } = selected_route(
+            let route = selected_route(
                 &candidates,
                 &forward.selected_route,
                 forward.selected_path,
                 echo.is_some(),
                 client_endpoint,
             );
+
+            let protocol = route.protocol();
+            let SelectedRoute {
+                format: selected_format,
+                endpoint: upstream_endpoint,
+                responses_passthrough,
+            } = route;
+            let parsed_upstream = serde_json::from_slice::<Value>(&forward.upstream_body);
+            let mut raw_usage = parsed_upstream
+                .as_ref()
+                .ok()
+                .and_then(|body| super::sse::source_usage(body, protocol));
+            if client_endpoint == Endpoint::AudioTranscriptions {
+                // Only validated duration usage may be billed.
+                raw_usage = None;
+            } else if client_endpoint == Endpoint::SystemOne {
+                response_transform::filter_systemone_usage(raw_usage.as_mut());
+            } else if client_endpoint == Endpoint::ImagesGenerations {
+                super::images::filter_usage(raw_usage.as_mut());
+            } else {
+                response_transform::filter_usage(raw_usage.as_mut(), protocol);
+            }
+            if let Some(usage) = raw_usage.as_mut() {
+                response_transform::normalize_reasoning_usage_value(usage);
+            }
 
             // The buffered forward commits the candidate even on non-2xx; a
             // non-2xx body is normalized rather than transformed, but the receipt
@@ -578,37 +599,38 @@ async fn run_inner(
                 // success: it is the upstream's malformed answer, a 502.
                 // Reasoning is excluded from the upstream body before any
                 // conversion could re-express it in the client surface's shape.
-                let converted = serde_json::from_slice::<Value>(&forward.upstream_body)
-                    .map_err(|err| err.to_string())
-                    .and_then(|mut upstream_json| {
-                        if client_endpoint == Endpoint::AudioTranscriptions {
-                            let (body, audio) =
-                                super::audio::sanitize_response(upstream_json, &params).map_err(
-                                    |err| {
-                                        service.record_audio_failure("malformed_duration");
-                                        err.to_string()
-                                    },
-                                )?;
-                            upstream_json = body;
-                            meter.audio = Some(audio);
-                        }
-                        if client_endpoint == Endpoint::ImagesGenerations {
-                            super::images::validate_response(
-                                &upstream_json,
-                                super::images::requested_count(&params),
-                            )
-                            .map_err(str::to_string)?;
-                        }
-                        if exclude_reasoning {
-                            response_transform::exclude_reasoning(&mut upstream_json);
-                        }
-                        response_transform::transform_response(
-                            selected_format,
-                            upstream_endpoint,
-                            upstream_json,
-                        )
+                let converted =
+                    parsed_upstream
                         .map_err(|err| err.to_string())
-                    });
+                        .and_then(|mut upstream_json| {
+                            if client_endpoint == Endpoint::AudioTranscriptions {
+                                let (body, audio) =
+                                    super::audio::sanitize_response(upstream_json, &params)
+                                        .map_err(|err| {
+                                            service.record_audio_failure("malformed_duration");
+                                            err.to_string()
+                                        })?;
+                                raw_usage = body.get("usage").cloned();
+                                upstream_json = body;
+                                meter.audio = Some(audio);
+                            }
+                            if client_endpoint == Endpoint::ImagesGenerations {
+                                super::images::validate_response(
+                                    &upstream_json,
+                                    super::images::requested_count(&params),
+                                )
+                                .map_err(str::to_string)?;
+                            }
+                            if exclude_reasoning {
+                                response_transform::exclude_reasoning(&mut upstream_json);
+                            }
+                            response_transform::transform_response(
+                                selected_format,
+                                upstream_endpoint,
+                                upstream_json,
+                            )
+                            .map_err(|err| err.to_string())
+                        });
                 let mut transformed = match converted {
                     Ok(transformed) => transformed,
                     Err(err) => {
@@ -618,14 +640,16 @@ async fn run_inner(
                             "upstream success body cannot be represented on the client surface"
                         );
                         meter.failed_attempts(&forward.failed_attempts, false);
-                        meter.gateway_failure_at(
-                            attempt_index,
-                            Some(&forward.selected_route),
-                            502,
-                            ErrorSource::Upstream,
-                            ErrorClass::UpstreamMalformedResponse,
-                            false,
-                        );
+                        meter.disarm();
+                        meter.spawn(PostReport {
+                            status: 502,
+                            attempt_index: Some(attempt_index),
+                            selected_route_id: Some(forward.selected_route.clone()),
+                            usage: raw_usage,
+                            error_source: Some(ErrorSource::Upstream),
+                            error_message: Some(ErrorClass::UpstreamMalformedResponse),
+                            ..meter.base()
+                        });
                         let body = errors::envelope_bytes(
                             surface,
                             errors::error_type(surface, 502),
@@ -651,7 +675,6 @@ async fn run_inner(
                 };
                 // Report usage before cost or image SDK defaults. Audio usage
                 // has already been normalized to duration only.
-                let raw_usage = transformed.get("usage").cloned();
                 meter.images = (client_endpoint == Endpoint::ImagesGenerations)
                     .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
@@ -756,7 +779,7 @@ async fn run_inner(
                     reported_status(mapped, upstream_status, &forward.upstream_body),
                     attempt_index,
                     Some(&forward.selected_route),
-                    None,
+                    raw_usage,
                     Some(class),
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
@@ -821,6 +844,7 @@ async fn run_inner(
                     &forward.selected_route,
                     forward.selected_path,
                     accounting.handle.clone(),
+                    accounting.control.clone(),
                     journal.clone(),
                     &inputs,
                 );
@@ -838,7 +862,15 @@ async fn run_inner(
                     accounting,
                 )
             } else {
-                let body = json_stream(forward.body, accounting.handle.clone(), inputs);
+                let protocol = selected_route(
+                    &inputs.candidates,
+                    &forward.selected_route,
+                    forward.selected_path,
+                    inputs.echo.is_some(),
+                    inputs.endpoint,
+                )
+                .protocol();
+                let body = json_stream(forward.body, accounting.handle.clone(), inputs, protocol);
                 service.finalize_middleware_bytes(
                     journal,
                     body,
@@ -1121,6 +1153,7 @@ fn build_early_streaming_response(
     meter.disarm();
     let accounting = Accounting::new(pending_report, Some(journal.clone()));
     let accounting_handle = accounting.handle.clone();
+    let stream_control = accounting.control.clone();
     let source_journal = journal.clone();
     let stream_request_id = request_id.clone();
     let identity = inputs.identity.clone();
@@ -1135,12 +1168,13 @@ fn build_early_streaming_response(
                     // Switch the response owner to the explicit byte path before
                     // polling the body, so EOF cannot synthesize an SSE terminal.
                     yield Ok(Record::NonSse(Bytes::new()));
-                    let mut body = json_stream(f.body, accounting_handle.clone(), inputs.clone());
+                    let protocol = selected_route(&inputs.candidates, &f.selected_route, f.selected_path, inputs.echo.is_some(), inputs.endpoint).protocol();
+                    let mut body = json_stream(f.body, accounting_handle.clone(), inputs.clone(), protocol);
                     while let Some(item) = body.next().await {
                         yield item.map(Record::NonSse);
                     }
                 } else {
-                    let mut pipeline = build_metered_pipeline(f.body, &f.selected_route, f.selected_path, accounting_handle, source_journal, &inputs);
+                    let mut pipeline = build_metered_pipeline(f.body, &f.selected_route, f.selected_path, accounting_handle, stream_control, source_journal, &inputs);
                     while let Some(item) = pipeline.next().await { yield item; }
                 }
             }
@@ -1206,6 +1240,18 @@ struct SelectedRoute {
     responses_passthrough: bool,
 }
 
+impl SelectedRoute {
+    fn protocol(&self) -> SseProtocol {
+        match self.format {
+            ProviderFormat::Anthropic if self.endpoint != Endpoint::Complete => {
+                SseProtocol::AnthropicMessages
+            }
+            ProviderFormat::Openai if self.responses_passthrough => SseProtocol::OpenaiResponses,
+            _ => SseProtocol::OpenaiChat,
+        }
+    }
+}
+
 /// Format is deployment metadata; the path is carried by the forward result
 /// because it is a per-request shaping outcome.
 fn selected_route(
@@ -1233,36 +1279,37 @@ fn selected_route(
 }
 
 /// Assemble the client-facing streaming pipeline for one committed upstream
-/// stream: the format/visibility/sanitize transforms, then the meter, which
-/// reads what the client receives (and a bridge's own usage). The caller
-/// layers the keep-alive and finalizer outside it.
+/// stream: source accounting followed by format/visibility/sanitize transforms.
+/// The caller layers keep-alive and the response owner outside it.
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
     selected_route_id: &str,
     selected_path: &'static str,
     accounting: AccountingHandle,
+    control: crate::aggregator::service::StreamControl,
     journal: MiddlewareReceiptJournal,
     inputs: &StreamPipelineInputs,
 ) -> EventStream {
-    let SelectedRoute {
-        format: selected_format,
-        endpoint: upstream_endpoint,
-        responses_passthrough,
-    } = selected_route(
+    let route = selected_route(
         &inputs.candidates,
         selected_route_id,
         selected_path,
         inputs.echo.is_some(),
         inputs.endpoint,
     );
-    let source_protocol = match selected_format {
-        ProviderFormat::Anthropic if upstream_endpoint != Endpoint::Complete => {
-            SseProtocol::AnthropicMessages
-        }
-        ProviderFormat::Openai if responses_passthrough => SseProtocol::OpenaiResponses,
-        _ => SseProtocol::OpenaiChat,
-    };
-    let body = decode_source(body, source_protocol, journal, accounting.clone());
+    let source_protocol = route.protocol();
+    let SelectedRoute {
+        format: selected_format,
+        endpoint: upstream_endpoint,
+        responses_passthrough,
+    } = route;
+    let body = decode_source(
+        body,
+        source_protocol,
+        journal,
+        accounting.clone(),
+        control.clone(),
+    );
     // Reasoning is excluded from the upstream's own chat events — the shape
     // exclusion reads — before a conversion could re-express it in the client
     // surface's shape.
@@ -1275,24 +1322,13 @@ pub(super) fn build_metered_pipeline(
         } else {
             body
         };
-    // A Chat bridge reshapes usage for the client and may end in an error that
-    // carries none, so it hands the meter the usage to report.
-    let upstream_usage = UpstreamUsage::default();
-    let format_transform = stream_transform::select_stream_transform(
-        selected_format,
-        upstream_endpoint,
-        &upstream_usage,
-    );
+    let format_transform =
+        stream_transform::select_stream_transform(selected_format, upstream_endpoint);
     let responses_bridge = inputs.echo.as_ref().filter(|_| !responses_passthrough);
-    let reports_upstream_usage = responses_bridge.is_some()
-        || matches!(
-            format_transform,
-            Some(StreamTransform::OpenaiToAnthropicMessages(_))
-        );
     let transformed: EventStream = match format_transform {
         Some(transform) => {
             let stream = EventTransformStream::new(visible, transform);
-            accounting.bridge(stream.bridge());
+            control.bridge(stream.bridge());
             Box::pin(stream)
         }
         None => visible,
@@ -1301,13 +1337,9 @@ pub(super) fn build_metered_pipeline(
         Some(echo) => {
             let stream = EventTransformStream::new(
                 transformed,
-                StreamTransform::OpenaiChatToResponses(
-                    echo.clone(),
-                    inputs.identity.clone(),
-                    upstream_usage.clone(),
-                ),
+                StreamTransform::OpenaiChatToResponses(echo.clone(), inputs.identity.clone()),
             );
-            accounting.bridge(stream.bridge());
+            control.bridge(stream.bridge());
             Box::pin(stream)
         }
         None => transformed,
@@ -1319,9 +1351,6 @@ pub(super) fn build_metered_pipeline(
         surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
     ));
-    if reports_upstream_usage {
-        accounting.upstream_usage(upstream_usage);
-    }
     sanitized
 }
 
@@ -1336,6 +1365,7 @@ fn json_stream(
     mut body: ServiceResponseStream,
     accounting: AccountingHandle,
     inputs: StreamPipelineInputs,
+    protocol: SseProtocol,
 ) -> ServiceResponseStream {
     Box::pin(async_stream::try_stream! {
         let mut bytes = Vec::new();
@@ -1346,10 +1376,11 @@ fn json_stream(
             }
             bytes.extend_from_slice(&chunk);
         }
-        // Declared non-SSE responses were never metered. Preserve opaque and
-        // non-object bodies; only valid JSON objects receive identity/sanitation.
+        // Observe source usage before sanitation. Opaque and non-object bodies
+        // pass through; only valid JSON objects receive identity/sanitation.
         if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) {
             if value.is_object() {
+                accounting.observe_payload(&value, protocol);
                 if inputs.exclude_reasoning { response_transform::exclude_reasoning(&mut value); }
                 response_transform::rewrite_identity(&mut value, &inputs.identity);
                 response_transform::canonicalize(&mut value, inputs.endpoint, Some(&inputs.identity.request_id));

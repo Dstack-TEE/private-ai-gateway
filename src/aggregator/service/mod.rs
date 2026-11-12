@@ -341,4 +341,4 @@ fn validate_keyset(
 #[path = "../../../tests/streaming/characterization.rs"]
 mod characterization;
 
-pub(crate) use streaming::{decode_source, error_records, ResponseContext};
+pub(crate) use streaming::{decode_source, error_records, ResponseContext, StreamControl};

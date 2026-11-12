@@ -14,14 +14,14 @@ use tokio::time::{sleep, Sleep};
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{MiddlewareReceiptJournal, ServiceError};
 use crate::sse::{EventStream, Record};
-use crate::sse_protocol::{sse_protocol, EventKind, SseProtocol};
+use crate::sse_protocol::{sse_protocol, SseProtocol};
 
 use super::control::ControlClient;
 use super::pricing;
 use super::request_features::SessionKind;
 use super::response_transform;
-use super::stream_transform::UpstreamUsage;
 use super::types::{ErrorClass, ErrorSource, PostReport, SpendMode, TenantIdentity};
+use crate::aggregator::service::StreamControl;
 
 /// How a stream failed, for the usage report: the status to record, the class
 /// of the failure, and which component broke when it was not the upstream. A
@@ -134,12 +134,6 @@ impl StreamReport {
 #[derive(Clone)]
 pub(crate) struct AccountingHandle(Arc<Mutex<AccountingState>>);
 
-/// A bridge can observe usage without emitting a destination event for it.
-pub(super) fn observe_bridge_usage(slot: &UpstreamUsage, mut usage: Value, protocol: SseProtocol) {
-    filter_observed_usage(Some(&mut usage), protocol, None);
-    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(usage);
-}
-
 fn filter_observed_usage(usage: Option<&mut Value>, protocol: SseProtocol, endpoint: Option<&str>) {
     if endpoint == Some(crate::aggregator::service::SYSTEMONE_PATH) {
         response_transform::filter_systemone_usage(usage);
@@ -152,13 +146,8 @@ struct AccountingState {
     report: StreamReport,
     last_usage: Option<Value>,
     start_usage: Option<Value>,
-    chat_start_usage: Option<Value>,
-    upstream_usage: Option<UpstreamUsage>,
-    bridge: Option<super::stream_transform::BridgeHandle>,
+    source: Option<SseProtocol>,
     ttft_ms: Option<u64>,
-    ingress_terminal: bool,
-    failure_terminal: bool,
-    continuation_failure: Option<StreamFailure>,
     settled: bool,
 }
 
@@ -166,6 +155,7 @@ struct AccountingState {
 /// transform stages; its destructor records abandonment, never receipt work.
 pub(crate) struct Accounting {
     pub handle: AccountingHandle,
+    pub control: StreamControl,
     pending: Option<MiddlewareReceiptJournal>,
 }
 impl Accounting {
@@ -175,28 +165,17 @@ impl Accounting {
                 report,
                 last_usage: None,
                 start_usage: None,
-                chat_start_usage: None,
-                upstream_usage: None,
+                source: None,
                 ttft_ms: None,
-                ingress_terminal: false,
-                failure_terminal: false,
-                continuation_failure: None,
-                bridge: None,
                 settled: false,
             }))),
+            control: StreamControl::default(),
             pending,
         }
     }
     pub fn settle(&mut self, failure: Option<StreamFailure>) {
         let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.settled {
-            // Reading to EOF must not replace the first failure that ended the
-            // old bridge's accounting. Gateway finalization can still fail.
-            let failure = if failure.is_some_and(|f| f.source == Some(ErrorSource::Gateway)) {
-                failure
-            } else {
-                state.continuation_failure.or(failure)
-            };
             let status = failure.map_or(state.report.upstream_status, |failure| failure.status);
             state.emit(status, failure);
         }
@@ -206,6 +185,10 @@ impl Drop for Accounting {
     fn drop(&mut self) {
         let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.settled {
+            return;
+        }
+        if let Some(failure) = self.control.aborted() {
+            state.emit(failure.status, Some(failure));
             return;
         }
         let failure = state
@@ -241,26 +224,34 @@ impl Drop for Accounting {
 impl AccountingState {
     fn emit(&mut self, status: u16, failure: Option<StreamFailure>) {
         self.settled = true;
-        let usage = self.upstream_usage.as_ref().map_or_else(
-            || self.last_usage.take(),
-            |slot| slot.lock().unwrap_or_else(PoisonError::into_inner).take(),
-        );
-        self.report.settle(status, usage, self.ttft_ms, failure);
+        self.report
+            .settle(status, self.last_usage.take(), self.ttft_ms, failure);
     }
-    fn price(&self, usage: &Value, billed: &Value) -> Option<Value> {
+    fn price(&self) -> Option<Value> {
         let prices = self.report.pricing.as_ref().filter(|p| !p.is_null())?;
-        let upstream = self
-            .upstream_usage
-            .as_ref()
-            .map(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner));
-        let cost = pricing::compute_cost(
-            upstream
-                .as_deref()
-                .and_then(Option::as_ref)
-                .unwrap_or(billed),
+        Some(pricing::cost_to_json(pricing::compute_cost(
+            self.last_usage.as_ref().unwrap_or(&Value::Null),
             prices,
-        );
-        usage.is_object().then(|| pricing::cost_to_json(cost))
+        )))
+    }
+    fn projected_usage(&self, destination: SseProtocol) -> Option<Value> {
+        let usage = self.last_usage.as_ref()?;
+        if self.source == Some(destination) {
+            return Some(usage.clone());
+        }
+        let chat = if self.source == Some(SseProtocol::AnthropicMessages) {
+            response_transform::chat_usage(
+                Some(usage),
+                response_transform::i64_field(usage, "output_tokens"),
+            )
+        } else {
+            usage.clone()
+        };
+        Some(match destination {
+            SseProtocol::OpenaiChat => chat,
+            SseProtocol::AnthropicMessages => response_transform::messages_usage(Some(&chat)),
+            SseProtocol::OpenaiResponses => response_transform::responses_usage(Some(&chat)),
+        })
     }
     fn report_attempt(&self, route: &str, index: u32, status: u16, duration_ms: u64) {
         // Attempt rows have no usage and do not settle the response owner.
@@ -301,94 +292,36 @@ impl AccountingHandle {
             state.ttft_ms = Some(response_transform::elapsed_ms(state.report.started));
         }
     }
-    /// Retain source phase and usage through conversion. After a failure
-    /// terminal, retain the old bridge's billing boundaries without forwarding
-    /// records to converters. Source reading can still continue to EOF.
-    pub(crate) fn ingress(&self, record: &mut Record) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(event) = record.event_mut() else {
-            return !state.failure_terminal;
+    /// Observe the upstream's cumulative usage before any content transform.
+    /// Position and destination protocol never select what is billed.
+    pub(crate) fn observe_source(&self, record: &Record) {
+        let Some(event) = record.event() else { return };
+        let Some(body) = event.payload.json() else {
+            return;
         };
-        event.after_terminal = state.ingress_terminal;
-        state.ingress_terminal |= event.meaning.terminal.is_some();
-        if let Some(usage) = event.payload.json().and_then(message_start_usage) {
-            state.start_usage = Some(usage.clone());
-            // Match the Messages-to-Chat bridge's usage observations without
-            // converting records that arrive after the destination terminal.
-            if event.meaning.failure.is_none()
-                && event.meaning.terminal.is_none()
-                && !matches!(
-                    event.meaning.kind,
-                    EventKind::Ping | EventKind::ContentBlockStop
-                )
-            {
-                state.chat_start_usage = Some(usage.clone());
-            }
-        }
-        if !state.failure_terminal {
-            return true;
-        }
-        if state.bridge.is_some() {
-            if state.continuation_failure.is_some()
-                || (event.source_protocol == Some(SseProtocol::OpenaiChat)
-                    && state.ingress_terminal)
-            {
-                return false;
-            }
-            let ignored_control = event.source_protocol == Some(SseProtocol::AnthropicMessages)
-                && matches!(
-                    event.meaning.kind,
-                    EventKind::Ping | EventKind::ContentBlockStop | EventKind::MessageStop
-                );
-            if !ignored_control && !event.data.trim().is_empty() && event.payload.json().is_none() {
-                state.continuation_failure = Some(StreamFailure::from_error(
-                    &ServiceError::Upstream(UpstreamError::Transport(
-                        "provider sent an event this surface cannot represent".into(),
-                    )),
-                ));
-                return false;
-            }
-        }
-        // Preserve the old bridges' usage selection in accounting only.
-        let failed = event.meaning.failure.is_some();
-        let source = event.source_protocol;
-        if state.bridge.is_none()
-            || failed
-            || (source == Some(SseProtocol::OpenaiChat)
-                && state.report.endpoint != crate::aggregator::service::COMPLETIONS_PATH)
-        {
-            if state.bridge.is_none() && !failed {
-                record.edit_json(|body| {
-                    response_transform::canonicalize_protocol_stream(
-                        body,
-                        sse_protocol(&state.report.endpoint),
-                        Some(&state.report.request_id),
-                    )
-                });
-            }
-            drop(state);
-            self.observe(record, failed);
-        } else if source == Some(SseProtocol::AnthropicMessages)
-            && sse_protocol(&state.report.endpoint) == SseProtocol::OpenaiChat
-            && event.meaning.kind == EventKind::MessageDelta
-            && event.meaning.terminal.is_none()
-        {
-            if let Some(usage) = event.payload.json().and_then(|body| body.get("usage")) {
-                let mut usage = response_transform::chat_usage(
-                    state.chat_start_usage.as_ref(),
-                    response_transform::i64_field(usage, "output_tokens"),
-                );
-                filter_observed_usage(Some(&mut usage), SseProtocol::OpenaiChat, None);
-                state.last_usage = Some(usage);
-            }
-        }
-        false
+        let Some(protocol) = event.source_protocol else {
+            return;
+        };
+        self.observe_payload(body, protocol);
     }
-    pub(crate) fn failure_terminal(&self) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failure_terminal = true;
+    pub(crate) fn observe_payload(&self, body: &Value, protocol: SseProtocol) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.source = Some(protocol);
+        let Some(mut usage) = source_usage(body, protocol) else {
+            return;
+        };
+        filter_observed_usage(Some(&mut usage), protocol, Some(&state.report.endpoint));
+        response_transform::normalize_reasoning_usage_value(&mut usage);
+        if protocol == SseProtocol::AnthropicMessages {
+            if message_start_usage(body).is_some() {
+                state.start_usage = Some(usage.clone());
+            } else if body.get("type").and_then(Value::as_str) == Some("message_delta") {
+                if let Some(start) = &state.start_usage {
+                    usage = complete_usage(start.clone(), &usage);
+                }
+            }
+        }
+        state.last_usage = Some(usage);
     }
     pub fn selected(&self, route: String, attempt: u32, status: u16) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -396,138 +329,71 @@ impl AccountingHandle {
         state.report.attempt_index = attempt;
         state.report.upstream_status = status;
     }
-    pub(crate) fn bridge(&self, bridge: super::stream_transform::BridgeHandle) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).bridge = Some(bridge);
-    }
-    pub(crate) fn has_bridge(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .bridge
-            .is_some()
-    }
-    pub(crate) fn close_bridge(&self) -> super::stream_transform::BridgeClosure {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .bridge
-            .as_ref()
-            .map_or_else(
-                Default::default,
-                super::stream_transform::BridgeHandle::close,
-            )
-    }
-    pub fn upstream_usage(&self, usage: UpstreamUsage) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .upstream_usage = Some(usage);
-    }
     pub fn disarm(&self) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .settled = true;
     }
-    /// Capture usage and inject cost. The owner decides which records to emit.
-    pub(crate) fn observe(&self, record: &mut Record, include_start: bool) -> Option<Value> {
-        if matches!(
-            record,
-            Record::Residual | Record::Heartbeat | Record::NonSse(_)
-        ) {
-            return None;
-        }
+    /// Client usage is a projection only; it never feeds accounting.
+    pub(crate) fn decorate(&self, record: &mut Record, failure: bool) -> Option<Value> {
+        record.event()?;
         self.first_byte();
-        let event = record.event()?;
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let destination = sse_protocol(&state.report.endpoint);
-        let source = event.source_protocol;
-        let bridged = source.is_some_and(|source| source != destination);
         let mut wire_usage = None;
-        record.edit_json(|parsed| {
-            // Filter each usage object once, including when it is emitted but
-            // another usage object on the same event is selected for billing.
-            let filter = |usage: Option<&mut Value>| {
-                filter_observed_usage(
-                    usage,
-                    source.unwrap_or(destination),
-                    Some(&state.report.endpoint),
-                );
-            };
-            filter(parsed.get_mut("usage"));
-            filter(parsed.get_mut("response").and_then(|r| r.get_mut("usage")));
-            if message_start_usage(parsed).is_some() {
-                filter(parsed.get_mut("message").and_then(|m| m.get_mut("usage")));
-                state.start_usage = message_start_usage(parsed).cloned();
-            }
-            let message_delta = parsed.get("type").and_then(Value::as_str) == Some("message_delta");
-            let top_usage = parsed.get("usage").is_some_and(|u| !u.is_null());
-            let usage = if top_usage {
-                parsed.get_mut("usage")
-            } else if include_start && message_start_usage(parsed).is_some() {
-                parsed.get_mut("message").and_then(|m| m.get_mut("usage"))
+        record.edit_json(|body| {
+            let start = message_start_usage(body).is_some();
+            let usage = if body.get("usage").is_some_and(|u| !u.is_null()) {
+                body.get_mut("usage")
+            } else if start {
+                body.get_mut("message").and_then(|m| m.get_mut("usage"))
             } else {
-                parsed.get_mut("response").and_then(|r| r.get_mut("usage"))
+                body.get_mut("response").and_then(|r| r.get_mut("usage"))
             };
             let Some(usage) = usage.filter(|u| !u.is_null()) else {
                 return;
             };
-            response_transform::normalize_reasoning_usage_value(usage);
-            let mut billed =
-                if message_delta || (bridged && source == Some(SseProtocol::AnthropicMessages)) {
-                    state
-                        .start_usage
-                        .clone()
-                        .map_or_else(|| usage.clone(), |start| complete_usage(start, usage))
-                } else {
-                    usage.clone()
-                };
-            if bridged {
-                billed = match (source, destination) {
-                    (Some(SseProtocol::AnthropicMessages), _) => response_transform::chat_usage(
-                        state.start_usage.as_ref(),
-                        response_transform::i64_field(&billed, "output_tokens"),
-                    ),
-                    (_, SseProtocol::AnthropicMessages) => {
-                        response_transform::messages_usage(Some(&billed))
-                    }
-                    _ => billed,
-                };
-            }
-            state.last_usage = Some(billed.clone());
-            if bridged {
-                if let Some(slot) = &state.upstream_usage {
-                    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(billed.clone());
+            if failure && state.source != Some(destination) {
+                if let Some(projected) = state.projected_usage(destination) {
+                    *usage = projected;
                 }
-                *usage = if destination == SseProtocol::OpenaiResponses {
-                    response_transform::responses_usage(Some(&billed))
-                } else {
-                    billed.clone()
-                };
             }
-            if let Some(cost) = state.price(usage, &billed) {
+            filter_observed_usage(Some(usage), destination, Some(&state.report.endpoint));
+            response_transform::normalize_reasoning_usage_value(usage);
+            if start && !failure {
+                return;
+            }
+            if let Some(cost) = state.price() {
                 usage["cost"] = cost;
             }
-            if include_start {
+            if failure {
                 wire_usage = Some(usage.clone());
             }
         });
         wire_usage
     }
-    /// A Responses terminal repeats the last converted usage, or zero if the
-    /// bridge never saw usage. This client projection does not bill zero usage.
     pub(crate) fn responses_usage(&self) -> Value {
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let billed = state
-            .upstream_usage
-            .as_ref()
-            .and_then(|slot| slot.lock().unwrap_or_else(PoisonError::into_inner).clone());
-        let mut usage = response_transform::responses_usage(billed.as_ref());
-        if let Some(cost) = state.price(&usage, billed.as_ref().unwrap_or(&usage)) {
+        let mut usage = state
+            .projected_usage(SseProtocol::OpenaiResponses)
+            .unwrap_or_else(|| response_transform::responses_usage(None));
+        if let Some(cost) = state.price() {
             usage["cost"] = cost;
         }
         usage
     }
+}
+
+/// Extract reported usage from the source payload, never a converted envelope.
+/// Control classification does not change the payload's usage schema.
+pub(crate) fn source_usage(body: &Value, protocol: SseProtocol) -> Option<Value> {
+    let usage = match protocol {
+        SseProtocol::AnthropicMessages => message_start_usage(body).or_else(|| body.get("usage")),
+        SseProtocol::OpenaiChat => body.get("usage"),
+        SseProtocol::OpenaiResponses => body.get("response").unwrap_or(body).get("usage"),
+    };
+    usage.filter(|usage| usage.is_object()).cloned()
 }
 
 pub(super) fn message_start_usage(value: &Value) -> Option<&Value> {

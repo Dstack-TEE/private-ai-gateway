@@ -962,6 +962,64 @@ fn inband_timeout_cases() -> Vec<Case> {
     cases
 }
 
+fn source_billing_cases() -> Vec<Case> {
+    let chat_usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n";
+    let chat_content = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+    let messages_start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\n";
+    let messages_delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\n";
+    let mut cases = vec![Case::new(
+        "billing_chat_cumulative_duplicates", Endpoint::ChatComplete,
+        &format!("data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":1}}}}\n\n{chat_usage}{chat_usage}data: [DONE]\n\n"), "openai",
+    )];
+    for (name, endpoint) in [
+        ("chat", Endpoint::ChatComplete),
+        ("messages", Endpoint::Messages),
+        ("responses", Endpoint::CreateModelResponse),
+    ] {
+        cases.push(Case::new(
+            &format!("billing_chat_{name}_usage_after_terminal"),
+            endpoint,
+            &format!("{chat_content}data: [DONE]\n\n{chat_usage}"),
+            "openai",
+        ));
+        if endpoint != Endpoint::ChatComplete {
+            cases.push(Case::new(
+                &format!("billing_chat_{name}_usage_after_malformed"),
+                endpoint,
+                &format!("{chat_content}data: not JSON\n\n{chat_usage}data: [DONE]\n\n"),
+                "openai",
+            ));
+        }
+        let name = if endpoint == Endpoint::Messages {
+            "native_messages_billing_usage_after_malformed".to_string()
+        } else {
+            format!("billing_messages_{name}_usage_after_malformed")
+        };
+        cases.push(Case::new(&name, endpoint,
+            &format!("{messages_start}data: not JSON\n\n{messages_delta}event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"), "anthropic"));
+    }
+    cases.push(Case::new("native_messages_billing_allowlist_merge", Endpoint::Messages,
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":4,\"cache_read_input_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "anthropic"));
+    for (name, endpoint, source, format) in [
+        ("billing_buffered_chat_filter", Endpoint::ChatComplete, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "openai"),
+        ("billing_buffered_chat_messages_source", Endpoint::Messages, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "openai"),
+        ("billing_buffered_chat_responses_source", Endpoint::CreateModelResponse, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "openai"),
+        ("billing_buffered_messages_filter", Endpoint::Messages, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "anthropic"),
+        ("billing_buffered_messages_chat_source", Endpoint::ChatComplete, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "anthropic"),
+        ("billing_buffered_messages_responses_source", Endpoint::CreateModelResponse, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "anthropic"),
+        ("native_responses_billing_buffered_filter", Endpoint::CreateModelResponse, "{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "openai"),
+    ] {
+        let mut case = Case::new(name, endpoint, source, format);
+        case.buffered = true;
+        cases.push(case);
+    }
+    let mut malformed = Case::new("billing_buffered_conversion_failure", Endpoint::Messages,
+        "{\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"provider_trace\":\"PRIVATE_UPSTREAM_DETAIL\"}}", "openai");
+    malformed.buffered = true;
+    cases.push(malformed);
+    cases
+}
+
 fn read_json_lines(input: &str) -> Vec<Value> {
     input
         .lines()
@@ -1063,6 +1121,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(eof_and_reset_cases());
     cases.extend(failed_bridge_accounting_cases());
     cases.extend(inband_timeout_cases());
+    cases.extend(source_billing_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -1170,6 +1229,62 @@ async fn early_declared_non_sse_opaque_bodies_use_unbilled_byte_path() {
         assert_eq!(reports[0]["status"], 200);
         assert!(reports[0]["usage"].is_null());
         assert!(reports[0]["errorMessage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn declared_non_sse_json_observes_filtered_source_usage_without_changing_bytes() {
+    for early in [false, true] {
+        for (endpoint, format, source, expected) in [
+            (
+                Endpoint::ChatComplete,
+                "openai",
+                json!({"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":3,"provider_trace":"PRIVATE_UPSTREAM_DETAIL"}}),
+                json!({"prompt_tokens":2,"completion_tokens":3}),
+            ),
+            (
+                Endpoint::Messages,
+                "anthropic",
+                json!({"type":"message","content":[],"usage":{"input_tokens":2,"output_tokens":3,"provider_trace":"PRIVATE_UPSTREAM_DETAIL"}}),
+                json!({"input_tokens":2,"output_tokens":3}),
+            ),
+            (
+                Endpoint::CreateModelResponse,
+                "openai",
+                json!({"object":"response","output":[],"usage":{"input_tokens":2,"output_tokens":3,"provider_trace":"PRIVATE_UPSTREAM_DETAIL"}}),
+                json!({"input_tokens":2,"output_tokens":3}),
+            ),
+        ] {
+            let source = source.to_string();
+            let mut case = Case::new(
+                "native_responses_non_sse_source_usage",
+                endpoint,
+                &source,
+                format,
+            );
+            case.non_sse = true;
+            case.early = early;
+            let snapshot = capture(&case).await;
+            let wire = snapshot["wire"].as_str().unwrap();
+            let wire = if early {
+                wire.strip_prefix(": PROCESSING\n\n").unwrap()
+            } else {
+                wire
+            };
+            let body: Value = serde_json::from_str(wire).unwrap();
+            assert!(!wire.ends_with('\n'));
+            assert!(body["usage"].get("cost").is_none());
+            let reports = snapshot["reports"].as_array().unwrap();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0]["status"], 200);
+            assert_eq!(reports[0]["usage"], expected);
+            assert_eq!(
+                crate::middleware::pricing::compute_cost(&expected, &reports[0]["pricing"])
+                    .to_string(),
+                "8"
+            );
+            assert!(reports[0]["errorMessage"].is_null());
+        }
     }
 }
 
@@ -1546,14 +1661,14 @@ async fn bridge_failures_close_existing_content_and_keep_continuation_accounting
                 assert!(wire.ends_with("\"sequence_number\":8}\n\n"), "{wire}");
             }
         } else if case.name.contains("messages_responses") {
-            assert!(reports[0]["usage"].is_null());
+            assert_eq!(reports[0]["usage"]["output_tokens"], 3);
         } else if case.name.contains("messages_chat") {
             assert!(reports[0]["usage"].get("prompt_tokens").is_none());
-            assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
+            assert_eq!(reports[0]["usage"]["output_tokens"], 3);
             assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
             assert!(!wire.contains("\"usage\""), "{wire}");
         } else if case.format == "anthropic" {
-            assert!(reports[0]["usage"].is_null());
+            assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
         } else {
             assert!(wire.contains("\"choices\":[],\"usage\":"), "{wire}");
         }
@@ -1592,7 +1707,13 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             "openai",
             Some(("completion_tokens", 3)),
         ),
-        ("chat_messages", Endpoint::Messages, chat, "openai", None),
+        (
+            "chat_messages",
+            Endpoint::Messages,
+            chat,
+            "openai",
+            Some(("completion_tokens", 3)),
+        ),
         (
             "native_chat_disallowed_usage",
             Endpoint::ChatComplete,
@@ -1605,7 +1726,7 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             Endpoint::CreateModelResponse,
             chat,
             "openai",
-            None,
+            Some(("completion_tokens", 3)),
         ),
         (
             "native_messages",
@@ -1619,23 +1740,29 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             Endpoint::ChatComplete,
             messages,
             "anthropic",
-            Some(("completion_tokens", 3)),
+            Some(("output_tokens", 3)),
         ),
         (
             "messages_responses",
             Endpoint::CreateModelResponse,
             messages,
             "anthropic",
-            None,
+            Some(("output_tokens", 3)),
         ),
         (
             "messages_chat_with_start",
             Endpoint::ChatComplete,
             messages_with_start.as_str(),
             "anthropic",
+            Some(("output_tokens", 3)),
+        ),
+        (
+            "legacy",
+            Endpoint::Complete,
+            chat,
+            "anthropic",
             Some(("completion_tokens", 3)),
         ),
-        ("legacy", Endpoint::Complete, chat, "anthropic", None),
         (
             "native_responses",
             Endpoint::CreateModelResponse,
@@ -1656,8 +1783,8 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
         if let Some((field, count)) = tokens {
             assert_eq!(reports[0]["usage"][field], count, "{name}");
             if name == "messages_chat_with_start" {
-                assert_eq!(reports[0]["usage"]["prompt_tokens"], 2);
-                assert_eq!(reports[0]["usage"]["total_tokens"], 5);
+                assert_eq!(reports[0]["usage"]["input_tokens"], 2);
+                assert!(reports[0]["usage"].get("total_tokens").is_none());
             }
         } else {
             assert!(reports[0]["usage"].is_null(), "{name}");
@@ -1731,12 +1858,12 @@ async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report(
 }
 
 #[tokio::test]
-async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
+async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
     let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
     for case in failed_bridge_accounting_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
-        assert_eq!(snapshot["reports"], baseline["reports"], "{}", case.name);
+        assert_report_outcomes(&snapshot, baseline);
         let reports = snapshot["reports"].as_array().unwrap();
         assert_eq!(reports.len(), 1, "{}", case.name);
         let report = &reports[0];
@@ -1751,17 +1878,23 @@ async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
                 "stream_inband_error"
             }
         );
-        let has_usage = case.read_error.is_some() || case.name.contains("preserves_usage");
-        assert_eq!(!report["usage"].is_null(), has_usage, "{}", case.name);
-        if has_usage {
-            let output = if case.endpoint == Endpoint::Messages {
-                "output_tokens"
+        let usage = &report["usage"];
+        let field = if case.format == "anthropic" {
+            "output_tokens"
+        } else {
+            "completion_tokens"
+        };
+        assert_eq!(
+            usage[field],
+            if case.name.contains("preserves_usage") {
+                9
             } else {
-                "completion_tokens"
-            };
-            assert_eq!(report["usage"][output], 3);
-            assert!(report["usage"].get("cost").is_none());
-        }
+                3
+            },
+            "{}",
+            case.name
+        );
+        assert!(usage.get("cost").is_none());
         let wire = snapshot["wire"].as_str().unwrap();
         assert!(!wire.contains("not JSON"));
         assert!(!wire.contains("\"prompt_tokens\":9"));
@@ -1791,7 +1924,7 @@ async fn inband_timeout_reports_match_main_on_native_and_bridged_paths() {
     for case in inband_timeout_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
-        assert_eq!(snapshot["reports"], baseline["reports"], "{}", case.name);
+        assert_report_outcomes(&snapshot, baseline);
         let reports = snapshot["reports"].as_array().unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0]["status"], 504);
@@ -1801,5 +1934,82 @@ async fn inband_timeout_reports_match_main_on_native_and_bridged_paths() {
             .get(&case.name)
             .map_or(baseline, |c| &c["expected"]);
         assert_eq!(snapshot, *expected, "{}", case.name);
+    }
+}
+
+// Billing corrections may change usage only; outcome and attribution stay main's.
+fn assert_report_outcomes(snapshot: &Value, baseline: &Value) {
+    let strip = |value: &Value| {
+        value["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| {
+                let mut report = report.clone();
+                report.as_object_mut().unwrap().remove("usage");
+                report
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(strip(snapshot), strip(baseline), "{}", snapshot["name"]);
+}
+
+#[tokio::test]
+async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_position() {
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    for case in source_billing_cases() {
+        let snapshot = capture(&case).await;
+        let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
+        assert_report_outcomes(&snapshot, baseline);
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1, "{}", case.name);
+        let usage = &reports[0]["usage"];
+        assert!(
+            !usage.to_string().contains("PRIVATE_UPSTREAM_DETAIL"),
+            "{}: {usage}",
+            case.name
+        );
+        let messages = case.format == "anthropic";
+        let responses = case.name.starts_with("native_responses");
+        let (input, output) = if messages || responses {
+            ("input_tokens", "output_tokens")
+        } else {
+            ("prompt_tokens", "completion_tokens")
+        };
+        assert_eq!(usage[input], 2, "{}: {usage}", case.name);
+        assert_eq!(usage[output], 3, "{}: {usage}", case.name);
+        if case.name.contains("allowlist_merge") {
+            assert_eq!(usage["cache_creation_input_tokens"], 4);
+            assert_eq!(usage["cache_read_input_tokens"], 5);
+        }
+        assert!(usage.get("cost").is_none());
+        let cost = crate::middleware::pricing::compute_cost(usage, &reports[0]["pricing"]);
+        assert_eq!(
+            cost.to_string(),
+            if case.name.contains("allowlist_merge") {
+                "17"
+            } else {
+                "8"
+            },
+            "{}",
+            case.name
+        );
+        let malformed_bridge = case.name.contains("malformed")
+            && ((messages && case.endpoint != Endpoint::Messages)
+                || (!messages && case.endpoint != Endpoint::ChatComplete));
+        if malformed_bridge {
+            assert_eq!(reports[0]["status"], 502);
+            assert_eq!(reports[0]["errorMessage"], "upstream_transport");
+            assert!(snapshot["receipt"].is_null());
+            assert_eq!(snapshot["before_eof"]["report"], false);
+            assert_eq!(baseline["before_eof"]["report"], true);
+            assert_eq!(
+                snapshot["wire"].as_str().unwrap(),
+                baseline["wire"]
+                    .as_str()
+                    .unwrap()
+                    .replace("\n\n\n\n", "\n\n")
+            );
+        }
     }
 }

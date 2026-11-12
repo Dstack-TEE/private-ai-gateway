@@ -5,8 +5,8 @@
 //! Provider conversions are selected by upstream format and client surface.
 //! Same-format streaming reaches this module too: every stream is sanitized
 //! here (identity rewrite + canonicalize, per chunk), and reasoning is excluded
-//! when the client opts out. The response owner accounts usage, chooses failure
-//! terminals and writes the client stream.
+//! when the client opts out. Ingress accounts source usage; the response owner
+//! chooses failure terminals and writes the client stream.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -39,10 +39,6 @@ use crate::sse_protocol::{event_kind, EventKind, EventMeaning, SseProtocol};
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
-/// Billing usage from Chat bridges, even if conversion has no event carrying it.
-/// Responses uses the Chat counters so cache creation is retained for pricing.
-pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
-
 /// Which streaming transform applies.
 ///
 /// `Clone` rather than `Copy`: `SanitizeResponse` carries per-request values
@@ -50,8 +46,8 @@ pub type UpstreamUsage = Arc<Mutex<Option<Value>>>;
 #[derive(Debug, Clone)]
 pub enum StreamTransform {
     AnthropicToOpenaiChat,
-    OpenaiToAnthropicMessages(UpstreamUsage),
-    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>, UpstreamUsage),
+    OpenaiToAnthropicMessages,
+    OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
     /// Applied to every stream, including same-format passthrough, which is the
@@ -63,7 +59,7 @@ pub enum StreamTransform {
 impl StreamTransform {
     fn provider(&self) -> &'static str {
         match self {
-            StreamTransform::OpenaiToAnthropicMessages(_) => "openai",
+            StreamTransform::OpenaiToAnthropicMessages => "openai",
             StreamTransform::OpenaiChatToResponses(..) => "openai",
             StreamTransform::ExcludeReasoning => "openai",
             StreamTransform::SanitizeResponse(_, _) => "openai",
@@ -113,18 +109,14 @@ impl StreamTransform {
             StreamTransform::AnthropicToOpenaiChat => {
                 anthropic_chat_stream(event, fallback_id, state, STRICT_OPENAI_COMPLIANCE)
             }
-            StreamTransform::OpenaiToAnthropicMessages(upstream_usage) => state
+            StreamTransform::OpenaiToAnthropicMessages => state
                 .messages
-                .get_or_insert_with(|| ChatStream::new(MessagesEvents::new(upstream_usage.clone())))
+                .get_or_insert_with(|| ChatStream::new(MessagesEvents::new()))
                 .event(event, fallback_id),
-            StreamTransform::OpenaiChatToResponses(echo, identity, upstream_usage) => state
+            StreamTransform::OpenaiChatToResponses(echo, identity) => state
                 .responses
                 .get_or_insert_with(|| {
-                    ChatStream::new(ResponsesEvents::new(
-                        echo.clone(),
-                        identity.clone(),
-                        upstream_usage.clone(),
-                    ))
+                    ChatStream::new(ResponsesEvents::new(echo.clone(), identity.clone()))
                 })
                 .event(event, fallback_id),
             StreamTransform::AnthropicCompleteToOpenai => anthropic_complete_stream(event),
@@ -145,7 +137,7 @@ impl StreamTransform {
     /// means it ended before the response was complete.
     fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, ()> {
         match self {
-            StreamTransform::OpenaiToAnthropicMessages(_) => state
+            StreamTransform::OpenaiToAnthropicMessages => state
                 .messages
                 .as_mut()
                 .map_or(Ok(None), ChatStream::end_of_stream),
@@ -159,21 +151,17 @@ impl StreamTransform {
 }
 
 /// Select the streaming transform for a committed route format + endpoint, or
-/// `None` for native passthrough. A Chat bridge reports its usage through
-/// `upstream_usage`.
+/// `None` for native passthrough.
 pub fn select_stream_transform(
     format: ProviderFormat,
     endpoint: Endpoint,
-    upstream_usage: &UpstreamUsage,
 ) -> Option<StreamTransform> {
     use Endpoint::*;
     use ProviderFormat::*;
     match (format, endpoint) {
         (Anthropic, ChatComplete) => Some(StreamTransform::AnthropicToOpenaiChat),
         (Anthropic, Complete) => Some(StreamTransform::AnthropicCompleteToOpenai),
-        (Openai, Messages) => Some(StreamTransform::OpenaiToAnthropicMessages(
-            upstream_usage.clone(),
-        )),
+        (Openai, Messages) => Some(StreamTransform::OpenaiToAnthropicMessages),
         _ => None,
     }
 }
@@ -479,8 +467,6 @@ enum Outcome {
 trait ChatEvents {
     /// The first chunk arrived: the message or response begins.
     fn start(&mut self, chunk: &Value, fallback_id: &str, out: &mut Vec<Record>);
-    /// The upstream reported usage (reasoning tokens already normalized).
-    fn usage(&mut self, _usage: &Value) {}
     fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>);
     fn text_delta(&mut self, kind: TextKind, delta: &str, out: &mut Vec<Record>);
     /// A citation in the open text, in Responses form.
@@ -600,7 +586,6 @@ impl<E: ChatEvents> ChatStream<E> {
         if let Some(usage) = chunk.usage {
             let mut usage = usage.clone();
             let _ = normalize_reasoning_usage_value(&mut usage);
-            self.events.usage(&usage);
             self.usage = Some(usage);
         }
         self.answered |= chunk.has_choice;
@@ -748,15 +733,11 @@ impl<E: ChatEvents> ChatStream<E> {
 struct MessagesEvents {
     /// The index the next content block takes.
     next_index: usize,
-    upstream_usage: UpstreamUsage,
 }
 
 impl MessagesEvents {
-    fn new(upstream_usage: UpstreamUsage) -> Self {
-        Self {
-            next_index: 0,
-            upstream_usage,
-        }
+    fn new() -> Self {
+        Self { next_index: 0 }
     }
 
     fn block_start(&mut self, block: Value, out: &mut Vec<Record>) {
@@ -814,14 +795,6 @@ impl ChatEvents for MessagesEvents {
                 },
             }),
         ));
-    }
-
-    fn usage(&mut self, usage: &Value) {
-        super::sse::observe_bridge_usage(
-            &self.upstream_usage,
-            messages_usage(Some(usage)),
-            SseProtocol::AnthropicMessages,
-        );
     }
 
     fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {
@@ -915,7 +888,6 @@ impl ChatEvents for MessagesEvents {
 struct ResponsesEvents {
     echo: Arc<Value>,
     identity: Arc<ResponseIdentity>,
-    upstream_usage: UpstreamUsage,
     tools: ResponsesToolMap,
     sequence: u64,
     model: Value,
@@ -933,16 +905,11 @@ struct ActiveItem {
 }
 
 impl ResponsesEvents {
-    fn new(
-        echo: Arc<Value>,
-        identity: Arc<ResponseIdentity>,
-        upstream_usage: UpstreamUsage,
-    ) -> Self {
+    fn new(echo: Arc<Value>, identity: Arc<ResponseIdentity>) -> Self {
         let tools = ResponsesToolMap::from_echo(&echo);
         Self {
             echo,
             identity,
-            upstream_usage,
             tools,
             sequence: 0,
             model: Value::Null,
@@ -1058,14 +1025,6 @@ impl ChatEvents for ResponsesEvents {
             let response = self.response("in_progress", Value::Null, Value::Null, None);
             self.emit(kind, json!({ "response": response }), out);
         }
-    }
-
-    fn usage(&mut self, usage: &Value) {
-        super::sse::observe_bridge_usage(
-            &self.upstream_usage,
-            usage.clone(),
-            SseProtocol::OpenaiChat,
-        );
     }
 
     fn open_text(&mut self, kind: TextKind, out: &mut Vec<Record>) {
@@ -1297,6 +1256,7 @@ pub(crate) struct EventTransformStream {
     queue: VecDeque<Record>,
     inner_done: bool,
     pending_error: Option<ServiceError>,
+    draining: bool,
     residual: bool,
 }
 
@@ -1311,6 +1271,7 @@ impl EventTransformStream {
             queue: VecDeque::new(),
             inner_done: false,
             pending_error: None,
+            draining: false,
             residual: false,
         }
     }
@@ -1318,7 +1279,9 @@ impl EventTransformStream {
         BridgeHandle(self.state.clone())
     }
     fn fail(&mut self, error: ServiceError) {
-        self.inner_done = true;
+        // Keep polling the same source for accounting after conversion fails.
+        // No further output is converted and the first error stays authoritative.
+        self.draining = true;
         self.pending_error.get_or_insert(error);
     }
     fn enqueue(&mut self, records: Vec<Record>) {
@@ -1344,12 +1307,18 @@ impl Stream for EventTransformStream {
             if let Some(record) = this.queue.pop_front() {
                 return Poll::Ready(Some(Ok(record)));
             }
+            if let Some(error) = this.pending_error.take() {
+                return Poll::Ready(Some(Err(error)));
+            }
             if this.inner_done {
-                return Poll::Ready(this.pending_error.take().map(Err));
+                return Poll::Ready(None);
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(record))) => {
+                    if this.draining {
+                        continue;
+                    }
                     this.residual |= matches!(record, Record::Residual);
                     let output = this.transform.apply_record(
                         record,
@@ -1367,11 +1336,17 @@ impl Stream for EventTransformStream {
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    this.inner_done = true;
+                    if this.draining {
+                        continue;
+                    }
+                    this.draining = true;
                     this.pending_error = Some(error);
                 }
                 Poll::Ready(None) => {
                     this.inner_done = true;
+                    if this.draining {
+                        continue;
+                    }
                     if this.residual {
                         this.pending_error =
                             Some(ServiceError::Upstream(UpstreamError::SseTruncated));
@@ -1461,7 +1436,7 @@ mod tests {
     }
 
     fn messages_transform() -> StreamTransform {
-        StreamTransform::OpenaiToAnthropicMessages(UpstreamUsage::default())
+        StreamTransform::OpenaiToAnthropicMessages
     }
     use futures_util::StreamExt;
     use std::collections::BTreeSet;
@@ -1931,11 +1906,7 @@ mod tests {
         });
         let stream = EventTransformStream::new(
             inner,
-            StreamTransform::OpenaiChatToResponses(
-                Arc::new(json!({})),
-                identity,
-                UpstreamUsage::default(),
-            ),
+            StreamTransform::OpenaiChatToResponses(Arc::new(json!({})), identity),
         );
         let collected: Vec<Result<Bytes, ServiceError>> = wire(stream).collect().await;
         let mut events = Vec::new();
@@ -2021,7 +1992,6 @@ mod tests {
                 request_id: "resp".into(),
                 user_model: None,
             }),
-            UpstreamUsage::default(),
         );
         let call = tool_event(json!({
             "index": 0, "id": "ts_1",

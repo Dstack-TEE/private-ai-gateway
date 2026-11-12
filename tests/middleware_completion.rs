@@ -1977,7 +1977,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     })
     .await;
     assert_eq!(report["selectedRouteId"], json!("anthropic:claude"));
-    assert_eq!(report["usage"]["prompt_tokens"], json!(100));
+    assert_eq!(report["usage"]["input_tokens"], json!(100));
     assert!(
         report["usage"].get("cost").is_none(),
         "report usage must be pre-cost-injection"
@@ -2188,10 +2188,7 @@ async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_m
             "anthropic:claude",
             anthropic_message.to_string(),
             anthropic_stream,
-            json!({
-                "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
-                "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
-            }),
+            anthropic_usage.clone(),
             // 50 input + 30 cache read * 0.1 + 20 cache creation * 1.25 + 5 output * 2
             88,
         ),
@@ -2388,6 +2385,23 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
             1400,
         ),
     ] {
+        let expected = if format == "openai" {
+            let input: Value = if streaming {
+                serde_json::from_str(
+                    wire.strip_prefix("data: ")
+                        .unwrap()
+                        .split("\n\n")
+                        .next()
+                        .unwrap(),
+                )
+                .unwrap()
+            } else {
+                serde_json::from_str(&wire).unwrap()
+            };
+            input["usage"].clone()
+        } else {
+            expected
+        };
         let route = format!("{format}:gpt-test");
         let (control_url, posts) = spawn_control_capturing(
             200,
@@ -2584,8 +2598,8 @@ async fn messages_bridge_stream_failure_keeps_route_and_usage() {
 
     let report = wait_for_post(&posts, |_| true).await;
     assert_eq!(report["selectedRouteId"], "openai:gpt");
-    assert_eq!(report["usage"]["input_tokens"], 3, "{report}");
-    assert_eq!(report["usage"]["output_tokens"], 4, "{report}");
+    assert_eq!(report["usage"]["prompt_tokens"], 3, "{report}");
+    assert_eq!(report["usage"]["completion_tokens"], 4, "{report}");
 }
 
 #[tokio::test]
@@ -5515,10 +5529,11 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             report["images"],
             json!({"count":returned,"size":"512x512","quality":"low"})
         );
+        assert!(!report["usage"].to_string().contains("private"));
         assert_eq!(
             report["usage"],
             if with_usage {
-                upstream["usage"].clone()
+                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3}})
             } else {
                 Value::Null
             }
@@ -6083,4 +6098,30 @@ async fn declared_non_sse_over_event_cap_fails_as_upstream_transport() {
     assert!(report["errorSource"].is_null());
     assert_eq!(report["errorMessage"], "upstream_transport");
     assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn buffered_non_success_reports_filtered_source_usage() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow":true, "candidates":[{"routeId":"openai:gpt", "format":"openai"}]
+        }),
+    )
+    .await;
+    let (service, _) = build_recording_service(429,
+        serde_json::to_vec(&json!({"error":{"type":"rate_limit_error","message":"Too many requests"},
+            "usage":{"prompt_tokens":2,"completion_tokens":3,"provider_trace":"PRIVATE_UPSTREAM_DETAIL"}})).unwrap(), "application/json");
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    let (status, _, _) = response_parts(response).await;
+    assert_eq!(status, 429);
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 429);
+    assert_eq!(
+        report["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3})
+    );
+    assert!(report["errorSource"].is_null());
 }
