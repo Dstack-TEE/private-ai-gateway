@@ -100,7 +100,7 @@ impl StreamReport {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint.clone(),
             status,
-            duration_ms: response_transform::elapsed_ms(self.started),
+            duration_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms,
             is_streaming: Some(true),
             attempt_index: Some(self.attempt_index),
@@ -289,7 +289,7 @@ impl AccountingHandle {
     pub(crate) fn first_byte(&self) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if state.ttft_ms.is_none() {
-            state.ttft_ms = Some(response_transform::elapsed_ms(state.report.started));
+            state.ttft_ms = Some(state.report.started.elapsed().as_millis() as u64);
         }
     }
     /// Observe the upstream's cumulative usage before any content transform.

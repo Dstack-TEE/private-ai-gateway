@@ -2,6 +2,10 @@
 //! Run with UPDATE_STREAMING_CORPUS=1 only when intentionally recording a baseline.
 use crate::common;
 
+#[path = "support.rs"]
+mod support;
+use support::{normalize_snapshot, normalize_wire, verify_e2ee_wire};
+
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +24,7 @@ use tokio::sync::Notify;
 use super::*;
 use crate::aci::keys::verify_receipt_signature;
 use crate::aci::receipt::receipt_signing_input;
+use crate::aci::receipt::SignedReceipt;
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
     UpstreamStreamResponse,
@@ -27,7 +32,6 @@ use crate::aci::upstream::{
 use crate::middleware::errors::Surface;
 use crate::middleware::request_transform::Endpoint;
 use crate::middleware::{CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey};
-use crate::streaming_test_support::FixedInputs;
 
 #[derive(Default)]
 struct Gate {
@@ -74,6 +78,27 @@ struct TrackingSessions {
     inner: crate::aggregator::session_store::InMemorySessionStore,
     id: Mutex<Option<String>>,
     fail_retention: bool,
+}
+
+#[derive(Default)]
+struct TrackingReceipts {
+    inner: InMemoryReceiptStore,
+    id: Mutex<Option<String>>,
+}
+impl ReceiptStore for TrackingReceipts {
+    fn put(&self, receipt: SignedReceipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64) {
+        *self.id.lock().unwrap() = Some(receipt.receipt_id.clone());
+        self.inner.put(receipt, owner, now, expires_at);
+    }
+    fn get_by_receipt_id(&self, id: &str, now: u64) -> Option<SignedReceipt> {
+        self.inner.get_by_receipt_id(id, now)
+    }
+    fn get_by_chat_id(&self, id: &str, now: u64) -> Option<SignedReceipt> {
+        self.inner.get_by_chat_id(id, now)
+    }
+    fn owner_of(&self, id: &str, now: u64) -> Option<ReceiptOwner> {
+        self.inner.owner_of(id, now)
+    }
 }
 impl crate::aggregator::session_store::SessionStore for TrackingSessions {
     fn get_session(
@@ -237,7 +262,6 @@ impl Case {
 }
 
 async fn capture(case: &Case) -> Value {
-    let _fixed = FixedInputs::enter();
     let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
     let path = match case.endpoint {
         Endpoint::Messages => MESSAGES_PATH,
@@ -281,6 +305,7 @@ async fn capture(case: &Case) -> Value {
         fail_retention: case.fail_publish,
         ..TrackingSessions::default()
     });
+    let receipts = Arc::new(TrackingReceipts::default());
     let clock = Arc::new(common::admission::TestClock(
         std::sync::atomic::AtomicU64::new(1_700_000_000),
     ));
@@ -301,7 +326,7 @@ async fn capture(case: &Case) -> Value {
                 read_error: case.read_error,
             }),
             Arc::new(Verifier),
-            Arc::new(InMemoryReceiptStore::default()),
+            receipts.clone(),
             AciServiceConfig::for_test(),
             clock.clone(),
         )
@@ -435,7 +460,15 @@ async fn capture(case: &Case) -> Value {
             "in-flight source must own its lease"
         );
     }
-    let before = json!({"receipt":service.get_receipt_by_receipt_id("rcpt-characterization").is_some(),"report":checkpoint_report.is_some()});
+    let stored_receipt = || {
+        receipts
+            .id
+            .lock()
+            .unwrap()
+            .as_deref()
+            .and_then(|id| service.get_receipt_by_receipt_id(id))
+    };
+    let before = json!({"receipt":stored_receipt().is_some(),"report":checkpoint_report.is_some()});
     if case.disconnect {
         drop(body);
     } else {
@@ -458,24 +491,7 @@ async fn capture(case: &Case) -> Value {
         all_reports.push(report);
     }
     if case.e2ee {
-        let value: Value = String::from_utf8_lossy(&wire)
-            .lines()
-            .filter_map(|l| serde_json::from_str(l.strip_prefix("data: ")?).ok())
-            .next()
-            .unwrap();
-        let aad=crate::aci::digest::jcs_bytes(&json!({"purpose":"aci.e2ee.response.v2","algo":crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM,"model":"fixture-model","id":"req-fixture","field":"choices.0.delta.content","nonce":"01".repeat(32),"ts":1_700_000_000})).unwrap();
-        let secret = crate::aci::e2ee::x25519_secret_key_from_bytes(&[0x37; 32]).unwrap();
-        let ciphertext = value["choices"][0]["delta"]["content"].as_str().unwrap();
-        assert_eq!(
-            crate::aci::e2ee::decrypt_x25519_with_secret_key(&secret, ciphertext, &aad).unwrap(),
-            b"hi"
-        );
-        assert!(crate::aci::e2ee::decrypt_x25519_with_secret_key(
-            &secret,
-            ciphertext,
-            b"tampered AAD"
-        )
-        .is_err());
+        verify_e2ee_wire(std::str::from_utf8(&wire).unwrap(), &case.source);
     }
     if case.lease_handoff {
         assert!(
@@ -485,7 +501,7 @@ async fn capture(case: &Case) -> Value {
             "receipt handoff extends the lease retention"
         );
     }
-    let receipt = service.get_receipt_by_receipt_id("rcpt-characterization");
+    let receipt = stored_receipt();
     let (receipt, signature_valid) = receipt.map_or((Value::Null, false), |r| {
         let value = r.document_json().unwrap();
         let key = service
@@ -499,6 +515,7 @@ async fn capture(case: &Case) -> Value {
             &receipt_signing_input(&value).unwrap(),
             &hex::decode(r.signature_hex).unwrap(),
         );
+        assert!(valid);
         (value, valid)
     });
     server.abort();
@@ -509,11 +526,11 @@ async fn capture(case: &Case) -> Value {
             .unwrap()
             .into();
     }
+    normalize_snapshot(&mut snapshot);
     snapshot
 }
 
 async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
-    let _fixed = FixedInputs::enter();
     let service = AciService::new(
         Arc::new(common::StaticKeyProvider::default()),
         Arc::new(common::StubQuoter::default()),
@@ -576,7 +593,13 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
         &receipt_signing_input(&receipt).unwrap(),
         &hex::decode(result.receipt.signature_hex).unwrap(),
     );
-    json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid})
+    assert!(signature_valid);
+    if encrypted {
+        verify_e2ee_wire(std::str::from_utf8(&result.wire_body).unwrap(), source);
+    }
+    let mut snapshot = json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid});
+    normalize_snapshot(&mut snapshot);
+    snapshot
 }
 
 fn rate_limit_cases() -> Vec<Case> {
@@ -1073,7 +1096,21 @@ fn cache_billing_cases() -> Vec<Case> {
 fn read_json_lines(input: &str) -> Vec<Value> {
     input
         .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|line| {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            if let Some(expected) = value.get_mut("expected") {
+                normalize_snapshot(expected);
+                let encrypted = matches!(
+                    expected["name"].as_str(),
+                    Some("e2ee_chat" | "buffered_sse_e2ee")
+                );
+                value["baseline_wire"] =
+                    normalize_wire(value["baseline_wire"].as_str().unwrap(), encrypted).into();
+            } else {
+                normalize_snapshot(&mut value);
+            }
+            value
+        })
         .collect()
 }
 
@@ -1518,7 +1555,7 @@ async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() 
             "native_chat_failure_chunk" => {
                 assert_eq!(payload["id"], "req-fixture");
                 assert_eq!(payload["object"], "chat.completion.chunk");
-                assert_eq!(payload["created"], 1_700_000_000);
+                assert_eq!(payload["created"], "<timestamp>");
                 assert_eq!(payload["model"], "fixture-model");
                 assert_eq!(payload["choices"][0]["delta"]["content"], "");
                 assert_eq!(payload["choices"][0]["finish_reason"], "error");

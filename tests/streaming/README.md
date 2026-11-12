@@ -14,12 +14,18 @@ buffered JSON, buffered SSE with and without encryption, and declared non-SSE
 streaming responses. Provider envelopes use real encryption and verification.
 E2EE output is also decrypted and rejects tampered AAD.
 
-The test supplies fixed request/receipt identities, signing keys, clocks and
-X25519 encryption inputs. Those overrides compile only under `cfg(test)` and are
-scoped to this test's thread. Production encryption retains OS randomness; other
-crypto tests continue to exercise random inputs. Duration and TTFT use a fixed
-test clock. The source stream deliberately splits every seven bytes and withholds
-EOF separately from its terminal event.
+The test supplies fixed request identities, signing keys and receipt clocks
+through existing interfaces. Encryption, receipt IDs, generated timestamps and
+elapsed times use the production implementations. The harness replaces encrypted
+blobs (including their ephemeral keys and nonces), receipt IDs/signatures,
+generated timestamps and elapsed times with stable snapshot placeholders. Before
+normalizing, it decrypts every encrypted field with the client key, compares its
+source plaintext, rejects tampered AAD, verifies each receipt signature, and checks
+receipt hashes against the captured source and client bytes. Snapshot returned
+hashes then cover the normalized wire bytes; source hashes remain unchanged.
+JSON ordering/whitespace and SSE framing are preserved. The source stream
+deliberately splits every seven bytes and withholds EOF separately from its
+terminal event.
 
 Run without credentials or inference requests:
 
@@ -32,6 +38,9 @@ refactoring differences: preserve the original snapshot and explicitly identify
 any approved parsing correction with its old and new expectation.
 
 Both fixtures use compact JSON Lines, one object per case sorted by case name.
+The loader projects the original raw baselines through the same normalization;
+the main recordings are retained unchanged, without re-running or re-recording
+main. New recordings use the normalized representation.
 `streaming_corrections.jsonl` records every approved difference with the original
 wire bytes and the corrected snapshot; its case name is `expected.name`.
 The corpus retains 145 main-recorded cases; exact-match and correction counts

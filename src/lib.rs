@@ -20,10 +20,6 @@ pub(crate) mod sse_protocol;
 extern crate self as private_ai_gateway;
 
 #[cfg(test)]
-#[path = "../tests/streaming/support.rs"]
-pub(crate) mod streaming_test_support;
-
-#[cfg(test)]
 #[path = "../tests/common/mod.rs"]
 mod common;
 

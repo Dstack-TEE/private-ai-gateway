@@ -149,22 +149,10 @@ pub fn encrypt_x25519_for_public_key(
 ) -> Result<String, KeyError> {
     let recipient = x25519_public_key_from_hex(recipient_public_key_hex)?;
     let ephemeral = X25519SecretKey::from(rand::random::<[u8; 32]>());
-    #[cfg(test)]
-    let ephemeral = if crate::streaming_test_support::active() {
-        X25519SecretKey::from([0x17; 32])
-    } else {
-        ephemeral
-    };
     let ephemeral_public = X25519PublicKey::from(&ephemeral);
     let shared = ephemeral.diffie_hellman(&recipient);
     let cipher = x25519_cipher_from_shared_secret(shared.as_bytes())?;
     let nonce_bytes: [u8; NONCE_LEN] = rand::random();
-    #[cfg(test)]
-    let nonce_bytes = if crate::streaming_test_support::active() {
-        [0x29; NONCE_LEN]
-    } else {
-        nonce_bytes
-    };
     let ciphertext = cipher
         .encrypt(
             &nonce_bytes.into(),

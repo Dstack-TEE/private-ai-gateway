@@ -1038,19 +1038,7 @@ pub(crate) fn sanitize_error(error: Option<&mut Value>) {
     });
 }
 
-pub(super) fn elapsed_ms(started: std::time::Instant) -> u64 {
-    #[cfg(test)]
-    if crate::streaming_test_support::active() {
-        return 0;
-    }
-    started.elapsed().as_millis() as u64
-}
-
 pub(crate) fn now_secs() -> u64 {
-    #[cfg(test)]
-    if crate::streaming_test_support::active() {
-        return 1_700_000_000;
-    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1058,10 +1046,6 @@ pub(crate) fn now_secs() -> u64 {
 }
 
 pub(super) fn now_millis() -> u128 {
-    #[cfg(test)]
-    if crate::streaming_test_support::active() {
-        return 1_700_000_000_000;
-    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())

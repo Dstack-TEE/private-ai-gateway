@@ -1440,7 +1440,7 @@ impl Meter {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint_path.to_string(),
             status: 0,
-            duration_ms: response_transform::elapsed_ms(self.started),
+            duration_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms: None,
             is_streaming: Some(false),
             attempt_index: Some(0),
