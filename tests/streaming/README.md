@@ -34,7 +34,7 @@ any approved parsing correction with its old and new expectation.
 Both fixtures use compact JSON Lines, one object per case sorted by case name.
 `streaming_corrections.jsonl` records every approved difference with the original
 wire bytes and the corrected snapshot; its case name is `expected.name`.
-The corpus retains 128 main-recorded cases; exact-match and correction counts
+The corpus retains 145 main-recorded cases; exact-match and correction counts
 are reported in the PR verification results. The eight
 failed-bridge accounting/reset cases were also recorded on `9b745bda`; their
 complete snapshots are identical on both main revisions.
@@ -103,3 +103,11 @@ regression covers cumulative duplicates, all supported bridges, post-terminal an
 post-malformed usage, Messages cache merging/filtering, and buffered filtering.
 `owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect` checks fatal output
 failure and cancellation while source observation is pending.
+
+`source_billing_prices_cache_writes_strings_and_partial_messages_on_every_bridge`
+checks 17 additional main-recorded cases: Chat cache writes on native and bridged
+paths, ignored inconsistent writes, explicit-zero precedence, numeric strings,
+start-only Messages at EOF/disconnect, and larger Messages delta input counts.
+The shared counter parser pins JSON decimal grammar, finite non-negative integral
+values and the `i64` bound in pricing unit tests. Client-injected cost and report
+usage are asserted separately.

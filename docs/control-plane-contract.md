@@ -178,6 +178,21 @@ does not inject client cost. Stream conversion, encoding or E2EE failures retain
 their status and attribution while source observation continues synchronously;
 the report is emitted at EOF or disconnect with the usage observed so far.
 
+Token counters accept JSON numbers or trimmed strings with JSON decimal syntax
+(optional exponent), only when finite, non-negative, integral and within `i64`.
+`10.0` and `1e2` count; fractions, hex, empty/non-numeric strings, `+10`, `01`,
+`.5` and `1.` are absent. No counter is truncated. Chat cache creation uses
+`cache_creation_input_tokens` first, including zero. Otherwise, for Chat usage
+with `prompt_tokens`, `prompt_tokens_details.cache_write_tokens` supplies creation
+only if it fits within prompt tokens minus the resolved cache read. An inconsistent
+write counter is ignored without changing cache-read behavior. Uncached input is
+prompt tokens minus cache read and creation. Source reports retain their schema.
+
+Start-only Messages usage is retained on EOF and client disconnect, including the
+start event's output tokens. A later Messages delta can raise the input counter;
+bridges use the same merged source usage as the native path. Numeric-string Chat
+counters are priced from the source rather than a bridge's integer-only projection.
+
 Token rates and usage follow the existing token normalization rules; absent
 usage or rates contribute zero. Arithmetic is checked: if an image or token
 component or their sum cannot be represented, the gateway logs a warning and
