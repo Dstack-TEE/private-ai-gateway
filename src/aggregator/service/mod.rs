@@ -341,5 +341,5 @@ fn validate_keyset(
 mod tests;
 
 pub(crate) use streaming::{
-    decode_source, done_record, error_records, ResponseContext, StreamControl,
+    decode_source, done_record, error_records, ResponseContext, StreamControl, TerminalPublication,
 };

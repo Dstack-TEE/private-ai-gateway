@@ -2,7 +2,7 @@
 //! Run with UPDATE_STREAMING_CORPUS=1 only when intentionally recording a baseline.
 use super::common;
 
-use super::support::{normalize_snapshot, normalize_wire, verify_e2ee_wire};
+use super::support::{normalize_snapshot, normalize_wire, verify_e2ee_wire, verify_received_hash};
 
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -24,8 +24,8 @@ use crate::aci::keys::verify_receipt_signature;
 use crate::aci::receipt::receipt_signing_input;
 use crate::aci::receipt::SignedReceipt;
 use crate::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    ModelRoute, ModelRouterBackend, PreparedUpstreamRequest, SseProtocol, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::middleware::errors::Surface;
 use crate::middleware::request_transform::Endpoint;
@@ -38,6 +38,7 @@ struct Gate {
     eof: AtomicBool,
     waker: AtomicWaker,
     headers: Notify,
+    released: AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +51,11 @@ struct CheckpointStream {
     chunks: VecDeque<Bytes>,
     gate: Arc<Gate>,
     read_error: Option<ReadError>,
+}
+impl Drop for CheckpointStream {
+    fn drop(&mut self) {
+        self.gate.released.store(true, Ordering::Release);
+    }
 }
 
 impl Stream for CheckpointStream {
@@ -84,10 +90,13 @@ struct TrackingSessions {
 struct TrackingReceipts {
     inner: InMemoryReceiptStore,
     id: Mutex<Option<String>>,
+    source: Arc<Mutex<CapturedSource>>,
+    published_source: Mutex<Option<CapturedSource>>,
 }
 impl ReceiptStore for TrackingReceipts {
     fn put(&self, receipt: SignedReceipt, owner: Option<ReceiptOwner>, now: u64, expires_at: u64) {
         *self.id.lock().unwrap() = Some(receipt.receipt_id.clone());
+        *self.published_source.lock().unwrap() = Some(self.source.lock().unwrap().clone());
         self.inner.put(receipt, owner, now, expires_at);
     }
     fn get_by_receipt_id(&self, id: &str, now: u64) -> Option<SignedReceipt> {
@@ -98,6 +107,110 @@ impl ReceiptStore for TrackingReceipts {
     }
     fn owner_of(&self, id: &str, now: u64) -> Option<ReceiptOwner> {
         self.inner.owner_of(id, now)
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturedSource {
+    bytes: Vec<u8>,
+    finished: bool,
+    protocol: Option<SseProtocol>,
+}
+
+struct CapturingBackend {
+    inner: Arc<dyn UpstreamBackend>,
+    source: Arc<Mutex<CapturedSource>>,
+}
+impl CapturingBackend {
+    fn capture_buffered(&self, response: UpstreamResponse) -> UpstreamResponse {
+        let mut source = self.source.lock().unwrap();
+        source.bytes = response.body.clone();
+        source.finished = true;
+        response
+    }
+    fn capture(&self, mut response: UpstreamStreamResponse) -> UpstreamStreamResponse {
+        let mut body = response.body;
+        let source = self.source.clone();
+        response.body = Box::pin(futures_util::stream::poll_fn(move |cx| {
+            let item = body.as_mut().poll_next(cx);
+            match &item {
+                Poll::Ready(Some(Ok(bytes))) => {
+                    source.lock().unwrap().bytes.extend_from_slice(bytes)
+                }
+                Poll::Ready(None) => source.lock().unwrap().finished = true,
+                _ => {}
+            }
+            item
+        }));
+        response
+    }
+}
+#[async_trait]
+impl UpstreamBackend for CapturingBackend {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn url_origin(&self) -> Option<&str> {
+        self.inner.url_origin()
+    }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        self.inner.prepare(req)
+    }
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        let protocol = self.inner.response_protocol(req, operation);
+        self.source.lock().unwrap().protocol = protocol;
+        protocol
+    }
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        self.inner.requires_verified_binding(req)
+    }
+    async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        self.inner
+            .forward(req)
+            .await
+            .map(|response| self.capture_buffered(response))
+    }
+    async fn forward_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.inner
+            .forward_prepared(req)
+            .await
+            .map(|response| self.capture_buffered(response))
+    }
+    async fn forward_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        event: &crate::aci::receipt::UpstreamVerifiedEvent,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        self.inner
+            .forward_verified_prepared(req, event)
+            .await
+            .map(|response| self.capture_buffered(response))
+    }
+    async fn forward_stream_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.inner
+            .forward_stream_prepared(req)
+            .await
+            .map(|response| self.capture(response))
+    }
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        event: &crate::aci::receipt::UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        self.inner
+            .forward_stream_verified_prepared(req, event)
+            .await
+            .map(|response| self.capture(response))
     }
 }
 impl crate::aggregator::session_store::SessionStore for TrackingSessions {
@@ -136,6 +249,7 @@ impl crate::aggregator::session_store::SessionStore for TrackingSessions {
 }
 
 struct Backend {
+    protocol: Option<SseProtocol>,
     source: Vec<u8>,
     content_type: &'static str,
     gate: Arc<Gate>,
@@ -151,6 +265,17 @@ impl UpstreamBackend for Backend {
     }
     fn url_origin(&self) -> Option<&str> {
         Some("https://upstream.test")
+    }
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        self.protocol.map(|protocol| match operation {
+            Endpoint::Complete => SseProtocol::OpenaiChat,
+            Endpoint::CreateModelResponse => SseProtocol::OpenaiResponses,
+            _ => protocol,
+        })
     }
     async fn forward(&self, _: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         Ok(UpstreamResponse {
@@ -236,6 +361,11 @@ struct Case {
     read_error: Option<ReadError>,
     direct_idle: bool,
     pricing: Value,
+    direct: bool,
+    drop_at_terminal: bool,
+    eof_at_source_end: bool,
+    upstream_path: Option<&'static str>,
+    source_protocol: Option<SseProtocol>,
 }
 
 impl Case {
@@ -257,11 +387,27 @@ impl Case {
             read_error: None,
             direct_idle: false,
             pricing: json!({"inputCostPerToken":"1","outputCostPerToken":"2"}),
+            direct: false,
+            drop_at_terminal: false,
+            eof_at_source_end: false,
+            upstream_path: None,
+            source_protocol: Some(if format == "anthropic" {
+                SseProtocol::AnthropicMessages
+            } else {
+                SseProtocol::OpenaiChat
+            }),
         }
     }
 }
 
 async fn capture(case: &Case) -> Value {
+    capture_with_upstream(case, None).await
+}
+
+async fn capture_with_upstream(
+    case: &Case,
+    upstream: Option<(Arc<dyn UpstreamBackend>, Arc<dyn UpstreamVerifier>)>,
+) -> Value {
     let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
     let path = match case.endpoint {
         Endpoint::Messages => MESSAGES_PATH,
@@ -301,6 +447,7 @@ async fn capture(case: &Case) -> Value {
         axum::serve(listener, app).await.unwrap();
     });
     let gate = Arc::new(Gate::default());
+    gate.eof.store(case.eof_at_source_end, Ordering::Release);
     let sessions = Arc::new(TrackingSessions {
         fail_retention: case.fail_publish,
         ..TrackingSessions::default()
@@ -309,23 +456,47 @@ async fn capture(case: &Case) -> Value {
     let clock = Arc::new(common::TestClock(std::sync::atomic::AtomicU64::new(
         1_700_000_000,
     )));
+    let fixture_backend = upstream.is_none();
+    let (backend, verifier) =
+        upstream.unwrap_or_else(|| {
+            let mut router = ModelRouterBackend::new("characterization-router");
+            router
+                .add_route(
+                    ModelRoute::new(
+                        "fixture-model",
+                        "fixture-model",
+                        Arc::new(Backend {
+                            protocol: case.source_protocol,
+                            source: case.source.as_bytes().to_vec(),
+                            content_type: if case.non_sse || case.buffered {
+                                "application/json"
+                            } else {
+                                "text/event-stream"
+                            },
+                            gate: gate.clone(),
+                            early: case.early,
+                            chunk_size: case.chunk_size,
+                            read_error: case.read_error,
+                        }),
+                        "fixture:model",
+                    )
+                    .unwrap()
+                    .with_path(case.upstream_path.map(str::to_string).or_else(|| {
+                        (case.format == "anthropic").then(|| MESSAGES_PATH.to_string())
+                    })),
+                )
+                .unwrap();
+            (Arc::new(router), Arc::new(Verifier))
+        });
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(common::StaticKeyProvider::default()),
             Arc::new(common::StubQuoter),
-            Arc::new(Backend {
-                source: case.source.as_bytes().to_vec(),
-                content_type: if case.non_sse || case.buffered {
-                    "application/json"
-                } else {
-                    "text/event-stream"
-                },
-                gate: gate.clone(),
-                early: case.early,
-                chunk_size: case.chunk_size,
-                read_error: case.read_error,
+            Arc::new(CapturingBackend {
+                inner: backend,
+                source: receipts.source.clone(),
             }),
-            Arc::new(Verifier),
+            verifier,
             receipts.clone(),
             AciServiceConfig::for_test(),
             clock.clone(),
@@ -333,6 +504,14 @@ async fn capture(case: &Case) -> Value {
         .unwrap()
         .with_session_store(sessions.clone()),
     );
+    let stored_receipt = || {
+        receipts
+            .id
+            .lock()
+            .unwrap()
+            .as_deref()
+            .and_then(|id| service.get_receipt_by_receipt_id(id))
+    };
     let config = MiddlewareConfig {
         control_url: format!("http://{addr}"),
         control_token: None,
@@ -370,7 +549,7 @@ async fn capture(case: &Case) -> Value {
         nonce: Some("01".repeat(32)),
         timestamp: Some(1_700_000_000),
     });
-    let response = if case.direct_idle {
+    let response = if case.direct_idle || case.direct {
         let StreamingForwardResult::Stream(forward) = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
                 audio_form: None,
@@ -381,7 +560,7 @@ async fn capture(case: &Case) -> Value {
                 aci_session_ids: vec![],
                 upstream_verification_event: None,
                 requester: None,
-                e2ee: None,
+                e2ee: e2ee.clone(),
                 context: GatewayRequestContext {
                     request_id: "req-fixture".into(),
                     user_model: Some("fixture-model".into()),
@@ -423,23 +602,65 @@ async fn capture(case: &Case) -> Value {
         .await
     };
     let status = response.status().as_u16();
-    let mut body = response.into_body().into_data_stream();
+    let mut body = Some(response.into_body().into_data_stream());
     let mut wire = Vec::new();
     if case.early {
         // The initial comment is emitted before forwarding resolves.
-        wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+        wire.extend_from_slice(&body.as_mut().unwrap().next().await.unwrap().unwrap());
         gate.headers.notify_one();
     }
-    while let Some(Some(chunk)) = body.next().now_or_never() {
-        wire.extend_from_slice(&chunk.unwrap());
+    let mut terminal_returned = false;
+    while let Some(chunk) = if case.drop_at_terminal {
+        tokio::time::timeout(Duration::from_secs(3), body.as_mut().unwrap().next())
+            .await
+            .expect("terminal must arrive without waiting for source EOF")
+    } else {
+        body.as_mut().unwrap().next().now_or_never().flatten()
+    } {
+        let chunk = chunk.unwrap();
+        wire.extend_from_slice(&chunk);
+        if case.drop_at_terminal {
+            let records =
+                crate::sse::decode_buffered(chunk, Some(Endpoint::from_path(path).into())).unwrap();
+            if records
+                .iter()
+                .any(|r| r.event().is_some_and(|e| e.meaning.terminal.is_some()))
+            {
+                // No further body poll: the receipt must already be published.
+                // The source stays owned until EOF or the body is dropped.
+                let receipt = stored_receipt().unwrap_or_else(|| panic!("{}", case.name));
+                if let Some(id) = &receipt.chat_id {
+                    assert_eq!(
+                        service.get_receipt_by_chat_id(id).unwrap().receipt_id,
+                        receipt.receipt_id
+                    );
+                }
+                if fixture_backend && !case.eof_at_source_end {
+                    assert!(!gate.released.load(Ordering::Acquire), "{}", case.name);
+                }
+                terminal_returned = true;
+                drop(body.take());
+                if fixture_backend {
+                    assert!(gate.released.load(Ordering::Acquire), "{}", case.name);
+                }
+                break;
+            }
+        }
     }
     if case.direct_idle {
         tokio::time::sleep(Duration::from_millis(5_010)).await;
-        while let Some(Some(chunk)) = body.next().now_or_never() {
+        while let Some(Some(chunk)) = body.as_mut().unwrap().next().now_or_never() {
             wire.extend_from_slice(&chunk.unwrap());
         }
     }
-    let checkpoint_report = if case.direct_idle {
+    if case.drop_at_terminal {
+        assert!(
+            terminal_returned,
+            "{} did not produce a terminal",
+            case.name
+        );
+    }
+    let checkpoint_report = if case.direct_idle || case.direct {
         None
     } else if case.buffered {
         Some(
@@ -457,7 +678,11 @@ async fn capture(case: &Case) -> Value {
             .flatten()
     };
     if case.lease_handoff {
-        clock.set(1_700_003_601);
+        clock.set(if stored_receipt().is_some() {
+            1_700_003_599
+        } else {
+            1_700_003_601
+        });
         assert!(
             service
                 .get_attested_session(sessions.id.lock().unwrap().as_deref().unwrap())
@@ -465,26 +690,18 @@ async fn capture(case: &Case) -> Value {
             "in-flight source must own its lease"
         );
     }
-    let stored_receipt = || {
-        receipts
-            .id
-            .lock()
-            .unwrap()
-            .as_deref()
-            .and_then(|id| service.get_receipt_by_receipt_id(id))
-    };
     let before = json!({"receipt":stored_receipt().is_some(),"report":checkpoint_report.is_some()});
-    if case.disconnect {
+    if case.disconnect || case.drop_at_terminal {
         drop(body);
     } else {
         gate.eof.store(true, Ordering::Release);
         gate.waker.wake();
-        while let Some(chunk) = body.next().await {
+        while let Some(chunk) = body.as_mut().unwrap().next().await {
             wire.extend_from_slice(&chunk.unwrap());
         }
     }
     let mut all_reports = match checkpoint_report {
-        _ if case.direct_idle => vec![],
+        _ if case.direct_idle || case.direct => vec![],
         Some(report) => vec![report],
         None => tokio::time::timeout(Duration::from_secs(3), reports.recv())
             .await
@@ -494,6 +711,13 @@ async fn capture(case: &Case) -> Value {
     };
     while let Ok(report) = reports.try_recv() {
         all_reports.push(report);
+    }
+    if case.drop_at_terminal && !case.direct {
+        if let Ok(Some(report)) =
+            tokio::time::timeout(Duration::from_millis(20), reports.recv()).await
+        {
+            all_reports.push(report);
+        }
     }
     if case.e2ee {
         verify_e2ee_wire(std::str::from_utf8(&wire).unwrap(), &case.source);
@@ -531,6 +755,15 @@ async fn capture(case: &Case) -> Value {
             .unwrap()
             .into();
     }
+    let published_source = receipts.published_source.lock().unwrap().clone();
+    if let Some(source) = published_source.filter(|_| !case.direct && !case.direct_idle) {
+        verify_received_hash(
+            &snapshot,
+            &source.bytes,
+            source.protocol.filter(|_| !source.finished),
+        )
+        .await;
+    }
     normalize_snapshot(&mut snapshot);
     snapshot
 }
@@ -540,6 +773,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
         Arc::new(common::StaticKeyProvider::default()),
         Arc::new(common::StubQuoter),
         Arc::new(Backend {
+            protocol: None,
             source: vec![],
             content_type: "text/event-stream",
             gate: Arc::new(Gate::default()),
@@ -570,7 +804,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
         builder,
         endpoint_path: CHAT_COMPLETIONS_PATH.into(),
         request_mode: crate::aggregator::metrics::RequestMode::Buffered,
-        response_model: None,
+        response_model: Default::default(),
     };
     let ctx = encrypted.then(|| E2eeRequestContext {
         version: "2".into(),
@@ -603,6 +837,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
         verify_e2ee_wire(std::str::from_utf8(&result.wire_body).unwrap(), source);
     }
     let mut snapshot = json!({"name":if encrypted {"buffered_sse_e2ee"} else {"buffered_sse"},"source_hash":crate::aci::digest::sha256_hex(source.as_bytes()),"wire_hash":crate::aci::digest::sha256_hex(&result.wire_body),"wire":String::from_utf8(result.wire_body).unwrap(),"receipt":receipt,"signature_valid":signature_valid});
+    verify_received_hash(&snapshot, source.as_bytes(), None).await;
     normalize_snapshot(&mut snapshot);
     snapshot
 }
@@ -694,6 +929,8 @@ fn final_review_cases() -> Vec<Case> {
     cases
 }
 
+mod terminal;
+
 fn eof_and_reset_cases() -> Vec<Case> {
     let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
     let messages = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
@@ -767,7 +1004,7 @@ fn eof_and_reset_cases() -> Vec<Case> {
     cases
 }
 
-fn differential_regression_cases() -> Vec<Case> {
+fn wire_regression_cases() -> Vec<Case> {
     let mut cases = Vec::new();
     {
         let mut case = Case::new("diff_chat_chat_conflicting_types_1", Endpoint::ChatComplete, "event: message_stop\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"private\"}}\n\ndata: [DONE]\n\n", "openai");
@@ -1098,11 +1335,20 @@ fn cache_billing_cases() -> Vec<Case> {
     }
     cases
 }
-fn read_json_lines(input: &str) -> Vec<Value> {
+#[derive(Clone, Copy)]
+enum FixtureProjection {
+    Raw,
+    Normalized,
+}
+
+fn read_json_lines(input: &str, projection: FixtureProjection) -> Vec<Value> {
     input
         .lines()
         .map(|line| {
             let mut value: Value = serde_json::from_str(line).unwrap();
+            if matches!(projection, FixtureProjection::Raw) {
+                return value;
+            }
             if let Some(expected) = value.get_mut("expected") {
                 normalize_snapshot(expected);
                 let encrypted = matches!(
@@ -1119,11 +1365,14 @@ fn read_json_lines(input: &str) -> Vec<Value> {
         .collect()
 }
 
-fn corpus_corrections() -> HashMap<String, Value> {
-    read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_corrections.jsonl"
-    )))
+fn corpus_corrections(projection: FixtureProjection) -> HashMap<String, Value> {
+    read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_corrections.jsonl"
+        )),
+        projection,
+    )
     .into_iter()
     .map(|correction| {
         (
@@ -1212,7 +1461,7 @@ async fn exact_wire_characterization_corpus() {
     cases.push(usage_after_failure_case());
     cases.extend(native_failure_content_cases());
     cases.extend(final_review_cases());
-    cases.extend(differential_regression_cases());
+    cases.extend(wire_regression_cases());
     cases.extend(eof_and_reset_cases());
     cases.extend(failed_bridge_accounting_cases());
     cases.extend(inband_timeout_cases());
@@ -1230,19 +1479,22 @@ async fn exact_wire_characterization_corpus() {
         .map(|case| serde_json::to_string(case).unwrap() + "\n")
         .collect::<String>();
     if std::env::var_os("RECORD_STREAMING_ACTUAL").is_some() {
-        std::fs::write(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/streaming/actual.tmp"),
-            &lines,
-        )
-        .unwrap();
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/terminal-review");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("corpus.jsonl"), &lines).unwrap();
     }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/streaming_wire.jsonl");
     if std::env::var_os("UPDATE_STREAMING_CORPUS").is_some() {
         std::fs::write(path, lines).unwrap();
     } else {
-        let expected = read_json_lines(&std::fs::read_to_string(path).unwrap());
-        let corrections = corpus_corrections();
+        let expected = read_json_lines(
+            &std::fs::read_to_string(path).unwrap(),
+            FixtureProjection::Raw,
+        );
+        let corrections = corpus_corrections(FixtureProjection::Raw);
+        let mut terminal_changes = 0;
         for (actual, baseline) in actual.iter().zip(&expected) {
             let name = actual["name"].as_str().unwrap();
             let expected = if let Some(correction) = corrections.get(name) {
@@ -1255,16 +1507,62 @@ async fn exact_wire_characterization_corpus() {
             } else {
                 baseline
             };
-            assert_eq!(actual, expected, "case {name}");
+            let terminal_expected = terminal::expected(name, expected);
+            let mut expected = expected.clone();
+            normalize_snapshot(&mut expected);
+            // Terminal publication must never change billing. Compare directly
+            // with #563 rather than allowing terminal patches to mask it.
+            assert_eq!(
+                actual["reports"].as_array().map(Vec::len),
+                expected["reports"].as_array().map(Vec::len),
+                "report count {name}"
+            );
+            if let Some(reports) = actual["reports"].as_array() {
+                for (index, report) in reports.iter().enumerate() {
+                    if name == "partial_usage_disconnect" {
+                        // A published success terminal changes only the later
+                        // disconnect outcome; all billing inputs stay identical.
+                        assert_eq!(expected["reports"][index]["status"], 499);
+                        assert_eq!(report["status"], 200);
+                    } else {
+                        assert_eq!(
+                            report["status"], expected["reports"][index]["status"],
+                            "report status {name} report {index}"
+                        );
+                    }
+                    for field in ["usage", "pricing"] {
+                        assert_eq!(
+                            report[field], expected["reports"][index][field],
+                            "billing {name} report {index} {field}"
+                        );
+                    }
+                    let prior = &expected["reports"][index];
+                    assert_eq!(
+                        crate::middleware::pricing::compute_cost(
+                            &report["usage"],
+                            &report["pricing"]
+                        ),
+                        crate::middleware::pricing::compute_cost(
+                            &prior["usage"],
+                            &prior["pricing"]
+                        ),
+                        "billing {name} report {index} cost"
+                    );
+                }
+            }
+            terminal_changes += usize::from(terminal_expected != expected);
+            assert_eq!(actual, &terminal_expected, "case {name}");
         }
         assert_eq!(actual.len(), expected.len());
+        assert_eq!(terminal_changes, terminal::patch_count());
+        eprintln!("corpus: {} cases, {} unchanged from #563, {terminal_changes} approved terminal changes", actual.len(), actual.len() - terminal_changes);
     }
 }
 
 #[tokio::test]
 async fn receipt_retention_failure_settles_once_with_usage_and_preserves_metrics() {
     let mut case = Case::new("receipt_failure", Endpoint::ChatComplete,
-        "data: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\n", "openai");
+        "data: {\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\ndata: [DONE]\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8,\"total_tokens\":15}}\n\n", "openai");
     case.fail_publish = true;
     let snapshot = capture(&case).await;
     assert_eq!(
@@ -1274,34 +1572,35 @@ async fn receipt_retention_failure_settles_once_with_usage_and_preserves_metrics
     assert!(snapshot["receipt"].is_null());
     let wire = snapshot["wire"].as_str().unwrap();
     assert!(wire.contains("\"cost\":8"), "{wire}");
-    assert!(wire.ends_with("data: [DONE]\n\n"));
+    assert!(!wire.contains("[DONE]"));
     let reports = snapshot["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["status"], 502);
     assert_eq!(reports[0]["errorSource"], "gateway");
     assert_eq!(reports[0]["errorMessage"], "downstream_finalizer_failed");
-    assert_eq!(reports[0]["usage"]["prompt_tokens"], 2);
-    assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
+    assert_eq!(reports[0]["usage"]["prompt_tokens"], 7);
+    assert_eq!(reports[0]["usage"]["completion_tokens"], 8);
     assert!(reports[0]["usage"].get("cost").is_none());
     let metrics = snapshot["metrics"].as_str().unwrap();
-    for (prefix, label) in [
-        (
-            "private_ai_gateway_upstream_responses_total{",
-            "model_id=\"upstream-model\"",
-        ),
-        (
-            "private_ai_gateway_stream_errors_total{",
-            "kind=\"receipt_finalize\"",
-        ),
-    ] {
-        let series: Vec<_> = metrics
-            .lines()
-            .filter(|line| line.starts_with(prefix))
-            .collect();
-        assert_eq!(series.len(), 1, "{metrics}");
-        assert!(series[0].contains(label), "{metrics}");
-        assert!(series[0].ends_with(" 1"), "{metrics}");
-    }
+    // Publication failure keeps source observation through genuine EOF, as #563
+    // does for encoding failures; the upstream-response metric records that EOF.
+    let upstream: Vec<_> = metrics
+        .lines()
+        .filter(|line| line.starts_with("private_ai_gateway_upstream_responses_total{"))
+        .collect();
+    assert_eq!(upstream.len(), 1, "{metrics}");
+    assert!(
+        upstream[0].contains("model_id=\"upstream-model\""),
+        "{metrics}"
+    );
+    assert!(upstream[0].ends_with(" 1"), "{metrics}");
+    let series: Vec<_> = metrics
+        .lines()
+        .filter(|line| line.starts_with("private_ai_gateway_stream_errors_total{"))
+        .collect();
+    assert_eq!(series.len(), 1, "{metrics}");
+    assert!(series[0].contains("kind=\"receipt_finalize\""), "{metrics}");
+    assert!(series[0].ends_with(" 1"), "{metrics}");
     assert!(!metrics
         .lines()
         .any(|line| line.starts_with("private_ai_gateway_receipts_issued_total{")));
@@ -1386,11 +1685,14 @@ async fn declared_non_sse_json_observes_filtered_source_usage_without_changing_b
 
 #[tokio::test]
 async fn over_cap_non_sse_matches_main_on_normal_and_early_paths() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
-    let corrections = corpus_corrections();
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Normalized,
+    );
+    let corrections = corpus_corrections(FixtureProjection::Normalized);
     for case in review_cases().into_iter().take(2) {
         let actual = capture(&case).await;
         let baseline = baselines
@@ -1546,17 +1848,25 @@ async fn usage_after_native_chat_error_is_filtered_on_wire_and_in_report() {
 
 #[tokio::test]
 async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Raw,
+    );
     for case in native_failure_content_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines
             .iter()
             .find(|value| value["name"] == case.name)
             .unwrap();
-        assert_eq!(&snapshot, baseline, "{}", case.name);
+        assert_eq!(
+            &snapshot,
+            &terminal::expected(&case.name, baseline),
+            "{}",
+            case.name
+        );
         let wire = snapshot["wire"].as_str().unwrap();
         assert!(!wire.contains("PRIVATE_UPSTREAM_DETAIL"), "{wire}");
         let payload: Value = serde_json::from_str(
@@ -1628,7 +1938,7 @@ async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() 
 }
 
 #[tokio::test]
-async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
+async fn conversion_overflow_after_destination_terminal_preserves_accounting_failure() {
     let text = "x".repeat(crate::sse::MAX_EVENT_BYTES - 100);
     let event =
         format!("event: content_block_delta\ndata: {{\"delta\":{{\"text\":\"{text}\"}}}}\n\n");
@@ -1644,9 +1954,8 @@ async fn conversion_overflow_after_destination_terminal_is_a_gateway_failure() {
     let reports = snapshot["reports"].as_array().unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0]["status"], 502);
-    assert_eq!(reports[0]["errorMessage"], "internal_error");
     assert_eq!(reports[0]["errorSource"], "gateway");
-    assert!(snapshot["receipt"].is_null());
+    assert_eq!(snapshot["signature_valid"], true);
 }
 
 #[tokio::test]
@@ -1688,7 +1997,7 @@ async fn malformed_bridge_payload_is_an_upstream_read_failure() {
         }
         assert!(!wire.starts_with("\n\n"), "{wire}");
         let metrics = snapshot["metrics"].as_str().unwrap();
-        if case.name != "malformed_after_chat_terminal" {
+        if !after_terminal {
             assert!(
                 metrics.lines().any(|line| line
                     .starts_with("private_ai_gateway_stream_errors_total{")
@@ -1730,8 +2039,8 @@ async fn direct_idle_stream_emits_the_default_gateway_heartbeat() {
 }
 
 #[tokio::test]
-async fn bridge_failures_close_existing_content_and_keep_continuation_accounting() {
-    for case in differential_regression_cases().into_iter().filter(|case| {
+async fn bridge_failures_close_existing_content_and_preserve_later_usage() {
+    for case in wire_regression_cases().into_iter().filter(|case| {
         case.name.contains("error_middle") || case.name.contains("usage_after_error")
     }) {
         let snapshot = capture(&case).await;
@@ -1778,7 +2087,7 @@ async fn bridge_failures_close_existing_content_and_keep_continuation_accounting
 }
 
 #[tokio::test]
-async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_continue() {
+async fn failure_terminal_stops_output_while_source_billing_continues() {
     let chat = concat!(
         "data: {\"error\":{\"message\":\"private\"}}\n\n",
         "data: [DONE]\n\n",
@@ -1891,10 +2200,21 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
         } else {
             assert!(reports[0]["usage"].is_null(), "{name}");
         }
+        let early_receipt = name.starts_with("native_") || name.starts_with("messages_");
         assert_eq!(
             snapshot["before_eof"],
-            json!({"receipt":false,"report":false})
+            json!({"receipt":early_receipt,"report":false}),
+            "{name}"
         );
+        let received = if name.starts_with("native_chat") {
+            &source[..source.find("data: [DONE]\n\n").unwrap() + "data: [DONE]\n\n".len()]
+        } else if name == "native_responses" {
+            source.split_inclusive("\n\n").next().unwrap()
+        } else if early_receipt {
+            source.split_once("event: message_delta").unwrap().0
+        } else {
+            source
+        };
         assert_eq!(
             snapshot["source_hash"],
             crate::aci::digest::sha256_hex(source.as_bytes())
@@ -1907,7 +2227,7 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
                 .iter()
                 .any(|event| {
                     event["type"] == "response.received"
-                        && event["body_hash"] == snapshot["source_hash"]
+                        && event["body_hash"] == crate::aci::digest::sha256_hex(received.as_bytes())
                 }),
             "{name}"
         );
@@ -1961,10 +2281,13 @@ async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report(
 
 #[tokio::test]
 async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Normalized,
+    );
     for case in failed_bridge_accounting_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
@@ -2005,7 +2328,7 @@ async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
         assert!(!wire.contains("\"prompt_tokens\":9"));
         assert_eq!(
             snapshot["before_eof"],
-            json!({"receipt":false,"report":false})
+            json!({"receipt":case.format == "anthropic","report":false})
         );
         if case.read_error.is_some() {
             assert_eq!(snapshot["wire"], baseline["wire"]);
@@ -2024,24 +2347,51 @@ async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
 
 #[tokio::test]
 async fn inband_timeout_reports_match_main_on_native_and_bridged_paths() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
-    let corrections = corpus_corrections();
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Raw,
+    );
+    let corrections = corpus_corrections(FixtureProjection::Raw);
     for case in inband_timeout_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
-        assert_report_outcomes(&snapshot, baseline);
+        let mut normalized_baseline = baseline.clone();
+        normalize_snapshot(&mut normalized_baseline);
+        assert_report_outcomes(&snapshot, &normalized_baseline);
         let reports = snapshot["reports"].as_array().unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0]["status"], 504);
         assert_eq!(reports[0]["errorMessage"], "upstream_timeout");
         assert!(reports[0]["errorSource"].is_null());
+        // The accepted failure terminal can publish a receipt before the read
+        // timeout, but it must not settle or mask that later upstream failure.
+        let published = matches!(
+            case.name.as_str(),
+            "native_messages_error_terminal_then_timeout"
+                | "messages_chat_inband_error_then_timeout"
+                | "messages_responses_inband_error_then_timeout"
+                | "native_responses_error_terminal_then_timeout"
+                | "native_responses_failed_terminal_then_timeout"
+        );
+        assert_eq!(
+            snapshot["before_eof"],
+            json!({"receipt":published,"report":false}),
+            "{}",
+            case.name
+        );
+        assert_eq!(snapshot["signature_valid"], published, "{}", case.name);
         let expected = corrections
             .get(&case.name)
             .map_or(baseline, |c| &c["expected"]);
-        assert_eq!(snapshot, *expected, "{}", case.name);
+        assert_eq!(
+            snapshot,
+            terminal::expected(&case.name, expected),
+            "{}",
+            case.name
+        );
     }
 }
 
@@ -2064,10 +2414,13 @@ fn assert_report_outcomes(snapshot: &Value, baseline: &Value) {
 
 #[tokio::test]
 async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_position() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Normalized,
+    );
     for case in source_billing_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
@@ -2127,10 +2480,13 @@ async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_posi
 
 #[tokio::test]
 async fn source_billing_prices_cache_writes_strings_and_partial_messages_on_every_bridge() {
-    let baselines = read_json_lines(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/streaming_wire.jsonl"
-    )));
+    let baselines = read_json_lines(
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/streaming_wire.jsonl"
+        )),
+        FixtureProjection::Normalized,
+    );
     for case in cache_billing_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines

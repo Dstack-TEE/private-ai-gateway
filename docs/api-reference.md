@@ -225,8 +225,25 @@ The normal provider-backed response path adds:
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
 For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
-is complete and stores the receipt after upstream EOF and response finalization.
-Receiving a protocol terminal does not publish the receipt before EOF. An upstream
+is complete. Publication at the first destination terminal requires the source
+protocol's own terminal on a route with an established protocol, or clean EOF,
+accepted from the provider adapter after any authentication barrier. The selected
+backend declares protocol evidence for the shaped upstream wire operation,
+including on custom paths. The route protocol always controls decoding and billing;
+a contradictory declaration is a routing failure for every streaming operation. An unknown declaration retains EOF publication.
+The gateway signs and stores the receipt before returning that terminal's bytes.
+The body stays open and reads the source until EOF, emitting no later bytes.
+Accounting observes filtered upstream usage in the source protocol through EOF
+or disconnect, as on every other response path. Closing after a terminal with a
+published receipt leaves it queryable and settles as completed with the usage
+observed so far, retaining any failure status. A bridge-generated failure terminal
+without an accepted source terminal retains source consumption and EOF
+finalization. At clean source EOF, synthesized terminals publish in the poll that
+returns them. Cancellation or failure can leave the reserved id unpublished,
+including after an error terminal. A receipt proves neither client delivery nor
+model-generation completeness. Source-read, decoder or transform failures before
+publication can prevent completion and leave no receipt. Later failures retain
+their report status even when a receipt already exists. An upstream
 non-2xx returned before streaming begins is buffered and does not receive a receipt.
 
 In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
@@ -278,8 +295,14 @@ Unrepresentable bridge payloads are upstream transport failures. Multiline JSON 
 once as one payload.
 
 Failure evidence remains sticky through the source protocol's terminal. Later
-source events cannot change that outcome; their bytes are still hashed through
-EOF. Accounting reads usage only from source payloads in the source protocol,
+source events cannot change that outcome. Publication freezes the received hash
+at the accepted source terminal block and suppresses later client output;
+source observation continues through EOF. A bridge failure terminal without an
+accepted source terminal retains source authentication, full source hashing and
+EOF publication. For early publication, `response.received` covers the decoder's
+accepted source prefix through the terminal block independently of chunking;
+SSE dispatch at CR excludes a following LF from that prefix.
+Accounting reads usage only from source payloads in the source protocol,
 before conversion. It observes usage through source EOF or client disconnect,
 including usage after terminals, failures and malformed records. Chat uses the
 latest cumulative usage; Messages merges start and delta counters; Responses uses
@@ -293,8 +316,8 @@ terminal continues normally until its protocol terminal arrives. When conversion
 encoding or E2EE fails, source observation continues synchronously to EOF or client
 disconnect, without further client output. The report retains its failure status,
 attribution and label and includes usage observed so far; its publication is
-delayed until that observation ends. Receipts remain suppressed where the previous
-abort path suppressed them. A buffered response that parses but fails conversion
+delayed until that observation ends. A failure before publication can suppress
+the receipt; an already-published receipt remains available. A buffered response that parses but fails conversion
 likewise retains filtered source usage on its existing 502 report.
 A source terminal alone does not prove a conversion succeeded: the destination
 terminal must be produced. Gateway stage failures still fail the response, even

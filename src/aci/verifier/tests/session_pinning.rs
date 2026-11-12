@@ -99,6 +99,14 @@ struct FixtureBackend(&'static str, Mutex<Vec<String>>);
 
 #[async_trait]
 impl UpstreamBackend for FixtureBackend {
+    fn response_protocol(
+        &self,
+        _req: &crate::aci::upstream::PreparedUpstreamRequest,
+        _operation: crate::middleware::request_transform::Endpoint,
+    ) -> Option<crate::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         self.0
     }

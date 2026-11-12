@@ -3,13 +3,14 @@
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_util::{FutureExt, Stream, StreamExt, TryStreamExt};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sse_stream::{Sse, SseByteStream};
 
 use crate::aci::upstream::UpstreamError;
@@ -20,6 +21,36 @@ pub(crate) const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const DEFAULT_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const KEEP_ALIVE_COMMENT: &[u8] = b": PROCESSING\n\n";
 pub(crate) type EventStream = Pin<Box<dyn Stream<Item = Result<Record, ServiceError>> + Send>>;
+
+/// Accepted source bytes, shared with the receipt draft. The decoder updates it
+/// at block boundaries, before a record can produce destination output.
+/// Publication freezes the hash while source consumption and accounting continue.
+#[derive(Clone, Default)]
+pub(crate) struct SourceHash(Arc<Mutex<SourceHashState>>);
+#[derive(Default)]
+struct SourceHashState {
+    hasher: Sha256,
+    frozen: bool,
+}
+impl SourceHash {
+    pub fn update(&self, bytes: &[u8]) {
+        let mut hash = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !hash.frozen {
+            hash.hasher.update(bytes);
+        }
+    }
+    pub fn finish(&self) -> String {
+        let mut hasher = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hasher.frozen = true;
+        format!("sha256:{}", hex::encode(hasher.hasher.clone().finalize()))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Payload {
@@ -249,6 +280,7 @@ struct LimitedInput {
     limit: BlockLimit,
     boundary: Arc<AtomicBool>,
     finished: bool,
+    source_hash: Option<SourceHash>,
 }
 impl Stream for LimitedInput {
     type Item = Result<Bytes, ServiceError>;
@@ -275,7 +307,11 @@ impl Stream for LimitedInput {
                 }
                 this.boundary
                     .store(this.limit.at_boundary(), Ordering::Relaxed);
-                return Poll::Ready(Some(Ok(this.pending.split_to(count))));
+                let bytes = this.pending.split_to(count);
+                if let Some(hash) = &this.source_hash {
+                    hash.update(&bytes);
+                }
+                return Poll::Ready(Some(Ok(bytes)));
             }
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => this.pending = bytes,
@@ -310,12 +346,27 @@ pub(crate) struct DecodedStream {
 }
 impl DecodedStream {
     pub fn new(inner: ServiceResponseStream, protocol: Option<SseProtocol>) -> Self {
-        Self::with_limit(inner, protocol, MAX_EVENT_BYTES)
+        Self::with_options(inner, protocol, MAX_EVENT_BYTES, None)
+    }
+    pub fn with_source_hash(
+        inner: ServiceResponseStream,
+        protocol: SseProtocol,
+        hash: SourceHash,
+    ) -> Self {
+        Self::with_options(inner, Some(protocol), MAX_EVENT_BYTES, Some(hash))
     }
     fn with_limit(
         inner: ServiceResponseStream,
         protocol: Option<SseProtocol>,
         max_bytes: usize,
+    ) -> Self {
+        Self::with_options(inner, protocol, max_bytes, None)
+    }
+    fn with_options(
+        inner: ServiceResponseStream,
+        protocol: Option<SseProtocol>,
+        max_bytes: usize,
+        source_hash: Option<SourceHash>,
     ) -> Self {
         let boundary = Arc::new(AtomicBool::new(true));
         Self {
@@ -333,6 +384,7 @@ impl DecodedStream {
                 },
                 boundary: boundary.clone(),
                 finished: false,
+                source_hash,
             }),
             protocol,
             boundary,

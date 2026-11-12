@@ -113,7 +113,7 @@ An allow response:
 | `pricing` | No | Per-token prices as numeric strings or numbers: `inputCostPerToken`, `outputCostPerToken`, `cacheReadCostPerToken`, and `cacheCreationCostPerToken`. A missing input or output price counts as zero; a missing cache price uses the input price. When pricing is present, the gateway prices the upstream usage and adds the result to the client's response as `usage.cost`, in buffered and streaming responses. The object is copied to post-consult reports. `imageCostPerImage` adds per-image pricing; see [Image generation](#image-generation). |
 | `candidates` | Required for an allowed inference | Ordered route candidates. An empty or missing list produces a no-route error. |
 | `candidates[].routeId` | Yes | `<upstream name>:<public model ID>` matching the active gateway upstream config. |
-| `candidates[].format` | Yes | `openai` or `anthropic`. Selects request and response transformation. |
+| `candidates[].format` | Yes | `openai` or `anthropic`. Selects request and response transformation. For every streaming operation, the resulting route protocol must agree with any protocol declared by the selected backend for the shaped upstream wire operation, independently of its URL path. This declaration validates the route protocol and never replaces source decoding. A contradiction is a route-attributed routing failure before forwarding. An unknown backend declaration retains forwarding with this format, but requires clean adapter EOF for receipt publication. |
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
@@ -454,18 +454,42 @@ Streaming and cancellation do not erase accounting:
   the report carries the real failure status, not the HTTP `200` the client
   already received.
 
-One response owner settles a streaming request once, after response finalization
-at upstream EOF or when the client abandons the response. This includes the
-pending-forward phase after early commit. A source reaching EOF cannot emit an
+One response owner settles a streaming request once. Publication at the first
+destination terminal requires the source protocol's own terminal on a route with
+an established protocol, or clean EOF, accepted from the provider adapter after
+any authentication barrier. The owner publishes before returning the first
+destination terminal's bytes, then keeps reading the source in the same body
+without emitting further bytes. It observes allowlisted upstream usage in the
+source protocol through EOF or disconnect and settles at source EOF, as on every
+response path. A bridge-generated failure terminal without an accepted
+source terminal retains normal source consumption and EOF settlement. At clean
+source EOF, synthesized terminals publish in the poll that returns them.
+Abandonment after a returned terminal with a published receipt settles as completed
+with observed usage, retaining any failure status. Earlier abandonment reports 499
+with observed usage and can leave the reserved receipt id unpublished, including
+after a bridge-generated error terminal. Early publication freezes the source hash
+but preserves later usage accounting. Post-terminal gateway-stage failures,
+including E2EE validation failures, retain their failure report and observed usage
+even when the terminal and receipt have already been returned. The same rules cover the pending-forward
+phase after early commit. A source reaching EOF cannot emit an
 intermediate cancellation report. Named protocol errors retain their failure
 when bridged or sanitized, even when followed by a terminal event. Usage in
 multiline SSE data is read as one payload. Invalid UTF-8 in a recognized SSE field
 is an upstream transport failure.
 
-If receipt signing or persistence fails at EOF, that owner emits one `502`
+Publication records the gateway's observed exchange, without proving client
+delivery or model-generation completeness. Source-read, decoder or transform
+failures before publication can prevent completion and leave no receipt. Later
+failures retain their report status while an already-published receipt remains
+available.
+
+If receipt signing or persistence fails, that owner withholds the successful
+terminal and emits one `502`
 report with `errorSource: gateway`, `errorMessage: downstream_finalizer_failed`
-and the usage already observed. It does not emit a success report first. The
-upstream-response metric still records the source's EOF, and the publication
+and the source usage observed through EOF or disconnect. Publication failure
+continues source observation, as other encoding failures do. It does not emit a
+success report first. The
+upstream-response metric still records source completion, and the publication
 failure increments the receipt-finalize stream-error metric.
 
 `errorMessage` takes one of these values:

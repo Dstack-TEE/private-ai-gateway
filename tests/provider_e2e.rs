@@ -640,7 +640,17 @@ async fn chutes_invoke_handler(
         (
             StatusCode::OK,
             [("content-type", "text/event-stream")],
-            encrypt_chutes_stream_response(response_pk),
+            encrypt_chutes_stream_response(
+                response_pk,
+                if headers
+                    .get("x-e2e-path")
+                    .is_some_and(|path| path == "/v1/responses")
+                {
+                    b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"provider-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"
+                } else {
+                    STREAM_CHAT_RESPONSE_EVENT
+                },
+            ),
         )
     } else {
         (
@@ -918,7 +928,7 @@ fn encrypt_chutes_response_blob(response_pk_b64: &str, body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn encrypt_chutes_stream_response(response_pk_b64: &str) -> Vec<u8> {
+fn encrypt_chutes_stream_response(response_pk_b64: &str, source: &[u8]) -> Vec<u8> {
     let response_pk = BASE64.decode(response_pk_b64).unwrap();
     let response_pk = MlKemEncapsulationKey768::new_from_slice(&response_pk).unwrap();
     let (mlkem_ct, shared_secret) = response_pk.encapsulate();
@@ -927,7 +937,7 @@ fn encrypt_chutes_stream_response(response_pk_b64: &str) -> Vec<u8> {
         mlkem_ct.as_slice(),
         CHUTES_INFO_STREAM,
     );
-    let encrypted = encrypt_chutes_stream_chunk(&key, STREAM_CHAT_RESPONSE_EVENT);
+    let encrypted = encrypt_chutes_stream_chunk(&key, source);
     format!(
         "data: {{\"e2e_init\":\"{}\"}}\n\ndata: {{\"e2e\":\"{}\"}}\n\ndata: [DONE]\n\n",
         BASE64.encode(mlkem_ct.as_slice()),
@@ -1570,9 +1580,12 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     e2ee: None,
                 },
                 vec![ForwardCandidate {
+                    format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
-                    path: "/v1/chat/completions",
+                    endpoint:
+                        private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+                    wire_endpoint: private_ai_gateway::endpoint::Endpoint::ChatComplete,
                 }],
                 stream,
                 journal.clone(),
@@ -2416,6 +2429,133 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
         receipt_event(&receipt, EVENT_REQUEST_FORWARDED)["body_hash"],
         sha256_hex(&expected.request.body)
     );
+}
+
+#[tokio::test]
+async fn chutes_responses_route_decodes_and_bills_the_responses_protocol() {
+    use private_ai_gateway::endpoint::Endpoint;
+    use private_ai_gateway::middleware::errors::Surface;
+    use private_ai_gateway::middleware::{
+        CacheSaltKey, CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
+    };
+    let (base_url, calls, key, _) = serve_chutes_provider_fixture().await;
+    let backend = ChutesProviderBackend::new_with_timeouts(base_url.clone(), 10, 600)
+        .unwrap()
+        .with_name("chutes-provider")
+        .with_bearer_token("fixture-token")
+        .with_e2ee_api_base(base_url.clone());
+    let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+        url_origin: Some(base_url),
+        verifier_id: "fixture-chutes-verifier/v1".into(),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
+        channel_bindings: vec![chutes_key_binding(&key)],
+        ..verified_event("chutes-provider", "provider-model")
+    });
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "provider-model",
+                "provider-model",
+                Arc::new(backend),
+                "route",
+            )
+            .unwrap()
+            .with_is_tee(Some(true)),
+        )
+        .unwrap();
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(router),
+            Arc::new(verifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let control = Router::new().route("/consult/pre", post(|| async { Json(json!({
+        "allow":true, "candidates":[{"routeId":"route", "format":"openai", "supportedEndpoints":["/v1/responses"]}],
+        "pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}
+    })) })).route("/consult/post", post(move |Json(report): Json<Value>| {
+        sent.send(report).unwrap(); async { StatusCode::OK }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let control = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    let middleware = Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        CacheSaltKey::new([8; 32]),
+        &MiddlewareConfig {
+            control_url: format!("http://{addr}"),
+            control_token: None,
+            control_timeout_ms: Some(2000),
+            control_post_timeout_ms: Some(2000),
+            sse_keepalive_ms: Some(0),
+            send_request_features: Some(false),
+            tee_only_domains: vec![],
+        },
+    )
+    .unwrap();
+    let params = json!({"model":"provider-model", "input":"hi", "stream":true});
+    let response = middleware
+        .handle_completion(
+            &service,
+            CompletionInput {
+                audio_form: None,
+                upload_permit: None,
+                endpoint: Endpoint::CreateModelResponse,
+                endpoint_path: "/v1/responses",
+                surface: Surface::Openai,
+                received_body: serde_json::to_vec(&params).unwrap().into(),
+                params,
+                api_key_hash: Some("fixture-key".into()),
+                requester: None,
+                e2ee: None,
+                aci_required: false,
+                aci_session_ids: vec![],
+                request_id: "fixture-responses".into(),
+                user_model: Some("provider-model".into()),
+                stream: true,
+                tee_only: false,
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let wire = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(wire.contains("event: response.completed"), "{wire}");
+    assert!(!wire.contains("[DONE]"), "{wire}");
+    let report = tokio::time::timeout(Duration::from_secs(3), reports.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["status"], 200, "{report}");
+    assert_eq!(report["usage"]["input_tokens"], 2, "{report}");
+    assert_eq!(report["usage"]["output_tokens"], 3, "{report}");
+    assert_eq!(
+        private_ai_gateway::middleware::pricing::compute_cost(&report["usage"], &report["pricing"]),
+        8.0
+    );
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_some());
+    assert_eq!(
+        calls.lock().unwrap()[0].x_e2e_path.as_deref(),
+        Some("/v1/responses")
+    );
+    control.abort();
+    let _ = control.await;
 }
 
 #[tokio::test]

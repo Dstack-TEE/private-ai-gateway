@@ -198,12 +198,13 @@ fn build_provider_backend(
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
             .with_name(cfg.name.clone())
             .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
-            if let Some(token) = &cfg.bearer_token {
-                backend = if cfg.provider == UpstreamProvider::Anthropic {
-                    backend.with_anthropic_api_key(token.clone())
-                } else {
-                    backend.with_bearer_token(token.clone())
-                };
+            if cfg.provider == UpstreamProvider::Anthropic {
+                backend = backend.with_anthropic_protocol();
+                if let Some(token) = &cfg.bearer_token {
+                    backend = backend.with_anthropic_api_key(token.clone());
+                }
+            } else if let Some(token) = &cfg.bearer_token {
+                backend = backend.with_bearer_token(token.clone());
             }
             backend = backend.with_basic_auth(cfg.basic_auth);
             Ok(Arc::new(backend))

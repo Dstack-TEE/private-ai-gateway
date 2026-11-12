@@ -12,6 +12,7 @@ use super::{
     UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::endpoint::Endpoint;
 
 pub struct ModelRoute {
     pub force_verbose_json: bool,
@@ -244,6 +245,17 @@ impl UpstreamBackend for ModelRouterBackend {
         })
     }
 
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        self.route_from_prepared(req)
+            .ok()?
+            .upstream
+            .response_protocol(req, operation)
+    }
+
     fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
         self.route_from_prepared(req)
             .is_ok_and(|route| route.upstream.requires_verified_binding(req))
@@ -350,6 +362,14 @@ mod tests {
 
     #[async_trait]
     impl UpstreamBackend for StubBackend {
+        fn response_protocol(
+            &self,
+            _req: &crate::aci::upstream::PreparedUpstreamRequest,
+            _operation: Endpoint,
+        ) -> Option<crate::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             self.name
         }

@@ -595,9 +595,54 @@ GET /v1/aci/receipts/{id}
 `{id}` is the `X-Receipt-Id` header value (preferred), or the
 OpenAI-compatible response `id` when the response body contains one.
 `X-Receipt-Id` arrives with the response, so the client holds the id before
-the receipt is queryable. A receipt is finalized when the response
-completes: a streamed response has no in-flight receipt (its hashes cover
-the whole stream). Receipts are retained for a bounded,
+the receipt is queryable. For a streamed response, publication at the first
+destination protocol terminal requires acceptance of the source protocol's own
+terminal on a route with an established source protocol, or clean EOF from the
+provider adapter, after any adapter authentication barrier. If either boundary
+has been reached when that terminal is produced, the gateway MUST finalize and
+publish the receipt before returning its bytes. The body stays open and continues
+reading the source until EOF, emitting no bytes after the destination terminal.
+Accounting observes allowlisted upstream usage in the source protocol through
+EOF or disconnect, regardless of terminals, failures or malformed records. The
+final cumulative value counts once; Messages start and delta usage is merged.
+Settlement remains at EOF. The
+`response.received` hash covers the accepted source bytes through its terminal
+block, or all source bytes at clean EOF; `response.returned` includes the
+destination terminal's final wire bytes.
+Bytes after that source boundary are excluded from the received hash. SSE dispatch
+at CR includes that CR; a following LF is outside the accepted prefix.
+
+The selected backend declares its source wire protocol for the prepared request
+and typed upstream operation, independently of the URL path and control-plane
+format. This backend method is required: routing and configuration wrappers
+delegate to the serving backend, while a backend without that knowledge returns
+unknown explicitly. Shaping derives the wire operation once: Chat requests in
+Anthropic format send Messages, and Messages requests in OpenAI format send Chat.
+Response transforms retain the client-facing operation. The OpenAI-compatible
+backend declares Chat for typed Chat or legacy-completion operations, Responses
+for a typed Responses operation, and Messages only for a typed Messages operation
+on the native Anthropic provider. Other providers' Messages operations are unknown.
+Chutes delegates to its OpenAI-compatible backend; the 0G adapter only serves
+Chat and declares it for every operation. The route protocol always controls decoding and source accounting.
+For every streaming operation, backend evidence that contradicts that route
+protocol is a routing failure; matching evidence permits terminal publication.
+Unknown evidence keeps the declared format and forwarding behavior, but requires
+clean adapter EOF for publication. Custom paths do not change this evidence.
+
+A bridge-generated failure terminal without an accepted source terminal does
+not permit early publication: the source retains its normal EOF or failure path.
+At clean source EOF, synthesized terminals publish in the poll that returns
+them. Middleware source-read, decoder or transform failures before publication
+can prevent completion and leave no receipt. Later failures retain their report
+status while an already-published receipt remains available. Publication failure
+withholds the successful terminal and continues source observation through EOF or
+disconnect before reporting the failure. Cancellation or failure can leave a reserved
+id unpublished even if an error terminal was returned. A receipt records the
+gateway's observed exchange; it does not prove client delivery or
+model-generation completeness.
+Cancellation after a terminal returned with a published receipt settles as
+completed, retaining any failure status and the usage observed so far.
+Receipts are retained for a bounded,
 implementation-defined period. Clients SHOULD fetch receipts promptly. An
 unknown or expired id returns `not_found`.
 

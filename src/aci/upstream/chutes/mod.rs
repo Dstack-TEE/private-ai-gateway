@@ -24,6 +24,7 @@ use super::{
     UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::endpoint::Endpoint;
 use crypto::{
     build_chutes_e2ee_request, chutes_e2ee_pubkey_sha256, decrypt_chutes_response,
     ChutesE2eeDecryptingStream,
@@ -364,6 +365,14 @@ impl UpstreamBackend for ChutesProviderBackend {
 
     fn url_origin(&self) -> Option<&str> {
         self.inner.url_origin()
+    }
+
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        self.inner.response_protocol(req, operation)
     }
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {

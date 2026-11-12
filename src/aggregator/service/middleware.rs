@@ -24,8 +24,10 @@ use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
+use crate::endpoint::Endpoint;
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
 use crate::middleware::sse::Accounting;
+use crate::middleware::types::ProviderFormat;
 use crate::sse::EventStream;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -189,7 +191,8 @@ pub(super) struct BufferedCommit {
     pub response_model: Option<String>,
     pub admission: SelectedUpstream,
     pub route_id: String,
-    pub path: &'static str,
+    pub endpoint: Endpoint,
+    pub format: ProviderFormat,
     pub middleware_forwarded_body: Vec<u8>,
     pub forwarded_body: bytes::Bytes,
 }
@@ -271,7 +274,8 @@ impl AciService {
             response_model,
             admission,
             route_id,
-            path,
+            endpoint,
+            format,
             middleware_forwarded_body,
             forwarded_body,
         } = commit;
@@ -320,14 +324,19 @@ impl AciService {
                     builder,
                     endpoint_path: endpoint_path.to_string(),
                     request_mode: RequestMode::Buffered,
-                    response_model,
+                    response_model: std::sync::Arc::new(
+                        response_model
+                            .map(std::sync::OnceLock::from)
+                            .unwrap_or_default(),
+                    ),
                     session_lease: admission.lease,
                 },
                 upstream_status: status,
                 upstream_body: response.body,
                 upstream_headers: response.headers,
                 selected_route: route_id,
-                selected_path: path,
+                selected_endpoint: endpoint,
+                selected_format: format,
                 failed_attempts,
                 session_id,
             },
@@ -452,15 +461,35 @@ impl AciService {
                 // attributed to it.
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
-                let prepared = match self.upstream.prepare(UpstreamRequest {
-                    cache_salt: req.context.cache_salt.clone(),
-                    body: candidate.body.clone().into(),
-                    form: req.audio_form.clone(),
-                    content_type: None,
-                    headers: upstream_headers.clone(),
-                    path: Some(candidate.path.to_string()),
-                    target_route_id: Some(route_id.clone()),
-                }) {
+                let (prepared, source_protocol) = match self
+                    .upstream
+                    .prepare(UpstreamRequest {
+                        cache_salt: req.context.cache_salt.clone(),
+                        body: candidate.body.clone().into(),
+                        form: req.audio_form.clone(),
+                        content_type: None,
+                        headers: upstream_headers.clone(),
+                        path: Some(candidate.endpoint.path().to_string()),
+                        target_route_id: Some(route_id.clone()),
+                    })
+                    .and_then(|prepared| {
+                        let protocol = self
+                            .upstream
+                            .response_protocol(&prepared, candidate.wire_endpoint);
+                        // Evidence validates the shaped route protocol; it never
+                        // replaces the protocol used by the source decoder.
+                        if stream
+                            && protocol.is_some_and(|protocol| {
+                                protocol != (candidate.format, candidate.endpoint).into()
+                            })
+                        {
+                            return Err(UpstreamError::Routing(
+                                "candidate format contradicts the configured upstream protocol"
+                                    .into(),
+                            ));
+                        }
+                        Ok((prepared, protocol))
+                    }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
                         abandon(&mut failed_attempts, 502);
@@ -689,6 +718,11 @@ impl AciService {
 
                     // Commit this candidate.
                     let upstream_headers = upstream_response.headers;
+                    let content_type = upstream_headers
+                        .get("content-type")
+                        .map(|value| value.split(';').next().unwrap_or("").trim())
+                        .filter(|base| !base.is_empty());
+                    let is_sse = content_type.is_none_or(|value| is_sse_content_type(Some(value)));
                     let receipt_id = generate_receipt_id();
                     let served_at = admission.admitted_at;
                     // Early SSE headers may already cite a keyset. Preserve
@@ -719,6 +753,7 @@ impl AciService {
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                     let keyset_digest = keyset.digest().to_string();
+                    receipt_journal.set_early_publication(source_protocol.is_some());
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         MiddlewareReceiptDraft {
@@ -727,22 +762,25 @@ impl AciService {
                             session_lease: admission.lease,
                             endpoint_path: endpoint_path.to_string(),
                             request_mode: RequestMode::Streaming,
-                            response_model: None,
+                            response_model: receipt_journal.response_model.clone(),
                         },
                         receipt_journal,
                         self.metrics.clone(),
                         status,
+                        !is_sse,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
+                            is_sse,
                             receipt_id: receipt_id.clone(),
                             keyset_digest,
                             upstream_status: status,
                             upstream_headers,
                             body: Box::pin(body),
                             selected_route: route_id.clone(),
-                            selected_path: candidate.path,
+                            selected_endpoint: candidate.endpoint,
+                            selected_format: candidate.format,
                             failed_attempts: std::mem::take(&mut failed_attempts),
                             session_id,
                         },
@@ -843,7 +881,8 @@ impl AciService {
                             response_model,
                             admission,
                             route_id: route_id.clone(),
-                            path: candidate.path,
+                            endpoint: candidate.endpoint,
+                            format: candidate.format,
                             middleware_forwarded_body: candidate.body.clone(),
                             forwarded_body,
                         }),
@@ -860,7 +899,8 @@ impl AciService {
                         response_model,
                         admission,
                         route_id,
-                        path: candidate.path,
+                        endpoint: candidate.endpoint,
+                        format: candidate.format,
                         middleware_forwarded_body: candidate.body.clone(),
                         forwarded_body,
                     },
@@ -989,7 +1029,7 @@ impl AciService {
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
-            draft.response_model.as_deref(),
+            draft.response_model.get().map(String::as_str),
         );
 
         Ok(MiddlewareReceiptFinalization {

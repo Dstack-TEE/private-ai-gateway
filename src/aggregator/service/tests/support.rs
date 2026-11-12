@@ -58,17 +58,12 @@ pub(super) fn normalize_snapshot(snapshot: &mut Value) {
     );
     let wire = normalize_wire(wire, encrypted);
     let hash = sha256_hex(wire.as_bytes());
-    let source_hash = snapshot["source_hash"].clone();
     let wire_hash = snapshot["wire_hash"].clone();
     if let Some(receipt) = snapshot["receipt"].as_object_mut() {
         for event in receipt["event_log"].as_array_mut().unwrap() {
-            match event["type"].as_str().unwrap() {
-                "response.received" => assert_eq!(event["body_hash"], source_hash),
-                "response.returned" => {
-                    assert_eq!(event["body_hash"], wire_hash);
-                    event["body_hash"] = hash.clone().into();
-                }
-                _ => {}
+            if event["type"] == "response.returned" {
+                assert_eq!(event["body_hash"], wire_hash);
+                event["body_hash"] = hash.clone().into();
             }
         }
         receipt.insert("receipt_id".into(), "<receipt-id>".into());
@@ -89,6 +84,55 @@ pub(super) fn normalize_snapshot(snapshot: &mut Value) {
     }
 }
 
+/// Reuse the production decoder to locate the terminal block, counting the exact
+/// captured source bytes it consumes. Never search for a matching prefix hash.
+pub(super) async fn verify_received_hash(
+    snapshot: &Value,
+    source: &[u8],
+    terminal_protocol: Option<crate::sse_protocol::SseProtocol>,
+) {
+    use futures_util::StreamExt;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let mut end = source.len();
+    if let Some(protocol) = terminal_protocol {
+        let mut terminal_end = None;
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let position = consumed.clone();
+        let bytes = bytes::Bytes::copy_from_slice(source);
+        let input = futures_util::stream::iter(0..bytes.len()).map(move |index| {
+            position.store(index + 1, Ordering::Relaxed);
+            Ok(bytes.slice(index..index + 1))
+        });
+        let mut records = crate::sse::DecodedStream::new(Box::pin(input), Some(protocol));
+        while let Some(record) = records.next().await {
+            if record
+                .unwrap()
+                .event()
+                .is_some_and(|event| event.meaning.terminal.is_some())
+            {
+                terminal_end = Some(consumed.load(Ordering::Relaxed));
+                break;
+            }
+        }
+        end = terminal_end.expect("early publication requires the source terminal");
+    }
+    let received = snapshot["receipt"]["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "response.received")
+        .unwrap();
+    assert_eq!(
+        received["body_hash"],
+        sha256_hex(&source[..end]),
+        "{}",
+        snapshot["name"]
+    );
+}
+
 pub(super) fn verify_e2ee_wire(wire: &str, source: &str) {
     let payloads = |wire: &str| {
         wire.lines()
@@ -97,7 +141,7 @@ pub(super) fn verify_e2ee_wire(wire: &str, source: &str) {
     };
     let source = payloads(source);
     let output = payloads(wire);
-    assert_eq!(source.len(), output.len());
+    assert!(output.len() <= source.len());
     let secret = crate::aci::e2ee::x25519_secret_key_from_bytes(&[0x37; 32]).unwrap();
     let mut fields = 0;
     for (source, output) in source.iter().zip(output) {

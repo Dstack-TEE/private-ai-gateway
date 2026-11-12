@@ -26,6 +26,8 @@ use bytes::Bytes;
 use futures_util::{stream, Stream};
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::endpoint::Endpoint;
+pub use crate::sse_protocol::SseProtocol;
 
 mod body;
 mod cache_salt;
@@ -195,6 +197,17 @@ pub trait UpstreamBackend: Send + Sync {
             is_tee: None,
         })
     }
+
+    /// Response wire protocol for the selected operation on this prepared
+    /// backend. This is a trusted backend declaration, independent of paths and
+    /// control-plane formats. Unknown backends publish receipts at clean EOF.
+    /// Wrappers must delegate to the backend that will serve the request;
+    /// implementations without protocol knowledge must explicitly return `None`.
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol>;
 
     /// Forward `req` to the upstream and return the response.
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError>;

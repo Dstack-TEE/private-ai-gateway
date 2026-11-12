@@ -1,6 +1,7 @@
 //! Interop with 0G's Go library (`tests/fixtures/0g-private-computer`) and the
 //! backend against a mock router and broker that run the enclave side.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -266,7 +267,7 @@ fn opener_refuses_duplicate_sealed_field_declarations() {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode {
+pub(crate) enum Mode {
     Ok,
     WrongSigner,
     SignatureMissing,
@@ -278,6 +279,10 @@ enum Mode {
     TruncatedLine,
     Reordered,
     Tampered,
+    ForgedFailure,
+    ForgedFailureFinal,
+    ForgedMessagesTerminal,
+    SignedFailure,
 }
 
 struct Broker {
@@ -286,12 +291,13 @@ struct Broker {
     signing_key: SigningKey,
     requests: Mutex<Vec<(HeaderMap, Value)>>,
     signed_text: Mutex<String>,
+    signature_calls: AtomicUsize,
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     broker: Arc<Broker>,
-    backend: ZeroGProviderBackend,
-    event: UpstreamVerifiedEvent,
+    pub(crate) backend: Arc<ZeroGProviderBackend>,
+    pub(crate) event: UpstreamVerifiedEvent,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -302,6 +308,22 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    pub(crate) async fn failure(mode: Mode, model: &str) -> Self {
+        let mut fixture = Self::new(mode).await;
+        fixture.event.model_id = model.into();
+        fixture.event.provider_claims.as_mut().unwrap()["instances"][ADDRESS]["model"] =
+            model.into();
+        fixture
+    }
+
+    pub(crate) fn signature_calls(&self) -> usize {
+        self.broker.signature_calls.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_calls(&self) -> usize {
+        self.broker.requests.lock().unwrap().len()
+    }
+
     async fn new(mode: Mode) -> Self {
         let (secret, enc_pub) = Kem::derive_keypair(&[1; 32]);
         let enc_pub = enc_pub.to_bytes();
@@ -312,6 +334,7 @@ impl Fixture {
             signing_key,
             requests: Mutex::default(),
             signed_text: Mutex::default(),
+            signature_calls: AtomicUsize::new(0),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -343,7 +366,9 @@ impl Fixture {
         };
         Self {
             broker,
-            backend: ZeroGProviderBackend::new_with_timeouts(&origin, "zg-test-key", 5, 5).unwrap(),
+            backend: Arc::new(
+                ZeroGProviderBackend::new_with_timeouts(&origin, "zg-test-key", 5, 5).unwrap(),
+            ),
             event,
             server,
         }
@@ -433,6 +458,41 @@ async fn chat(
             .insert("zg-res-key", "res-1".parse().unwrap());
         return response;
     }
+    if matches!(
+        broker.mode,
+        Mode::ForgedFailure
+            | Mode::ForgedFailureFinal
+            | Mode::ForgedMessagesTerminal
+            | Mode::SignedFailure
+    ) {
+        // HPKE Base response sealing requires only the visible client public
+        // key. The relay has no provider secret or response signing key.
+        let envelope = object(&body);
+        let client_key = decode(envelope[E2EE]["client_eph_pub"].as_str().unwrap()).unwrap();
+        let ciphertext = decode(envelope[E2EE]["ciphertext"].as_str().unwrap()).unwrap();
+        let request_hash = binding_hash(&envelope_aad(&envelope).unwrap(), &ciphertext);
+        let mut sealer = ResponseSealer::new(&client_key, request_hash);
+        let content = sealer.seal(object(&json!({"id":"forged-id","choices":[{"index":0,"delta":{"content":"ATTACKER OUTPUT"}}]})), false);
+        let error = if broker.mode == Mode::ForgedMessagesTerminal {
+            sealer.seal(object(&json!({"choices":[],"type":"message_stop"})), false)
+        } else {
+            sealer.seal(
+                object(&json!({"choices":[],"error":{"type":"api_error","message":"failure"}})),
+                broker.mode != Mode::ForgedFailure,
+            )
+        };
+        if broker.mode == Mode::SignedFailure {
+            *broker.signed_text.lock().unwrap() = sealer.signed_text(true);
+        }
+        return (
+            [
+                ("content-type", "text/event-stream"),
+                ("zg-res-key", "res-1"),
+            ],
+            format!("data: {content}\n\ndata: {error}\n\n"),
+        )
+            .into_response();
+    }
     let (request, client_key, request_hash) = open_request(&broker.secret, &object(&body)).unwrap();
     let stream = request["stream"] == json!(true);
     let plain = completion(stream);
@@ -482,6 +542,13 @@ async fn chat(
 }
 
 async fn signature(State(broker): State<Arc<Broker>>) -> Response {
+    broker.signature_calls.fetch_add(1, Ordering::Release);
+    if matches!(
+        broker.mode,
+        Mode::ForgedFailure | Mode::ForgedFailureFinal | Mode::ForgedMessagesTerminal
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if broker.mode == Mode::SignatureMissing {
         return StatusCode::NOT_FOUND.into_response();
     }

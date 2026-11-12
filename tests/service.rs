@@ -78,6 +78,14 @@ impl StubUpstream {
 
 #[async_trait]
 impl UpstreamBackend for StubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -1361,6 +1369,14 @@ async fn streaming_exchange_keeps_its_admitted_keyset_across_renewals() {
 
     #[async_trait]
     impl UpstreamBackend for PausedUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused"
         }
@@ -1526,6 +1542,14 @@ async fn assert_buffered_receipt_uses_current_keyset(direct: bool) {
 
     #[async_trait]
     impl UpstreamBackend for PausedUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused-buffered"
         }
