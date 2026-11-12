@@ -84,11 +84,13 @@ pub(super) fn provider_cache_salt_field(provider: UpstreamProvider) -> Option<Ca
         UpstreamProvider::PhalaDirect => Some(CacheSaltField::CacheSalt("phala-direct")),
         UpstreamProvider::NearAi => Some(CacheSaltField::CacheSalt("near-ai")),
         UpstreamProvider::ArmetAi => Some(CacheSaltField::CacheSalt("armet-ai")),
+        UpstreamProvider::ZeroGPrivateComputer => {
+            Some(CacheSaltField::CacheSalt("0g-private-computer"))
+        }
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
-        | UpstreamProvider::SecretAi
-        | UpstreamProvider::ZeroGPrivateComputer => None,
+        | UpstreamProvider::SecretAi => None,
     }
 }
 

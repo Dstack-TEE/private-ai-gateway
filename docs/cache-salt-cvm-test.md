@@ -197,3 +197,7 @@ rm -rf "$WORK"
 - ArmetAI enforces `cache_salt` in the measured vLLM TD.
 - Phala Direct forwards `cache_salt` to SGLang/vLLM; SGLang storage tiers need
   ≥ 0.5.20. See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation).
+- The default compose has no 0G route because it needs a current reviewed
+  `accepted_subjects` boot-chain pin. To cover 0G, add a `0g-private-computer`
+  entry following [Configuration](providers/0g-private-computer/verification.md#configuration)
+  with a reviewed pin.

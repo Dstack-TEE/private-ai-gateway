@@ -61,7 +61,8 @@ are ignored. Anonymous requests receive no generated salt. Direct mode
 | Phala Direct | `cache_salt` | The production chain (PIG → vllm-router → SGLang or vLLM) forwards the field; the engine enforces isolation. With an SGLang storage tier (HiCache/Mooncake), require SGLang ≥ 0.5.20, whose storage keys include the salt; 0.5.19 partitions only GPU cache. |
 | NEAR AI | `cache_salt` | Honored by NEAR's TEE vLLM models. |
 | ArmetAI | `cache_salt` | Enforced by vLLM in the measured TD. |
-| Other providers | None | Secret AI uses Ollama, which has no partition field; 0G's engine is not established. Non-TEE providers receive no field. |
+| 0G Private Computer | `cache_salt` | The adapter seals the field and the broker merges it into the served request; honored by the tested models. The engine is set by unmeasured broker config, so re-test when 0G providers change. |
+| Other providers | None | Secret AI uses Ollama, which has no partition field. Non-TEE providers receive no field. |
 
 Injection applies only when the resolved upstream path ends in
 `/chat/completions`, `/completions`, `/responses`, or `/messages`, including

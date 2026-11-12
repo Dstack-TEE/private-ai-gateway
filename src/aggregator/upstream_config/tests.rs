@@ -1074,6 +1074,7 @@ fn cache_salt_provider_mapping_uses_stable_serde_tags() {
         UpstreamProvider::PhalaDirect,
         UpstreamProvider::NearAi,
         UpstreamProvider::ArmetAi,
+        UpstreamProvider::ZeroGPrivateComputer,
     ] {
         let tag = match builders::provider_cache_salt_field(provider).unwrap() {
             CacheSaltField::CacheSalt(tag) | CacheSaltField::UserCacheSecret(tag) => tag,
@@ -1085,7 +1086,6 @@ fn cache_salt_provider_mapping_uses_stable_serde_tags() {
         UpstreamProvider::Anthropic,
         UpstreamProvider::AciService,
         UpstreamProvider::SecretAi,
-        UpstreamProvider::ZeroGPrivateComputer,
     ] {
         assert!(builders::provider_cache_salt_field(provider).is_none());
     }
