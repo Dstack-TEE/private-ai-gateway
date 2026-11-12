@@ -79,13 +79,11 @@ impl StreamTransform {
     ) -> Result<Vec<Record>, ()> {
         // Failure evidence belongs to the response owner. Preserve the complete
         // source record, including usage, through every content stage.
-        if let Some(event) = record
+        if record
             .event
             .as_ref()
-            .filter(|event| event.meaning.failure.is_some())
+            .is_some_and(|event| event.meaning.failure.is_some())
         {
-            state.passthrough |=
-                !event.after_terminal && !matches!(self, Self::AnthropicToOpenaiChat);
             return Ok(vec![record]);
         }
         match self {
@@ -94,9 +92,6 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
-                if record.unconverted {
-                    return Ok(vec![record]);
-                }
                 record.edit_json(|body| {
                     response_transform::rewrite_identity(body, identity);
                     response_transform::canonicalize_stream(
@@ -108,10 +103,6 @@ impl StreamTransform {
                 return Ok(vec![record]);
             }
             _ => {}
-        }
-        if state.passthrough {
-            record.unconverted = true;
-            return Ok(vec![record]);
         }
         if record.residual {
             return Ok(vec![record]);
@@ -154,9 +145,6 @@ impl StreamTransform {
     /// Close what the stream left open when the upstream ends it. `Err(())`
     /// means it ended before the response was complete.
     fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, ()> {
-        if state.passthrough {
-            return Ok(None);
-        }
         match self {
             StreamTransform::OpenaiToAnthropicMessages(_) => state
                 .messages
@@ -195,7 +183,6 @@ pub fn select_stream_transform(
 /// touches the part for its transform.
 #[derive(Default)]
 struct StreamState {
-    passthrough: bool,
     // Anthropic -> OpenAI chat.
     tool_index: Option<i64>,
     usage: Option<Value>,
@@ -1279,9 +1266,11 @@ impl BridgeHandle {
         let mut closed = BridgeClosure::default();
         if let Some(stream) = &mut state.messages {
             stream.close_text(true, &mut closed.records);
+            stream.terminated = true;
         }
         if let Some(stream) = &mut state.responses {
             stream.close_text(true, &mut closed.records);
+            stream.terminated = true;
             if stream.started() {
                 let response = stream
                     .events

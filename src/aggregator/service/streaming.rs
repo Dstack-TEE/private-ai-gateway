@@ -122,13 +122,16 @@ pub(crate) fn decode_source(
 ) -> EventStream {
     let mut ids = Identifiers::default();
     Box::pin(
-        DecodedStream::new(inner, Some(protocol)).map(move |mut record| {
+        DecodedStream::new(inner, Some(protocol)).filter_map(move |mut record| {
             if let Ok(record) = &mut record {
                 accounting.ingress(record);
                 ids.observe(record);
                 journal.observe_source(&ids);
+                if accounting.observe_after_terminal(record) {
+                    return std::future::ready(None);
+                }
             }
-            record
+            std::future::ready(Some(record))
         }),
     )
 }
@@ -340,6 +343,9 @@ impl ResponseOwner {
     }
 
     fn accept(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
+        if self.failure.is_some() && self.saw_terminal {
+            return Ok(Bytes::new());
+        }
         self.truncated |= record.residual;
         let failure = record
             .event
@@ -350,26 +356,7 @@ impl ResponseOwner {
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
         let Some(event) = record.event.as_ref().filter(|_| failure) else {
-            // A failed bridge has already emitted its destination terminal.
-            if self.failure.is_some()
-                && self.saw_terminal
-                && record
-                    .event
-                    .as_ref()
-                    .is_some_and(|event| event.meaning.terminal.is_some())
-                && self
-                    .accounting
-                    .as_ref()
-                    .is_some_and(|accounting| accounting.handle.has_bridge())
-            {
-                return Ok(Bytes::new());
-            }
-            // Only records the bridge actually converted reach the destination.
-            return if self.accounting.is_some() && self.failure.is_some() && record.unconverted {
-                Ok(Bytes::new())
-            } else {
-                self.encode(record)
-            };
+            return self.encode(record);
         };
         if self.accounting.is_none() {
             // Direct forwarding retains the provider's application payloads.
@@ -564,6 +551,11 @@ impl ResponseOwner {
                 .and_then(Value::as_u64)
             {
                 self.sequence = Some(self.sequence.map_or(sequence, |old| old.max(sequence)));
+            }
+        }
+        if self.failure.is_some() && self.saw_terminal {
+            if let Some(accounting) = &self.accounting {
+                accounting.handle.failure_terminal();
             }
         }
         Ok(bytes)

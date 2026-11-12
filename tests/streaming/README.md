@@ -47,6 +47,12 @@ remove unknown fields on Messages errors and Responses error events. Bridge fail
 omit startup events or the Chat chunk wrapper that existed only to carry an error.
 After content has been emitted, the owner asks the bridge to use its existing
 close path, keeping closing frames and partial Responses output before failure.
+Once the owner emits a failed response's destination terminal, no continuation
+records are converted or forwarded. Accounting still observes the source to EOF
+with the existing bridge usage rules: billing and reports are unchanged, including
+usage after that terminal. Native nonterminal failure records continue normally
+until their protocol terminal. The `diff_messages_chat_usage_after_error_1` case
+pins the removed continuation chunk and the unchanged completion-token report.
 Legacy Anthropic completion reports a source failure instead of success.
 
 Framing normalization and rejection cases are pinned separately by

@@ -14,7 +14,7 @@ use tokio::time::{sleep, Sleep};
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{MiddlewareReceiptJournal, ServiceError};
 use crate::sse::{EventStream, Record};
-use crate::sse_protocol::{sse_protocol, SseProtocol};
+use crate::sse_protocol::{sse_protocol, EventKind, SseProtocol};
 
 use super::control::ControlClient;
 use super::pricing;
@@ -152,10 +152,12 @@ struct AccountingState {
     report: StreamReport,
     last_usage: Option<Value>,
     start_usage: Option<Value>,
+    chat_start_usage: Option<Value>,
     upstream_usage: Option<UpstreamUsage>,
     bridge: Option<super::stream_transform::BridgeHandle>,
     ttft_ms: Option<u64>,
     ingress_terminal: bool,
+    failure_terminal: bool,
     settled: bool,
 }
 
@@ -172,9 +174,11 @@ impl Accounting {
                 report,
                 last_usage: None,
                 start_usage: None,
+                chat_start_usage: None,
                 upstream_usage: None,
                 ttft_ms: None,
                 ingress_terminal: false,
+                failure_terminal: false,
                 bridge: None,
                 settled: false,
             }))),
@@ -298,7 +302,63 @@ impl AccountingHandle {
         state.ingress_terminal |= event.meaning.terminal.is_some();
         if let Some(usage) = event.payload.json().and_then(message_start_usage) {
             state.start_usage = Some(usage.clone());
+            // Match the Messages-to-Chat bridge's usage observations without
+            // converting records that arrive after the destination terminal.
+            if event.meaning.failure.is_none()
+                && event.meaning.terminal.is_none()
+                && !matches!(
+                    event.meaning.kind,
+                    EventKind::Ping | EventKind::ContentBlockStop
+                )
+            {
+                state.chat_start_usage = Some(usage.clone());
+            }
         }
+    }
+    pub(crate) fn failure_terminal(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .failure_terminal = true;
+    }
+    /// Source hashing and the existing billing continue to EOF, independently
+    /// of output. Preserve the old bridges' usage selection here, not in them.
+    pub(crate) fn observe_after_terminal(&self, record: &mut Record) -> bool {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.failure_terminal {
+            return false;
+        }
+        let Some(event) = record.event.as_ref() else {
+            return true;
+        };
+        let failed = event.meaning.failure.is_some();
+        let source = event.source_protocol;
+        if state.bridge.is_none()
+            || failed
+            || (source == Some(SseProtocol::OpenaiChat)
+                && state.report.endpoint != crate::aggregator::service::COMPLETIONS_PATH)
+        {
+            drop(state);
+            self.observe(record, failed);
+        } else if source == Some(SseProtocol::AnthropicMessages)
+            && sse_protocol(&state.report.endpoint) == SseProtocol::OpenaiChat
+            && event.meaning.kind == EventKind::MessageDelta
+            && event.meaning.terminal.is_none()
+        {
+            if let Some(usage) = record.json().and_then(|body| body.get("usage")) {
+                let mut usage = response_transform::chat_usage(
+                    state.chat_start_usage.as_ref(),
+                    response_transform::i64_field(usage, "output_tokens"),
+                );
+                filter_observed_usage(Some(&mut usage), SseProtocol::OpenaiChat, None);
+                drop(state);
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .last_usage = Some(usage);
+            }
+        }
+        true
     }
     pub fn selected(&self, route: String, attempt: u32, status: u16) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -350,12 +410,6 @@ impl AccountingHandle {
         let destination = sse_protocol(&state.report.endpoint);
         let source = event.source_protocol;
         let bridged = source.is_some_and(|source| source != destination);
-        if record.unconverted
-            && (source != Some(SseProtocol::OpenaiChat)
-                || state.report.endpoint == crate::aggregator::service::COMPLETIONS_PATH)
-        {
-            return None;
-        }
         let mut wire_usage = None;
         record.edit_json(|parsed| {
             // Filter each usage object once, including when it is emitted but

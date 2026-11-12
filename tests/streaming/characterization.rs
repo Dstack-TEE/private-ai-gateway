@@ -1465,12 +1465,118 @@ async fn bridge_failures_close_existing_content_and_keep_continuation_accounting
         } else if case.name.contains("messages_chat") {
             assert!(reports[0]["usage"].get("prompt_tokens").is_none());
             assert_eq!(reports[0]["usage"]["completion_tokens"], 3);
-            assert!(wire.contains("\"finish_reason\":\"stop\""), "{wire}");
+            assert!(wire.ends_with("data: [DONE]\n\n"), "{wire}");
+            assert!(!wire.contains("\"usage\""), "{wire}");
         } else if case.format == "anthropic" {
             assert!(reports[0]["usage"].is_null());
         } else {
             assert!(wire.contains("\"choices\":[],\"usage\":"), "{wire}");
         }
+    }
+}
+
+#[tokio::test]
+async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_continue() {
+    let chat = concat!(
+        "data: {\"error\":{\"message\":\"private\"}}\n\n",
+        "data: [DONE]\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"AFTER_FAILURE\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+    );
+    let messages = concat!(
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"private\"}}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"text\":\"AFTER_FAILURE\",\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let responses = concat!(
+        "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"private\"}}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"AFTER_FAILURE\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
+    );
+    for (name, endpoint, source, format, tokens) in [
+        (
+            "native_chat",
+            Endpoint::ChatComplete,
+            chat,
+            "openai",
+            Some(("completion_tokens", 3)),
+        ),
+        (
+            "chat_messages",
+            Endpoint::Messages,
+            chat,
+            "openai",
+            Some(("output_tokens", 3)),
+        ),
+        (
+            "chat_responses",
+            Endpoint::CreateModelResponse,
+            chat,
+            "openai",
+            Some(("completion_tokens", 3)),
+        ),
+        (
+            "native_messages",
+            Endpoint::Messages,
+            messages,
+            "anthropic",
+            Some(("output_tokens", 3)),
+        ),
+        (
+            "messages_chat",
+            Endpoint::ChatComplete,
+            messages,
+            "anthropic",
+            Some(("completion_tokens", 3)),
+        ),
+        (
+            "messages_responses",
+            Endpoint::CreateModelResponse,
+            messages,
+            "anthropic",
+            None,
+        ),
+        ("legacy", Endpoint::Complete, chat, "anthropic", None),
+        (
+            "native_responses",
+            Endpoint::CreateModelResponse,
+            responses,
+            "openai",
+            Some(("output_tokens", 3)),
+        ),
+    ] {
+        let case = Case::new(name, endpoint, source, format);
+        let snapshot = capture(&case).await;
+        let wire = snapshot["wire"].as_str().unwrap();
+        assert!(!wire.contains("AFTER_FAILURE"), "{name}: {wire}");
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1, "{name}");
+        assert_eq!(reports[0]["status"], 502, "{name}");
+        assert_eq!(reports[0]["errorMessage"], "stream_inband_error", "{name}");
+        assert!(reports[0]["errorSource"].is_null(), "{name}");
+        if let Some((field, count)) = tokens {
+            assert_eq!(reports[0]["usage"][field], count, "{name}");
+        } else {
+            assert!(reports[0]["usage"].is_null(), "{name}");
+        }
+        assert_eq!(
+            snapshot["before_eof"],
+            json!({"receipt":false,"report":false})
+        );
+        assert_eq!(
+            snapshot["source_hash"],
+            crate::aci::digest::sha256_hex(source.as_bytes())
+        );
+        assert_eq!(snapshot["signature_valid"], true, "{name}");
+        assert!(
+            snapshot["receipt"]["event_log"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["type"] == "response.received"
+                        && event["body_hash"] == snapshot["source_hash"]
+                }),
+            "{name}"
+        );
     }
 }
 

@@ -51,8 +51,6 @@ pub(crate) struct Record {
     /// The library returns metadata-only blocks, with no dispatched payload.
     metadata: Sse,
     pub residual: bool,
-    /// Content forwarded by a bridge after it stopped producing destination records.
-    pub unconverted: bool,
     heartbeat: bool,
     edited: bool,
     /// Explicit non-SSE response bytes, including the early-commit handoff.
@@ -75,7 +73,6 @@ impl Record {
             event,
             metadata,
             residual: false,
-            unconverted: false,
             heartbeat: false,
             edited: false,
             non_sse: None,
@@ -133,7 +130,6 @@ impl Record {
                 ..Sse::default()
             },
             residual: false,
-            unconverted: false,
             heartbeat: false,
             edited: false,
             non_sse: None,

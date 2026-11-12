@@ -278,6 +278,10 @@ once as one payload.
 Failure evidence remains sticky through the source protocol's terminal. Later
 source events cannot change that outcome; their bytes are still hashed through
 EOF, and usage and billing retain the existing behavior of the selected bridge.
+After the owner emits a destination terminal for a failed response, no further
+records are converted or sent to the client. Source reading and accounting still
+continue to EOF with the same usage and billing. A native failure record without
+a terminal continues normally until its protocol terminal arrives.
 A source terminal alone does not prove a conversion succeeded: the destination
 terminal must be produced. Gateway stage failures still fail the response, even
 if the destination terminal has already been sent; no error tail is appended
