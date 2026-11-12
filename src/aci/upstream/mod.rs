@@ -65,7 +65,7 @@ pub struct UpstreamRequest {
     /// Internal user secret, consumed by model routing before forwarding.
     pub cache_salt: Option<crate::middleware::cache_salt::CacheSalt>,
     /// Shared file bytes, encoded once after route selection and model rewrite.
-    pub form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
+    pub form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
     /// Matches `body`; absent for JSON requests.
     pub content_type: Option<String>,
     pub body: Bytes,
@@ -90,11 +90,10 @@ pub struct PreparedUpstreamRequest {
 }
 
 impl PreparedUpstreamRequest {
-    pub(crate) async fn encode_audio(&mut self) -> Result<(), UpstreamError> {
+    pub(crate) async fn encode_media(&mut self) -> Result<(), UpstreamError> {
         if let Some(form) = self.request.form.take() {
-            let params = serde_json::from_slice(&self.request.body).map_err(|_| {
-                UpstreamError::InvalidRequest("invalid transcription metadata".into())
-            })?;
+            let params = serde_json::from_slice(&self.request.body)
+                .map_err(|_| UpstreamError::InvalidRequest("invalid media metadata".into()))?;
             let (body, content_type) = form.encode(&params).await?;
             self.request.body = body;
             self.request.content_type = Some(content_type);

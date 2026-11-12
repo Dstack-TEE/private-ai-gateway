@@ -12,12 +12,16 @@ pub mod completion;
 pub mod config;
 pub mod control;
 pub mod errors;
+pub mod image_edits;
 pub mod images;
+pub mod media;
 pub mod pricing;
 pub mod reasoning;
 pub mod request_features;
 pub mod request_transform;
+pub mod rerank;
 pub mod response_transform;
+pub mod speech;
 pub mod sse;
 pub mod stream_transform;
 pub mod types;
@@ -39,6 +43,34 @@ use std::sync::Arc;
 
 use crate::aggregator::service::AciService;
 use errors::Surface;
+
+/// Validate buffered JSON metadata and return its upstream allowlist, when applicable.
+pub(crate) fn validate_buffered(
+    endpoint: request_transform::Endpoint,
+    params: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, images::RequestError> {
+    use request_transform::Endpoint;
+    let body = match endpoint {
+        Endpoint::ImagesGenerations => {
+            images::validate_request(params)?;
+            images::upstream_body(params)
+        }
+        Endpoint::ImagesEdits => {
+            image_edits::validate_request(params)?;
+            image_edits::upstream_fields(params)
+        }
+        Endpoint::AudioSpeech => {
+            speech::validate_request(params)?;
+            speech::upstream_body(params)
+        }
+        Endpoint::Rerank => {
+            rerank::validate_request(params)?;
+            rerank::upstream_body(params)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(body))
+}
 
 /// Stamp the native SDK header from the same gateway identity used for billing.
 pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {

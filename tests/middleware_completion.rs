@@ -89,10 +89,17 @@ impl UpstreamBackend for RecordingUpstream {
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let parsed = if let Some(content_type) = req.content_type.as_deref() {
-            private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
-                .await
-                .unwrap()
-                .0
+            if req.path.as_deref() == Some("/v1/images/edits") {
+                private_ai_gateway::middleware::image_edits::parse(req.body.clone(), content_type)
+                    .await
+                    .unwrap()
+                    .0
+            } else {
+                private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
+                    .await
+                    .unwrap()
+                    .0
+            }
         } else {
             serde_json::from_slice(&req.body).unwrap()
         };
@@ -5934,25 +5941,6 @@ async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report()
 }
 
 #[tokio::test]
-async fn images_no_opt_in_candidate_returns_model_not_found() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    let (status, _, body) = response_parts(
-        middleware(url)
-            .handle_completion(&service, images_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert_eq!(body["error"]["type"], "model_not_found");
-    assert!(requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn images_malformed_2xx_is_not_billed_and_never_returns_url() {
     for (requested, upstream) in [
         (Some(1), json!({"data":[{"url":"https://private"}]})),
@@ -6037,6 +6025,7 @@ fn audio_input() -> CompletionInput {
         params,
         received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
         audio_form: Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+            kind: private_ai_gateway::middleware::media::FormKind::Transcription,
             file: bytes::Bytes::from_static(b"sensitive audio"),
             extension: "wav".into(),
         })),
@@ -6304,26 +6293,476 @@ async fn audio_invalid_duration_is_502_without_billing_or_retranscription() {
     }
 }
 
+fn rerank_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","query":"q","documents":["a",{"text":"b"}],"top_n":1,"return_documents":true,"user":"alice"});
+    CompletionInput {
+        endpoint: Endpoint::Rerank,
+        endpoint_path: "/v1/rerank",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-rerank".into(),
+        ..chat_input()
+    }
+}
+
 #[tokio::test]
-async fn audio_requires_endpoint_opt_in() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[
-            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
-        ]}),
+async fn rerank_opt_in_sanitizes_before_pricing_and_reporting() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}],
+        "pricing":{"inputCostPerToken":"0.01","outputCostPerToken":"99"}}))
+    .await;
+    let (service, requests) = build_recording_service(200, serde_json::to_vec(&json!({
+        "id":"private","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"private":true}],
+        "usage":{"prompt_tokens":5,"total_tokens":5,"completion_tokens":100,"cost":99,"private":"private"},"private":true
+    })).unwrap(), "application/json");
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, rerank_input())
+            .await,
     )
     .await;
-    let (service, requests) = build_recording_service(
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["usage"],
+        json!({"prompt_tokens":5,"total_tokens":5,"cost":0.05})
+    );
+    assert_eq!(
+        body["results"],
+        json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}])
+    );
+    assert_eq!(body["model"], "gpt-test");
+    assert!(body.get("private").is_none());
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/rerank");
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+        assert!(calls[0].body.get("user").is_none());
+        assert_eq!(calls[0].body["documents"], json!(["a", "b"]));
+    }
+    assert!(service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .is_some());
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
+    assert_eq!(report["selectedRouteId"], "rank:model");
+    assert_eq!(report["usage"], json!({"prompt_tokens":5,"total_tokens":5}));
+}
+
+#[tokio::test]
+async fn rerank_malformed_usage_is_receipted_and_unbilled() {
+    let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}]})).await;
+    let (service, _) = build_recording_service(
         200,
-        br#"{"text":"hello","duration":2.1}"#.to_vec(),
+        br#"{"results":[{"index":0,"relevance_score":1}]}"#.to_vec(),
         "application/json",
     );
-    let (status, _, _) = response_parts(
+    let (status, headers, _) = response_parts(
         middleware(url)
-            .handle_completion(&service, audio_input())
+            .handle_completion(&service, rerank_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 502);
+    assert!(service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .is_some());
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
+    assert_eq!(report["status"], 502);
+    assert!(report.get("usage").is_none_or(Value::is_null));
+}
+
+fn image_edits_input() -> CompletionInput {
+    CompletionInput {
+        endpoint: Endpoint::ImagesEdits,
+        endpoint_path: "/v1/images/edits",
+        params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
+        received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
+        audio_form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
+            kind: private_ai_gateway::middleware::media::FormKind::ImageEdit,
+            file: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
+            extension: "jpg".into(),
+        })),
+        request_id: "req-edits".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"generation:model","format":"openai","supportedEndpoints":["/v1/images/generations"]},
+        {"routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}],
+        "pricing":{"imageCostPerImage":"0.012"}})).await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"id":"private","file_path":"private","data":[{"b64_json":"image","url":"private"}]}"#
+            .to_vec(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, image_edits_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["usage"]["cost"], 0.012);
+    assert!(!body.to_string().contains("private"));
+    let forwarded = requests.lock().unwrap()[0].clone();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+    let (params, image) = private_ai_gateway::middleware::image_edits::parse(
+        forwarded.raw_body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        params,
+        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","response_format":"b64_json"})
+    );
+    assert_eq!(image.file, b"\xff\xd8\xffimage".as_slice());
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/images/edits");
+    assert_eq!(
+        pres.lock().unwrap()[0]["provider"],
+        json!({"order":["near"]})
+    );
+    assert!(!pres.lock().unwrap()[0].to_string().contains("make it blue"));
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let forwarded_event = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "request.forwarded")
+        .unwrap();
+    assert_eq!(
+        forwarded_event["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(&forwarded.raw_body)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+    assert_eq!(report["selectedRouteId"], "edit:model");
+    assert_eq!(
+        report["images"],
+        json!({"count":1,"size":"512x512","quality":"auto"})
+    );
+    assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn image_edits_no_opt_in_or_malformed_success_never_bills() {
+    for (opt_in, status) in [(false, 404), (true, 502)] {
+        let endpoints = if opt_in {
+            json!(["/v1/images/edits"])
+        } else {
+            json!(["/v1/images/generations"])
+        };
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"edit:model","format":"openai","supportedEndpoints":endpoints}],"pricing":{"imageCostPerImage":"0.012"}})).await;
+        let (service, requests) = build_recording_service(
+            200,
+            br#"{"data":[{"url":"private"}]}"#.to_vec(),
+            "application/json",
+        );
+        let (actual, headers, _) = response_parts(
+            middleware(url)
+                .handle_completion(&service, image_edits_input())
+                .await,
+        )
+        .await;
+        assert_eq!(actual, status);
+        assert_eq!(requests.lock().unwrap().len(), usize::from(opt_in));
+        if opt_in {
+            assert!(service
+                .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+                .is_some());
+        }
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+        assert!(report.get("images").is_none());
+        assert!(report["usage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}]})).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingUpstream {
+        requests: requests.clone(),
+        status: 200,
+        body: br#"{"data":[{"b64_json":"image"}]}"#.to_vec(),
+        content_type: "application/json",
+    });
+    let mut router = ModelRouterBackend::new("image-edits-policy");
+    router
+        .add_route(
+            ModelRoute::new("gpt-test", "flux", backend, "near:model")
+                .unwrap()
+                .with_is_tee(Some(true)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    let mut raw = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-test\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.png\"\r\n\r\n".to_vec();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    let request = |provider: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/images/edits")
+            .header("authorization", "Bearer tenant-key")
+            .header("host", "gateway.example")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            .header("x-aci-provider", provider.to_string())
+            .body(axum::body::Body::from(raw.clone()))
+            .unwrap()
+    };
+    let (status, headers, _) = response_parts(
+        app.clone()
+            .oneshot(request(json!({"aci_verified":true})))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    let document = receipt.document_json().unwrap();
+    let session = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (pin, expected) in [(session, 200), ("ab".repeat(32), 412)] {
+        let provider = json!({"aci_session_ids":[pin]});
+        let (status, _, _) = response_parts(
+            app.clone()
+                .oneshot(request(provider.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected);
+        assert_eq!(pres.lock().unwrap().last().unwrap()["provider"], provider);
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    for request in requests.lock().unwrap().iter() {
+        assert!(!request.headers.contains_key("x-aci-provider"));
+        assert_eq!(request.body["model"], "flux");
+    }
+}
+
+#[tokio::test]
+async fn rerank_aliases_share_canonical_opt_in_forwarding_receipts_and_metrics() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}]})).await;
+    let (service, requests) = build_recording_service(200, br#"{"results":[{"index":0,"relevance_score":1}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.to_vec(), "application/json");
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    for path in ["/v2/rerank", "/rerank"] {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&rerank_input().params).unwrap(),
+            ))
+            .unwrap();
+        let (status, headers, _) =
+            response_parts(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, 200);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert_eq!(receipt.document_json().unwrap()["endpoint"], "/v1/rerank");
+    }
+    let pres = pres.lock().unwrap();
+    assert_eq!(pres.len(), 2);
+    assert!(pres.iter().all(|pre| pre["endpoint"] == "/v1/rerank"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path.as_deref() == Some("/v1/rerank")));
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    assert!(metrics.lines().any(
+        |line| line.starts_with("private_ai_gateway_requests_total{")
+            && line.contains("endpoint=\"/v1/rerank\"")
+            && line.ends_with(" 2")
+    ));
+    assert!(!metrics.contains("endpoint=\"/v2/rerank\""));
+    assert!(!metrics.contains("endpoint=\"/rerank\""));
+}
+
+fn speech_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","input":"界🙂e\u{301}","voice":"ryan","speed":1.2,"stream_format":"audio"});
+    CompletionInput {
+        endpoint: Endpoint::AudioSpeech,
+        endpoint_path: "/v1/audio/speech",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-speech".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}],
+        "pricing":{"speechCostPerCharacter":"0.01"}}))
+    .await;
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    let (service, requests) = build_recording_service(200, audio.to_vec(), "audio/wav; rate=24000");
+    let response = middleware(url)
+        .handle_completion(&service, speech_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "audio/wav");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), audio);
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/audio/speech");
+    assert!(!pres.lock().unwrap()[0].to_string().contains("input"));
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+        assert!(calls[0].body.get("stream_format").is_none());
+    }
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let usage = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "usage.reported")
+        .unwrap();
+    assert_eq!(usage["usage"], json!({"type":"characters","characters":4}));
+    let returned = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "response.returned")
+        .unwrap();
+    assert_eq!(
+        returned["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(audio)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
+    assert_eq!(report["usage"], json!({"type":"characters","characters":4}));
+    assert_eq!(report["pricing"]["speechCostPerCharacter"], "0.01");
+    assert_eq!(report["selectedRouteId"], "tts:model");
+}
+
+#[tokio::test]
+async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
+    let (url, pres, _) = spawn_control_capturing_pre(
+        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"audio".to_vec(), "audio/wav");
+    let (status, _, _) = response_parts(
+        middleware(url.clone())
+            .handle_completion(&service, speech_input())
             .await,
     )
     .await;
     assert_eq!(status, 404);
+    for patch in [
+        json!({"stream_format":"sse"}),
+        json!({"voice":null}),
+        json!({"input":"🙂".repeat(4097)}),
+    ] {
+        let mut input = speech_input();
+        input
+            .params
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, _, _) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+    assert_eq!(pres.lock().unwrap().len(), 1);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn speech_failures_keep_receipts_without_billable_characters() {
+    for (upstream_status, content_type, expected) in [
+        (200, "text/event-stream", 502),
+        (200, "audio/wav, text/html", 502),
+        (200, "audio/wav/extra", 502),
+        (200, "application/json", 502),
+        (400, "application/json", 400),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}]})).await;
+        let (service, _) = build_recording_service(
+            upstream_status,
+            br#"{"error":{"message":"bad voice private"}}"#.to_vec(),
+            content_type,
+        );
+        let (status, headers, _) = response_parts(
+            middleware(url)
+                .handle_completion(&service, speech_input())
+                .await,
+        )
+        .await;
+        assert_eq!(status, expected);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert!(!receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "usage.reported"));
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
+        assert_eq!(report["status"], expected);
+        assert!(report["usage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn buffered_native_endpoints_require_explicit_opt_in() {
+    let (url, _) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[
+            {"routeId":"plain:model","format":"openai"},
+            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
+        ]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for input in [images_input(), audio_input(), rerank_input()] {
+        let (status, _, body) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["type"], "model_not_found");
+    }
     assert!(requests.lock().unwrap().is_empty());
 }

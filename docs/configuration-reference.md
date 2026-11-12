@@ -527,9 +527,11 @@ gateway therefore always requests `verbose_json` internally for NEAR audio
 and preserves the caller's requested output format. Other providers receive
 the requested format. No word timestamps are added unless requested.
 
-Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
-402 MiB upload byte budget (60-second read deadline), independent 16 inference
-slots, and 8 MiB upstream response. Upload bytes are charged chunk by chunk
+Transcription limits are process constants: 25 MiB file, 64 KiB text,
+independent 16 inference slots, and 8 MiB upstream response. Audio transcription
+and image edit uploads share one process-wide 402 MiB upload byte budget and a
+60-second read deadline; buffered uploads for either endpoint reduce the bytes
+available to the other. Upload bytes are charged chunk by chunk
 until handoff or drop; connections with no buffered data and declared
 `Content-Length` do not reserve upload capacity.
 Header-based audio/image refusals discard unread bytes without buffering up to
@@ -543,3 +545,8 @@ returns `429 rate_limit_exceeded` with `Retry-After: 1`.
 `private_ai_gateway_audio_failures_total{reason}` uses fixed
 reasons `upload_rejection`, `admission_rejection`, `malformed_duration`, and
 `response_size_failure`, without audio, prompts, or filenames.
+
+`private_ai_gateway_image_failures_total{reason="upload_rejection"}` counts
+image edit upload and multipart parse rejections, including byte-budget, size,
+deadline, media-type and request-field validation failures. Like the audio
+counter, its labels contain no uploaded content, prompts or filenames.

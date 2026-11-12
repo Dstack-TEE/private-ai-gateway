@@ -619,10 +619,11 @@ pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&st
         Endpoint::CreateModelResponse => canonicalize_responses(body),
         Endpoint::Messages => canonicalize_messages(body, request_id),
         Endpoint::Embed => {}
+        Endpoint::Rerank => super::rerank::canonicalize(body),
         Endpoint::SystemOne => canonicalize_systemone(body),
         // Buffered audio is already validated and sanitized by audio::sanitize_response.
-        Endpoint::AudioTranscriptions => {}
-        Endpoint::ImagesGenerations => super::images::canonicalize(body),
+        Endpoint::AudioTranscriptions | Endpoint::AudioSpeech => {}
+        Endpoint::ImagesGenerations | Endpoint::ImagesEdits => super::images::canonicalize(body),
     }
 }
 

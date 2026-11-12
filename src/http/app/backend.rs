@@ -28,7 +28,7 @@ pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
     pub(super) endpoint_path: &'static str,
     pub(super) received_body: axum::body::Bytes,
-    pub(super) audio_form: Option<Arc<crate::middleware::audio::AudioForm>>,
+    pub(super) audio_form: Option<Arc<crate::middleware::media::MediaForm>>,
     pub(super) forwarded_body: Option<Vec<u8>>,
     pub(super) aci_required: bool,
     pub(super) aci_session_ids: Vec<String>,
@@ -191,9 +191,21 @@ async fn forward_to_backend_inner(
             // The service already normalized an upstream error into the gateway's
             // envelope (with a matching receipt + E2EE wire body), so the buffered
             // response is returned uniformly here.
+            let content_type = if input.endpoint_path
+                == crate::aggregator::service::AUDIO_SPEECH_PATH
+                && (200..300).contains(&forward.upstream_status)
+            {
+                forward
+                    .upstream_headers
+                    .get("content-type")
+                    .map(String::as_str)
+                    .unwrap_or("application/json")
+            } else {
+                "application/json"
+            };
             let mut resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
-                "application/json",
+                content_type,
                 forward.e2ee.as_ref(),
             );
             insert_str_header(
@@ -325,7 +337,7 @@ pub(super) fn generate_request_id() -> String {
 
 pub(super) fn chat_response_headers(
     receipt_id: &str,
-    content_type: &'static str,
+    content_type: &str,
     e2ee: Option<&E2eeResponseInfo>,
 ) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
@@ -347,13 +359,8 @@ pub(super) fn chat_response_headers(
         }
     }
 
-    // Ours, not the upstream's. Relaying the upstream `content-type` leaked a
-    // small fingerprint of its own (whether it appends `; charset=utf-8`), and
-    // the caller already knows which content type this path emits.
-    resp_headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    // JSON/SSE callers supply the gateway type; speech supplies validated audio.
+    insert_str_header(&mut resp_headers, "content-type", content_type);
     resp_headers
 }
 

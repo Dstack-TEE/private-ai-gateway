@@ -591,6 +591,7 @@ async fn audio_binding_retry_reuses_exact_encoded_bytes_and_boundary() {
     request.received_body = b"raw multipart bytes";
     request.forwarded_body = Some(br#"{"model":"model-a","response_format":"json"}"#.to_vec());
     request.audio_form = Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+        kind: private_ai_gateway::middleware::media::FormKind::Transcription,
         file: bytes::Bytes::from_static(b"spoken audio"),
         extension: "wav".into(),
     }));

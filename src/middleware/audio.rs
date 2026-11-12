@@ -1,20 +1,19 @@
 //! Bounded OpenAI multipart transcription input and sanitized JSON output.
 
+use axum::body::Bytes;
+#[cfg(test)]
 use axum::{
-    body::{Body, Bytes},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
+    body::Body,
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
 };
+#[cfg(test)]
 use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::{
-    collections::HashSet,
-    sync::{Arc, LazyLock},
-    time::Duration,
-};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use std::{collections::HashSet, sync::Arc};
+#[cfg(test)]
+use tokio::sync::Semaphore;
 
 pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -27,151 +26,11 @@ const UPSTREAM_FIELDS: &[&str] = &[
     "response_format",
     "timestamp_granularities[]",
 ];
-// Charge bytes received, not connections or declared Content-Length.
-const UPLOAD_BYTE_BUDGET: usize = 16 * MAX_BODY_BYTES;
-const READ_DEADLINE: Duration = Duration::from_secs(60);
-static UPLOAD_BYTES: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(UPLOAD_BYTE_BUDGET)));
-
-#[derive(Debug)]
-pub struct AudioError {
-    pub status: StatusCode,
-    pub code: &'static str,
-    pub param: String,
-    message: String,
-    error_type: &'static str,
-}
-impl AudioError {
-    fn invalid(param: &str) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_parameter",
-            param: param.into(),
-            message: format!("invalid transcription parameter: {param}"),
-            error_type: "invalid_request_error",
-        }
-    }
-    fn capacity() -> Self {
-        Self {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            code: "rate_limit_exceeded",
-            param: "body".into(),
-            message: "transcription upload byte capacity reached; retry shortly".into(),
-            error_type: "rate_limit_error",
-        }
-    }
-    fn large() -> Self {
-        Self {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "request_too_large",
-            param: "file".into(),
-            message: "transcription upload exceeds the file or request size limit".into(),
-            error_type: "invalid_request_error",
-        }
-    }
-    fn timeout() -> Self {
-        Self {
-            status: StatusCode::REQUEST_TIMEOUT,
-            code: "upload_timeout",
-            param: "body".into(),
-            message: "transcription upload exceeded the 60-second read deadline".into(),
-            error_type: "invalid_request_error",
-        }
-    }
-}
-
-impl IntoResponse for AudioError {
-    fn into_response(self) -> Response {
-        let mut response = (self.status, Json(json!({"error":{"type":self.error_type, "code":self.code,"param":self.param,"message":self.message}}))).into_response();
-        if matches!(
-            self.status,
-            StatusCode::PAYLOAD_TOO_LARGE | StatusCode::REQUEST_TIMEOUT
-        ) {
-            response
-                .headers_mut()
-                .insert(header::CONNECTION, HeaderValue::from_static("close"));
-        }
-        if self.status == StatusCode::TOO_MANY_REQUESTS {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        }
-        response
-    }
-}
-
-/// Account for each received chunk until inference admission takes over, or
-/// the upload is refused, times out, or drops. Opening a connection reserves no bytes.
-pub async fn read_upload(
-    headers: &HeaderMap,
-    body: Body,
-) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
-    if headers
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|v| v > MAX_BODY_BYTES as u64)
-    {
-        return Err(AudioError::large());
-    }
-    tokio::time::timeout(READ_DEADLINE, collect_upload(body, UPLOAD_BYTES.clone()))
-        .await
-        .map_err(|_| AudioError::timeout())?
-}
-
-async fn collect_upload(
-    body: Body,
-    budget: Arc<Semaphore>,
-) -> Result<(Bytes, OwnedSemaphorePermit), AudioError> {
-    let mut permit = budget
-        .clone()
-        .try_acquire_many_owned(0)
-        .map_err(|_| AudioError::capacity())?;
-    let mut chunks = body.into_data_stream();
-    let mut bytes = bytes::BytesMut::new();
-    while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|_| AudioError::invalid("body"))?;
-        if chunk.len() > MAX_BODY_BYTES - bytes.len() {
-            return Err(AudioError::large());
-        }
-        let count = u32::try_from(chunk.len()).map_err(|_| AudioError::large())?;
-        let chunk_permit = budget
-            .clone()
-            .try_acquire_many_owned(count)
-            .map_err(|_| AudioError::capacity())?;
-        permit.merge(chunk_permit);
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok((bytes.freeze(), permit))
-}
-
-/// Shared slices of the buffered upload; no caller filename or MIME is forwarded.
-#[derive(Debug, Clone)]
-pub struct AudioForm {
-    pub file: Bytes,
-    pub extension: String,
-}
+use super::media::{self, FormKind};
+pub use super::media::{MediaError as AudioError, MediaForm as AudioForm};
 
 pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioForm>), AudioError> {
-    let boundary =
-        multer::parse_boundary(content_type).map_err(|_| AudioError::invalid("content-type"))?;
-    if boundary.is_empty()
-        || boundary.len() > 70
-        || !boundary.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
-    {
-        return Err(AudioError::invalid("boundary"));
-    }
-    let constraints = multer::Constraints::new().size_limit(
-        multer::SizeLimit::new()
-            .whole_stream(MAX_BODY_BYTES as u64)
-            .per_field(MAX_TEXT_BYTES as u64)
-            .for_field("file", MAX_FILE_BYTES as u64),
-    );
-    let mut multipart = multer::Multipart::with_constraints(
-        stream::once(async move { Ok::<_, std::convert::Infallible>(body) }),
-        boundary,
-        constraints,
-    );
+    let mut multipart = media::multipart(body, content_type, FormKind::Transcription)?;
     let mut params = Map::new();
     let mut seen = HashSet::new();
     let mut timestamps = Vec::new();
@@ -181,37 +40,22 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| AudioError::invalid("multipart"))?
+        .map_err(|_| FormKind::Transcription.invalid("multipart"))?
     {
-        let name = field
-            .name()
-            .ok_or_else(|| AudioError::invalid("field"))?
-            .to_string();
-        // Multer resolves duplicate part headers with last-wins semantics.
-        // Only its parsed values are used; caller headers never reach the
-        // upstream because reqwest re-encodes every validated field and file.
-        if name.len() > 64
-            || field
-                .headers()
-                .iter()
-                .map(|(k, v)| k.as_str().len() + v.len())
-                .sum::<usize>()
-                > 8192
-        {
-            return Err(AudioError::invalid("multipart"));
-        }
+        // Only parsed values are used; reqwest re-encodes caller part headers.
+        let name = media::field_name(&field, FormKind::Transcription)?;
         let timestamp = matches!(
             name.as_str(),
             "timestamp_granularities" | "timestamp_granularities[]"
         );
         if !timestamp && !seen.insert(name.clone()) {
-            return Err(AudioError::invalid(&name));
+            return Err(FormKind::Transcription.invalid(&name));
         }
         if name == "file" {
             let filename = field
                 .file_name()
                 .filter(|v| v.len() <= 255)
-                .ok_or_else(|| AudioError::invalid("file"))?;
+                .ok_or_else(|| FormKind::Transcription.invalid("file"))?;
             let ext = filename
                 .rsplit_once('.')
                 .map(|(_, e)| e.to_ascii_lowercase())
@@ -221,12 +65,16 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                     ]
                     .contains(&e.as_str())
                 })
-                .ok_or_else(|| AudioError::invalid("file"))?;
-            let data = field.bytes().await.map_err(|_| AudioError::large())?;
+                .ok_or_else(|| FormKind::Transcription.invalid("file"))?;
+            let data = field
+                .bytes()
+                .await
+                .map_err(|_| FormKind::Transcription.large())?;
             if data.is_empty() {
-                return Err(AudioError::invalid("file"));
+                return Err(FormKind::Transcription.invalid("file"));
             }
             file = Some(Arc::new(AudioForm {
+                kind: crate::middleware::media::FormKind::Transcription,
                 file: data,
                 extension: ext,
             }));
@@ -238,24 +86,25 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
         {
             return Err(AudioError {
                 code: "unknown_parameter",
-                ..AudioError::invalid(&name)
+                ..FormKind::Transcription.invalid(&name)
             });
         }
         if field.file_name().is_some() {
-            return Err(AudioError::invalid(&name));
+            return Err(FormKind::Transcription.invalid(&name));
         }
         let data = field
             .bytes()
             .await
-            .map_err(|_| AudioError::invalid(&name))?;
+            .map_err(|_| FormKind::Transcription.invalid(&name))?;
         text_bytes += data.len();
         if text_bytes > MAX_TEXT_BYTES {
-            return Err(AudioError::invalid("fields"));
+            return Err(FormKind::Transcription.invalid("fields"));
         }
-        let value = std::str::from_utf8(&data).map_err(|_| AudioError::invalid(&name))?;
+        let value =
+            std::str::from_utf8(&data).map_err(|_| FormKind::Transcription.invalid(&name))?;
         if name == "stream" {
             if value != "false" {
-                return Err(AudioError::invalid(&name));
+                return Err(FormKind::Transcription.invalid(&name));
             }
         } else if timestamp {
             if timestamp_name.as_ref().is_some_and(|n| n != &name)
@@ -263,7 +112,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                 || !["word", "segment"].contains(&value)
                 || timestamps.len() >= 2
             {
-                return Err(AudioError::invalid(&name));
+                return Err(FormKind::Transcription.invalid(&name));
             }
             timestamp_name = Some(name);
             timestamps.push(value.to_string());
@@ -272,7 +121,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
-                .ok_or_else(|| AudioError::invalid(&name))?;
+                .ok_or_else(|| FormKind::Transcription.invalid(&name))?;
             params.insert(name, json!(temperature));
         } else {
             params.insert(name, Value::String(value.into()));
@@ -283,35 +132,35 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty())
     {
-        return Err(AudioError::invalid("model"));
+        return Err(FormKind::Transcription.invalid("model"));
     }
     if params.get("language").is_some_and(|v| {
         !v.as_str().is_some_and(|s| {
             (2..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase())
         })
     }) {
-        return Err(AudioError::invalid("language"));
+        return Err(FormKind::Transcription.invalid("language"));
     }
     if params
         .get("prompt")
         .and_then(Value::as_str)
         .is_some_and(|s| s.chars().count() > 4096)
     {
-        return Err(AudioError::invalid("prompt"));
+        return Err(FormKind::Transcription.invalid("prompt"));
     }
     let format = params.entry("response_format").or_insert(json!("json"));
     if !matches!(format.as_str(), Some("json" | "verbose_json")) {
-        return Err(AudioError::invalid("response_format"));
+        return Err(FormKind::Transcription.invalid("response_format"));
     }
     if !timestamps.is_empty() {
         if format != "verbose_json" {
-            return Err(AudioError::invalid("timestamp_granularities"));
+            return Err(FormKind::Transcription.invalid("timestamp_granularities"));
         }
         params.insert("timestamp_granularities[]".into(), json!(timestamps));
     }
     Ok((
         Value::Object(params),
-        file.ok_or_else(|| AudioError::invalid("file"))?,
+        file.ok_or_else(|| FormKind::Transcription.invalid("file"))?,
     ))
 }
 
@@ -319,53 +168,6 @@ pub fn upstream_fields(params: &Value) -> Value {
     let mut fields = params.as_object().cloned().unwrap_or_default();
     fields.retain(|k, _| UPSTREAM_FIELDS.contains(&k.as_str()));
     Value::Object(fields)
-}
-
-impl AudioForm {
-    /// Encode once after model selection. These exact immutable bytes are both
-    /// hashed and transmitted, including on channel binding retries.
-    pub async fn encode(
-        &self,
-        params: &Value,
-    ) -> Result<(Bytes, String), crate::aci::upstream::UpstreamError> {
-        use crate::aci::upstream::UpstreamError;
-        let mut form = reqwest::multipart::Form::new();
-        for (key, value) in upstream_fields(params).as_object().into_iter().flatten() {
-            if let Some(values) = value.as_array() {
-                for value in values {
-                    form = form.text(key.clone(), value.as_str().unwrap_or_default().to_string());
-                }
-            } else {
-                form = form.text(
-                    key.clone(),
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| value.to_string()),
-                );
-            }
-        }
-        let file =
-            reqwest::multipart::Part::stream_with_length(self.file.clone(), self.file.len() as u64)
-                .file_name(format!("audio.{}", self.extension))
-                .mime_str("application/octet-stream")
-                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
-        form = form.part("file", file);
-        let content_type = format!("multipart/form-data; boundary={}", form.boundary());
-        let chunks = form.into_stream();
-        futures_util::pin_mut!(chunks);
-        let mut bytes = bytes::BytesMut::new();
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|e| UpstreamError::Transport(e.to_string()))?;
-            if chunk.len() > MAX_BODY_BYTES - bytes.len() {
-                return Err(UpstreamError::InvalidRequest(
-                    "encoded multipart body exceeds limit".into(),
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok((bytes.freeze(), content_type))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -634,17 +436,17 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
-        let available = UPLOAD_BYTES.available_permits();
+        let available = media::UPLOAD_BYTES.available_permits();
         let body = Body::from_stream(
             stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
                 .chain(stream::pending()),
         );
-        let result = read_upload(&HeaderMap::new(), body).await;
+        let result = media::read_upload(&HeaderMap::new(), body, FormKind::Transcription).await;
         let error = result.unwrap_err();
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(response.headers()[header::CONNECTION], "close");
-        assert_eq!(UPLOAD_BYTES.available_permits(), available);
+        assert_eq!(media::UPLOAD_BYTES.available_permits(), available);
     }
 
     #[tokio::test]
@@ -656,10 +458,16 @@ mod tests {
                 panic!("declared oversize upload must not be read")
             },
         ));
-        let declared = read_upload(&headers, unread).await.unwrap_err();
-        let received = read_upload(&HeaderMap::new(), Body::from(vec![0; MAX_BODY_BYTES + 1]))
+        let declared = media::read_upload(&headers, unread, FormKind::Transcription)
             .await
             .unwrap_err();
+        let received = media::read_upload(
+            &HeaderMap::new(),
+            Body::from(vec![0; MAX_BODY_BYTES + 1]),
+            FormKind::Transcription,
+        )
+        .await
+        .unwrap_err();
         for error in [declared, received] {
             let response = error.into_response();
             assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -674,14 +482,17 @@ mod tests {
             Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
             Ok(Bytes::from_static(b"cde")),
         ]));
-        let (bytes, permit) = collect_upload(body, budget.clone()).await.unwrap();
+        let (bytes, permit) = media::collect_upload(body, budget.clone(), FormKind::Transcription)
+            .await
+            .unwrap();
         assert_eq!(bytes, "abcde");
         assert_eq!(permit.num_permits(), 5);
         assert_eq!(budget.available_permits(), 2);
 
-        let rejected = collect_upload(Body::from("xyz"), budget.clone())
-            .await
-            .unwrap_err();
+        let rejected =
+            media::collect_upload(Body::from("xyz"), budget.clone(), FormKind::Transcription)
+                .await
+                .unwrap_err();
         let response = rejected.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()[header::RETRY_AFTER], "1");
@@ -698,7 +509,10 @@ mod tests {
             Err(std::io::Error::other("upload interrupted")),
         ]));
         assert_eq!(
-            collect_upload(body, budget.clone()).await.unwrap_err().code,
+            media::collect_upload(body, budget.clone(), FormKind::Transcription)
+                .await
+                .unwrap_err()
+                .code,
             "invalid_parameter"
         );
         assert_eq!(budget.available_permits(), 7);
@@ -715,7 +529,11 @@ mod tests {
                 }),
             ),
         );
-        let task = tokio::spawn(collect_upload(body, budget.clone()));
+        let task = tokio::spawn(media::collect_upload(
+            body,
+            budget.clone(),
+            FormKind::Transcription,
+        ));
         rx.await.unwrap();
         assert_eq!(budget.available_permits(), 5);
         task.abort();

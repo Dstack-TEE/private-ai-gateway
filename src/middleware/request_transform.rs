@@ -17,8 +17,9 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::aggregator::service::{
-    AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
+    AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    EMBEDDINGS_PATH, IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH,
+    RESPONSES_PATH, SYSTEMONE_PATH,
 };
 
 use super::reasoning::validate_effective;
@@ -36,11 +37,14 @@ pub enum Endpoint {
     ChatComplete,
     Complete,
     Embed,
+    Rerank,
     Messages,
     CreateModelResponse,
     SystemOne,
     ImagesGenerations,
+    ImagesEdits,
     AudioTranscriptions,
+    AudioSpeech,
 }
 
 impl Endpoint {
@@ -50,12 +54,45 @@ impl Endpoint {
             Endpoint::ChatComplete => CHAT_COMPLETIONS_PATH,
             Endpoint::Complete => COMPLETIONS_PATH,
             Endpoint::Embed => EMBEDDINGS_PATH,
+            Endpoint::Rerank => RERANK_PATH,
             Endpoint::Messages => MESSAGES_PATH,
             Endpoint::CreateModelResponse => RESPONSES_PATH,
             Endpoint::SystemOne => SYSTEMONE_PATH,
             Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
+            Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
             Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
+            Endpoint::AudioSpeech => AUDIO_SPEECH_PATH,
         }
+    }
+
+    pub(crate) fn from_path(path: &str) -> Option<Self> {
+        Some(match path {
+            CHAT_COMPLETIONS_PATH => Self::ChatComplete,
+            COMPLETIONS_PATH => Self::Complete,
+            EMBEDDINGS_PATH => Self::Embed,
+            RERANK_PATH => Self::Rerank,
+            MESSAGES_PATH => Self::Messages,
+            RESPONSES_PATH => Self::CreateModelResponse,
+            SYSTEMONE_PATH => Self::SystemOne,
+            IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
+            IMAGES_EDITS_PATH => Self::ImagesEdits,
+            AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            AUDIO_SPEECH_PATH => Self::AudioSpeech,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_image(self) -> bool {
+        matches!(self, Self::ImagesGenerations | Self::ImagesEdits)
+    }
+
+    pub(crate) fn is_media(self) -> bool {
+        self.is_image() || matches!(self, Self::AudioTranscriptions | Self::AudioSpeech)
+    }
+
+    /// Native buffered endpoints require explicit candidate opt-in.
+    pub(crate) fn is_buffered_native(self) -> bool {
+        self.is_media() || self == Self::Rerank
     }
 
     fn label(self) -> &'static str {
@@ -63,11 +100,14 @@ impl Endpoint {
             Endpoint::ChatComplete => "chatComplete",
             Endpoint::Complete => "complete",
             Endpoint::Embed => "embed",
+            Endpoint::Rerank => "rerank",
             Endpoint::Messages => "messages",
             Endpoint::CreateModelResponse => "createModelResponse",
             Endpoint::SystemOne => "systemOne",
             Endpoint::ImagesGenerations => "imagesGenerations",
+            Endpoint::ImagesEdits => "imagesEdits",
             Endpoint::AudioTranscriptions => "audioTranscriptions",
+            Endpoint::AudioSpeech => "audioSpeech",
         }
     }
 }
@@ -213,6 +253,15 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
+            return Ok(super::speech::upstream_body(params));
+        }
+        (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
+            return Ok(super::image_edits::upstream_fields(params));
+        }
+        (ProviderFormat::Openai, Endpoint::Rerank) => {
+            return Ok(super::rerank::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
             return Ok(super::audio::upstream_fields(params));
         }
@@ -297,11 +346,7 @@ pub fn build_candidates(
             );
             continue;
         }
-        if matches!(
-            endpoint,
-            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
-        ) && !candidate.supports_endpoint(endpoint.path())
-        {
+        if endpoint.is_buffered_native() && !candidate.supports_endpoint(endpoint.path()) {
             continue;
         }
         let bridge = match &messages_chat {
@@ -812,13 +857,19 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, Rerank)
+        | (Openai, AudioSpeech)
         | (Openai, AudioTranscriptions)
+        | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
+        | (Anthropic, Rerank)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioSpeech)
         | (Anthropic, AudioTranscriptions)
+        | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }

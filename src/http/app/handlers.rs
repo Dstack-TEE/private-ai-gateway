@@ -515,12 +515,36 @@ pub(super) async fn systemone(
     openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
+pub(super) async fn rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::Rerank).await
+}
+
+pub(super) async fn images_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesEdits).await
+}
+
 pub(super) async fn images_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
     buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+}
+
+pub(super) async fn audio_speech(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioSpeech).await
 }
 
 pub(super) async fn audio_transcriptions(
@@ -568,39 +592,50 @@ async fn buffered_multimodal_endpoint(
         .await;
     }
     let request_id = generate_request_id();
-    let is_audio = endpoint == Endpoint::AudioTranscriptions;
-    if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+    use crate::middleware::media::FormKind;
+    let media: Option<FormKind> = match endpoint {
+        Endpoint::AudioTranscriptions => Some(FormKind::Transcription),
+        Endpoint::ImagesEdits => Some(FormKind::ImageEdit),
+        _ => None,
+    };
+    if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let (received_body, parsed, audio_form, upload_permit) = if is_audio {
+    let (received_body, parsed, audio_form, upload_permit) = if let Some(kind) = media {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
                     &headers,
                     body,
-                    crate::middleware::audio::MAX_BODY_BYTES,
+                    kind.spec().max_body_bytes,
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
                 )
                 .await;
             }
         };
-        let (bytes, permit) = match crate::middleware::audio::read_upload(&headers, body).await {
+        let upload = async {
+            let (bytes, permit) =
+                crate::middleware::media::read_upload(&headers, body, kind).await?;
+            let content_type = header_str(&headers, "content-type").unwrap_or("");
+            let (params, form) = match kind {
+                FormKind::Transcription => {
+                    crate::middleware::audio::parse(bytes.clone(), content_type).await?
+                }
+                FormKind::ImageEdit => {
+                    crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
+                }
+            };
+            Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
+        }
+        .await;
+        let (bytes, permit, mut params, form) = match upload {
             Ok(upload) => upload,
             Err(err) => {
-                state.service.record_audio_failure("upload_rejection");
+                (kind.spec().record_failure)(&state.service, "upload_rejection");
                 return err.into_response();
             }
         };
-        let content_type = header_str(&headers, "content-type").unwrap_or("");
-        let (mut params, form) =
-            match crate::middleware::audio::parse(bytes.clone(), content_type).await {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    state.service.record_audio_failure("upload_rejection");
-                    return err.into_response();
-                }
-            };
         if let Some(provider) = provider {
             params["provider"] = provider;
         }
@@ -639,18 +674,17 @@ async fn buffered_multimodal_endpoint(
     if state.middleware.is_some() {
         return dispatch_completion(state, input, true).await;
     }
-    if endpoint == Endpoint::ImagesGenerations {
-        if let Err(err) = crate::middleware::images::validate_request(&input.params) {
-            return err.into_response();
-        }
-        input.params = crate::middleware::images::upstream_body(&input.params);
+    match crate::middleware::validate_buffered(endpoint, &input.params) {
+        Ok(Some(params)) => input.params = params,
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
     }
     // Uploads and invalid requests do not reserve generation capacity.
     // Middleware admission happens after its control-plane consult instead.
     let permit = match crate::middleware::admission::try_acquire(endpoint) {
         Ok(permit) => permit,
         Err(_) => {
-            if is_audio {
+            if media == Some(FormKind::Transcription) {
                 state.service.record_audio_failure("admission_rejection");
             }
             return crate::middleware::admission::capacity_response();
@@ -883,14 +917,11 @@ pub(super) async fn openai_completion_endpoint(
     };
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
-    let endpoint = match endpoint_path {
-        COMPLETIONS_PATH => Endpoint::Complete,
-        EMBEDDINGS_PATH => Endpoint::Embed,
-        MESSAGES_PATH => Endpoint::Messages,
-        RESPONSES_PATH => Endpoint::CreateModelResponse,
-        SYSTEMONE_PATH => Endpoint::SystemOne,
-        CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
-        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
+    let endpoint = match Endpoint::from_path(endpoint_path)
+        .filter(|endpoint| !endpoint.is_buffered_native())
+    {
+        Some(endpoint) => endpoint,
+        None => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
     };
     let mut input = match completion_input(
         &state,
@@ -921,7 +952,7 @@ async fn reject_json_provider_header(headers: &HeaderMap, body: Body) -> Respons
         error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "X-ACI-Provider is only supported on multipart transcription requests",
+            "X-ACI-Provider is only supported on multipart media requests",
         ),
     )
     .await

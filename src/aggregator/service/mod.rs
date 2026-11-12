@@ -29,10 +29,12 @@ use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const AUDIO_SPEECH_PATH: &str = "/v1/audio/speech";
+pub const RERANK_PATH: &str = "/v1/rerank";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const RESPONSES_PATH: &str = "/v1/responses";
-pub use crate::aci::types::AUDIO_TRANSCRIPTIONS_PATH;
+pub use crate::aci::types::{AUDIO_TRANSCRIPTIONS_PATH, IMAGES_EDITS_PATH};
 pub const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
@@ -248,6 +250,10 @@ impl AciService {
 
     pub fn record_audio_failure(&self, reason: &str) {
         self.metrics.record_audio_failure(reason);
+    }
+
+    pub fn record_image_failure(&self, reason: &str) {
+        self.metrics.record_image_failure(reason);
     }
 
     pub fn metrics(&self) -> Result<MetricsSnapshot, ServiceError> {
