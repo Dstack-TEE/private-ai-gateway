@@ -178,8 +178,10 @@ does not inject client cost. Stream conversion, encoding or E2EE failures retain
 their status and attribution while source observation continues synchronously;
 the report is emitted at EOF or disconnect with the usage observed so far.
 
-Token counters accept JSON numbers or trimmed strings with JSON decimal syntax
-(optional exponent), only when finite, non-negative, integral and within `i64`.
+Token counters accept JSON numbers or strings with JSON decimal syntax (optional
+exponent), trimming only ASCII space, tab, LF and CR. Values must be finite,
+non-negative, integral and at most `9007199254740991` (JavaScript's maximum safe
+integer); larger values, a byte-order mark and other Unicode whitespace are absent.
 `10.0` and `1e2` count; fractions, hex, empty/non-numeric strings, `+10`, `01`,
 `.5` and `1.` are absent. No counter is truncated. Chat cache creation uses
 `cache_creation_input_tokens` first, including zero. Otherwise, for Chat usage

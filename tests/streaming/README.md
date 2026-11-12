@@ -109,5 +109,6 @@ checks 17 additional main-recorded cases: Chat cache writes on native and bridge
 paths, ignored inconsistent writes, explicit-zero precedence, numeric strings,
 start-only Messages at EOF/disconnect, and larger Messages delta input counts.
 The shared counter parser pins JSON decimal grammar, finite non-negative integral
-values and the `i64` bound in pricing unit tests. Client-injected cost and report
-usage are asserted separately.
+values up to JavaScript's maximum safe integer, and ASCII space/tab/LF/CR trimming
+in pricing unit tests. BOM and Unicode whitespace are rejected. Client-injected
+cost and report usage are asserted separately.

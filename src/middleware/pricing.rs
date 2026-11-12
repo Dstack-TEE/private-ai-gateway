@@ -16,24 +16,25 @@ struct ResolvedUsage {
     cache_creation: i128,
 }
 
-/// A finite, non-negative integral counter, within i64. Strings use the JSON
-/// decimal grammar, including optional exponents, after trimming whitespace.
+/// A finite, non-negative integral counter, at most JavaScript's MAX_SAFE_INTEGER.
+/// Strings use JSON decimal grammar after trimming only space, tab, LF and CR.
 /// Shared with usage projection so pricing and bridge cache buckets agree.
 pub(super) fn usage_counter(value: &Value) -> Option<i64> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
     let parsed;
     let number = match value {
         Value::Number(number) => number,
         Value::String(text) => {
-            parsed = serde_json::from_str::<serde_json::Number>(text.trim()).ok()?;
+            parsed = serde_json::from_str::<serde_json::Number>(
+                text.trim_matches([' ', '\t', '\n', '\r']),
+            )
+            .ok()?;
             &parsed
         }
         _ => return None,
     };
-    if let Some(count) = number.as_i64() {
-        return (count >= 0).then_some(count);
-    }
     let count = number.as_f64()?;
-    if !count.is_finite() || count < 0.0 || count.fract() != 0.0 || count >= -(i64::MIN as f64) {
+    if !count.is_finite() || count < 0.0 || count.fract() != 0.0 || count > MAX_SAFE_INTEGER {
         return None;
     }
     Some(count as i64)
@@ -237,11 +238,12 @@ mod tests {
             (json!(10), 10),
             (json!(10.0), 10),
             (json!(" 10.0 "), 10),
+            (json!(" \t\n\r10.0\r\n\t "), 10),
             (json!("1e2"), 100),
             (json!("1E+2"), 100),
             (json!("100e-2"), 1),
-            (json!(i64::MAX), i64::MAX),
-            (json!(i64::MAX.to_string()), i64::MAX),
+            (json!(9_007_199_254_740_991_i64), 9_007_199_254_740_991),
+            (json!("9007199254740991"), 9_007_199_254_740_991),
         ] {
             assert_eq!(usage_counter(&value), Some(expected), "{value}");
         }
@@ -261,8 +263,18 @@ mod tests {
             json!("1."),
             json!("not a count"),
             json!("1e400"),
+            json!(9_007_199_254_740_992_i64),
+            json!("9007199254740992"),
+            json!(i64::MAX),
+            json!(i64::MAX.to_string()),
             json!("9223372036854775808"),
             json!(u64::MAX),
+            json!("\u{feff}10"),
+            json!("10\u{feff}"),
+            json!("\u{0085}10"),
+            json!("10\u{0085}"),
+            json!("\u{000b}10"),
+            json!("10\u{000c}"),
             Value::Null,
             json!(true),
             json!([]),
@@ -543,7 +555,9 @@ mod image_tests {
         );
         assert_eq!(
             compute_image_cost(
-                Some(&json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":i64::MAX})),
+                Some(
+                    &json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":9_007_199_254_740_991_i64})
+                ),
                 &pricing,
                 &images,
             ),
