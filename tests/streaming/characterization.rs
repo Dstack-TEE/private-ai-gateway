@@ -31,7 +31,9 @@ use crate::aci::upstream::{
 };
 use crate::middleware::errors::Surface;
 use crate::middleware::request_transform::Endpoint;
-use crate::middleware::{CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey};
+use crate::middleware::{
+    CacheSaltKey, CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
+};
 
 #[derive(Default)]
 struct Gate {
@@ -342,7 +344,12 @@ async fn capture(case: &Case) -> Value {
         send_request_features: Some(false),
         tee_only_domains: vec![],
     };
-    let mw = Middleware::new(PrefixHashKey::new([7; 32]), &config).unwrap();
+    let mw = Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        CacheSaltKey::new([8; 32]),
+        &config,
+    )
+    .unwrap();
     let params = match case.endpoint {
         Endpoint::CreateModelResponse => {
             json!({"model":"fixture-model","input":"hi","stream":!case.buffered})
