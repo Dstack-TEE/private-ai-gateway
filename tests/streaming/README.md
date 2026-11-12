@@ -34,7 +34,9 @@ any approved parsing correction with its old and new expectation.
 Both fixtures use compact JSON Lines, one object per case sorted by case name.
 `streaming_corrections.jsonl` records every approved difference with the original
 wire bytes and the corrected snapshot; its case name is `expected.name`.
-Of the 93 cases, 47 match main exactly and 46 pin approved corrections.
+Of the 101 cases, 48 match main exactly and 53 pin approved corrections. The eight
+failed-bridge accounting/reset cases were also recorded on `9b745bda`; their
+complete snapshots are identical on both main revisions.
 The failure cases cover each destination and bridge. Native failures retain
 their canonical output, including rate-limit codes on Chat, Messages and both
 Responses terminal forms. Failed Chat usage keeps public token counts and cost
@@ -49,8 +51,15 @@ After content has been emitted, the owner asks the bridge to use its existing
 close path, keeping closing frames and partial Responses output before failure.
 Once the owner emits a failed response's destination terminal, no continuation
 records are converted or forwarded. Accounting still observes the source to EOF
-with the existing bridge usage rules: billing and reports are unchanged, including
-usage after that terminal. Native nonterminal failure records continue normally
+with main's bridge usage rules: Chat-source bridges stop accounting at their source
+terminal, and all bridges stop at a malformed continuation that main's converter
+would reject. Until then, usage after the destination failure terminal remains
+billable. The report retains the conversion failure's `upstream_transport` label;
+a read reset also replaces an earlier in-band failure label with
+`upstream_transport`. The eight `failed_bridge_accounting_cases` snapshots pin
+complete reports against main, including retained pre-terminal usage. Malformed
+continuations still cannot produce another client error tail; reading and receipt
+publication continue to EOF. Native nonterminal failure records continue normally
 until their protocol terminal. The `diff_messages_chat_usage_after_error_1` case
 pins the removed continuation chunk and the unchanged completion-token report.
 Legacy Anthropic completion reports a source failure instead of success.

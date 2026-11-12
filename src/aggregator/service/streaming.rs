@@ -17,7 +17,7 @@ use super::{
 };
 use crate::aci::keys::KeyProvider;
 use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
-use crate::aci::upstream::UpstreamBodyStream;
+use crate::aci::upstream::{UpstreamBodyStream, UpstreamError};
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
 use crate::middleware::response_transform::{self, ResponseIdentity};
@@ -645,7 +645,11 @@ impl ResponseOwner {
     fn stream_error(&mut self, error: &ServiceError) {
         let already_failed = self.failure.is_some();
         let upstream = matches!(error, ServiceError::Upstream(_));
-        if !upstream || (!self.saw_terminal && self.failure.is_none()) {
+        if !upstream
+            || (!self.saw_terminal && self.failure.is_none())
+            || (already_failed
+                && matches!(error, ServiceError::Upstream(UpstreamError::Transport(_))))
+        {
             self.failure = Some(StreamFailure::from_error(error));
         }
         if let Some(receipt) = &self.receipt {

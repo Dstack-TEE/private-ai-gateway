@@ -879,6 +879,54 @@ fn review_cases() -> Vec<Case> {
     cases
 }
 
+fn failed_bridge_accounting_cases() -> Vec<Case> {
+    let error = "data: {\"error\":{\"message\":\"private\"}}\n\n";
+    let usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n";
+    let mut cases = Vec::new();
+    for (destination, endpoint) in [
+        ("messages", Endpoint::Messages),
+        ("responses", Endpoint::CreateModelResponse),
+    ] {
+        for (ending, continuation) in [
+            ("terminal", "data: [DONE]\n\n"),
+            ("malformed", "data: not JSON\n\n"),
+        ] {
+            cases.push(Case::new(
+                &format!("failed_chat_{destination}_usage_after_{ending}"),
+                endpoint,
+                &format!("{error}{continuation}{usage}"),
+                "openai",
+            ));
+        }
+        cases.push(Case::new(
+            &format!("failed_chat_{destination}_preserves_usage_before_terminal"),
+            endpoint,
+            &format!("{error}{usage}data: [DONE]\n\ndata: {{\"usage\":{{\"prompt_tokens\":9,\"completion_tokens\":9,\"total_tokens\":18}}}}\n\n"),
+            "openai",
+        ));
+    }
+    cases.push(Case::new(
+        "failed_messages_chat_usage_after_malformed",
+        Endpoint::ChatComplete,
+        concat!(
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"private\"}}\n\n",
+            "data: not JSON\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ),
+        "anthropic",
+    ));
+    let mut reset = Case::new(
+        "native_chat_inband_error_then_reset",
+        Endpoint::ChatComplete,
+        &format!("{usage}{error}"),
+        "openai",
+    );
+    reset.transport_error = true;
+    cases.push(reset);
+    cases
+}
+
 fn read_json_lines(input: &str) -> Vec<Value> {
     input
         .lines()
@@ -978,6 +1026,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(final_review_cases());
     cases.extend(differential_regression_cases());
     cases.extend(eof_and_reset_cases());
+    cases.extend(failed_bridge_accounting_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -1507,13 +1556,7 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             "openai",
             Some(("completion_tokens", 3)),
         ),
-        (
-            "chat_messages",
-            Endpoint::Messages,
-            chat,
-            "openai",
-            Some(("output_tokens", 3)),
-        ),
+        ("chat_messages", Endpoint::Messages, chat, "openai", None),
         (
             "native_chat_disallowed_usage",
             Endpoint::ChatComplete,
@@ -1526,7 +1569,7 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             Endpoint::CreateModelResponse,
             chat,
             "openai",
-            Some(("completion_tokens", 3)),
+            None,
         ),
         (
             "native_messages",
@@ -1648,5 +1691,59 @@ async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report(
             );
             assert!(wire.ends_with("}\n\n"));
         }
+    }
+}
+
+#[tokio::test]
+async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    for case in failed_bridge_accounting_cases() {
+        let snapshot = capture(&case).await;
+        let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
+        assert_eq!(snapshot["reports"], baseline["reports"], "{}", case.name);
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1, "{}", case.name);
+        let report = &reports[0];
+        assert_eq!(report["status"], 502);
+        assert!(report["errorSource"].is_null());
+        let transport = case.transport_error || case.source.contains("not JSON");
+        assert_eq!(
+            report["errorMessage"],
+            if transport {
+                "upstream_transport"
+            } else {
+                "stream_inband_error"
+            }
+        );
+        let has_usage = case.transport_error || case.name.contains("preserves_usage");
+        assert_eq!(!report["usage"].is_null(), has_usage, "{}", case.name);
+        if has_usage {
+            let output = if case.endpoint == Endpoint::Messages {
+                "output_tokens"
+            } else {
+                "completion_tokens"
+            };
+            assert_eq!(report["usage"][output], 3);
+            assert!(report["usage"].get("cost").is_none());
+        }
+        let wire = snapshot["wire"].as_str().unwrap();
+        assert!(!wire.contains("not JSON"));
+        assert!(!wire.contains("\"prompt_tokens\":9"));
+        assert_eq!(
+            snapshot["before_eof"],
+            json!({"receipt":false,"report":false})
+        );
+        if case.transport_error {
+            assert_eq!(snapshot["wire"], baseline["wire"]);
+            assert!(!wire.contains("[DONE]"));
+        } else {
+            let terminal = match case.endpoint {
+                Endpoint::Messages => "event: error\n",
+                Endpoint::CreateModelResponse => "event: response.failed\n",
+                _ => "data: [DONE]\n\n",
+            };
+            assert_eq!(wire.matches(terminal).count(), 1, "{}: {wire}", case.name);
+        }
+        assert!(wire.ends_with("\n\n"));
     }
 }

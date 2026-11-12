@@ -158,6 +158,7 @@ struct AccountingState {
     ttft_ms: Option<u64>,
     ingress_terminal: bool,
     failure_terminal: bool,
+    continuation_failure: Option<StreamFailure>,
     settled: bool,
 }
 
@@ -179,6 +180,7 @@ impl Accounting {
                 ttft_ms: None,
                 ingress_terminal: false,
                 failure_terminal: false,
+                continuation_failure: None,
                 bridge: None,
                 settled: false,
             }))),
@@ -188,6 +190,13 @@ impl Accounting {
     pub fn settle(&mut self, failure: Option<StreamFailure>) {
         let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.settled {
+            // Reading to EOF must not replace the first failure that ended the
+            // old bridge's accounting. Gateway finalization can still fail.
+            let failure = if failure.is_some_and(|f| f.source == Some(ErrorSource::Gateway)) {
+                failure
+            } else {
+                state.continuation_failure.or(failure)
+            };
             let status = failure.map_or(state.report.upstream_status, |failure| failure.status);
             state.emit(status, failure);
         }
@@ -293,7 +302,8 @@ impl AccountingHandle {
         }
     }
     /// Retain source phase and usage through conversion. After a failure
-    /// terminal, keep billing to EOF without forwarding records to converters.
+    /// terminal, retain the old bridge's billing boundaries without forwarding
+    /// records to converters. Source reading can still continue to EOF.
     pub(crate) fn ingress(&self, record: &mut Record) -> bool {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(event) = record.event_mut() else {
@@ -317,6 +327,27 @@ impl AccountingHandle {
         }
         if !state.failure_terminal {
             return true;
+        }
+        if state.bridge.is_some() {
+            if state.continuation_failure.is_some()
+                || (event.source_protocol == Some(SseProtocol::OpenaiChat)
+                    && state.ingress_terminal)
+            {
+                return false;
+            }
+            let ignored_control = event.source_protocol == Some(SseProtocol::AnthropicMessages)
+                && matches!(
+                    event.meaning.kind,
+                    EventKind::Ping | EventKind::ContentBlockStop | EventKind::MessageStop
+                );
+            if !ignored_control && !event.data.trim().is_empty() && event.payload.json().is_none() {
+                state.continuation_failure = Some(StreamFailure::from_error(
+                    &ServiceError::Upstream(UpstreamError::Transport(
+                        "provider sent an event this surface cannot represent".into(),
+                    )),
+                ));
+                return false;
+            }
         }
         // Preserve the old bridges' usage selection in accounting only.
         let failed = event.meaning.failure.is_some();
