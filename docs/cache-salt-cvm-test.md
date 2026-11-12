@@ -127,7 +127,8 @@ env -i PATH="$PATH" \
 The summary goes to stderr; `results.json` holds every request's counters.
 Exit status 0 is a pass, 1 means an isolation check hit another namespace,
 2 means a warm-up never hit (inconclusive), and 3 means a request error
-(inconclusive), including non-200 responses and transport failures. Rerun on
+(inconclusive), including non-200 responses and transport failures. A leak
+outranks request errors, so exit 1 wins when both occur. Rerun on
 2; resolve request errors before rerunning on 3. Investigate 1 before merging or
 deploying: check the provider row in
 [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)

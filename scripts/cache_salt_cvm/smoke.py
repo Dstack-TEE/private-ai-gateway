@@ -10,6 +10,7 @@ Usage: smoke.py BASE_URL MODEL [MODEL ...]
 
 Exit status: 0 pass, 1 an isolation check hit another namespace, 2 a warm-up
 never produced a hit (inconclusive; rerun), 3 a request error (inconclusive).
+A leak outranks request errors elsewhere in the run.
 
 `--replay` repeats tenant A's no-salt prompt from an earlier run, for example
 after a restart: a hit shows the gateway derived the same salt again, so the
@@ -184,8 +185,9 @@ def main():
     ]
     json.dump(results, sys.stdout, indent=2)
     print()
-    # Only a successful isolation request reporting a hit proves a leak.
-    # Request errors and warm-ups without a hit make the run inconclusive.
+    # Only a successful isolation request reporting a hit proves a leak, and a
+    # leak outranks any request error elsewhere. Request errors and warm-ups
+    # without a hit make the run inconclusive.
     failed = inconclusive = request_error = False
     for r in results:
         bad = [s for s in r["steps"] if not s["ok"]]
@@ -195,10 +197,10 @@ def main():
         )
         errors = any(s["status"] != 200 for s in r["steps"])
         verdict = (
-            "INCONCLUSIVE (request error)"
-            if errors
-            else "FAIL"
+            "FAIL"
             if leaked
+            else "INCONCLUSIVE (request error)"
+            if errors
             else "INCONCLUSIVE"
             if bad
             else "PASS"
@@ -213,7 +215,7 @@ def main():
                 f"  {mark} t{s['trial']} {s['step']:<24} expect={s['expect']:<4} cached={s.get('cached')}/{s.get('prompt_tokens')} attempts={s.get('attempts', 1)} status={s['status']}",
                 file=sys.stderr,
             )
-    sys.exit(3 if request_error else 1 if failed else 2 if inconclusive else 0)
+    sys.exit(1 if failed else 3 if request_error else 2 if inconclusive else 0)
 
 
 if __name__ == "__main__":
