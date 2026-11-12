@@ -1159,9 +1159,12 @@ fn build_early_streaming_response(
         match forward.await {
             Ok(MiddlewareForwardResult::Stream(f)) => {
                 accounting_handle.selected(
-                    f.selected_route.clone(), &f.failed_attempts, f.upstream_status,
+                    f.selected_route.clone(),
+                    &f.failed_attempts,
+                    f.upstream_status,
                 );
-                if f.upstream_headers.get("content-type")
+                if f.upstream_headers
+                    .get("content-type")
                     .is_some_and(|value| !is_sse_content_type(Some(value)))
                 {
                     // Switch the response owner to the explicit byte path before
@@ -1173,17 +1176,26 @@ fn build_early_streaming_response(
                         f.selected_path,
                         inputs.echo.is_some(),
                         inputs.endpoint,
-                    ).protocol();
+                    )
+                    .protocol();
                     let mut body = json_stream(
-                        f.body, accounting_handle.clone(), inputs.clone(), protocol,
+                        f.body,
+                        accounting_handle.clone(),
+                        inputs.clone(),
+                        protocol,
                     );
                     while let Some(item) = body.next().await {
                         yield item.map(Record::NonSse);
                     }
                 } else {
                     let mut pipeline = build_metered_pipeline(
-                        f.body, &f.selected_route, f.selected_path, accounting_handle,
-                        stream_control, source_journal, &inputs,
+                        f.body,
+                        &f.selected_route,
+                        f.selected_path,
+                        accounting_handle,
+                        stream_control,
+                        source_journal,
+                        &inputs,
                     );
                     while let Some(item) = pipeline.next().await {
                         yield item;
@@ -1192,7 +1204,9 @@ fn build_early_streaming_response(
             }
             other => {
                 let status = accounting_handle.forward_failure(
-                    surface, received_body.as_ref(), other,
+                    surface,
+                    received_body.as_ref(),
+                    other,
                 );
                 for record in error_records(protocol, status, Some(&stream_request_id), None) {
                     yield Ok(record);
@@ -1404,7 +1418,9 @@ fn json_stream(
                 }
                 response_transform::rewrite_identity(&mut value, &inputs.identity);
                 response_transform::canonicalize(
-                    &mut value, inputs.endpoint, Some(&inputs.identity.request_id),
+                    &mut value,
+                    inputs.endpoint,
+                    Some(&inputs.identity.request_id),
                 );
                 bytes = serde_json::to_vec(&value)
                     .map_err(|_| {

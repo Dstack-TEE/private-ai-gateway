@@ -662,18 +662,19 @@ impl ResponseOwner {
                 let Some(sequence) = next_sequence(self.sequence) else {
                     return output;
                 };
-                let body = json!({"response":{
-                    "store":false,
-                    "id":request_id,
-                    "object":"response",
-                    "created_at":response_transform::now_secs(),
-                    "model":self.identity.as_ref().and_then(|i| i.user_model.as_deref()),
-                    "status":"failed",
-                    "incomplete_details":null,
-                    "error":error,
-                    "output":[],
-                    "usage":usage,
-                },
+                let body = json!({
+                    "response": {
+                        "store": false,
+                        "id": request_id,
+                        "object": "response",
+                        "created_at": response_transform::now_secs(),
+                        "model": self.identity.as_ref().and_then(|i| i.user_model.as_deref()),
+                        "status": "failed",
+                        "incomplete_details": null,
+                        "error": error,
+                        "output": [],
+                        "usage": usage,
+                    },
                     "type": "response.failed",
                     "sequence_number": sequence
                 });

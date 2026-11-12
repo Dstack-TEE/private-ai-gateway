@@ -389,15 +389,17 @@ pub(crate) fn decode_envelope(
     Box::pin(async_stream::try_stream! {
         let mut decoder = DecodedStream::with_limit(inner, None, max_bytes);
         while let Some(item) = decoder.next().await {
-            let record = item.and_then(|record| match record {
-                Record::Residual => Err(decoder.pending_error.take().unwrap_or(
-                    ServiceError::Upstream(UpstreamError::EnvelopeTruncated),
-                )),
-                record => Ok(record),
-            }).map_err(|error| match error {
-                ServiceError::Upstream(error) => error,
-                _ => UpstreamError::Transport("invalid provider SSE envelope".into()),
-            })?;
+            let record = item
+                .and_then(|record| match record {
+                    Record::Residual => Err(decoder.pending_error.take().unwrap_or(
+                        ServiceError::Upstream(UpstreamError::EnvelopeTruncated),
+                    )),
+                    record => Ok(record),
+                })
+                .map_err(|error| match error {
+                    ServiceError::Upstream(error) => error,
+                    _ => UpstreamError::Transport("invalid provider SSE envelope".into()),
+                })?;
             yield record;
         }
     })
