@@ -29,10 +29,6 @@ pub fn event_from_request(
     request: &UpstreamVerificationRequest,
     result: VerificationResult,
 ) -> UpstreamVerifiedEvent {
-    let evidence = crate::aggregator::session::EvidenceRef::from_bytes(
-        "application/json",
-        br#"{"fixture":"verifier-input"}"#,
-    );
     UpstreamVerifiedEvent {
         upstream_name: request.upstream_name.clone(),
         model_id: request.model_id.clone(),
@@ -43,7 +39,7 @@ pub fn event_from_request(
             origin: "https://upstream.test".into(),
             spki_sha256: "11".repeat(32),
         }],
-        evidence: Some(serde_json::json!({"digest": evidence.digest, "data": evidence.data_uri})),
+        evidence: Some(test_evidence()),
         ..Default::default()
     }
 }
@@ -121,4 +117,12 @@ impl Quoter for StubQuoter {
     async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
         Ok(self.quote(&report_data))
     }
+}
+
+pub fn test_evidence() -> serde_json::Value {
+    let evidence = crate::aggregator::session::EvidenceRef::from_bytes(
+        "application/json",
+        br#"{"fixture":"verifier-input"}"#,
+    );
+    serde_json::json!({"digest": evidence.digest, "data": evidence.data_uri})
 }

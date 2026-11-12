@@ -179,6 +179,33 @@ A receipt proves what the attested gateway recorded. A deep session audit lets
 the relying party reappraise the provider evidence instead of accepting the
 gateway's `verified` label alone.
 
+For streaming responses, publication at the first destination terminal requires
+the source protocol's own terminal on a route with an established protocol, or
+clean EOF, accepted from the provider adapter after any authentication barrier.
+The selected backend declares protocol evidence for the shaped upstream wire
+operation, including on custom paths. The route protocol always controls decoding
+and billing; a contradictory declaration is a routing failure for every streaming
+operation. An unknown declaration retains EOF publication.
+The gateway publishes before returning the first destination terminal's bytes.
+The body then stays open, reading the source until EOF while emitting no bytes
+after the destination terminal. Accounting observes allowlisted upstream usage
+in the source protocol through EOF or disconnect; settlement remains at source
+EOF. The received hash covers the accepted source prefix through its
+terminal block, or all source bytes at clean EOF; the returned hash includes the
+destination terminal's final wire bytes. Later source bytes are excluded from the
+received hash. A disconnect after a terminal with a published receipt settles as
+completed with the usage observed so far, retaining any failure status.
+
+A bridge-generated failure terminal without a source terminal retains normal
+source consumption and EOF finalization. At clean source EOF, synthesized
+terminals publish in the poll that returns them. Middleware source-read, decoder
+or transform failures before publication can prevent completion and leave no
+receipt. Later failures retain their report status while an already-published
+receipt remains available. Cancellation or failure can leave a reserved receipt id
+unpublished even after an error
+terminal. Publication proves neither client delivery nor model-generation
+completeness.
+
 ### Audit the receipt
 
 Given an established workload keyset and the exact request and response bytes,

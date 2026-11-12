@@ -194,6 +194,7 @@ impl Accounting {
         accounting
     }
     pub fn settle(&mut self, failure: Option<StreamFailure>) {
+        let failure = self.control.report_failure(failure);
         let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.settled {
             let status = failure.map_or(state.report.upstream_status, |failure| failure.status);
@@ -203,12 +204,18 @@ impl Accounting {
 }
 impl Drop for Accounting {
     fn drop(&mut self) {
-        let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.settled {
+        if let Some(failure) = self.control.aborted() {
+            self.settle(Some(failure));
             return;
         }
-        if let Some(failure) = self.control.aborted() {
-            state.emit(failure.status, Some(failure));
+        if let crate::aggregator::service::TerminalPublication::Published { failure } =
+            self.control.published_terminal()
+        {
+            self.settle(failure);
+            return;
+        }
+        let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.settled {
             return;
         }
         if let Some(meter) = state.pending.take() {

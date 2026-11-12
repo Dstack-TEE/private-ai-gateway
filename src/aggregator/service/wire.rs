@@ -1,5 +1,5 @@
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -129,8 +129,8 @@ pub struct MiddlewareForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
-    /// Upstream API path used by the committed candidate.
-    pub selected_path: &'static str,
+    pub selected_endpoint: crate::endpoint::Endpoint,
+    pub selected_format: crate::middleware::types::ProviderFormat,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
@@ -148,8 +148,8 @@ pub struct MiddlewareStreamingForwarded {
     /// These are internal routing outcomes, not emitted as response headers;
     /// the committed reference for what happened is the receipt.
     pub selected_route: String,
-    /// Upstream API path used by the committed candidate.
-    pub selected_path: &'static str,
+    pub selected_endpoint: crate::endpoint::Endpoint,
+    pub selected_format: crate::middleware::types::ProviderFormat,
     /// Failed-over candidates in the order tried (see [`FailedAttempt`]). The
     /// committed route is `selected_route`; these are surfaced so the caller can
     /// observe every attempt, not just the one that served the response.
@@ -163,7 +163,7 @@ pub struct MiddlewareReceiptDraft {
     pub(super) builder: ReceiptBuilder,
     pub(super) endpoint_path: String,
     pub(super) request_mode: RequestMode,
-    pub(super) response_model: Option<String>,
+    pub(super) response_model: Arc<OnceLock<String>>,
 }
 
 /// The candidate whose upstream response the forwarder is waiting for.
@@ -184,6 +184,8 @@ pub struct InFlightAttempt {
 #[derive(Clone, Default)]
 pub struct MiddlewareReceiptJournal {
     inner: Arc<Mutex<MiddlewareReceiptJournalState>>,
+    pub(super) source_hash: crate::sse::SourceHash,
+    pub(super) response_model: Arc<OnceLock<String>>,
 }
 
 #[derive(Default)]
@@ -198,9 +200,24 @@ struct MiddlewareReceiptJournalState {
     /// the authoritative list).
     abandoned: Vec<FailedAttempt>,
     source_finished: bool,
+    source_hash_finished: bool,
+    /// Only matching trusted backend evidence permits publication before EOF.
+    early_publication: bool,
 }
 
 impl MiddlewareReceiptJournal {
+    pub(crate) fn set_early_publication(&self, eligible: bool) {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .early_publication = eligible;
+    }
+    pub(crate) fn early_publication(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .early_publication
+    }
     pub(crate) fn set_early_response_keyset(&self, keyset: Arc<SealedWorkloadKeyset>) {
         self.inner
             .lock()
@@ -284,12 +301,7 @@ impl MiddlewareReceiptJournal {
     }
 
     pub(crate) fn response_model(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .expect("middleware receipt journal poisoned")
-            .draft
-            .as_ref()
-            .and_then(|draft| draft.response_model.clone())
+        self.response_model.get().cloned()
     }
     pub(crate) fn source_finished(&self) -> bool {
         self.inner
@@ -297,28 +309,44 @@ impl MiddlewareReceiptJournal {
             .expect("middleware receipt journal poisoned")
             .source_finished
     }
-    pub(crate) fn finish_source(&self, hash: String) -> Result<(), ServiceError> {
+    pub(crate) fn finish_source(&self) -> Result<(), ServiceError> {
+        self.finish_source_hash()?;
         let mut inner = self
             .inner
             .lock()
-            .expect("middleware receipt journal poisoned");
-        if let Some(draft) = &mut inner.draft {
-            draft.builder.add_response_received_hash(hash)?;
-        }
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.source_finished = true;
+        Ok(())
+    }
+    pub(crate) fn finish_source_hash(&self) -> Result<(), ServiceError> {
+        let hash = self.source_hash.finish();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.source_hash_finished {
+            return Ok(());
+        }
+        let Some(draft) = &mut inner.draft else {
+            return Ok(());
+        };
+        draft.builder.add_response_received_hash(hash)?;
+        inner.source_hash_finished = true;
         Ok(())
     }
     pub(crate) fn observe_source(&self, ids: &super::streaming::Identifiers) {
         let mut inner = self
             .inner
             .lock()
-            .expect("middleware receipt journal poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(model) = &ids.model_id {
+            self.response_model.get_or_init(|| model.clone());
+        }
         if let Some(draft) = &mut inner.draft {
             draft.builder.set_chat_id(ids.chat_id.clone());
             draft
                 .builder
                 .set_upstream_verified_model_id(ids.model_id.clone());
-            draft.response_model = ids.model_id.clone();
         }
     }
 
@@ -461,14 +489,18 @@ pub struct GatewayRequestContext {
 }
 
 /// One ordered failover candidate: a route id to try, the request body to
-/// send to it, and the upstream path the body is shaped for. Callers may
+/// send to it, and the upstream operation the body is shaped for. Callers may
 /// share a single body across candidates or give each candidate its own.
 /// Candidates are tried in order until one succeeds.
 #[derive(Debug, Clone)]
 pub struct ForwardCandidate {
     pub route_id: String,
+    /// Request/response format asserted by the control plane. Validated against
+    /// the backend's declared protocol before this candidate is sent.
+    pub format: crate::middleware::types::ProviderFormat,
     pub body: Vec<u8>,
-    pub path: &'static str,
+    pub endpoint: crate::endpoint::Endpoint,
+    pub wire_endpoint: crate::endpoint::Endpoint,
 }
 
 /// Provider HTTP statuses that trigger failover to the next candidate when

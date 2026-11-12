@@ -22,6 +22,7 @@ use super::{
 };
 use crate::aci::digest::sha256_bare_hex;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::endpoint::Endpoint;
 
 const PROVIDER: &str = "privatemode";
 const DEFAULT_ENCRYPTED_PATH: &str = "/v1/chat/completions";
@@ -370,6 +371,14 @@ impl UpstreamBackend for PrivatemodeProviderBackend {
 
     fn url_origin(&self) -> Option<&str> {
         self.inner.url_origin()
+    }
+
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        self.inner.response_protocol(req, operation)
     }
 
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {

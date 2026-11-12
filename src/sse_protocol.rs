@@ -10,8 +10,9 @@
 
 use serde_json::{json, Value};
 
+use crate::endpoint::Endpoint;
 use crate::error_payload::{error_type, upstream_message, Surface};
-use crate::middleware::{request_transform::Endpoint, types::ProviderFormat};
+use crate::middleware::types::ProviderFormat;
 
 /// Streaming protocol of a downstream endpoint. Narrower than [`Surface`],
 /// which groups all OpenAI-compatible endpoints together: the chat/completions

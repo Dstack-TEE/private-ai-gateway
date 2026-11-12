@@ -22,6 +22,7 @@ use super::{
     UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::endpoint::Endpoint;
 
 pub const ZERO_G_PROVIDER: &str = "0g-private-computer";
 pub const ZERO_G_E2EE_ALGORITHM: &str = "0g-pc-v1-hpke-x25519-hkdf-sha256-chacha20poly1305";
@@ -290,6 +291,15 @@ impl UpstreamBackend for ZeroGProviderBackend {
 
     fn url_origin(&self) -> Option<&str> {
         Some(&self.router_base)
+    }
+
+    // The 0G adapter only serves OpenAI Chat, independently of the requested operation.
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        _operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        Some(super::SseProtocol::OpenaiChat)
     }
 
     fn requires_verified_binding(&self, _req: &PreparedUpstreamRequest) -> bool {

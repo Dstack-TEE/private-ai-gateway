@@ -28,7 +28,7 @@ use crate::aggregator::service::{
     E2eeError, E2eeRequestContext, E2eeResponseInfo, FailedAttempt, ForwardCandidate,
     GatewayRequestContext, MiddlewareForwardResult, MiddlewareReceiptDraft,
     MiddlewareReceiptJournal, ReceiptOwner, ServiceError, ServiceResponseStream,
-    UpstreamVerificationError, RESPONSES_PATH,
+    UpstreamVerificationError,
 };
 
 use super::cache_salt::CacheSaltKey;
@@ -412,10 +412,12 @@ async fn run_inner(
     drop(upload_permit);
     let forward_candidates: Vec<ForwardCandidate> = shaped
         .into_iter()
-        .map(|(route_id, body, upstream_endpoint)| ForwardCandidate {
-            route_id,
-            body: serde_json::to_vec(&body).unwrap_or_default(),
-            path: upstream_endpoint.path(),
+        .map(|candidate| ForwardCandidate {
+            format: candidate.format,
+            route_id: candidate.route_id,
+            body: serde_json::to_vec(&candidate.body).unwrap_or_default(),
+            endpoint: candidate.endpoint,
+            wire_endpoint: candidate.wire_endpoint,
         })
         .collect();
 
@@ -518,7 +520,6 @@ async fn run_inner(
                         endpoint_path,
                         identity: identity.clone(),
                         exclude_reasoning,
-                        candidates: candidates.clone(),
                         echo: echo.clone(),
                     };
                     return build_early_streaming_response(
@@ -551,18 +552,10 @@ async fn run_inner(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
-            // Looked up in the ORIGINAL list even though shaping may have
-            // skipped candidates: a route id names one deployment and a
-            // deployment has one format, so a repeated id (an ordered list
-            // may name a route twice) cannot disagree on format — and
-            // same-id copies shape identically, so a skip can never split
-            // them either.
             let route = selected_route(
-                &candidates,
-                &forward.selected_route,
-                forward.selected_path,
+                forward.selected_format,
+                forward.selected_endpoint,
                 echo.is_some(),
-                client_endpoint,
             );
 
             let protocol = route.protocol();
@@ -834,15 +827,14 @@ async fn run_inner(
                 endpoint_path,
                 identity: identity.clone(),
                 exclude_reasoning,
-                candidates: candidates.clone(),
                 echo: echo.clone(),
             };
             let receipt_id = journal.peek_receipt_id();
             let finalized = if is_sse_content_type(Some(&content_type)) {
                 let events = build_metered_pipeline(
                     forward.body,
-                    &forward.selected_route,
-                    forward.selected_path,
+                    forward.selected_format,
+                    forward.selected_endpoint,
                     accounting.handle.clone(),
                     accounting.control.clone(),
                     journal.clone(),
@@ -863,11 +855,9 @@ async fn run_inner(
                 )
             } else {
                 let protocol = selected_route(
-                    &inputs.candidates,
-                    &forward.selected_route,
-                    forward.selected_path,
+                    forward.selected_format,
+                    forward.selected_endpoint,
                     inputs.echo.is_some(),
-                    inputs.endpoint,
                 )
                 .protocol();
                 let body = json_stream(forward.body, accounting.handle.clone(), inputs, protocol);
@@ -1171,11 +1161,9 @@ fn build_early_streaming_response(
                     // polling the body, so EOF cannot synthesize an SSE terminal.
                     yield Ok(Record::BeginNonSse);
                     let protocol = selected_route(
-                        &inputs.candidates,
-                        &f.selected_route,
-                        f.selected_path,
+                        f.selected_format,
+                        f.selected_endpoint,
                         inputs.echo.is_some(),
-                        inputs.endpoint,
                     )
                     .protocol();
                     let mut body = json_stream(
@@ -1190,8 +1178,8 @@ fn build_early_streaming_response(
                 } else {
                     let mut pipeline = build_metered_pipeline(
                         f.body,
-                        &f.selected_route,
-                        f.selected_path,
+                        f.selected_format,
+                        f.selected_endpoint,
                         accounting_handle,
                         stream_control,
                         source_journal,
@@ -1256,16 +1244,14 @@ fn build_early_streaming_response(
 
 /// The per-request context a committed upstream stream needs to become the
 /// client pipeline: which surface it is, the identity to stamp on it, whether
-/// reasoning is excluded, and the candidate list the serving route's format is
-/// read from. Cloned once so it can be shared between the immediate streaming
-/// arm and the pre-first-byte deferred path.
+/// reasoning is excluded. Cloned once for the immediate streaming arm and the
+/// pre-first-byte deferred path.
 #[derive(Clone)]
 pub(super) struct StreamPipelineInputs {
     pub endpoint: Endpoint,
     pub endpoint_path: &'static str,
     pub identity: Arc<response_transform::ResponseIdentity>,
     pub exclude_reasoning: bool,
-    pub candidates: Vec<RouteCandidate>,
     pub echo: Option<Arc<Value>>,
 }
 
@@ -1284,29 +1270,12 @@ impl SelectedRoute {
     }
 }
 
-/// Format is deployment metadata; the path is carried by the forward result
-/// because it is a per-request shaping outcome.
-fn selected_route(
-    candidates: &[RouteCandidate],
-    route_id: &str,
-    path: &str,
-    responses: bool,
-    client_endpoint: Endpoint,
-) -> SelectedRoute {
-    let format = candidates
-        .iter()
-        .find(|candidate| candidate.route_id == route_id)
-        .or_else(|| candidates.first())
-        .map_or(ProviderFormat::Openai, |candidate| candidate.format);
-    let responses_passthrough = responses && path == RESPONSES_PATH;
+/// The forward result carries the exact candidate's typed shaping outcome.
+fn selected_route(format: ProviderFormat, endpoint: Endpoint, responses: bool) -> SelectedRoute {
     SelectedRoute {
         format,
-        endpoint: if responses && !responses_passthrough {
-            Endpoint::ChatComplete
-        } else {
-            client_endpoint
-        },
-        responses_passthrough,
+        endpoint,
+        responses_passthrough: responses && endpoint == Endpoint::CreateModelResponse,
     }
 }
 
@@ -1315,20 +1284,14 @@ fn selected_route(
 /// The caller layers keep-alive and the response owner outside it.
 pub(super) fn build_metered_pipeline(
     body: ServiceResponseStream,
-    selected_route_id: &str,
-    selected_path: &'static str,
+    selected_format: ProviderFormat,
+    selected_endpoint: Endpoint,
     accounting: AccountingHandle,
     control: crate::aggregator::service::StreamControl,
     journal: MiddlewareReceiptJournal,
     inputs: &StreamPipelineInputs,
 ) -> EventStream {
-    let route = selected_route(
-        &inputs.candidates,
-        selected_route_id,
-        selected_path,
-        inputs.echo.is_some(),
-        inputs.endpoint,
-    );
+    let route = selected_route(selected_format, selected_endpoint, inputs.echo.is_some());
     let source_protocol = route.protocol();
     let SelectedRoute {
         format: selected_format,

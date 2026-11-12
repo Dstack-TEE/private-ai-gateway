@@ -30,7 +30,7 @@ use crate::sse_protocol::{
     FailureEvidence, SseProtocol, TerminalKind,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Identifiers {
     pub chat_id: Option<String>,
     pub model_id: Option<String>,
@@ -59,11 +59,11 @@ impl Identifiers {
 pub(super) struct MiddlewareProviderResponseDraftingStream {
     inner: UpstreamBodyStream,
     journal: MiddlewareReceiptJournal,
-    hasher: Sha256,
     finished: bool,
     metrics: Arc<ServiceMetrics>,
     endpoint: String,
     source_status: u16,
+    raw_source_hash: Option<crate::sse::SourceHash>,
 }
 impl MiddlewareProviderResponseDraftingStream {
     pub(super) fn new(
@@ -72,17 +72,19 @@ impl MiddlewareProviderResponseDraftingStream {
         journal: MiddlewareReceiptJournal,
         metrics: Arc<ServiceMetrics>,
         source_status: u16,
+        hash_raw_bytes: bool,
     ) -> Self {
         let endpoint = draft.endpoint_path.clone();
+        let raw_source_hash = hash_raw_bytes.then(|| journal.source_hash.clone());
         journal.set(draft);
         Self {
             inner,
             journal,
-            hasher: Sha256::new(),
             finished: false,
             metrics,
             endpoint,
             source_status,
+            raw_source_hash,
         }
     }
 }
@@ -96,7 +98,9 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
         match this.inner.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(bytes))) => {
-                this.hasher.update(&bytes);
+                if let Some(hash) = &this.raw_source_hash {
+                    hash.update(&bytes);
+                }
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(error))) => {
@@ -105,10 +109,7 @@ impl Stream for MiddlewareProviderResponseDraftingStream {
             }
             Poll::Ready(None) => {
                 this.finished = true;
-                let result = this.journal.finish_source(format!(
-                    "sha256:{}",
-                    hex::encode(this.hasher.clone().finalize())
-                ));
+                let result = this.journal.finish_source();
                 this.metrics.record_upstream_response(
                     &this.endpoint,
                     RequestMode::Streaming,
@@ -128,12 +129,39 @@ pub(crate) struct StreamControl(Arc<Mutex<StreamControlState>>);
 #[derive(Default)]
 struct StreamControlState {
     source_terminal: bool,
+    published_terminal: TerminalPublication,
     output_ended: bool,
     bridges: Vec<BridgeHandle>,
     continuation_failure: Option<StreamFailure>,
     aborted: Option<StreamFailure>,
 }
+#[derive(Clone, Copy, Default)]
+pub(crate) enum TerminalPublication {
+    #[default]
+    Unpublished,
+    Published {
+        failure: Option<StreamFailure>,
+    },
+}
 impl StreamControl {
+    fn source_terminal(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .source_terminal
+    }
+    fn terminal_returned(&self, failure: Option<StreamFailure>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .published_terminal = TerminalPublication::Published { failure };
+    }
+    pub(crate) fn published_terminal(&self) -> TerminalPublication {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .published_terminal
+    }
     fn ingress(&self, mut record: Record) -> Result<Option<Record>, ServiceError> {
         validate_source_record(&record)?;
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -214,7 +242,7 @@ impl StreamControl {
             .unwrap_or_else(PoisonError::into_inner)
             .aborted
     }
-    fn report_failure(&self, failure: Option<StreamFailure>) -> Option<StreamFailure> {
+    pub(crate) fn report_failure(&self, failure: Option<StreamFailure>) -> Option<StreamFailure> {
         if failure.is_some_and(|f| f.source == Some(ErrorSource::Gateway)) {
             return failure;
         }
@@ -249,8 +277,9 @@ pub(crate) fn decode_source(
     control: StreamControl,
 ) -> EventStream {
     let mut ids = Identifiers::default();
+    let hash = journal.source_hash.clone();
     Box::pin(
-        DecodedStream::new(inner, Some(protocol)).filter_map(move |record| {
+        DecodedStream::with_source_hash(inner, protocol, hash).filter_map(move |record| {
             let result = match record {
                 Ok(record) => {
                     accounting.observe_source(&record);
@@ -282,6 +311,7 @@ pub(crate) enum ResponseInput {
     Bytes(ServiceResponseStream),
 }
 struct ReceiptContext {
+    published: bool,
     keys: Arc<dyn KeyProvider>,
     receipt_store: Arc<dyn ReceiptStore>,
     session_store: Arc<dyn SessionStore>,
@@ -303,6 +333,7 @@ enum ReceiptDraft {
 impl ReceiptContext {
     fn new(service: &AciService, requester: Option<ReceiptOwner>, draft: ReceiptDraft) -> Self {
         Self {
+            published: false,
             keys: service.keys.clone(),
             receipt_store: service.receipt_store.clone(),
             session_store: service.session_store.clone(),
@@ -320,19 +351,27 @@ impl ReceiptContext {
         ids: &Identifiers,
         hash: String,
         endpoint: &str,
+        at_terminal: bool,
     ) -> Result<(), ServiceError> {
-        if self.suppressed {
+        if self.suppressed || self.published {
             return Ok(());
         }
         let (mut builder, lease, response_model) = match &mut self.draft {
             ReceiptDraft::Middleware(journal) => {
+                if at_terminal {
+                    journal.finish_source_hash()?;
+                }
                 let Some(draft) = journal.take() else {
                     return Ok(());
                 };
-                if !journal.source_finished() {
+                if !at_terminal && !journal.source_finished() {
                     return Ok(());
                 }
-                (draft.builder, draft.session_lease, draft.response_model)
+                (
+                    draft.builder,
+                    draft.session_lease,
+                    draft.response_model.get().cloned(),
+                )
             }
             ReceiptDraft::Direct { builder, lease } => (
                 *builder.take().ok_or(ReceiptError::EmptyReceipt)?,
@@ -357,19 +396,12 @@ impl ReceiptContext {
             self.ttl,
             lease.as_ref(),
         )?;
-        if matches!(self.draft, ReceiptDraft::Direct { .. }) {
-            self.metrics.record_upstream_response(
-                endpoint,
-                RequestMode::Streaming,
-                200,
-                response_model.as_deref(),
-            );
-        }
         self.metrics.record_receipt_issued(
             endpoint,
             RequestMode::Streaming,
             response_model.as_deref(),
         );
+        self.published = true;
         Ok(())
     }
 }
@@ -393,8 +425,8 @@ impl ResponseMode {
     }
 }
 
-/// The sole response lifetime owner. EOF remains the publication boundary; a
-/// terminal records protocol meaning but never stops polling the source.
+/// The sole response lifetime owner. An accepted source terminal permits
+/// publication at the destination terminal while source accounting continues.
 pub(crate) struct ResponseOwner {
     inner: ResponseInput,
     receipt: Option<ReceiptContext>,
@@ -707,8 +739,30 @@ impl ResponseOwner {
             encrypt_e2ee_record(&mut record, ctx, &self.endpoint)?;
         }
         let bytes = serialize(&record)?;
+        if self.saw_terminal {
+            return Ok(Bytes::new());
+        }
+        let mut publish_at_terminal = false;
         if let Some(event) = record.event() {
-            self.saw_terminal |= event.meaning.terminal.is_some();
+            let terminal = event.meaning.terminal.is_some();
+            // The source must reach its own terminal or clean adapter EOF,
+            // after any authentication barrier. Unknown evidence requires EOF.
+            let source_terminal = self
+                .mode
+                .accounting()
+                .is_none_or(|accounting| accounting.control.source_terminal())
+                && self
+                    .receipt
+                    .as_ref()
+                    .is_none_or(|receipt| match &receipt.draft {
+                        ReceiptDraft::Middleware(journal) => journal.early_publication(),
+                        ReceiptDraft::Direct { .. } => true,
+                    });
+            let source_finished = self.receipt.as_ref().is_some_and(|receipt| {
+                matches!(&receipt.draft, ReceiptDraft::Middleware(journal) if journal.source_finished())
+            });
+            publish_at_terminal = terminal && (self.ended || source_terminal || source_finished);
+            self.saw_terminal |= terminal;
             if let Some(sequence) = event
                 .payload
                 .json()
@@ -723,7 +777,32 @@ impl ResponseOwner {
                 accounting.control.failure_terminal();
             }
         }
+        self.wire_hasher.update(&bytes);
+        if publish_at_terminal {
+            self.publish(!self.ended)?;
+            if self
+                .receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.published)
+            {
+                if let Some(accounting) = self.mode.accounting() {
+                    accounting.control.terminal_returned(self.failure);
+                }
+            }
+        }
         Ok(bytes)
+    }
+    fn publish(&mut self, at_terminal: bool) -> Result<(), ServiceError> {
+        let hash = format!(
+            "sha256:{}",
+            hex::encode(self.wire_hasher.clone().finalize())
+        );
+        if let Some(receipt) = &mut self.receipt {
+            // Publication snapshots ids; later source observations only affect EOF metrics.
+            let ids = self.ids.clone();
+            receipt.publish(&ids, hash, &self.endpoint, at_terminal)?;
+        }
+        Ok(())
     }
     fn record_finalizer_error(&self, error: &ServiceError) {
         if let Some(receipt) = &self.receipt {
@@ -769,17 +848,24 @@ impl Stream for ResponseOwner {
                 this.encode(record)
             } else if this.ended {
                 this.finished = true;
-                let hash = format!(
-                    "sha256:{}",
-                    hex::encode(this.wire_hasher.clone().finalize())
-                );
-                let result = this.receipt.as_mut().map_or(Ok(()), |receipt| {
-                    receipt.publish(&this.ids, hash, &this.endpoint)
-                });
+                let result = this.publish(false);
+                if let Some(receipt) = &this.receipt {
+                    if matches!(receipt.draft, ReceiptDraft::Direct { .. })
+                        && !receipt.suppressed
+                        && result.is_ok()
+                    {
+                        receipt.metrics.record_upstream_response(
+                            &this.endpoint,
+                            RequestMode::Streaming,
+                            200,
+                            this.ids.model_id.as_deref(),
+                        );
+                    }
+                }
                 if let Err(error) = &result {
                     this.fail(error);
                 } else if let Some(accounting) = this.mode.accounting_mut() {
-                    accounting.settle(accounting.control.report_failure(this.failure));
+                    accounting.settle(this.failure);
                 }
                 return Poll::Ready(this.output_error.take().or_else(|| result.err()).map(Err));
             } else {
@@ -803,7 +889,10 @@ impl Stream for ResponseOwner {
                         Poll::Pending => return Poll::Pending,
                     },
                     ResponseInput::Bytes(stream) => match stream.as_mut().poll_next(cx) {
-                        Poll::Ready(Some(Ok(bytes))) => Some(Ok(bytes)),
+                        Poll::Ready(Some(Ok(bytes))) => {
+                            this.wire_hasher.update(&bytes);
+                            Some(Ok(bytes))
+                        }
                         Poll::Ready(Some(Err(error))) => {
                             if this.output_error.is_none() {
                                 this.stream_error(&error);
@@ -823,7 +912,6 @@ impl Stream for ResponseOwner {
             match bytes {
                 Ok(bytes) if bytes.is_empty() => {}
                 Ok(bytes) => {
-                    this.wire_hasher.update(&bytes);
                     return Poll::Ready(Some(Ok(bytes)));
                 }
                 Err(error) => {

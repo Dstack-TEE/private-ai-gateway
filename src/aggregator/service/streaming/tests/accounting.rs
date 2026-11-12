@@ -537,9 +537,13 @@ async fn payload_response_error_stays_failed_with_default_or_unknown_event_name(
             false,
         )
         .await;
-        assert!(output.contains("event: error\n"), "{output}");
-        assert!(output.contains("\"type\":\"error\""), "{output}");
-        if prefix.is_empty() { assert!(!output.contains("response.completed")); }
+        if prefix.is_empty() {
+            assert!(output.contains("event: error\n"), "{output}");
+            assert!(output.contains("\"type\":\"error\""), "{output}");
+            assert!(!output.contains("response.completed"));
+        } else {
+            assert!(!output.contains("event: error\n"), "{output}");
+        }
         assert_eq!(control.captured().await["status"], status);
         assert_eq!(control.reports.lock().unwrap().len(), 1);
     }

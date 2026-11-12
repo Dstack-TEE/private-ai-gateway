@@ -60,6 +60,14 @@ impl StubUpstream {
 
 #[async_trait]
 impl UpstreamBackend for StubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "stub-upstream"
     }
@@ -501,6 +509,14 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
     struct ErrUpstream;
     #[async_trait]
     impl UpstreamBackend for ErrUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "err-upstream"
         }
@@ -1647,6 +1663,14 @@ struct TimingOutStubUpstream;
 
 #[async_trait]
 impl UpstreamBackend for TimingOutStubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "stub-timeout-upstream"
     }
@@ -1699,4 +1723,147 @@ async fn direct_messages_timeout_is_an_anthropic_504() {
         .as_str()
         .unwrap_or("")
         .starts_with("req_"));
+}
+
+#[tokio::test]
+async fn configured_backend_publishes_receipt_before_terminal_then_pending_disconnect() {
+    use std::time::Duration;
+
+    use axum::routing::post;
+    use futures_util::StreamExt;
+    use private_ai_gateway::http::build_router_with_admin_and_middleware;
+    use private_ai_gateway::middleware::{
+        CacheSaltKey, Middleware, MiddlewareConfig, PrefixHashKey,
+    };
+    use serde_json::json;
+
+    const SOURCE: &[u8] = concat!(
+        "data: {\"id\":\"configured-terminal\",\"model\":\"upstream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+        "data: [DONE]\n\n"
+    ).as_bytes();
+    let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let fixture = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    [("content-type", "text/event-stream")],
+                    Body::from_stream(
+                        futures_util::stream::once(async {
+                            Ok::<_, std::io::Error>(Bytes::from_static(SOURCE))
+                        })
+                        .chain(futures_util::stream::pending()),
+                    ),
+                )
+            }),
+        )
+        .route(
+            "/consult/pre",
+            post(|| async {
+                Json(json!({"allow":true,"candidates":[{"routeId":"fixture:public","format":"openai"}]}))
+            }),
+        )
+        .route(
+            "/consult/post",
+            post(move |Json(body): Json<Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(body).unwrap();
+                    StatusCode::OK
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, fixture).await.unwrap() });
+    let manager = common::session_config(json!([{
+        "name":"fixture", "provider":"openai-compatible",
+        "base_url":format!("http://{address}"), "models":{"public":"upstream"}
+    }]));
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            manager.backend(),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let middleware = Arc::new(
+        Middleware::new(
+            PrefixHashKey::new([7; 32]),
+            CacheSaltKey::new([8; 32]),
+            &MiddlewareConfig {
+                control_url: format!("http://{address}"),
+                control_token: None,
+                control_timeout_ms: Some(2_000),
+                control_post_timeout_ms: Some(2_000),
+                sse_keepalive_ms: Some(0),
+                send_request_features: Some(false),
+                tee_only_domains: vec![],
+            },
+        )
+        .unwrap(),
+    );
+    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer fixture-key")
+                .body(Body::from(
+                    r#"{"model":"public","messages":[],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    while !wire.ends_with(b"data: [DONE]\n\n") {
+        wire.extend_from_slice(
+            &tokio::time::timeout(Duration::from_secs(2), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // No EOF has arrived and the client never polls the body after the terminal.
+    let receipt = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/aci/receipts/{receipt_id}"))
+                .header("authorization", "Bearer fixture-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), StatusCode::OK);
+    assert!(reports.try_recv().is_err());
+    drop(body);
+    let report = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["status"], 200);
+    assert_eq!(report["selectedRouteId"], "fixture:public");
+    assert_eq!(
+        report["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5})
+    );
+    assert!(reports.try_recv().is_err());
+    server.abort();
+    let _ = server.await;
 }

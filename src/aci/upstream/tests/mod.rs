@@ -12,3 +12,5 @@ pub(crate) async fn characterization_provider_sources() -> [(&'static str, Strin
         ),
     ]
 }
+
+pub(crate) use super::zero_g::tests::{Fixture as ZeroGTerminalFixture, Mode as ZeroGTerminalMode};

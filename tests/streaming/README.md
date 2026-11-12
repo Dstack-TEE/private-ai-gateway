@@ -138,3 +138,96 @@ digit-only strings (including leading zeros), bounded by JavaScript's maximum
 safe integer, in pricing unit tests. Strings are never trimmed; signs, decimal
 points, exponents and whitespace are rejected. Client-injected cost and report
 usage are asserted separately.
+
+## Terminal publication
+
+The response owner publishes the receipt in the poll returning the first eligible
+destination terminal. It keeps the same source input and #563's source-based
+accounting through EOF, suppressing all later client bytes. `terminal.rs` checks
+lookup and signature validity before another body poll, keeps the source pending,
+and drops the body immediately after the terminal to check its completed report.
+Native Chat, Messages and Responses, every bridge, legacy completion, early commit,
+E2EE, synthesized terminals and direct serving use the same publication boundary.
+LF, CRLF and CR prefixes at six chunk sizes pin the received-hash cutoff, including
+when terminal and suffix arrive in one chunk. A dispatching CR excludes its next LF.
+
+The receipt store captures the adapter's source bytes and EOF state at publication.
+Before normalization, the harness reuses the production decoder with byte counting
+to locate the source terminal block and requires its exact prefix hash to equal
+`response.received`; EOF publication checks every captured source byte. The raw
+`response.returned` hash must equal the captured client bytes. Existing terminal
+patches apply to raw baselines before both pass through the shared normalization,
+so no receipt-ID, signature, timestamp or encryption overrides are needed.
+
+Early publication requires the source protocol's own accepted terminal with a
+trusted backend protocol declaration, or clean adapter EOF. Real 0G adapter regressions
+cover unsigned forged frames, missing final frames, rejected signatures and valid
+signed controls on native and bridged paths. A bridge failure terminal without
+an accepted source terminal keeps source authentication and EOF finalization.
+Both bridges that synthesize a terminal at clean Chat EOF publish in that poll.
+
+`candidate_format_must_match_the_configured_upstream_protocol` rejects a declared
+Anthropic format for a Chat backend before verification or forwarding, using the
+real router and 0G fixture on Chat and Messages clients. Matching controls verify
+and publish. `backend_protocol_declarations_accept_only_the_matching_format`
+covers known backend declarations on versioned, unversioned, prefixed and custom
+paths. The real OpenAI-compatible backend on `/custom/infer` publishes before EOF
+and rejects contradictory formats. Unknown backend declarations retain forwarding
+and require clean EOF for publication; pending-source and real-adapter tests pin
+this rule. Their test-only path alias leaves its protocol unknown and exists
+because production 0G accepts solely `/v1/chat/completions`. Responses and legacy
+completion use the selected typed upstream operation, never the URL path.
+
+`configured_backend_publishes_receipt_before_terminal_then_pending_disconnect`
+in `tests/http.rs` uses `UpstreamConfigManager::backend()` and the production HTTP
+router: receipt GET succeeds before EOF or another body poll, and dropping after
+the terminal yields one 200 report with full observed usage. The custom-path
+publication/rejection test and the provider/operation declaration matrix also
+load through the config manager. These tests cover the dynamic configuration
+wrapper that hand-built routers bypassed. The backend trait requires an explicit
+declaration on every implementation so a wrapper cannot inherit unknown by
+omission.
+
+The 145-case corpus has 71 unchanged cases and 74 approved changes: 59 earlier
+publication (including completed status after a published-terminal disconnect),
+10 source-hash cutoff and 5 output cutoff. Every report's status, usage, pricing
+and computed cost equals #563, except the approved post-publication disconnect
+status. Those billing assertions are independent of terminal patches. Main and
+#563 snapshots remain untouched. Compact JSON Lines in
+`streaming_terminal_corrections.jsonl` name every difference; stale or unused
+patches fail verification.
+
+Of the 18 new source-billing cases, 12 are unchanged. The other six are:
+
+- Earlier publication: `billing_chat_cumulative_duplicates`,
+  `native_messages_billing_allowlist_merge`, and
+  `native_messages_billing_usage_after_malformed`.
+- Source-hash cutoff: `billing_chat_messages_usage_after_terminal` and
+  `billing_chat_responses_usage_after_terminal`.
+- Output cutoff: `billing_chat_chat_usage_after_terminal`.
+
+The existing `diff_messages_responses_error_middle_1` signature patch and
+`messages_responses_inband_error_then_timeout` receipt patch reflect #563's new
+source-based usage projection into the Responses failure output. Their categories
+are unchanged. All other prior terminal patches remain unchanged.
+
+Of the 17 counter/cache cases, the six start-only Messages EOF/disconnect cases
+are unchanged. The eleven others change only `/before_eof/receipt`: cache writes
+on all three Chat-source surfaces, ignored inconsistent writes, explicit-zero
+precedence, numeric strings on all three surfaces, and larger Messages deltas on
+all three surfaces. Their wire bytes, receipts and complete reports match #563;
+all 63 existing terminal patches are unchanged.
+
+All nine timeout cases retain 504 `upstream_timeout`, including the five that
+publish a receipt before the timeout. They have no report before the timeout.
+`post_terminal_e2ee_failure_keeps_observing_source_usage` checks that later usage99
+is still billed on a 502 gateway failure while the early receipt and wire hashes
+stay frozen. Publication failures withhold the successful terminal, continue
+source observation and report once at EOF; the retention-failure regression pins
+later cumulative usage and genuine-EOF metrics. A disconnect before the terminal
+remains 499 without a receipt. Drop performs no receipt or completion work.
+
+The `native_post_terminal_usage` receipt loses its `req-fixture` alias because its
+only source id arrives after `[DONE]`. Normal pre-terminal ids remain queryable in
+the yielding poll. Native Messages, native Responses and Messages-to-Responses
+already lacked a `chat_id` alias on #563; this limitation is preserved.

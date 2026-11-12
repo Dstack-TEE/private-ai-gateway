@@ -17,8 +17,8 @@ use futures_util::StreamExt;
 use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
     CacheSaltField, ModelRoute, ModelRouterBackend, OpenAICompatibleBackend,
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+    PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
@@ -31,6 +31,7 @@ use private_ai_gateway::aggregator::upstream_config::{
 };
 use private_ai_gateway::middleware::errors::Surface;
 use private_ai_gateway::middleware::request_transform::Endpoint;
+use private_ai_gateway::middleware::types::ProviderFormat;
 use private_ai_gateway::middleware::{
     CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
 };
@@ -51,6 +52,7 @@ fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
 
 // A mock upstream that returns a fixed response for any forward.
 struct MockUpstream {
+    format: ProviderFormat,
     status: u16,
     body: Vec<u8>,
     /// Headers an upstream may add on top of `content-type` — the kind the
@@ -68,10 +70,55 @@ struct RecordedRequest {
 }
 
 struct RecordingUpstream {
+    format: ProviderFormat,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     status: u16,
     body: Vec<u8>,
     content_type: &'static str,
+}
+
+// These fixtures resolve chat-shaped client paths to their configured protocol,
+// as ModelRouterBackend does before handing a request to a concrete backend.
+fn prepare_mock_request(
+    backend: &dyn UpstreamBackend,
+    mut req: UpstreamRequest,
+    format: ProviderFormat,
+) -> Result<PreparedUpstreamRequest, UpstreamError> {
+    if matches!(
+        req.path.as_deref(),
+        Some("/v1/messages" | "/v1/chat/completions")
+    ) {
+        req.path = Some(
+            match format {
+                ProviderFormat::Openai => "/v1/chat/completions",
+                ProviderFormat::Anthropic => "/v1/messages",
+            }
+            .into(),
+        );
+    }
+    Ok(PreparedUpstreamRequest {
+        model_id: serde_json::from_slice::<Value>(&req.body).unwrap()["model"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        route_id: None,
+        is_tee: None,
+        upstream_name: backend.name().into(),
+        url_origin: backend.url_origin().map(str::to_string),
+        request: req,
+    })
+}
+
+fn mock_response_protocol(format: ProviderFormat, operation: Endpoint) -> Option<SseProtocol> {
+    match operation {
+        Endpoint::Complete => Some(SseProtocol::OpenaiChat),
+        Endpoint::CreateModelResponse => Some(SseProtocol::OpenaiResponses),
+        Endpoint::ChatComplete | Endpoint::Messages => Some(match format {
+            ProviderFormat::Openai => SseProtocol::OpenaiChat,
+            ProviderFormat::Anthropic => SseProtocol::AnthropicMessages,
+        }),
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -82,6 +129,18 @@ impl UpstreamBackend for RecordingUpstream {
 
     fn url_origin(&self) -> Option<&str> {
         Some("https://recording-upstream.example")
+    }
+
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        prepare_mock_request(self, req, self.format)
+    }
+
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        mock_response_protocol(self.format, operation)
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -139,6 +198,16 @@ impl UpstreamBackend for MockUpstream {
     fn url_origin(&self) -> Option<&str> {
         Some("https://mock-upstream.example")
     }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        prepare_mock_request(self, req, self.format)
+    }
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        mock_response_protocol(self.format, operation)
+    }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
@@ -189,6 +258,14 @@ struct TeeAwareUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TeeAwareUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "tee-aware-upstream"
     }
@@ -373,11 +450,21 @@ fn build_service_with_upstream_headers(
     body: Vec<u8>,
     extra_headers: Vec<(&'static str, &'static str)>,
 ) -> Arc<AciService> {
+    build_service_with_format(status, body, extra_headers, ProviderFormat::Openai)
+}
+
+fn build_service_with_format(
+    status: u16,
+    body: Vec<u8>,
+    extra_headers: Vec<(&'static str, &'static str)>,
+    format: ProviderFormat,
+) -> Arc<AciService> {
     Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(MockUpstream {
+                format,
                 status,
                 body,
                 extra_headers,
@@ -396,12 +483,22 @@ fn build_recording_service(
     body: Vec<u8>,
     content_type: &'static str,
 ) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    build_recording_service_with_format(status, body, content_type, ProviderFormat::Openai)
+}
+
+fn build_recording_service_with_format(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+    format: ProviderFormat,
+) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(RecordingUpstream {
+                format,
                 requests: requests.clone(),
                 status,
                 body,
@@ -641,6 +738,7 @@ fn cache_salt_service(
     routes: &[(&str, Option<CacheSaltField>, u16)],
     upstream_path: Option<&str>,
     stream: bool,
+    format: ProviderFormat,
 ) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut router = ModelRouterBackend::new("cache-salt-router");
@@ -663,6 +761,7 @@ fn cache_salt_service(
                     "gpt-test",
                     "actual-model",
                     Arc::new(RecordingUpstream {
+                        format,
                         requests: requests.clone(),
                         status: *status,
                         body,
@@ -715,8 +814,12 @@ async fn cache_salt_is_user_and_provider_scoped_in_buffered_and_streaming_middle
                     pre["workspaceId"] = json!(13);
                 }
                 let (control_url, pres, posts) = spawn_control_capturing_pre(pre).await;
-                let (service, requests) =
-                    cache_salt_service(&[("route:gpt-test", field, 200)], None, streaming);
+                let (service, requests) = cache_salt_service(
+                    &[("route:gpt-test", field, 200)],
+                    None,
+                    streaming,
+                    ProviderFormat::Openai,
+                );
                 let mut input = chat_input();
                 input.stream = streaming;
                 input.params["stream"] = json!(streaming);
@@ -797,16 +900,20 @@ async fn cache_salt_is_user_and_provider_scoped_in_buffered_and_streaming_middle
 async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller_fields() {
     let mut values = Vec::new();
     for (surface, format, native_path) in [
-        (Endpoint::ChatComplete, "openai", None),
-        (Endpoint::Complete, "openai", None),
+        (Endpoint::ChatComplete, ProviderFormat::Openai, None),
+        (Endpoint::Complete, ProviderFormat::Openai, None),
         (
             Endpoint::CreateModelResponse,
-            "openai",
+            ProviderFormat::Openai,
             Some("/v1/responses"),
         ),
-        (Endpoint::CreateModelResponse, "openai", None),
-        (Endpoint::Messages, "anthropic", Some("/v1/messages")),
-        (Endpoint::Messages, "openai", None),
+        (Endpoint::CreateModelResponse, ProviderFormat::Openai, None),
+        (
+            Endpoint::Messages,
+            ProviderFormat::Anthropic,
+            Some("/v1/messages"),
+        ),
+        (Endpoint::Messages, ProviderFormat::Openai, None),
     ] {
         let pre = json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
             "candidates":[{"routeId":"route:gpt-test","format":format,
@@ -820,6 +927,7 @@ async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller
             )],
             native_path,
             false,
+            format,
         );
         let mw = middleware(control_url);
         for (index, caller) in [
@@ -850,7 +958,7 @@ async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller
             input.params["user_cache_secret"] = json!("raw-secret-canary");
             input.received_body = serde_json::to_vec(&input.params).unwrap().into();
             let response = mw.handle_completion(&service, input).await;
-            assert_eq!(response.status(), 200, "{surface:?}, {format}, {index}");
+            assert_eq!(response.status(), 200, "{surface:?}, {format:?}, {index}");
             let _ = raw_body(response).await;
         }
         let requests = requests.lock().unwrap();
@@ -892,6 +1000,7 @@ async fn cache_salt_failover_uses_each_selected_providers_partition() {
             ],
             None,
             stream,
+            ProviderFormat::Openai,
         );
         let mut input = chat_input();
         input.stream = stream;
@@ -926,6 +1035,7 @@ async fn cache_salt_direct_http_topology_preserves_caller_fields() {
         )],
         None,
         false,
+        ProviderFormat::Openai,
     );
     let original = json!({"model":"gpt-test","messages":[],"cache_salt":"caller-cache","user_cache_secret":"caller-secret"});
     let response = build_router(service)
@@ -1957,7 +2067,12 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "content": [{ "type": "text", "text": "hi" }],
         "usage": { "input_tokens": 100, "output_tokens": 20 }
     });
-    let service = build_service_with_upstream(200, serde_json::to_vec(&anthropic_body).unwrap());
+    let service = build_service_with_format(
+        200,
+        serde_json::to_vec(&anthropic_body).unwrap(),
+        vec![],
+        ProviderFormat::Anthropic,
+    );
 
     let input = chat_input();
     let (status, _headers, body) =
@@ -2216,7 +2331,12 @@ async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_m
                 }),
             )
             .await;
-            let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+            let (service, _) = build_recording_service_with_format(
+                200,
+                wire.into_bytes(),
+                content_type,
+                serde_json::from_value(json!(format)).unwrap(),
+            );
             let response = middleware(control_url)
                 .handle_completion(&service, responses_input(streaming))
                 .await;
@@ -2418,7 +2538,12 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
         } else {
             "application/json"
         };
-        let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+        let (service, _) = build_recording_service_with_format(
+            200,
+            wire.into_bytes(),
+            content_type,
+            serde_json::from_value(json!(format)).unwrap(),
+        );
         let response = middleware(control_url)
             .handle_completion(&service, messages_input(streaming))
             .await;
@@ -2449,7 +2574,12 @@ async fn malformed_2xx_body_returns_502_upstream() {
     .await;
     let mw = middleware(control_url);
     // Upstream returns HTTP 200 with a non-JSON body.
-    let service = build_service_with_upstream(200, b"<html>not json</html>".to_vec());
+    let service = build_service_with_format(
+        200,
+        b"<html>not json</html>".to_vec(),
+        vec![],
+        ProviderFormat::Anthropic,
+    );
     let input = chat_input();
 
     let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
@@ -2946,8 +3076,10 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         e2ee: None,
     };
     let candidate = || ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "tee-a:gpt-test".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     };
 
@@ -3335,6 +3467,14 @@ struct SequencedUpstream {
 
 #[async_trait]
 impl UpstreamBackend for SequencedUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "sequenced-upstream"
     }
@@ -3343,14 +3483,11 @@ impl UpstreamBackend for SequencedUpstream {
     }
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let route_id = req.target_route_id.clone().unwrap_or_default();
-        Ok(PreparedUpstreamRequest {
-            upstream_name: self.name().to_string(),
-            url_origin: self.url_origin().map(str::to_string),
-            model_id: "gpt-test".to_string(),
-            is_tee: Some(false),
-            route_id: Some(route_id),
-            request: req,
-        })
+        let mut prepared = prepare_mock_request(self, req, ProviderFormat::Openai)?;
+        prepared.model_id = "gpt-test".into();
+        prepared.is_tee = Some(false);
+        prepared.route_id = Some(route_id);
+        Ok(prepared)
     }
     async fn forward_prepared(
         &self,
@@ -3498,8 +3635,10 @@ fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'sta
 
 fn plain_candidate(route: &str) -> ForwardCandidate {
     ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: route.to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     }
 }
@@ -3759,8 +3898,10 @@ async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
     // replay the hard-failed twin too.
     let (service, forwarded, bodies) = build_sequenced_service(vec![500, 429, 200]);
     let twin = |body: &[u8]| ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "dup:gpt-test".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: body.to_vec(),
     };
     let result = service
@@ -3994,6 +4135,14 @@ struct HangingUpstream;
 
 #[async_trait]
 impl UpstreamBackend for HangingUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "hang-upstream"
     }
@@ -4042,6 +4191,14 @@ struct TimingOutUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TimingOutUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "timeout-upstream"
     }
@@ -4190,6 +4347,14 @@ struct SlowStreamUpstream {
 
 #[async_trait]
 impl UpstreamBackend for SlowStreamUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "slow-stream-upstream"
     }
@@ -4256,6 +4421,14 @@ async fn early_keepalive_receipt_keeps_committed_keyset_across_renewal() {
 
     #[async_trait]
     impl UpstreamBackend for PausedStreamUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused-stream"
         }
@@ -4438,6 +4611,14 @@ async fn assert_early_keepalive_rejects_expired_admission(delay: AdmissionDelay,
     }
     #[async_trait]
     impl UpstreamBackend for CountingUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "counting-upstream"
         }
@@ -4724,6 +4905,14 @@ struct FailoverScriptedUpstream {
 
 #[async_trait]
 impl UpstreamBackend for FailoverScriptedUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "failover-scripted-upstream"
     }
@@ -4809,6 +4998,14 @@ struct TimeoutThenHangUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TimeoutThenHangUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "timeout-then-hang-upstream"
     }
@@ -4877,6 +5074,14 @@ struct Always429StreamUpstream;
 
 #[async_trait]
 impl UpstreamBackend for Always429StreamUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "always-429-upstream"
     }
@@ -5007,6 +5212,14 @@ struct PartialUsageUpstream {
 
 #[async_trait]
 impl UpstreamBackend for PartialUsageUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "partial-usage-fixture"
     }
@@ -5705,6 +5918,7 @@ fn audio_policy_service() -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>)
     use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
     let requests = Arc::new(Mutex::new(Vec::new()));
     let backend = Arc::new(RecordingUpstream {
+        format: ProviderFormat::Openai,
         requests: requests.clone(),
         status: 200,
         body: br#"{"text":"hello","duration":2.965}"#.to_vec(),

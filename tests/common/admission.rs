@@ -89,6 +89,14 @@ impl Backend {
 }
 #[async_trait]
 impl UpstreamBackend for Backend {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn url_origin(&self) -> Option<&str> {
         None
     }
@@ -217,8 +225,10 @@ pub fn request(ids: Vec<String>) -> ChatCompletionRequest<'static> {
 }
 pub fn candidate(id: &str) -> ForwardCandidate {
     ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: id.to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: REQUEST.to_vec(),
     }
 }

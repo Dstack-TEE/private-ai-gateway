@@ -45,6 +45,53 @@ fn test_upstream_config(
 }
 
 #[test]
+fn configured_backend_protocol_comes_from_provider_and_wire_operation() {
+    use crate::aci::upstream::{SseProtocol, UpstreamRequest};
+    use crate::middleware::request_transform::Endpoint;
+
+    for (provider, messages_protocol) in [
+        (UpstreamProvider::OpenAiCompatible, None),
+        (UpstreamProvider::Chutes, None),
+        (
+            UpstreamProvider::Anthropic,
+            Some(SseProtocol::AnthropicMessages),
+        ),
+    ] {
+        for token in [None, Some("fixture-token".to_string())] {
+            let mut config = test_upstream_config("protocol", provider, "public", "upstream");
+            config.path = Some("/custom/infer".into());
+            config.bearer_token = token;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("upstreams.json");
+            std::fs::write(&path, serde_json::to_vec(&vec![config]).unwrap()).unwrap();
+            let manager =
+                UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None))
+                    .unwrap();
+            let backend = manager.backend();
+            for (operation, protocol) in [
+                (Endpoint::ChatComplete, Some(SseProtocol::OpenaiChat)),
+                (Endpoint::Messages, messages_protocol),
+                (Endpoint::Complete, Some(SseProtocol::OpenaiChat)),
+                (
+                    Endpoint::CreateModelResponse,
+                    Some(SseProtocol::OpenaiResponses),
+                ),
+                (Endpoint::Embed, None),
+            ] {
+                let prepared = backend
+                    .prepare(UpstreamRequest {
+                        body: bytes::Bytes::from_static(br#"{"model":"public"}"#),
+                        path: Some(operation.path().into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(backend.response_protocol(&prepared, operation), protocol);
+            }
+        }
+    }
+}
+
+#[test]
 fn router_provider_verifies_once_per_channel() {
     // A router (NEAR AI) with several models yields ONE verification target — the
     // shared gateway channel — so it seals one session per channel, not one per

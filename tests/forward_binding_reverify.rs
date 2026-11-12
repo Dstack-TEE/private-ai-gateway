@@ -167,6 +167,14 @@ impl MismatchingBackend {
 
 #[async_trait]
 impl UpstreamBackend for MismatchingBackend {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -372,8 +380,10 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
     let service = build_service(backend, verifier.clone());
 
     let candidates = vec![ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "route-a".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: CHAT_BODY.to_vec(),
     }];
     let journal = MiddlewareReceiptJournal::default();
