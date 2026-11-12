@@ -8,9 +8,7 @@ use std::sync::{
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use futures_util::Stream;
-#[cfg(test)]
-use futures_util::StreamExt;
+use futures_util::{FutureExt, Stream, StreamExt, TryStreamExt};
 use serde_json::Value;
 use sse_stream::{Sse, SseByteStream};
 
@@ -387,11 +385,14 @@ pub(crate) fn decode_envelope(
     inner: crate::aci::upstream::UpstreamBodyStream,
     max_bytes: usize,
 ) -> EnvelopeStream {
-    use futures_util::StreamExt;
     let inner = Box::pin(inner.map(|item| item.map_err(ServiceError::Upstream)));
     Box::pin(
         DecodedStream::with_limit(inner, None, max_bytes).map(|item| {
-            item.map_err(|error| match error {
+            item.and_then(|record| match record {
+                Record::Residual => Err(ServiceError::Upstream(UpstreamError::EnvelopeTruncated)),
+                record => Ok(record),
+            })
+            .map_err(|error| match error {
                 ServiceError::Upstream(error) => error,
                 _ => UpstreamError::Transport("invalid provider SSE envelope".into()),
             })
@@ -405,21 +406,12 @@ pub(crate) fn decode_buffered(
     bytes: Bytes,
     protocol: Option<SseProtocol>,
 ) -> Result<Vec<Record>, ServiceError> {
-    let mut stream =
-        DecodedStream::new(Box::pin(futures_util::stream::iter([Ok(bytes)])), protocol);
-    let mut cx = Context::from_waker(std::task::Waker::noop());
-    let mut records = Vec::new();
-    loop {
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(record)) => records.push(record?),
-            Poll::Ready(None) => return Ok(records),
-            Poll::Pending => {
-                return Err(ServiceError::AdmissionInvariant(
-                    "buffered SSE input waited",
-                ))
-            }
-        }
-    }
+    DecodedStream::new(Box::pin(futures_util::stream::iter([Ok(bytes)])), protocol)
+        .try_collect()
+        .now_or_never()
+        .ok_or(ServiceError::AdmissionInvariant(
+            "buffered SSE input waited",
+        ))?
 }
 
 #[cfg(test)]

@@ -217,7 +217,7 @@ impl ChutesE2eeDecryptingStream {
         if raw.is_empty() {
             return Ok(());
         }
-        if raw == "[DONE]" {
+        if event.meaning.kind == crate::sse_protocol::EventKind::Done {
             self.pending.push_back(encode_application_data(raw)?);
             return Ok(());
         }
@@ -331,6 +331,28 @@ pub(crate) async fn characterization_source() -> String {
 mod tests {
     use super::*;
     use crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
+
+    #[tokio::test]
+    async fn incomplete_envelope_is_an_upstream_transport_failure() {
+        use futures_util::StreamExt;
+        let (key, _) = MlKem768::generate_keypair();
+        let input = Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+            b"data: {",
+        ))]));
+        let mut stream = ChutesE2eeDecryptingStream::new(input, key);
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(matches!(error, UpstreamError::EnvelopeTruncated));
+        let failure = crate::middleware::sse::StreamFailure::from_error(
+            &crate::aggregator::service::ServiceError::Upstream(error),
+        );
+        assert_eq!(failure.status, 502);
+        assert_eq!(failure.source, None);
+        assert_eq!(
+            failure.class,
+            Some(crate::middleware::types::ErrorClass::UpstreamTransport)
+        );
+        assert!(stream.next().await.is_none());
+    }
 
     #[test]
     fn gzip_round_trip_under_limit() {

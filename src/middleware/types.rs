@@ -377,6 +377,7 @@ impl From<&UpstreamError> for ErrorClass {
             UpstreamError::Transport(_)
             | UpstreamError::SseLineOverflow
             | UpstreamError::SseTruncated
+            | UpstreamError::EnvelopeTruncated
             | UpstreamError::ResponseTooLarge => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
             UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,

@@ -359,11 +359,22 @@ fn verified_event_stream(
         let mut events = crate::sse::decode_envelope(Box::pin(raw), MAX_SSE_BUFFER_BYTES);
         while let Some(record) = events.next().await {
             let record = record?;
-            let crate::sse::Record::Event(event) = record else { continue };
-            if event.data == "[DONE]" { break }
-            let frame = event.payload.json().and_then(Value::as_object).ok_or_else(|| rejected("invalid SSE frame JSON"))?.clone();
+            let crate::sse::Record::Event(event) = record else {
+                continue;
+            };
+            if event.meaning.kind == crate::sse_protocol::EventKind::Done {
+                break;
+            }
+            let frame = match event.payload {
+                crate::sse::Payload::Json(Value::Object(frame)) => Ok(frame),
+                _ => Err(rejected("invalid SSE frame JSON")),
+            }?;
             let opened = opener.open_frame(frame)?;
-            if opened.values().all(is_empty) { continue }
+            // Opening removes unbound fields; an otherwise empty frame carries
+            // no authenticated value for the caller.
+            if opened.values().all(is_empty) {
+                continue;
+            }
             let data = serde_json::to_string(&opened).map_err(rejected)?;
             yield sse_stream::Sse::default().data(data).encode().map_err(rejected)?;
         }

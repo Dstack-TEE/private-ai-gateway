@@ -1,4 +1,5 @@
 use super::wire::{E2eeAadMode, E2eeDecryptor};
+use super::ServiceError;
 
 use serde_json::{json, Value};
 
@@ -533,13 +534,12 @@ pub(super) fn encrypt_e2ee_final_response(
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
     is_sse: bool,
-) -> Result<Vec<u8>, E2eeError> {
+) -> Result<Vec<u8>, ServiceError> {
     if !is_sse {
-        return encrypt_e2ee_response_body(cleartext_body, ctx, endpoint_path);
+        return encrypt_e2ee_response_body(cleartext_body, ctx, endpoint_path).map_err(Into::into);
     }
     super::streaming::finalize_sse_body(cleartext_body, Some(ctx), endpoint_path)
         .map(|(bytes, _)| bytes)
-        .map_err(|_| E2eeError::EncryptionFailed)
 }
 
 pub fn is_sse_content_type(content_type: Option<&str>) -> bool {

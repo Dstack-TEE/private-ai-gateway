@@ -275,6 +275,7 @@ enum Mode {
     Unsealed,
     RouterError,
     Truncated,
+    TruncatedLine,
     Reordered,
     Tampered,
 }
@@ -463,7 +464,12 @@ async fn chat(
         let events: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
         (
             [("content-type", "text/event-stream")],
-            events + "data: [DONE]\n\n",
+            events
+                + if broker.mode == Mode::TruncatedLine {
+                    "data: {"
+                } else {
+                    "data: [DONE]\n\n"
+                },
         )
             .into_response()
     } else {
@@ -597,6 +603,32 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
             .flatten()
             .all(|event| !event.contains("[DONE]")));
     }
+}
+
+#[tokio::test]
+async fn incomplete_envelope_is_an_upstream_transport_failure() {
+    let fixture = Fixture::new(Mode::TruncatedLine).await;
+    let response = fixture
+        .backend
+        .forward_stream_verified_prepared(fixture.chat(true), &fixture.event)
+        .await
+        .unwrap();
+    let items: Vec<_> = response.body.collect().await;
+    assert!(items
+        .iter()
+        .flatten()
+        .all(|event| !event.windows(6).any(|part| part == b"[DONE]")));
+    let error = items.into_iter().last().unwrap().unwrap_err();
+    assert!(matches!(error, UpstreamError::EnvelopeTruncated));
+    let failure = crate::middleware::sse::StreamFailure::from_error(
+        &crate::aggregator::service::ServiceError::Upstream(error),
+    );
+    assert_eq!(failure.status, 502);
+    assert_eq!(failure.source, None);
+    assert_eq!(
+        failure.class,
+        Some(crate::middleware::types::ErrorClass::UpstreamTransport)
+    );
 }
 
 #[tokio::test]

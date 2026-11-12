@@ -1372,7 +1372,7 @@ fn json_stream(
         while let Some(chunk) = body.next().await {
             let chunk = chunk?;
             if bytes.len().saturating_add(chunk.len()) > crate::sse::MAX_EVENT_BYTES {
-                Err(ServiceError::Upstream(UpstreamError::Transport("provider SSE event exceeded the size cap".into())))?;
+                Err(ServiceError::Upstream(UpstreamError::ResponseTooLarge))?;
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -1680,6 +1680,7 @@ fn forward_error_status(err: &ServiceError) -> u16 {
             | UpstreamError::Transport(_)
             | UpstreamError::SseLineOverflow
             | UpstreamError::SseTruncated
+            | UpstreamError::EnvelopeTruncated
             | UpstreamError::ResponseTooLarge
             | UpstreamError::ChannelBindingMismatch(_),
         )
