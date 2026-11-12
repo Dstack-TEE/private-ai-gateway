@@ -292,12 +292,13 @@ impl AccountingHandle {
             state.ttft_ms = Some(response_transform::elapsed_ms(state.report.started));
         }
     }
-    /// Retain source phase and the initial Messages usage through conversion.
-    pub(crate) fn ingress(&self, record: &mut Record) {
-        let Some(event) = &mut record.event else {
-            return;
-        };
+    /// Retain source phase and usage through conversion. After a failure
+    /// terminal, keep billing to EOF without forwarding records to converters.
+    pub(crate) fn ingress(&self, record: &mut Record) -> bool {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(event) = record.event_mut() else {
+            return !state.failure_terminal;
+        };
         event.after_terminal = state.ingress_terminal;
         state.ingress_terminal |= event.meaning.terminal.is_some();
         if let Some(usage) = event.payload.json().and_then(message_start_usage) {
@@ -314,23 +315,10 @@ impl AccountingHandle {
                 state.chat_start_usage = Some(usage.clone());
             }
         }
-    }
-    pub(crate) fn failure_terminal(&self) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .failure_terminal = true;
-    }
-    /// Source hashing and the existing billing continue to EOF, independently
-    /// of output. Preserve the old bridges' usage selection here, not in them.
-    pub(crate) fn observe_after_terminal(&self, record: &mut Record) -> bool {
-        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.failure_terminal {
-            return false;
-        }
-        let Some(event) = record.event.as_ref() else {
             return true;
-        };
+        }
+        // Preserve the old bridges' usage selection in accounting only.
         let failed = event.meaning.failure.is_some();
         let source = event.source_protocol;
         if state.bridge.is_none()
@@ -338,6 +326,15 @@ impl AccountingHandle {
             || (source == Some(SseProtocol::OpenaiChat)
                 && state.report.endpoint != crate::aggregator::service::COMPLETIONS_PATH)
         {
+            if state.bridge.is_none() && !failed {
+                record.edit_json(|body| {
+                    response_transform::canonicalize_protocol_stream(
+                        body,
+                        sse_protocol(&state.report.endpoint),
+                        Some(&state.report.request_id),
+                    )
+                });
+            }
             drop(state);
             self.observe(record, failed);
         } else if source == Some(SseProtocol::AnthropicMessages)
@@ -345,20 +342,22 @@ impl AccountingHandle {
             && event.meaning.kind == EventKind::MessageDelta
             && event.meaning.terminal.is_none()
         {
-            if let Some(usage) = record.json().and_then(|body| body.get("usage")) {
+            if let Some(usage) = event.payload.json().and_then(|body| body.get("usage")) {
                 let mut usage = response_transform::chat_usage(
                     state.chat_start_usage.as_ref(),
                     response_transform::i64_field(usage, "output_tokens"),
                 );
                 filter_observed_usage(Some(&mut usage), SseProtocol::OpenaiChat, None);
-                drop(state);
-                self.0
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .last_usage = Some(usage);
+                state.last_usage = Some(usage);
             }
         }
-        true
+        false
+    }
+    pub(crate) fn failure_terminal(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .failure_terminal = true;
     }
     pub fn selected(&self, route: String, attempt: u32, status: u16) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -401,11 +400,14 @@ impl AccountingHandle {
     }
     /// Capture usage and inject cost. The owner decides which records to emit.
     pub(crate) fn observe(&self, record: &mut Record, include_start: bool) -> Option<Value> {
-        if record.residual || record.is_heartbeat() || record.non_sse.is_some() {
+        if matches!(
+            record,
+            Record::Residual | Record::Heartbeat | Record::NonSse(_)
+        ) {
             return None;
         }
         self.first_byte();
-        let event = record.event.as_ref()?;
+        let event = record.event()?;
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let destination = sse_protocol(&state.report.endpoint);
         let source = event.source_protocol;
@@ -561,7 +563,10 @@ impl Stream for KeepAliveStream {
         }
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(item)) => {
-                if item.as_ref().is_ok_and(|record| record.non_sse.is_some()) {
+                if item
+                    .as_ref()
+                    .is_ok_and(|record| matches!(record, Record::NonSse(_)))
+                {
                     this.interval = None;
                     this.sleep = None;
                 }
@@ -576,7 +581,7 @@ impl Stream for KeepAliveStream {
                 if let Some(sleep) = this.sleep.as_mut() {
                     if sleep.as_mut().poll(cx).is_ready() {
                         this.arm();
-                        return Poll::Ready(Some(Ok(Record::heartbeat())));
+                        return Poll::Ready(Some(Ok(Record::Heartbeat)));
                     }
                 }
                 Poll::Pending

@@ -1125,7 +1125,7 @@ fn build_early_streaming_response(
     let stream_request_id = request_id.clone();
     let identity = inputs.identity.clone();
     let body_stream = async_stream::stream! {
-        yield Ok::<Record, ServiceError>(Record::heartbeat());
+        yield Ok::<Record, ServiceError>(Record::Heartbeat);
         match forward.await {
             Ok(MiddlewareForwardResult::Stream(f)) => {
                 let attempt_index = f.failed_attempts.len() as u32;
@@ -1134,10 +1134,10 @@ fn build_early_streaming_response(
                 if f.upstream_headers.get("content-type").is_some_and(|value| !is_sse_content_type(Some(value))) {
                     // Switch the response owner to the explicit byte path before
                     // polling the body, so EOF cannot synthesize an SSE terminal.
-                    yield Ok(Record::non_sse(Bytes::new()));
+                    yield Ok(Record::NonSse(Bytes::new()));
                     let mut body = json_stream(f.body, accounting_handle.clone(), inputs.clone());
                     while let Some(item) = body.next().await {
-                        yield item.map(Record::non_sse);
+                        yield item.map(Record::NonSse);
                     }
                 } else {
                     let mut pipeline = build_metered_pipeline(f.body, &f.selected_route, f.selected_path, accounting_handle, source_journal, &inputs);

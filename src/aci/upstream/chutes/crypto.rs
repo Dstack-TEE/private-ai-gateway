@@ -210,7 +210,7 @@ impl ChutesE2eeDecryptingStream {
     }
 
     fn process_event(&mut self, record: crate::sse::Record) -> Result<(), UpstreamError> {
-        let Some(event) = record.event else {
+        let crate::sse::Record::Event(event) = record else {
             return Ok(());
         };
         let raw = event.data;

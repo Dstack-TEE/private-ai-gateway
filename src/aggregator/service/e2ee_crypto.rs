@@ -553,7 +553,7 @@ pub(super) fn encrypt_e2ee_record(
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
 ) -> Result<(), E2eeError> {
-    let Some(event) = &record.event else {
+    let Some(event) = record.event() else {
         return Ok(());
     };
     if event.meaning.kind == crate::sse_protocol::EventKind::Done {

@@ -359,7 +359,7 @@ fn verified_event_stream(
         let mut events = crate::sse::decode_envelope(Box::pin(raw), MAX_SSE_BUFFER_BYTES);
         while let Some(record) = events.next().await {
             let record = record?;
-            let Some(event) = record.event else { continue };
+            let crate::sse::Record::Event(event) = record else { continue };
             if event.data == "[DONE]" { break }
             let frame = event.payload.json().and_then(Value::as_object).ok_or_else(|| rejected("invalid SSE frame JSON"))?.clone();
             let opened = opener.open_frame(frame)?;

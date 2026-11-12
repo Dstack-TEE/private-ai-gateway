@@ -646,6 +646,19 @@ pub(crate) fn canonicalize_stream(body: &mut Value, endpoint: Endpoint, request_
     }
 }
 
+pub(crate) fn canonicalize_protocol_stream(
+    body: &mut Value,
+    protocol: SseProtocol,
+    request_id: Option<&str>,
+) {
+    let endpoint = match protocol {
+        SseProtocol::OpenaiChat => Endpoint::ChatComplete,
+        SseProtocol::AnthropicMessages => Endpoint::Messages,
+        SseProtocol::OpenaiResponses => Endpoint::CreateModelResponse,
+    };
+    canonicalize_stream(body, endpoint, request_id);
+}
+
 fn canonicalize_systemone(body: &mut Value, filter_usage_fields: bool) {
     let Some(object) = body.as_object_mut() else {
         return;

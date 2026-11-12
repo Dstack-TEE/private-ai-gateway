@@ -20,7 +20,6 @@ use crate::aci::receipt::{ReceiptBuilder, ReceiptError};
 use crate::aci::upstream::UpstreamBodyStream;
 use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
-use crate::middleware::request_transform::Endpoint;
 use crate::middleware::response_transform::{self, ResponseIdentity};
 use crate::middleware::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamFailure};
 use crate::middleware::types::{ErrorClass, ErrorSource};
@@ -124,10 +123,10 @@ pub(crate) fn decode_source(
     Box::pin(
         DecodedStream::new(inner, Some(protocol)).filter_map(move |mut record| {
             if let Ok(record) = &mut record {
-                accounting.ingress(record);
+                let forward = accounting.ingress(record);
                 ids.observe(record);
                 journal.observe_source(&ids);
-                if accounting.observe_after_terminal(record) {
+                if !forward {
                     return std::future::ready(None);
                 }
             }
@@ -346,16 +345,15 @@ impl ResponseOwner {
         if self.failure.is_some() && self.saw_terminal {
             return Ok(Bytes::new());
         }
-        self.truncated |= record.residual;
+        self.truncated |= matches!(record, Record::Residual);
         let failure = record
-            .event
-            .as_ref()
+            .event()
             .is_some_and(|event| event.meaning.failure.is_some());
         let usage = self
             .accounting
             .as_ref()
             .and_then(|accounting| accounting.handle.observe(&mut record, failure));
-        let Some(event) = record.event.as_ref().filter(|_| failure) else {
+        let Some(event) = record.event().filter(|_| failure) else {
             return self.encode(record);
         };
         if self.accounting.is_none() {
@@ -369,7 +367,6 @@ impl ResponseOwner {
             return Ok(Bytes::new());
         };
         let native = self.native_source(event.source_protocol);
-        let already_failed = self.failure.is_some();
         if !event.after_terminal {
             self.failure.get_or_insert_with(inband_failure);
         }
@@ -378,7 +375,7 @@ impl ResponseOwner {
             return self.encode(record);
         }
         // A bridge generates one destination failure, never a second terminal.
-        if already_failed || event.after_terminal {
+        if event.after_terminal {
             return Ok(Bytes::new());
         }
         let failure = self.bridge_failure(record, protocol, usage);
@@ -396,13 +393,8 @@ impl ResponseOwner {
     }
 
     fn sanitize_native_failure(&self, record: &mut Record, protocol: SseProtocol) {
-        let Some(event) = &record.event else { return };
+        let Some(event) = record.event() else { return };
         let meaning = event.meaning;
-        let endpoint = match protocol {
-            SseProtocol::OpenaiChat => Endpoint::ChatComplete,
-            SseProtocol::AnthropicMessages => Endpoint::Messages,
-            SseProtocol::OpenaiResponses => Endpoint::CreateModelResponse,
-        };
         record.edit_json(|body| {
             if let Some(identity) = &self.identity {
                 response_transform::rewrite_identity(body, identity);
@@ -421,9 +413,9 @@ impl ResponseOwner {
                         response_transform::sanitize_responses_error_event(object);
                     }
                 }
-                _ => response_transform::canonicalize_stream(
+                _ => response_transform::canonicalize_protocol_stream(
                     body,
-                    endpoint,
+                    protocol,
                     self.request_id.as_deref(),
                 ),
             }
@@ -448,7 +440,7 @@ impl ResponseOwner {
         protocol: SseProtocol,
         usage: Option<Value>,
     ) -> Vec<Record> {
-        let Some(event) = &record.event else {
+        let Some(event) = record.event() else {
             return Vec::new();
         };
         let source = event.source_protocol;
@@ -536,13 +528,13 @@ impl ResponseOwner {
     }
 
     fn encode(&mut self, mut record: Record) -> Result<Bytes, ServiceError> {
-        self.non_sse |= record.non_sse.is_some();
+        self.non_sse |= matches!(record, Record::NonSse(_));
         self.ids.observe(&record);
         if let Some(ctx) = &self.e2ee {
             encrypt_e2ee_record(&mut record, ctx, &self.endpoint)?;
         }
         let bytes = serialize(&record)?;
-        if let Some(event) = &record.event {
+        if let Some(event) = record.event() {
             self.saw_terminal |= event.meaning.terminal.is_some();
             if let Some(sequence) = event
                 .payload

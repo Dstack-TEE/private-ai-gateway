@@ -573,10 +573,10 @@ async fn early_non_sse_handoff_disables_subsequent_keepalives() {
     use futures_util::FutureExt;
     let (release, pending) = tokio::sync::oneshot::channel();
     let source = Box::pin(async_stream::stream! {
-        yield Ok(Record::heartbeat());
-        yield Ok(Record::non_sse(Bytes::new()));
+        yield Ok(Record::Heartbeat);
+        yield Ok(Record::NonSse(Bytes::new()));
         pending.await.unwrap();
-        yield Ok(Record::non_sse(Bytes::from_static(b"opaque body")));
+        yield Ok(Record::NonSse(Bytes::from_static(b"opaque body")));
     });
     let mut stream = KeepAliveStream::new(source, Some(Duration::from_millis(10)));
     assert_eq!(

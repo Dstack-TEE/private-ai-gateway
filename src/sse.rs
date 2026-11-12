@@ -38,48 +38,63 @@ impl Payload {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Event {
+    /// Original decoded text, also the exact size used by conversion limits.
     pub data: String,
     pub payload: Payload,
     pub meaning: EventMeaning,
     pub after_terminal: bool,
     pub source_protocol: Option<SseProtocol>,
+    metadata: Sse,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Record {
-    pub event: Option<Event>,
+pub(crate) enum Record {
+    Event(Event),
+    EditedEvent(Event),
     /// The library returns metadata-only blocks, with no dispatched payload.
-    metadata: Sse,
-    pub residual: bool,
-    heartbeat: bool,
-    edited: bool,
+    Metadata(Sse),
+    Residual,
+    Heartbeat,
     /// Explicit non-SSE response bytes, including the early-commit handoff.
-    pub non_sse: Option<Bytes>,
+    NonSse(Bytes),
 }
 impl Record {
-    pub fn from_sse(metadata: Sse, protocol: Option<SseProtocol>) -> Self {
-        let event = metadata.data.as_ref().map(|data| {
-            let payload = serde_json::from_str(data)
-                .map_or_else(|_| Payload::Text(data.clone()), Payload::Json);
-            Event {
-                data: data.clone(),
-                meaning: classify(protocol, metadata.event.as_deref(), &payload),
-                after_terminal: false,
-                source_protocol: protocol,
-                payload,
-            }
-        });
-        Self {
-            event,
+    pub fn from_sse(mut metadata: Sse, protocol: Option<SseProtocol>) -> Self {
+        let Some(data) = metadata.data.take() else {
+            return Self::Metadata(metadata);
+        };
+        let payload =
+            serde_json::from_str(&data).map_or_else(|_| Payload::Text(data.clone()), Payload::Json);
+        let event = Event {
+            data,
+            meaning: classify(protocol, metadata.event.as_deref(), &payload),
+            after_terminal: false,
+            source_protocol: protocol,
+            payload,
             metadata,
-            residual: false,
-            heartbeat: false,
-            edited: false,
-            non_sse: None,
+        };
+        Self::Event(event)
+    }
+    pub fn event(&self) -> Option<&Event> {
+        match self {
+            Self::Event(event) | Self::EditedEvent(event) => Some(event),
+            _ => None,
         }
     }
+    pub fn event_mut(&mut self) -> Option<&mut Event> {
+        match self {
+            Self::Event(event) | Self::EditedEvent(event) => Some(event),
+            _ => None,
+        }
+    }
+    fn mark_edited(&mut self) {
+        *self = match std::mem::replace(self, Self::Residual) {
+            Self::Event(event) | Self::EditedEvent(event) => Self::EditedEvent(event),
+            other => other,
+        };
+    }
     pub fn edit_json(&mut self, edit: impl FnOnce(&mut Value)) {
-        let Some(event) = self.event.as_mut() else {
+        let Some(event) = self.event_mut() else {
             return;
         };
         let Payload::Json(value) = &mut event.payload else {
@@ -87,29 +102,39 @@ impl Record {
         };
         let previous = value.clone();
         edit(value);
-        if previous == *value {
-            return;
+        if previous != *value {
+            self.mark_edited();
         }
-        self.edited = true;
     }
     pub fn json(&self) -> Option<&Value> {
-        self.event.as_ref()?.payload.json()
+        self.event()?.payload.json()
     }
     #[cfg(test)]
     pub fn event_name(&self) -> &str {
-        self.metadata
+        let metadata = match self {
+            Self::Event(event) | Self::EditedEvent(event) => &event.metadata,
+            Self::Metadata(metadata) => metadata,
+            _ => return "message",
+        };
+        metadata
             .event
             .as_deref()
             .filter(|name| !name.is_empty())
             .unwrap_or("message")
     }
     pub fn set_event_name(&mut self, name: &str) {
-        self.metadata.event = Some(name.into());
+        match self {
+            Self::Event(event) | Self::EditedEvent(event) => {
+                event.metadata.event = Some(name.into())
+            }
+            Self::Metadata(metadata) => metadata.event = Some(name.into()),
+            _ => {}
+        }
     }
     pub fn set_encrypted(&mut self, value: Value) {
-        if let Some(event) = &mut self.event {
+        if let Some(event) = self.event_mut() {
             event.payload = Payload::Json(value);
-            self.edited = true;
+            self.mark_edited();
         }
     }
     pub fn generated(name: Option<&str>, payload: Payload, meaning: EventMeaning) -> Self {
@@ -117,68 +142,44 @@ impl Record {
             Payload::Text(text) => text.clone(),
             Payload::Json(value) => value.to_string(),
         };
-        Self {
-            event: Some(Event {
-                data,
-                payload,
-                meaning,
-                after_terminal: false,
-                source_protocol: None,
-            }),
+        Self::Event(Event {
+            data,
+            payload,
+            meaning,
+            after_terminal: false,
+            source_protocol: None,
             metadata: Sse {
                 event: name.map(str::to_string),
                 ..Sse::default()
             },
-            residual: false,
-            heartbeat: false,
-            edited: false,
-            non_sse: None,
-        }
-    }
-    pub fn is_heartbeat(&self) -> bool {
-        self.heartbeat
-    }
-    pub fn heartbeat() -> Self {
-        Self {
-            heartbeat: true,
-            ..Self::from_sse(Sse::default(), None)
-        }
-    }
-    pub fn non_sse(bytes: Bytes) -> Self {
-        Self {
-            non_sse: Some(bytes),
-            ..Self::from_sse(Sse::default(), None)
-        }
+        })
     }
     pub fn buffered_bytes(&self) -> usize {
-        self.event.as_ref().map_or(0, |event| event.data.len())
+        self.event().map_or(0, |event| event.data.len())
     }
 }
 
 /// The only SSE encoding boundary. The heartbeat is the gateway's fixed comment;
 /// all fields and payloads are encoded through the library's public encoder.
 pub(crate) fn serialize(record: &Record) -> Result<Bytes, ServiceError> {
-    if let Some(bytes) = &record.non_sse {
-        return Ok(bytes.clone());
-    }
-    if record.residual {
-        return Ok(Bytes::new());
-    }
-    if record.heartbeat {
-        return Ok(Bytes::from_static(KEEP_ALIVE_COMMENT));
-    }
-    let mut metadata = record.metadata.clone();
-    if let Some(event) = &record.event {
-        metadata.data = Some(if record.edited {
-            match &event.payload {
-                Payload::Json(v) => serde_json::to_string(v)
+    let metadata = match record {
+        Record::NonSse(bytes) => return Ok(bytes.clone()),
+        Record::Residual => return Ok(Bytes::new()),
+        Record::Heartbeat => return Ok(Bytes::from_static(KEEP_ALIVE_COMMENT)),
+        Record::Event(event) => Sse {
+            data: Some(event.data.clone()),
+            ..event.metadata.clone()
+        },
+        Record::EditedEvent(event) => Sse {
+            data: Some(match &event.payload {
+                Payload::Json(value) => serde_json::to_string(value)
                     .map_err(|_| ServiceError::AdmissionInvariant("SSE JSON encoding failed"))?,
-                Payload::Text(s) => s.clone(),
-            }
-        } else {
-            event.data.clone()
-        });
-    }
+                Payload::Text(text) => text.clone(),
+            }),
+            ..event.metadata.clone()
+        },
+        Record::Metadata(metadata) => metadata.clone(),
+    };
     metadata
         .encode()
         .map_err(|_| ServiceError::AdmissionInvariant("SSE encoding failed"))
@@ -355,7 +356,7 @@ impl Stream for DecodedStream {
             Poll::Ready(Some(Ok(event))) => {
                 let record = Record::from_sse(event, this.protocol);
                 if this.protocol.is_some()
-                    && record.event.as_ref().is_some_and(|event| {
+                    && record.event().is_some_and(|event| {
                         event.meaning.failure
                             == Some(crate::sse_protocol::FailureEvidence::ConflictingType)
                     })
@@ -377,10 +378,7 @@ impl Stream for DecodedStream {
                 };
                 if !this.boundary.load(Ordering::Relaxed) {
                     this.pending_error = Some(error);
-                    Poll::Ready(Some(Ok(Record {
-                        residual: true,
-                        ..Record::from_sse(Sse::default(), None)
-                    })))
+                    Poll::Ready(Some(Ok(Record::Residual)))
                 } else {
                     this.finished = true;
                     Poll::Ready(Some(Err(error)))
@@ -388,12 +386,7 @@ impl Stream for DecodedStream {
             }
             Poll::Ready(None) => {
                 this.finished = true;
-                Poll::Ready((!this.boundary.load(Ordering::Relaxed)).then(|| {
-                    Ok(Record {
-                        residual: true,
-                        ..Record::from_sse(Sse::default(), None)
-                    })
-                }))
+                Poll::Ready((!this.boundary.load(Ordering::Relaxed)).then(|| Ok(Record::Residual)))
             }
         }
     }
@@ -463,7 +456,7 @@ mod tests {
                     serialize(&records[0]).unwrap(),
                     b"event: \ndata: { \"x\" : 1 }\nid: last\nretry: 7\n\n".as_slice()
                 );
-                assert!(!records[1].residual);
+                assert!(!matches!(records[1], Record::Residual));
                 assert_eq!(
                     serialize(&records[1]).unwrap(),
                     b"data: pending\n\n".as_slice()
@@ -499,19 +492,13 @@ mod tests {
                             .collect();
                         assert_eq!(records.len(), 1, "{input:?} split {split}");
                         assert_eq!(
-                            records[0].residual,
+                            matches!(records[0], Record::Residual),
                             ending.is_empty(),
                             "{input:?} split {split}"
                         );
                         if !ending.is_empty() {
                             assert!(
-                                records[0]
-                                    .event
-                                    .as_ref()
-                                    .unwrap()
-                                    .meaning
-                                    .terminal
-                                    .is_some(),
+                                records[0].event().unwrap().meaning.terminal.is_some(),
                                 "{input:?} split {split}"
                             );
                         }

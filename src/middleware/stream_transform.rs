@@ -80,8 +80,7 @@ impl StreamTransform {
         // Failure evidence belongs to the response owner. Preserve the complete
         // source record, including usage, through every content stage.
         if record
-            .event
-            .as_ref()
+            .event()
             .is_some_and(|event| event.meaning.failure.is_some())
         {
             return Ok(vec![record]);
@@ -104,10 +103,10 @@ impl StreamTransform {
             }
             _ => {}
         }
-        if record.residual {
+        if matches!(record, Record::Residual) {
             return Ok(vec![record]);
         }
-        let Some(event) = record.event.as_ref() else {
+        let Some(event) = record.event() else {
             return Ok(Vec::new());
         };
         let output = match self {
@@ -135,7 +134,7 @@ impl StreamTransform {
         }?;
         let mut output = output.unwrap_or_default();
         for record in &mut output {
-            if let Some(output) = record.event.as_mut() {
+            if let Some(output) = record.event_mut() {
                 output.after_terminal = event.after_terminal;
             }
         }
@@ -1351,7 +1350,7 @@ impl Stream for EventTransformStream {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(record))) => {
-                    this.residual |= record.residual;
+                    this.residual |= matches!(record, Record::Residual);
                     let output = this.transform.apply_record(
                         record,
                         &this.fallback_id,
@@ -1637,13 +1636,9 @@ mod tests {
         let output = StreamTransform::AnthropicToOpenaiChat
             .apply_record(record, "fb", &mut state)
             .unwrap();
-        assert!(output.iter().all(|record| record
-            .event
-            .as_ref()
-            .unwrap()
-            .meaning
-            .terminal
-            .is_none()));
+        assert!(output
+            .iter()
+            .all(|record| record.event().unwrap().meaning.terminal.is_none()));
     }
 
     fn started_messages_state() -> StreamState {
@@ -1954,7 +1949,7 @@ mod tests {
         }
         for block in wire.split("\n\n").filter(|block| !block.trim().is_empty()) {
             let parsed = decode_record(block);
-            let data = parsed.event.as_ref().unwrap().data.as_str();
+            let data = parsed.event().unwrap().data.as_str();
             assert_ne!(data, "[DONE]", "Responses surface emitted [DONE]");
             let value: Value = serde_json::from_str(data).expect("Responses event JSON");
             assert_eq!(
@@ -2400,7 +2395,11 @@ mod tests {
             json!({ "error": { "type": "overloaded_error", "message": "busy" } })
         );
         let out = run(transform.clone(), &[&text, &error, "data: [DONE]"]);
-        assert_eq!(out.last().unwrap()["error"]["type"], "overloaded_error");
+        // The owner chooses the failure terminal; content transforms retain
+        // the upstream failure record and its retry classification.
+        assert!(out
+            .iter()
+            .any(|event| event["error"]["type"] == "overloaded_error"));
     }
 
     #[test]

@@ -1491,6 +1491,14 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
         "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"private\"}}}\n\n",
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"AFTER_FAILURE\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n",
     );
+    let messages_with_start = format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":2}}}}}}\n\n{messages}"
+    );
+    let chat_with_disallowed_usage = concat!(
+        "data: {\"error\":{\"message\":\"private\"}}\n\n",
+        "data: [DONE]\n\n",
+        "data: {\"response\":{\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}},\"delta\":\"AFTER_FAILURE\"}\n\n",
+    );
     for (name, endpoint, source, format, tokens) in [
         (
             "native_chat",
@@ -1505,6 +1513,13 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             chat,
             "openai",
             Some(("output_tokens", 3)),
+        ),
+        (
+            "native_chat_disallowed_usage",
+            Endpoint::ChatComplete,
+            chat_with_disallowed_usage,
+            "openai",
+            None,
         ),
         (
             "chat_responses",
@@ -1534,6 +1549,13 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
             "anthropic",
             None,
         ),
+        (
+            "messages_chat_with_start",
+            Endpoint::ChatComplete,
+            messages_with_start.as_str(),
+            "anthropic",
+            Some(("completion_tokens", 3)),
+        ),
         ("legacy", Endpoint::Complete, chat, "anthropic", None),
         (
             "native_responses",
@@ -1554,6 +1576,10 @@ async fn failure_terminal_stops_output_while_source_billing_and_eof_publication_
         assert!(reports[0]["errorSource"].is_null(), "{name}");
         if let Some((field, count)) = tokens {
             assert_eq!(reports[0]["usage"][field], count, "{name}");
+            if name == "messages_chat_with_start" {
+                assert_eq!(reports[0]["usage"]["prompt_tokens"], 2);
+                assert_eq!(reports[0]["usage"]["total_tokens"], 5);
+            }
         } else {
             assert!(reports[0]["usage"].is_null(), "{name}");
         }
