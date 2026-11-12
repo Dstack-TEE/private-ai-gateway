@@ -59,8 +59,11 @@ remove unknown fields on Messages errors and Responses error events. Bridge fail
 omit startup events or the Chat chunk wrapper that existed only to carry an error.
 After content has been emitted, the owner asks the bridge to use its existing
 close path, keeping closing frames and partial Responses output before failure.
-Once the owner emits a failed response's destination terminal, no continuation
-records are converted or forwarded. Accounting observes source records until EOF or client disconnect, independently
+Once the owner emits a failed response's destination terminal, continuation
+output is discarded. The existing bridge chain still validates and updates its
+source state, preserving malformed-continuation report labels without duplicating
+bridge acceptance rules in stream control. Accounting observes source records
+until EOF or client disconnect, independently
 of terminal position, failures, malformed records or destination protocol. Reports
 use the source protocol's filtered usage: the latest cumulative value for Chat,
 merged start/delta counters for Messages, and reported response usage for Responses.
@@ -112,6 +115,9 @@ regression covers cumulative duplicates, all supported bridges, post-terminal an
 post-malformed usage, Messages cache merging/filtering, and buffered filtering.
 `owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect` checks fatal output
 failure and cancellation while source observation is pending.
+`discarded_continuations_use_bridge_validation_and_keep_source_usage` checks
+source terminal state, Anthropic controls, malformed continuations and later usage
+through the production native-to-bridge and two-bridge pipelines.
 
 `source_billing_prices_cache_writes_strings_and_partial_messages_on_every_bridge`
 checks 17 additional main-recorded cases: Chat cache writes on native and bridged

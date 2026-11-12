@@ -22,6 +22,7 @@ use crate::aggregator::metrics::{RequestMode, ServiceMetrics, StreamErrorKind};
 use crate::aggregator::session_store::{SessionLease, SessionStore};
 use crate::middleware::response_transform::{self, ResponseIdentity};
 use crate::middleware::sse::{Accounting, AccountingHandle, KeepAliveStream, StreamFailure};
+use crate::middleware::stream_transform::{BridgeError, BridgeHandle};
 use crate::middleware::types::{ErrorClass, ErrorSource};
 use crate::sse::{serialize, DecodedStream, EventStream, Payload, Record};
 use crate::sse_protocol::{
@@ -121,61 +122,69 @@ pub(crate) struct StreamControl(Arc<Mutex<StreamControlState>>);
 struct StreamControlState {
     source_terminal: bool,
     output_ended: bool,
-    bridge: Option<crate::middleware::stream_transform::BridgeHandle>,
+    bridges: Vec<BridgeHandle>,
     continuation_failure: Option<StreamFailure>,
     aborted: Option<StreamFailure>,
 }
 impl StreamControl {
-    fn ingress(&self, record: &mut Record) -> Result<bool, ServiceError> {
-        validate_source_record(record)?;
+    fn ingress(&self, mut record: Record) -> Result<Option<Record>, ServiceError> {
+        validate_source_record(&record)?;
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(event) = record.event_mut() else {
-            return Ok(!state.output_ended);
+            return Ok((!state.output_ended).then_some(record));
         };
         event.after_terminal = state.source_terminal;
         state.source_terminal |= event.meaning.terminal.is_some();
         if !state.output_ended {
-            return Ok(true);
+            return Ok(Some(record));
         }
-        // Preserve the report label of a bridge that would have rejected this
-        // continuation, while source accounting keeps observing through EOF.
-        let ignored_control = event.source_protocol == Some(SseProtocol::AnthropicMessages)
-            && matches!(
-                event.meaning.kind,
-                EventKind::Ping | EventKind::ContentBlockStop | EventKind::MessageStop
-            );
-        if state.bridge.is_some()
-            && !ignored_control
-            && !event.data.trim().is_empty()
-            && event.payload.json().is_none()
-            && !(event.source_protocol == Some(SseProtocol::OpenaiChat) && state.source_terminal)
-        {
-            state
-                .continuation_failure
-                .get_or_insert(StreamFailure::from_error(&ServiceError::Upstream(
-                    crate::aci::upstream::UpstreamError::Transport(
+        if state.continuation_failure.is_none() {
+            // Run the actual bridge chain, preserving its validation and source
+            // state, but discard output after the destination failure terminal.
+            let result = state
+                .bridges
+                .iter()
+                .try_fold(vec![record], |records, bridge| {
+                    records
+                        .into_iter()
+                        .try_fold(Vec::new(), |mut output, record| {
+                            output.extend(bridge.continuation(record)?);
+                            Ok(output)
+                        })
+                });
+            // An already-closed destination needs no further completion. Only
+            // malformed source content changes the continuation report label.
+            if matches!(result, Err(BridgeError::InvalidPayload)) {
+                state.continuation_failure = Some(StreamFailure::from_error(
+                    &ServiceError::Upstream(crate::aci::upstream::UpstreamError::Transport(
                         "provider sent an event this surface cannot represent".into(),
-                    ),
-                )));
+                    )),
+                ));
+            }
         }
-        Ok(false)
+        Ok(None)
     }
-    pub(crate) fn bridge(&self, bridge: crate::middleware::stream_transform::BridgeHandle) {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).bridge = Some(bridge);
-    }
-    fn has_bridge(&self) -> bool {
+    pub(crate) fn bridge(&self, bridge: BridgeHandle) {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .bridge
-            .is_some()
+            .bridges
+            .push(bridge);
+    }
+    fn has_bridge(&self) -> bool {
+        !self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bridges
+            .is_empty()
     }
     fn close_bridge(&self) -> crate::middleware::stream_transform::BridgeClosure {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .bridge
-            .as_ref()
+            .bridges
+            .last()
             .map_or_else(
                 Default::default,
                 crate::middleware::stream_transform::BridgeHandle::close,
@@ -238,19 +247,20 @@ pub(crate) fn decode_source(
 ) -> EventStream {
     let mut ids = Identifiers::default();
     Box::pin(
-        DecodedStream::new(inner, Some(protocol)).filter_map(move |mut record| {
-            if let Ok(record) = &mut record {
-                accounting.observe_source(record);
-                let forward = control.ingress(record);
-                ids.observe(record);
-                journal.observe_source(&ids);
-                match forward {
-                    Ok(true) => {}
-                    Ok(false) => return std::future::ready(None),
-                    Err(error) => return std::future::ready(Some(Err(error))),
+        DecodedStream::new(inner, Some(protocol)).filter_map(move |record| {
+            let result = match record {
+                Ok(record) => {
+                    accounting.observe_source(&record);
+                    ids.observe(&record);
+                    journal.observe_source(&ids);
+                    match control.ingress(record) {
+                        Ok(record) => record.map(Ok),
+                        Err(error) => Some(Err(error)),
+                    }
                 }
-            }
-            std::future::ready(Some(record))
+                Err(error) => Some(Err(error)),
+            };
+            std::future::ready(result)
         }),
     )
 }

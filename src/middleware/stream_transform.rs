@@ -72,7 +72,7 @@ impl StreamTransform {
         mut record: Record,
         fallback_id: &str,
         state: &mut StreamState,
-    ) -> Result<Vec<Record>, ()> {
+    ) -> Result<Vec<Record>, BridgeError> {
         // Failure evidence belongs to the response owner. Preserve the complete
         // source record, including usage, through every content stage.
         if record
@@ -133,9 +133,12 @@ impl StreamTransform {
         Ok(output)
     }
 
-    /// Close what the stream left open when the upstream ends it. `Err(())`
+    /// Close what the stream left open when the upstream ends it. An error
     /// means it ended before the response was complete.
-    fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, ()> {
+    fn end_of_stream(&self, state: &mut StreamState) -> Result<Option<Vec<Record>>, BridgeError> {
+        if state.output_closed {
+            return Ok(None);
+        }
         match self {
             StreamTransform::OpenaiToAnthropicMessages => state
                 .messages
@@ -170,6 +173,8 @@ pub fn select_stream_transform(
 /// touches the part for its transform.
 #[derive(Default)]
 struct StreamState {
+    // Client closure must not stop validation before the source terminal.
+    output_closed: bool,
     // Anthropic -> OpenAI chat.
     tool_index: Option<i64>,
     usage: Option<Value>,
@@ -186,7 +191,7 @@ fn anthropic_chat_stream(
     fallback_id: &str,
     state: &mut StreamState,
     strict: bool,
-) -> Result<Option<Vec<Record>>, ()> {
+) -> Result<Option<Vec<Record>>, BridgeError> {
     if event.meaning.terminal.is_some() {
         return Ok(Some(vec![done_event()]));
     }
@@ -197,7 +202,7 @@ fn anthropic_chat_stream(
     if matches!(&event.payload, Payload::Text(text) if text.is_empty()) {
         return Ok(None);
     }
-    let parsed = event.payload.json().ok_or(())?;
+    let parsed = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
     Ok(anthropic_chat_chunk(
         parsed,
         event.meaning.kind,
@@ -534,10 +539,14 @@ impl<E: ChatEvents> ChatStream<E> {
         !self.response_id.is_empty()
     }
 
-    /// Apply one SSE event. `Err(())` only for a payload that is not JSON:
+    /// Apply one SSE event. A non-JSON payload or incomplete response fails:
     /// the stream is corrupt, and skipping the event could silently drop part
     /// of the answer.
-    fn event(&mut self, event: &Event, fallback_id: &str) -> Result<Option<Vec<Record>>, ()> {
+    fn event(
+        &mut self,
+        event: &Event,
+        fallback_id: &str,
+    ) -> Result<Option<Vec<Record>>, BridgeError> {
         let empty = matches!(&event.payload, Payload::Text(text) if text.is_empty());
         let mut out = Vec::new();
         if self.terminated {
@@ -546,7 +555,7 @@ impl<E: ChatEvents> ChatStream<E> {
         if event.meaning.terminal.is_some() {
             self.finish(&mut out)?;
         } else if !empty {
-            let chunk = event.payload.json().ok_or(())?;
+            let chunk = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
             self.chunk(chunk, fallback_id, &mut out);
         }
         Ok((!out.is_empty()).then_some(out))
@@ -556,12 +565,12 @@ impl<E: ChatEvents> ChatStream<E> {
     /// some upstreams omit, so a stream that already declared its finish (or
     /// its error) still terminates; one that did not, or said nothing, was
     /// cut off.
-    fn end_of_stream(&mut self) -> Result<Option<Vec<Record>>, ()> {
+    fn end_of_stream(&mut self) -> Result<Option<Vec<Record>>, BridgeError> {
         if self.terminated {
             return Ok(None);
         }
         if self.finish_reason.is_none() {
-            return Err(());
+            return Err(BridgeError::IncompleteResponse);
         }
         let mut out = Vec::new();
         self.finish(&mut out)?;
@@ -683,15 +692,15 @@ impl<E: ChatEvents> ChatStream<E> {
         call.arguments.push_str(delta.arguments);
     }
 
-    fn finish(&mut self, out: &mut Vec<Record>) -> Result<(), ()> {
+    fn finish(&mut self, out: &mut Vec<Record>) -> Result<(), BridgeError> {
         if self.terminated {
             return Ok(());
         }
+        self.terminated = true;
         // `[DONE]` with nothing before it: there is no response to close.
         if !self.started() {
-            return Err(());
+            return Err(BridgeError::IncompleteResponse);
         }
-        self.terminated = true;
         let finish = ChatFinish::parse(self.finish_reason.as_deref());
         // Text the turn was cut off in is unfinished, unless calls followed it.
         self.close_text(!finish.truncated() || self.called_after_text, out);
@@ -1174,7 +1183,7 @@ impl ChatEvents for ResponsesEvents {
 
 // ── Anthropic legacy completion SSE → OpenAI completion chunks ───────────────
 
-fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
+fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, BridgeError> {
     if event.meaning.kind == EventKind::Ping {
         return Ok(None);
     }
@@ -1187,7 +1196,7 @@ fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
         return Ok(Some(vec![done_event()]));
     }
     // Fail the stream on a malformed event rather than skip it.
-    let parsed = event.payload.json().ok_or(())?;
+    let parsed = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
     let body = json!({
         "id": parsed.get("log_id").cloned().unwrap_or(Value::Null),
         "object": "text_completion",
@@ -1204,10 +1213,20 @@ fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, ()> {
     Ok(Some(vec![chat_event(body)]))
 }
 
-/// The owner can close content already emitted by a bridge before writing its
-/// failure terminal. This handle never detects errors or settles a response.
+/// Validation and content closure share the bridge's actual conversion state.
+/// The owner discards continuation output after its failure terminal.
 #[derive(Clone)]
-pub(crate) struct BridgeHandle(Arc<Mutex<StreamState>>);
+pub(crate) struct BridgeHandle {
+    state: Arc<Mutex<StreamState>>,
+    transform: StreamTransform,
+    fallback_id: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum BridgeError {
+    InvalidPayload,
+    IncompleteResponse,
+}
 
 #[derive(Default)]
 pub(crate) struct BridgeClosure {
@@ -1216,19 +1235,28 @@ pub(crate) struct BridgeClosure {
 }
 
 impl BridgeHandle {
+    pub(crate) fn continuation(&self, record: Record) -> Result<Vec<Record>, BridgeError> {
+        self.transform.apply_record(
+            record,
+            &self.fallback_id,
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
     pub(crate) fn close(&self) -> BridgeClosure {
         let mut state = self
-            .0
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output_closed = true;
         let mut closed = BridgeClosure::default();
         if let Some(stream) = &mut state.messages {
             stream.close_text(true, &mut closed.records);
-            stream.terminated = true;
         }
         if let Some(stream) = &mut state.responses {
             stream.close_text(true, &mut closed.records);
-            stream.terminated = true;
             if stream.started() {
                 let response = stream
                     .events
@@ -1276,7 +1304,11 @@ impl EventTransformStream {
         }
     }
     pub(crate) fn bridge(&self) -> BridgeHandle {
-        BridgeHandle(self.state.clone())
+        BridgeHandle {
+            state: self.state.clone(),
+            transform: self.transform.clone(),
+            fallback_id: self.fallback_id.clone(),
+        }
     }
     fn fail(&mut self, error: ServiceError) {
         // Keep polling the same source for accounting after conversion fails.
@@ -1330,7 +1362,7 @@ impl Stream for EventTransformStream {
                     );
                     match output {
                         Ok(records) => this.enqueue(records),
-                        Err(()) => this.fail(ServiceError::Upstream(UpstreamError::Transport(
+                        Err(_) => this.fail(ServiceError::Upstream(UpstreamError::Transport(
                             "provider sent an event this surface cannot represent".into(),
                         ))),
                     }
@@ -1361,7 +1393,7 @@ impl Stream for EventTransformStream {
                     match output {
                         Ok(Some(records)) => this.enqueue(records),
                         Ok(None) => {}
-                        Err(()) => {
+                        Err(_) => {
                             this.pending_error =
                                 Some(ServiceError::Upstream(UpstreamError::Transport(
                                     "provider ended before finishing its response".into(),
@@ -1413,7 +1445,7 @@ mod tests {
             text: &str,
             fallback: &str,
             state: &mut StreamState,
-        ) -> Result<Option<String>, ()> {
+        ) -> Result<Option<String>, BridgeError> {
             let protocol = match self {
                 StreamTransform::AnthropicToOpenaiChat => SseProtocol::AnthropicMessages,
                 _ => SseProtocol::OpenaiChat,
@@ -2139,7 +2171,7 @@ mod tests {
         for event in events {
             let result = transform
                 .apply(event, "fallback-1", &mut state)
-                .unwrap_or_else(|()| panic!("transform rejected {event}"));
+                .unwrap_or_else(|error| panic!("transform rejected {event}: {error:?}"));
             if let Some(result) = result {
                 // A transform may emit multiple concatenated SSE events.
                 for piece in result.split("\n\n") {

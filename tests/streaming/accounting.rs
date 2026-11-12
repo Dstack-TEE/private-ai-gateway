@@ -429,6 +429,96 @@ async fn transformed_response(
 }
 
 #[tokio::test]
+async fn discarded_continuations_use_bridge_validation_and_keep_source_usage() {
+    use crate::middleware::request_transform::Endpoint;
+    for endpoint in [Endpoint::Messages, Endpoint::CreateModelResponse] {
+        for source_terminated in [false, true] {
+            let control = Control::new().await;
+            let terminal = if source_terminated {
+                "data: [DONE]\n\n"
+            } else {
+                ""
+            };
+            let source = format!(concat!(
+                "data: {{\"error\":{{\"message\":\"private\"}}}}\n\n{}",
+                "data: not JSON\n\n",
+                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}\n\n",
+                "data: [DONE]\n\n",
+            ), terminal);
+            let output =
+                transformed_response(&control, source, SseProtocol::OpenaiChat, endpoint, false)
+                    .await;
+            let terminal = if endpoint == Endpoint::Messages {
+                "event: error\n"
+            } else {
+                "event: response.failed\n"
+            };
+            assert!(output.starts_with(terminal), "{output}");
+            assert_eq!(output.matches("\n\n").count(), 1, "{output}");
+            let report = control.captured().await;
+            assert_eq!(report["status"], 502);
+            assert_eq!(
+                report["errorMessage"],
+                if source_terminated {
+                    "stream_inband_error"
+                } else {
+                    "upstream_transport"
+                }
+            );
+            assert_eq!(
+                report["usage"],
+                json!({"prompt_tokens":2,"completion_tokens":3})
+            );
+            assert_eq!(control.reports.lock().unwrap().len(), 1);
+        }
+    }
+    for endpoint in [Endpoint::ChatComplete, Endpoint::CreateModelResponse] {
+        for malformed in [false, true] {
+            let control = Control::new().await;
+            let continuation = if malformed {
+                "data: not JSON\n\n"
+            } else {
+                "event: ping\ndata: not JSON\n\nevent: content_block_stop\ndata: not JSON\n\n"
+            };
+            let source = format!(concat!(
+                "event: error\ndata: {{\"type\":\"error\",\"error\":{{\"message\":\"private\"}}}}\n\n{}",
+                "event: message_delta\ndata: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":3}}}}\n\n",
+                "event: message_stop\ndata: not JSON\n\n",
+            ), continuation);
+            let output = transformed_response(
+                &control,
+                source,
+                SseProtocol::AnthropicMessages,
+                endpoint,
+                false,
+            )
+            .await;
+            assert!(!output.contains("not JSON"), "{output}");
+            if endpoint == Endpoint::ChatComplete {
+                assert_eq!(output.matches("data: [DONE]\n\n").count(), 1);
+                assert!(output.ends_with("data: [DONE]\n\n"));
+                assert_eq!(output.matches("\n\n").count(), 2, "{output}");
+            } else {
+                assert!(output.starts_with("event: response.failed\n"), "{output}");
+                assert_eq!(output.matches("\n\n").count(), 1, "{output}");
+            }
+            let report = control.captured().await;
+            assert_eq!(report["status"], 502);
+            assert_eq!(
+                report["errorMessage"],
+                if malformed {
+                    "upstream_transport"
+                } else {
+                    "stream_inband_error"
+                }
+            );
+            assert_eq!(report["usage"], json!({"output_tokens":3}));
+            assert_eq!(control.reports.lock().unwrap().len(), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn payload_response_error_stays_failed_with_default_or_unknown_event_name() {
     use crate::middleware::request_transform::Endpoint;
     for (name, prefix, status) in [
