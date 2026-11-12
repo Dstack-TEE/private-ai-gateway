@@ -93,6 +93,8 @@ impl Record {
             other => other,
         };
     }
+    /// The closure must return true whenever it mutates the value; otherwise
+    /// serialization emits the original text unchanged.
     pub fn edit_json(&mut self, edit: impl FnOnce(&mut Value) -> bool) {
         let Some(event) = self.event_mut() else {
             return;

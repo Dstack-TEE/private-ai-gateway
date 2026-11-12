@@ -308,12 +308,16 @@ impl AccountingHandle {
         surface: Surface,
         received: &[u8],
         result: Result<MiddlewareForwardResult, ServiceError>,
-    ) -> u16 {
+    ) -> Result<u16, ServiceError> {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut meter = state
+            .pending
+            .take()
+            .ok_or(ServiceError::AdmissionInvariant(
+                "early forward failure has no pending meter",
+            ))?;
         state.settled = true;
-        state.pending.take().map_or(502, |mut meter| {
-            meter.account_forward_failure(surface, received, result)
-        })
+        Ok(meter.account_forward_failure(surface, received, result))
     }
     /// Client usage is a projection only; it never feeds accounting.
     pub(crate) fn decorate(&self, record: &mut Record, failure: bool) -> Option<Value> {

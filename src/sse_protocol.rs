@@ -138,6 +138,7 @@ pub(crate) enum EventKind {
     ResponseCompleted,
     ResponseIncomplete,
     ResponseFailed,
+    ResponseError,
     Error,
 }
 
@@ -176,13 +177,17 @@ impl EventMeaning {
                 Some(TerminalKind::Incomplete)
             }
             (SseProtocol::OpenaiResponses, EventKind::ResponseFailed) => Some(TerminalKind::Failed),
-            (SseProtocol::OpenaiResponses | SseProtocol::AnthropicMessages, EventKind::Error) => {
-                Some(TerminalKind::Error)
-            }
+            (
+                SseProtocol::OpenaiResponses | SseProtocol::AnthropicMessages,
+                EventKind::Error | EventKind::ResponseError,
+            ) => Some(TerminalKind::Error),
             _ => None,
         };
-        let failure = matches!(kind, EventKind::Error | EventKind::ResponseFailed)
-            .then_some(FailureEvidence::Inband);
+        let failure = matches!(
+            kind,
+            EventKind::Error | EventKind::ResponseError | EventKind::ResponseFailed
+        )
+        .then_some(FailureEvidence::Inband);
         Self {
             kind,
             terminal,
@@ -205,7 +210,8 @@ pub(crate) fn event_kind(name: &str) -> EventKind {
         "response.completed" => EventKind::ResponseCompleted,
         "response.incomplete" => EventKind::ResponseIncomplete,
         "response.failed" => EventKind::ResponseFailed,
-        "response.error" | "error" => EventKind::Error,
+        "response.error" => EventKind::ResponseError,
+        "error" => EventKind::Error,
         _ => EventKind::Data,
     }
 }
@@ -272,7 +278,10 @@ pub(crate) fn classify(
             || nested_error
             || choices_error
             || stop_error
-            || matches!(payload_kind, EventKind::Error | EventKind::ResponseFailed)
+            || matches!(
+                payload_kind,
+                EventKind::Error | EventKind::ResponseError | EventKind::ResponseFailed
+            )
         {
             meaning.failure.get_or_insert(FailureEvidence::Inband);
             // An extension event can still carry a protocol failure terminal.
@@ -281,7 +290,10 @@ pub(crate) fn classify(
                     (Some(SseProtocol::OpenaiResponses), EventKind::ResponseFailed) => {
                         Some(TerminalKind::Failed)
                     }
-                    (Some(SseProtocol::OpenaiResponses), EventKind::Error)
+                    (
+                        Some(SseProtocol::OpenaiResponses),
+                        EventKind::Error | EventKind::ResponseError,
+                    )
                     | (Some(SseProtocol::AnthropicMessages), EventKind::Error) => {
                         Some(TerminalKind::Error)
                     }
@@ -297,6 +309,36 @@ pub(crate) fn classify(
 mod classification_tests {
     use super::*;
     use crate::sse::Payload;
+
+    #[test]
+    fn messages_extension_response_error_is_failed_but_not_terminal() {
+        for payload_type in ["error", "response.error"] {
+            let payload = Payload::Json(json!({"type": payload_type}));
+            for protocol in [
+                SseProtocol::OpenaiChat,
+                SseProtocol::AnthropicMessages,
+                SseProtocol::OpenaiResponses,
+            ] {
+                let meaning = classify(Some(protocol), Some("extension"), &payload);
+                assert_eq!(meaning.kind, EventKind::Data);
+                assert_eq!(meaning.failure, Some(FailureEvidence::Inband));
+                let terminal = match protocol {
+                    SseProtocol::OpenaiChat => None,
+                    SseProtocol::AnthropicMessages if payload_type == "response.error" => None,
+                    _ => Some(TerminalKind::Error),
+                };
+                assert_eq!(meaning.terminal, terminal, "{protocol:?} {payload_type}");
+            }
+            // Named or unnamed effective error kinds retain their existing
+            // terminal semantics; only the extension payload override differs.
+            for name in [None, Some(payload_type)] {
+                let meaning = classify(Some(SseProtocol::AnthropicMessages), name, &payload);
+                assert_eq!(meaning.failure, Some(FailureEvidence::Inband));
+                assert_eq!(meaning.terminal, Some(TerminalKind::Error));
+            }
+        }
+    }
+
     #[test]
     fn terminals_and_names_are_exact() {
         for protocol in [

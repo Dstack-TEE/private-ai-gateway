@@ -1203,13 +1203,22 @@ fn build_early_streaming_response(
                 }
             }
             other => {
-                let status = accounting_handle.forward_failure(
+                match accounting_handle.forward_failure(
                     surface,
                     received_body.as_ref(),
                     other,
-                );
-                for record in error_records(protocol, status, Some(&stream_request_id), None) {
-                    yield Ok(record);
+                ) {
+                    Ok(status) => {
+                        for record in error_records(
+                            protocol,
+                            status,
+                            Some(&stream_request_id),
+                            None,
+                        ) {
+                            yield Ok(record);
+                        }
+                    }
+                    Err(error) => yield Err(error),
                 }
             }
         }
