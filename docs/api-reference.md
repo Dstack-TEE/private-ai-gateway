@@ -289,6 +289,10 @@ A source terminal alone does not prove a conversion succeeded: the destination
 terminal must be produced. Gateway stage failures still fail the response, even
 if the destination terminal has already been sent; no error tail is appended
 after that terminal.
+After an in-band failure, a later upstream read error supplies the report status
+and class, including after a failure terminal: a timeout reports 504
+`upstream_timeout`, and a reset reports 502 `upstream_transport`. Usage and pricing
+retain the selected bridge's billing rules.
 
 Application blocks are limited to 16 MiB. A clean EOF between events retains the
 existing completion policy: Chat gets a missing `data: [DONE]` marker, while

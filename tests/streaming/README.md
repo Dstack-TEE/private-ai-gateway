@@ -34,7 +34,7 @@ any approved parsing correction with its old and new expectation.
 Both fixtures use compact JSON Lines, one object per case sorted by case name.
 `streaming_corrections.jsonl` records every approved difference with the original
 wire bytes and the corrected snapshot; its case name is `expected.name`.
-Of the 101 cases, 48 match main exactly and 53 pin approved corrections. The eight
+Of the 110 cases, 54 match main exactly and 56 pin approved corrections. The eight
 failed-bridge accounting/reset cases were also recorded on `9b745bda`; their
 complete snapshots are identical on both main revisions.
 The failure cases cover each destination and bridge. Native failures retain
@@ -55,14 +55,22 @@ with main's bridge usage rules: Chat-source bridges stop accounting at their sou
 terminal, and all bridges stop at a malformed continuation that main's converter
 would reject. Until then, usage after the destination failure terminal remains
 billable. The report retains the conversion failure's `upstream_transport` label;
-a read reset also replaces an earlier in-band failure label with
-`upstream_transport`. The eight `failed_bridge_accounting_cases` snapshots pin
+a later upstream read failure supplies its report status and class even after a
+failure terminal: reset is 502 `upstream_transport`, timeout is 504
+`upstream_timeout`. The eight `failed_bridge_accounting_cases` snapshots pin
 complete reports against main, including retained pre-terminal usage. Malformed
 continuations still cannot produce another client error tail; reading and receipt
 publication continue to EOF. Native nonterminal failure records continue normally
 until their protocol terminal. The `diff_messages_chat_usage_after_error_1` case
 pins the removed continuation chunk and the unchanged completion-token report.
 Legacy Anthropic completion reports a source failure instead of success.
+
+Nine `inband_timeout_cases` were recorded on main `0edde219`, covering each native
+protocol and bridge, a native failed Messages delta, and both native Responses
+failure terminals. Every complete report matches main's 504 `upstream_timeout`,
+including the exact `response.error` stream in the sanitizer-renaming regression.
+Usage and pricing retain each path's main semantics. Six complete snapshots match
+main exactly; the other three pin existing framing/canonical-failure corrections.
 
 Framing normalization and rejection cases are pinned separately by
 `library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,

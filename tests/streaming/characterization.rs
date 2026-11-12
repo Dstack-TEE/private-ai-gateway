@@ -36,10 +36,16 @@ struct Gate {
     headers: Notify,
 }
 
+#[derive(Clone, Copy)]
+enum ReadError {
+    Reset,
+    Timeout,
+}
+
 struct CheckpointStream {
     chunks: VecDeque<Bytes>,
     gate: Arc<Gate>,
-    transport_error: bool,
+    read_error: Option<ReadError>,
 }
 
 impl Stream for CheckpointStream {
@@ -50,10 +56,11 @@ impl Stream for CheckpointStream {
         }
         self.gate.waker.register(cx.waker());
         if self.gate.eof.load(Ordering::Acquire) {
-            if std::mem::take(&mut self.transport_error) {
-                return Poll::Ready(Some(Err(UpstreamError::Transport(
-                    "fixture read failed".into(),
-                ))));
+            if let Some(error) = self.read_error.take() {
+                return Poll::Ready(Some(Err(match error {
+                    ReadError::Reset => UpstreamError::Transport("fixture read failed".into()),
+                    ReadError::Timeout => UpstreamError::Timeout("fixture read timed out".into()),
+                })));
             }
             Poll::Ready(None)
         } else {
@@ -109,7 +116,7 @@ struct Backend {
     gate: Arc<Gate>,
     early: bool,
     chunk_size: usize,
-    transport_error: bool,
+    read_error: Option<ReadError>,
 }
 
 #[async_trait]
@@ -169,7 +176,7 @@ impl Backend {
                     .map(Bytes::copy_from_slice)
                     .collect(),
                 gate: self.gate.clone(),
-                transport_error: self.transport_error,
+                read_error: self.read_error,
             }),
             served_instance_id: None,
         })
@@ -201,7 +208,7 @@ struct Case {
     fail_publish: bool,
     metrics: bool,
     chunk_size: usize,
-    transport_error: bool,
+    read_error: Option<ReadError>,
     direct_idle: bool,
 }
 
@@ -221,7 +228,7 @@ impl Case {
             fail_publish: false,
             metrics: false,
             chunk_size: 7,
-            transport_error: false,
+            read_error: None,
             direct_idle: false,
         }
     }
@@ -289,7 +296,7 @@ async fn capture(case: &Case) -> Value {
                 gate: gate.clone(),
                 early: case.early,
                 chunk_size: case.chunk_size,
-                transport_error: case.transport_error,
+                read_error: case.read_error,
             }),
             Arc::new(Verifier),
             Arc::new(InMemoryReceiptStore::default()),
@@ -514,7 +521,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
             gate: Arc::new(Gate::default()),
             early: false,
             chunk_size: 7,
-            transport_error: false,
+            read_error: None,
         }),
         Arc::new(InMemoryReceiptStore::default()),
         AciServiceConfig::for_test(),
@@ -711,7 +718,7 @@ fn eof_and_reset_cases() -> Vec<Case> {
                 &format!("{source}data: {{\"unfinished\":"),
                 format,
             );
-            case.transport_error = reset;
+            case.read_error = reset.then_some(ReadError::Reset);
             cases.push(case);
         }
     }
@@ -805,7 +812,7 @@ fn differential_regression_cases() -> Vec<Case> {
     {
         let mut case = Case::new("diff_legacy_complete_terminal_transport_1", Endpoint::Complete, "data: {\"completion\":\"hi\",\"model\":\"upstream-model\",\"log_id\":\"upstream-id\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\n", "anthropic");
         case.chunk_size = 1;
-        case.transport_error = true;
+        case.read_error = Some(ReadError::Reset);
         cases.push(case);
     }
     {
@@ -922,8 +929,36 @@ fn failed_bridge_accounting_cases() -> Vec<Case> {
         &format!("{usage}{error}"),
         "openai",
     );
-    reset.transport_error = true;
+    reset.read_error = Some(ReadError::Reset);
     cases.push(reset);
+    cases
+}
+
+fn inband_timeout_cases() -> Vec<Case> {
+    let chat = concat!(
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+        "data: {\"error\":{\"type\":\"api_error\",\"message\":\"private\"}}\n\n",
+    );
+    let messages = concat!(
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\n",
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"private\"}}\n\n",
+    );
+    let mut cases = Vec::new();
+    for (name, endpoint, source, format) in [
+        ("native_chat_inband_error_then_timeout", Endpoint::ChatComplete, chat, "openai"),
+        ("chat_messages_inband_error_then_timeout", Endpoint::Messages, chat, "openai"),
+        ("chat_responses_inband_error_then_timeout", Endpoint::CreateModelResponse, chat, "openai"),
+        ("native_messages_error_terminal_then_timeout", Endpoint::Messages, messages, "anthropic"),
+        ("messages_chat_inband_error_then_timeout", Endpoint::ChatComplete, messages, "anthropic"),
+        ("messages_responses_inband_error_then_timeout", Endpoint::CreateModelResponse, messages, "anthropic"),
+        ("native_responses_error_terminal_then_timeout", Endpoint::CreateModelResponse, "event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n", "openai"),
+        ("native_responses_failed_terminal_then_timeout", Endpoint::CreateModelResponse, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"failed\",\"output\":[],\"error\":{\"type\":\"api_error\",\"message\":\"private\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n", "openai"),
+        ("native_messages_failed_delta_then_timeout", Endpoint::Messages, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"usage\":{\"input_tokens\":2}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"error\"},\"usage\":{\"output_tokens\":3}}\n\n", "anthropic"),
+    ] {
+        let mut case = Case::new(name, endpoint, source, format);
+        case.read_error = Some(ReadError::Timeout);
+        cases.push(case);
+    }
     cases
 }
 
@@ -1027,6 +1062,7 @@ async fn exact_wire_characterization_corpus() {
     cases.extend(differential_regression_cases());
     cases.extend(eof_and_reset_cases());
     cases.extend(failed_bridge_accounting_cases());
+    cases.extend(inband_timeout_cases());
     let mut actual = Vec::new();
     for case in cases {
         actual.push(capture(&case).await);
@@ -1668,7 +1704,7 @@ async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report(
         assert_eq!(reports[0]["status"], 502, "{}", case.name);
         assert_eq!(
             reports[0]["errorMessage"],
-            if case.transport_error {
+            if case.read_error.is_some() {
                 "upstream_transport"
             } else {
                 "stream_truncated"
@@ -1706,7 +1742,7 @@ async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
         let report = &reports[0];
         assert_eq!(report["status"], 502);
         assert!(report["errorSource"].is_null());
-        let transport = case.transport_error || case.source.contains("not JSON");
+        let transport = case.read_error.is_some() || case.source.contains("not JSON");
         assert_eq!(
             report["errorMessage"],
             if transport {
@@ -1715,7 +1751,7 @@ async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
                 "stream_inband_error"
             }
         );
-        let has_usage = case.transport_error || case.name.contains("preserves_usage");
+        let has_usage = case.read_error.is_some() || case.name.contains("preserves_usage");
         assert_eq!(!report["usage"].is_null(), has_usage, "{}", case.name);
         if has_usage {
             let output = if case.endpoint == Endpoint::Messages {
@@ -1733,7 +1769,7 @@ async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
             snapshot["before_eof"],
             json!({"receipt":false,"report":false})
         );
-        if case.transport_error {
+        if case.read_error.is_some() {
             assert_eq!(snapshot["wire"], baseline["wire"]);
             assert!(!wire.contains("[DONE]"));
         } else {
@@ -1745,5 +1781,25 @@ async fn failed_bridge_accounting_matches_main_at_source_stop_boundaries() {
             assert_eq!(wire.matches(terminal).count(), 1, "{}: {wire}", case.name);
         }
         assert!(wire.ends_with("\n\n"));
+    }
+}
+
+#[tokio::test]
+async fn inband_timeout_reports_match_main_on_native_and_bridged_paths() {
+    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let corrections = corpus_corrections();
+    for case in inband_timeout_cases() {
+        let snapshot = capture(&case).await;
+        let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
+        assert_eq!(snapshot["reports"], baseline["reports"], "{}", case.name);
+        let reports = snapshot["reports"].as_array().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], 504);
+        assert_eq!(reports[0]["errorMessage"], "upstream_timeout");
+        assert!(reports[0]["errorSource"].is_null());
+        let expected = corrections
+            .get(&case.name)
+            .map_or(baseline, |c| &c["expected"]);
+        assert_eq!(snapshot, *expected, "{}", case.name);
     }
 }

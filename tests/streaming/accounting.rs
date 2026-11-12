@@ -734,11 +734,17 @@ async fn named_anthropic_error_crosses_bridge_with_failure_and_terminal() {
 #[tokio::test]
 async fn sanitize_renaming_preserves_terminal_failure_metadata() {
     use crate::middleware::request_transform::Endpoint;
-    let control = Control::new().await;
-    let wire = transformed_response(&control, "event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n".into(), SseProtocol::OpenaiResponses, Endpoint::CreateModelResponse, true).await;
-    assert_eq!(wire.matches("event: error\n").count(), 1);
-    assert_eq!(
-        control.captured().await["errorMessage"],
-        "stream_inband_error"
-    );
+    for (timeout, status, class) in [
+        (false, 502, "stream_inband_error"),
+        (true, 504, "upstream_timeout"),
+    ] {
+        let control = Control::new().await;
+        let wire = transformed_response(&control, "event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"type\":\"api_error\",\"message\":\"failed\"}}\n\n".into(), SseProtocol::OpenaiResponses, Endpoint::CreateModelResponse, timeout).await;
+        assert_eq!(wire.matches("event: error\n").count(), 1);
+        let report = control.captured().await;
+        assert_eq!(report["status"], status);
+        assert_eq!(report["errorMessage"], class);
+        assert!(report["errorSource"].is_null());
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
+    }
 }
