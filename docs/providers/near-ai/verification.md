@@ -34,6 +34,8 @@ The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest th
 
 The verifier cache omits the model from its key because every configured model uses the same router channel. The receipt records the selected model; the session records the shared router evidence.
 
+Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+
 Image generation for `black-forest-labs/FLUX.2-klein-4B` uses this same router
 TLS attestation. It does not establish the image model instance, workload,
 or weights provenance. NEAR image responses carry no token usage; middleware

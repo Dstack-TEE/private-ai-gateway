@@ -81,15 +81,13 @@ pub(super) fn provider_cache_salt_field(provider: UpstreamProvider) -> Option<Ca
         UpstreamProvider::Chutes => Some(CacheSaltField::CacheSalt("chutes")),
         UpstreamProvider::Privatemode => Some(CacheSaltField::CacheSalt("privatemode")),
         UpstreamProvider::Tinfoil => Some(CacheSaltField::UserCacheSecret("tinfoil")),
-        // The deployed vllm-proxy revision and unknown-field forwarding have
-        // not been confirmed; do not assume its current upstream behavior.
-        UpstreamProvider::PhalaDirect
-        | UpstreamProvider::OpenAiCompatible
+        UpstreamProvider::PhalaDirect => Some(CacheSaltField::CacheSalt("phala-direct")),
+        UpstreamProvider::NearAi => Some(CacheSaltField::CacheSalt("near-ai")),
+        UpstreamProvider::ArmetAi => Some(CacheSaltField::CacheSalt("armet-ai")),
+        UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
-        | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::ArmetAi
         | UpstreamProvider::ZeroGPrivateComputer => None,
     }
 }

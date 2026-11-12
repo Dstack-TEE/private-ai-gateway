@@ -4,8 +4,8 @@
 # Mirrors redpill-ai/private-ai-launcher-compose docker-compose.no-ingress.yml:
 # the same launcher image, source pin, dstack KMS socket and middleware mode.
 # A two-tenant mock control plane (inlined below) replaces the real one, the
-# official Privatemode proxy runs beside the gateway as in production, and
-# dstack-verifier and node-exporter are dropped. Replace
+# official Privatemode proxy and dstack-verifier run beside the gateway as in
+# production, and node-exporter is dropped. Replace
 # COMMIT_SHA_PLACEHOLDER with a full commit pushed to the gateway repository.
 # Secret values arrive as dstack encrypted env; only their names appear here.
 
@@ -35,11 +35,13 @@ services:
     depends_on:
       - control
       - privatemode-proxy
+      - dstack-verifier
     environment:
       - PRIVATE_AI_GATEWAY_CONFIG_PATH=/etc/private-ai-gateway/gateway.config.json
       - RUST_LOG=info
       - PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git
       - PRIVATE_AI_GATEWAY_REPO_COMMIT=COMMIT_SHA_PLACEHOLDER
+      - DSTACK_VERIFIER_URL=http://dstack-verifier:8080
 
   privatemode-proxy:
     image: ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b
@@ -63,6 +65,15 @@ services:
         target: privatemode-api-key
     restart: unless-stopped
 
+  dstack-verifier:
+    image: ghcr.io/dstack-tee/dstack-verifier:0.6.3@sha256:22aeb6808e38a56115f843d4d66f4852407e72f6080d5f8781fd82d9f819db41
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   control:
     image: python:3.12-alpine@sha256:e064671ca452259bab50e8e2c7bd896e39e9a343bb06ca25234adf6fe18d0fc7
     restart: unless-stopped
@@ -73,7 +84,7 @@ services:
     environment:
       - TEST_USER_A_KEY=${TEST_USER_A_KEY:?set TEST_USER_A_KEY}
       - TEST_USER_B_KEY=${TEST_USER_B_KEY:?set TEST_USER_B_KEY}
-      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-glm":["privatemode-test:p-glm"]}'
+      - 'TEST_MODELS={"t-gpt-oss":["tinfoil-test:t-gpt-oss"],"c-glm":["chutes-test:c-glm"],"c-kimi":["chutes-test:c-kimi"],"p-glm":["privatemode-test:p-glm"],"n-glm":["near-test:n-glm"],"n-qwen":["near-test:n-qwen"],"a-glm":["armet-test:a-glm"],"pd-qwen":["pd-qwen-test:pd-qwen"],"pd-glm":["pd-glm-test:pd-glm"]}'
 
 volumes:
   pal-cache:
@@ -126,6 +137,37 @@ configs:
           "provider": "privatemode",
           "base_url": "http://privatemode-proxy:8080",
           "models": {"p-glm": "glm-5.3-flash"}
+        },
+        {
+          "name": "near-test",
+          "provider": "near-ai",
+          "base_url": "https://cloud-api.near.ai",
+          "models": {"n-glm": "z-ai/glm-5.3-flash", "n-qwen": "Qwen/Qwen3.6-35B-A3B-FP8"},
+          "bearer_token": "${NEAR_AI_API_KEY:?set NEAR_AI_API_KEY}"
+        },
+        {
+          "name": "armet-test",
+          "provider": "armet-ai",
+          "base_url": "https://ctf.armet.ai",
+          "models": {"a-glm": "GLM-5.3-Flash"},
+          "accepted_subjects": ["tdx-measurement:sha256:4b1a5d29dd1f8d617b6c156c02859140ff17c46c9becb68bf2e25df830571529"],
+          "bearer_token": "${ARMET_AI_API_KEY:?set ARMET_AI_API_KEY}"
+        },
+        {
+          "name": "pd-qwen-test",
+          "provider": "phala-direct",
+          "base_url": "https://qwen3-8-27b.usc2-87.phala.com",
+          "models": {"pd-qwen": "qwen/qwen3.8-27b"},
+          "verifier_request_timeout_seconds": 600,
+          "bearer_token": "${PHALA_DIRECT_QWEN_TOKEN:?set PHALA_DIRECT_QWEN_TOKEN}"
+        },
+        {
+          "name": "pd-glm-test",
+          "provider": "phala-direct",
+          "base_url": "https://glm-5-3.gpu16.phala.com",
+          "models": {"pd-glm": "z-ai/glm-5.3"},
+          "verifier_request_timeout_seconds": 600,
+          "bearer_token": "${PHALA_DIRECT_GLM_TOKEN:?set PHALA_DIRECT_GLM_TOKEN}"
         }
       ]
   mock-control:

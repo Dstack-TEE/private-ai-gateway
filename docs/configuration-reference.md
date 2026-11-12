@@ -307,7 +307,7 @@ provider_salt = lowercase_hex(HMAC(user_secret,
 
 `caller_salt` is included only for a non-empty JSON string in `cache_salt`;
 other values are ignored. `provider_tag` is the stable serialized provider
-name (`chutes`, `privatemode`, or `tinfoil`). The result is 64 hex characters.
+name. The result is 64 hex characters.
 The control plane's authenticated `userId` is the isolation boundary; this
 assumes an honest control plane. No user ID is sent in the salt field.
 

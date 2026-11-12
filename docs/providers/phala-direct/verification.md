@@ -100,7 +100,7 @@ The adapter records the classification and does not enforce it. A relying party 
 
 ## Limitations
 
-- Middleware strips caller `cache_salt` and `user_cache_secret` but injects neither field for `phala-direct`. A read-only inspection of [the launcher Compose repository at `3ebf84f`](https://github.com/redpill-ai/private-ai-launcher-compose/tree/3ebf84fecf369a8f8426aa7ea97d2facce83ae0a) found no deployed `Dstack-TEE/vllm-proxy` revision (the gateway upstream seed is empty). Unknown-body-field forwarding by the deployed proxy therefore remains unconfirmed. Enable a cache field only after confirming that version's forwarding behavior. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+- Middleware injects a per-user `cache_salt`: PIG/vllm-router pass it through to SGLang/vLLM for engine-enforced isolation; SGLang storage tiers (HiCache/Mooncake) require ≥ 0.5.20 so storage keys include the salt. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
 - A non-current TCB state is recorded rather than rejected by the bridge.
 - Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
 - The compose check proves the compose was measured. The adapter does not compare the compose or image digests with an operator allowlist.

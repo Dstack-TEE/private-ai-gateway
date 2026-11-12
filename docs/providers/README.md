@@ -58,8 +58,10 @@ are ignored. Anonymous requests receive no generated salt. Direct mode
 | Chutes | `cache_salt` | Passthrough to vLLM is an observed provider behavior, not an attested cache-isolation guarantee. It was observed on the gateway's end-to-end-encrypted instance path; the public `llm.chutes.ai` API ignored `cache_salt` when called directly. |
 | Privatemode | `cache_salt` | The proxy uses the effective salt for cache/shard affinity; see [Prompt cache](privatemode/verification.md#prompt-cache). |
 | Tinfoil | `user_cache_secret` | Requires the provider router's `CACHE_SALT_ENABLED` policy. The router combines this secret with the shared upstream credential to derive its own salt. |
-| Phala Direct | None | The deployed `Dstack-TEE/vllm-proxy` revision and unknown-JSON-field forwarding have not been confirmed. |
-| Other providers | None | No supported cache partition field is established. |
+| Phala Direct | `cache_salt` | The production chain (PIG → vllm-router → SGLang or vLLM) forwards the field; the engine enforces isolation. With an SGLang storage tier (HiCache/Mooncake), require SGLang ≥ 0.5.20, whose storage keys include the salt; 0.5.19 partitions only GPU cache. |
+| NEAR AI | `cache_salt` | Honored by NEAR's TEE vLLM models. |
+| ArmetAI | `cache_salt` | Enforced by vLLM in the measured TD. |
+| Other providers | None | Secret AI uses Ollama, which has no partition field; 0G's engine is not established. Non-TEE providers receive no field. |
 
 Injection applies only when the resolved upstream path ends in
 `/chat/completions`, `/completions`, `/responses`, or `/messages`, including

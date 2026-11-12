@@ -39,14 +39,16 @@ trials after the warm-up has proved the prompt is cached.
   `--profile <name>` to every command instead of switching the global profile.
 - `curl`, `jq`, `openssl`, `python3`.
 - Provider credentials for the routes you test. The compose uses
-  `TINFOIL_API_KEY`, `CHUTES_API_KEY`, and `PRIVATEMODE_API_KEY`. Load them from
-  your secret store; never paste them into a shell history or a file you commit.
+  `TINFOIL_API_KEY`, `CHUTES_API_KEY`, `PRIVATEMODE_API_KEY`, `NEAR_AI_API_KEY`,
+  `ARMET_AI_API_KEY`, `PHALA_DIRECT_QWEN_TOKEN`, and `PHALA_DIRECT_GLM_TOKEN`.
+  Load them from your secret store; never paste them into a shell history or a
+  file you commit.
 - A gateway commit pushed to `Dstack-TEE/private-ai-gateway`; the launcher
   clones it inside the CVM.
 
 The compose is [`scripts/cache_salt_cvm/compose.yaml`](../scripts/cache_salt_cvm/compose.yaml).
 It mirrors the production no-ingress launcher compose, includes the official
-Privatemode proxy sidecar, and seeds three upstreams:
+Privatemode proxy and dstack-verifier sidecars, and seeds seven upstreams:
 
 | Public model | Route | Provider field |
 | --- | --- | --- |
@@ -54,6 +56,14 @@ Privatemode proxy sidecar, and seeds three upstreams:
 | `c-glm` | Chutes `zai-org/GLM-5.1-TEE` | `cache_salt` |
 | `c-kimi` | Chutes `moonshotai/Kimi-K2.6-TEE` | `cache_salt` |
 | `p-glm` | Privatemode `glm-5.3-flash` | `cache_salt` |
+| `n-glm` | NEAR AI `z-ai/glm-5.3-flash` | `cache_salt` |
+| `n-qwen` | NEAR AI `Qwen/Qwen3.6-35B-A3B-FP8` | `cache_salt` |
+| `a-glm` | ArmetAI `GLM-5.3-Flash` | `cache_salt` |
+| `pd-qwen` | Phala Direct `qwen/qwen3.8-27b` | `cache_salt` |
+| `pd-glm` | Phala Direct `z-ai/glm-5.3` | `cache_salt` |
+
+Node URLs, model IDs, and the ArmetAI measurement pin mirror the production
+upstream config at the time of writing and must be refreshed from it.
 
 Its mock control plane maps the SHA-256 of `TEST_USER_A_KEY` to `userId`
 1001 and of `TEST_USER_B_KEY` to 1002, and allows anonymous requests without
@@ -86,6 +96,10 @@ privatemode_api_key=$(read_secret PRIVATEMODE_API_KEY)
   echo "PRIVATEMODE_API_KEY_SHA256=$(printf %s "$privatemode_api_key" | sha256sum | cut -d' ' -f1)"
   echo "TINFOIL_API_KEY=$(read_secret TINFOIL_API_KEY)"
   echo "CHUTES_API_KEY=$(read_secret CHUTES_API_KEY)"
+  echo "NEAR_AI_API_KEY=$(read_secret NEAR_AI_API_KEY)"
+  echo "ARMET_AI_API_KEY=$(read_secret ARMET_AI_API_KEY)"
+  echo "PHALA_DIRECT_QWEN_TOKEN=$(read_secret PHALA_DIRECT_QWEN_TOKEN)"
+  echo "PHALA_DIRECT_GLM_TOKEN=$(read_secret PHALA_DIRECT_GLM_TOKEN)"
   echo "PRIVATE_AI_GATEWAY_ADMIN_TOKEN=$(openssl rand -hex 32)"
   echo "PRIVATE_AI_GATEWAY_CONTROL_TOKEN=$(openssl rand -hex 32)"
   echo "TEST_USER_A_KEY=user-a-$(openssl rand -hex 16)"
@@ -107,7 +121,7 @@ URL=$(phala cvms get "$NAME" --profile "$PROFILE" --json | jq -r '.endpoints[0].
 until [ "$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$URL/health")" = 200 ]; do sleep 20; done
 ```
 
-Confirm that the CVM built the commit under test and serves the four models:
+Confirm that the CVM built the commit under test and serves the nine models:
 
 ```bash
 curl -s "$URL/v1/attestation/report" | jq -r '.attestation.source_provenance.repo_commit'   # must equal $COMMIT
@@ -121,7 +135,7 @@ cd "$WORK"
 env -i PATH="$PATH" \
   TEST_USER_A_KEY="$(grep '^TEST_USER_A_KEY=' secrets.env | cut -d= -f2-)" \
   TEST_USER_B_KEY="$(grep '^TEST_USER_B_KEY=' secrets.env | cut -d= -f2-)" \
-  python3 smoke.py "$URL" t-gpt-oss c-glm c-kimi p-glm > results.json
+  python3 smoke.py "$URL" t-gpt-oss c-glm c-kimi p-glm n-glm n-qwen a-glm pd-qwen pd-glm > results.json
 ```
 
 The summary goes to stderr; `results.json` holds every request's counters.
@@ -179,4 +193,7 @@ rm -rf "$WORK"
   than a key may use. A 502 on every `p-glm` request usually means the key's
   license excludes the model: the proxy answers 403 "your license does not
   allow access to model". Pick a model the key can call.
-- PhalaDirect is not covered by the default compose.
+- NEAR's TEE vLLM models honor `cache_salt`.
+- ArmetAI enforces `cache_salt` in the measured vLLM TD.
+- Phala Direct forwards `cache_salt` to SGLang/vLLM; SGLang storage tiers need
+  ≥ 0.5.20. See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation).
