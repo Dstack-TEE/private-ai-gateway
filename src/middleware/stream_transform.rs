@@ -20,6 +20,7 @@ use futures_util::Stream;
 use serde_json::{json, Map, Value};
 
 use crate::aci::upstream::UpstreamError;
+use crate::aggregator::service::done_record;
 use crate::aggregator::service::ServiceError;
 #[cfg(test)]
 use crate::aggregator::service::ServiceResponseStream;
@@ -50,9 +51,8 @@ pub enum StreamTransform {
     OpenaiChatToResponses(Arc<Value>, Arc<ResponseIdentity>),
     AnthropicCompleteToOpenai,
     ExcludeReasoning,
-    /// Applied to every stream, including same-format passthrough, which is the
-    /// one path that previously relayed provider bytes verbatim. Carries the
-    /// endpoint so each chunk is canonicalized to that surface's output schema.
+    /// Applied to every stream, including native passthrough. The endpoint
+    /// selects the canonical output schema for each payload.
     SanitizeResponse(Arc<ResponseIdentity>, Endpoint),
 }
 
@@ -88,12 +88,12 @@ impl StreamTransform {
             }
             StreamTransform::SanitizeResponse(identity, endpoint) => {
                 record.edit_json(|body| {
-                    response_transform::rewrite_identity(body, identity);
+                    let changed = response_transform::rewrite_identity(body, identity);
                     response_transform::canonicalize_stream(
                         body,
                         *endpoint,
                         Some(identity.request_id.as_str()),
-                    );
+                    ) | changed
                 });
                 return Ok(vec![record]);
             }
@@ -193,7 +193,7 @@ fn anthropic_chat_stream(
     strict: bool,
 ) -> Result<Option<Vec<Record>>, BridgeError> {
     if event.meaning.terminal.is_some() {
-        return Ok(Some(vec![done_event()]));
+        return Ok(Some(vec![done_record()]));
     }
     match event.meaning.kind {
         EventKind::Ping | EventKind::ContentBlockStop => return Ok(None),
@@ -344,20 +344,12 @@ fn anthropic_chat_chunk(
 // assembly, the terminal decision — and drives a `ChatEvents` writer for the
 // client's surface.
 
-fn done_event() -> Record {
-    Record::generated(
-        None,
-        Payload::Text("[DONE]".into()),
-        EventMeaning::generated(SseProtocol::OpenaiChat, EventKind::Done),
-    )
-}
-
 fn chat_event(body: Value) -> Record {
     Record::generated(None, Payload::Json(body), EventMeaning::default())
 }
 
-fn sse_event(event: &str, data: &Value) -> Record {
-    named_event(SseProtocol::AnthropicMessages, event, data.clone())
+fn sse_event(event: &str, data: Value) -> Record {
+    named_event(SseProtocol::AnthropicMessages, event, data)
 }
 
 fn named_event(protocol: SseProtocol, name: &str, body: Value) -> Record {
@@ -752,21 +744,21 @@ impl MessagesEvents {
     fn block_start(&mut self, block: Value, out: &mut Vec<Record>) {
         out.push(sse_event(
             "content_block_start",
-            &json!({ "type": "content_block_start", "index": self.next_index, "content_block": block }),
+            json!({ "type": "content_block_start", "index": self.next_index, "content_block": block }),
         ));
     }
 
     fn block_delta(&self, delta: Value, out: &mut Vec<Record>) {
         out.push(sse_event(
             "content_block_delta",
-            &json!({ "type": "content_block_delta", "index": self.next_index, "delta": delta }),
+            json!({ "type": "content_block_delta", "index": self.next_index, "delta": delta }),
         ));
     }
 
     fn block_stop(&mut self, out: &mut Vec<Record>) {
         out.push(sse_event(
             "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": self.next_index }),
+            json!({ "type": "content_block_stop", "index": self.next_index }),
         ));
         self.next_index += 1;
     }
@@ -794,7 +786,7 @@ impl ChatEvents for MessagesEvents {
         let usage = messages_usage(None);
         out.push(sse_event(
             "message_start",
-            &json!({
+            json!({
                 "type": "message_start",
                 "message": {
                     "id": id, "type": "message", "role": "assistant", "content": [],
@@ -872,23 +864,20 @@ impl ChatEvents for MessagesEvents {
                 };
                 out.push(sse_event(
                     "error",
-                    &json!({ "type": "error", "error": error }),
+                    json!({ "type": "error", "error": error }),
                 ));
                 return;
             }
         };
         out.push(sse_event(
             "message_delta",
-            &json!({
+            json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": finish.stop_reason(tool_use), "stop_sequence": Value::Null },
                 "usage": messages_usage(usage),
             }),
         ));
-        out.push(sse_event(
-            "message_stop",
-            &json!({ "type": "message_stop" }),
-        ));
+        out.push(sse_event("message_stop", json!({ "type": "message_stop" })));
     }
 }
 
@@ -1193,7 +1182,7 @@ fn anthropic_complete_stream(event: &Event) -> Result<Option<Vec<Record>>, Bridg
         return Ok(None);
     }
     if event.meaning.kind == EventKind::Done {
-        return Ok(Some(vec![done_event()]));
+        return Ok(Some(vec![done_record()]));
     }
     // Fail the stream on a malformed event rather than skip it.
     let parsed = event.payload.json().ok_or(BridgeError::InvalidPayload)?;
@@ -1228,10 +1217,21 @@ pub(crate) enum BridgeError {
     IncompleteResponse,
 }
 
+impl From<BridgeError> for ServiceError {
+    fn from(error: BridgeError) -> Self {
+        let message = match error {
+            BridgeError::InvalidPayload => "provider sent an event this surface cannot represent",
+            BridgeError::IncompleteResponse => "provider ended before finishing its response",
+        };
+        ServiceError::Upstream(UpstreamError::Transport(message.into()))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BridgeClosure {
     pub records: Vec<Record>,
     pub response: Option<Record>,
+    pub chat_id: Option<String>,
 }
 
 impl BridgeHandle {
@@ -1245,13 +1245,18 @@ impl BridgeHandle {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
     }
-    pub(crate) fn close(&self) -> BridgeClosure {
+    pub(crate) fn close(&self, request_id: Option<&str>) -> BridgeClosure {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.output_closed = true;
-        let mut closed = BridgeClosure::default();
+        let mut closed = BridgeClosure {
+            chat_id: matches!(self.transform, StreamTransform::AnthropicToOpenaiChat)
+                .then(|| request_id.map(str::to_owned))
+                .flatten(),
+            ..BridgeClosure::default()
+        };
         if let Some(stream) = &mut state.messages {
             stream.close_text(true, &mut closed.records);
         }
@@ -1362,9 +1367,7 @@ impl Stream for EventTransformStream {
                     );
                     match output {
                         Ok(records) => this.enqueue(records),
-                        Err(_) => this.fail(ServiceError::Upstream(UpstreamError::Transport(
-                            "provider sent an event this surface cannot represent".into(),
-                        ))),
+                        Err(error) => this.fail(error.into()),
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
@@ -1393,12 +1396,7 @@ impl Stream for EventTransformStream {
                     match output {
                         Ok(Some(records)) => this.enqueue(records),
                         Ok(None) => {}
-                        Err(_) => {
-                            this.pending_error =
-                                Some(ServiceError::Upstream(UpstreamError::Transport(
-                                    "provider ended before finishing its response".into(),
-                                )))
-                        }
+                        Err(error) => this.pending_error = Some(error.into()),
                     }
                 }
             }
@@ -1434,7 +1432,7 @@ mod tests {
         .next()
         .unwrap_or_else(|| Record::from_sse(sse_stream::Sse::default(), None))
     }
-    fn edit_event_body(text: &str, edit: impl FnOnce(&mut Value)) -> String {
+    fn edit_event_body(text: &str, edit: impl FnOnce(&mut Value) -> bool) -> String {
         let mut record = decode_record(text);
         record.edit_json(edit);
         String::from_utf8(crate::sse::serialize(&record).unwrap().to_vec()).unwrap()

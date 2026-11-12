@@ -11,10 +11,14 @@ use futures_util::Stream;
 use serde_json::Value;
 use tokio::time::{sleep, Sleep};
 
+use super::completion::Meter;
+use super::errors::Surface;
+use super::request_transform::Endpoint;
 use crate::aci::upstream::UpstreamError;
-use crate::aggregator::service::{MiddlewareReceiptJournal, ServiceError};
+use crate::aggregator::service::ServiceError;
+use crate::aggregator::service::{FailedAttempt, MiddlewareForwardResult};
 use crate::sse::{EventStream, Record};
-use crate::sse_protocol::{sse_protocol, SseProtocol};
+use crate::sse_protocol::SseProtocol;
 
 use super::control::ControlClient;
 use super::pricing;
@@ -46,7 +50,7 @@ impl Default for StreamFailure {
 impl StreamFailure {
     /// Classify the error that ended the stream. A gateway-enforced read
     /// deadline is 504; any other upstream failure 502; an error raised by a
-    /// gateway stage ahead of the meter (receipt drafting, a transform) is
+    /// gateway stage (receipt drafting or a transform) is
     /// still 502 but attributed to the gateway so it does not count against
     /// the serving route.
     pub(crate) fn from_error(err: &ServiceError) -> Self {
@@ -134,16 +138,22 @@ impl StreamReport {
 #[derive(Clone)]
 pub(crate) struct AccountingHandle(Arc<Mutex<AccountingState>>);
 
-fn filter_observed_usage(usage: Option<&mut Value>, protocol: SseProtocol, endpoint: Option<&str>) {
+fn filter_observed_usage(
+    usage: Option<&mut Value>,
+    protocol: SseProtocol,
+    endpoint: Option<&str>,
+) -> bool {
     if endpoint == Some(crate::aggregator::service::SYSTEMONE_PATH) {
-        response_transform::filter_systemone_usage(usage);
+        response_transform::filter_systemone_usage(usage)
     } else {
-        response_transform::filter_usage(usage, protocol);
+        response_transform::filter_usage(usage, protocol)
     }
 }
 
 struct AccountingState {
     report: StreamReport,
+    destination: SseProtocol,
+    pending: Option<Meter>,
     last_usage: Option<Value>,
     start_usage: Option<Value>,
     source: Option<SseProtocol>,
@@ -156,13 +166,14 @@ struct AccountingState {
 pub(crate) struct Accounting {
     pub handle: AccountingHandle,
     pub control: StreamControl,
-    pending: Option<MiddlewareReceiptJournal>,
 }
 impl Accounting {
-    pub fn new(report: StreamReport, pending: Option<MiddlewareReceiptJournal>) -> Self {
+    pub fn new(report: StreamReport) -> Self {
         Self {
             handle: AccountingHandle(Arc::new(Mutex::new(AccountingState {
+                destination: Endpoint::from_path(&report.endpoint).into(),
                 report,
+                pending: None,
                 last_usage: None,
                 start_usage: None,
                 source: None,
@@ -170,8 +181,17 @@ impl Accounting {
                 settled: false,
             }))),
             control: StreamControl::default(),
-            pending,
         }
+    }
+    pub(super) fn pending(meter: Meter) -> Self {
+        let accounting = Self::new(meter.stream_report(None, 0, 200));
+        accounting
+            .handle
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pending = Some(meter);
+        accounting
     }
     pub fn settle(&mut self, failure: Option<StreamFailure>) {
         let mut state = self.handle.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -191,39 +211,20 @@ impl Drop for Accounting {
             state.emit(failure.status, Some(failure));
             return;
         }
-        let failure = state
-            .report
-            .selected_route_id
-            .is_none()
-            .then_some(StreamFailure {
-                class: Some(ErrorClass::ClientDisconnected),
-                ..StreamFailure::default()
-            });
-        if failure.is_some() {
-            if let Some(journal) = &self.pending {
-                let abandoned = journal.abandoned_attempts();
-                for (index, attempt) in abandoned.iter().enumerate().filter(|(_, a)| a.status != 0)
-                {
-                    state.report_attempt(
-                        &attempt.route_id,
-                        index as u32,
-                        attempt.status,
-                        attempt.duration_ms,
-                    );
-                }
-                let in_flight = journal.in_flight();
-                state.report.attempt_index = in_flight
-                    .as_ref()
-                    .map_or(abandoned.len() as u32, |a| a.attempt_index);
-                state.report.selected_route_id = in_flight.map(|a| a.route_id);
-            }
+        if let Some(meter) = state.pending.take() {
+            state.settled = true;
+            drop(meter);
+        } else {
+            state.emit(499, None);
         }
-        state.emit(499, failure);
     }
 }
 impl AccountingState {
     fn emit(&mut self, status: u16, failure: Option<StreamFailure>) {
         self.settled = true;
+        if let Some(mut meter) = self.pending.take() {
+            meter.disarm();
+        }
         self.report
             .settle(status, self.last_usage.take(), self.ttft_ms, failure);
     }
@@ -252,37 +253,6 @@ impl AccountingState {
             SseProtocol::AnthropicMessages => response_transform::messages_usage(Some(&chat)),
             SseProtocol::OpenaiResponses => response_transform::responses_usage(Some(&chat)),
         })
-    }
-    fn report_attempt(&self, route: &str, index: u32, status: u16, duration_ms: u64) {
-        // Attempt rows have no usage and do not settle the response owner.
-        let report = PostReport {
-            request_id: self.report.request_id.clone(),
-            endpoint: self.report.endpoint.clone(),
-            status,
-            duration_ms,
-            ttft_ms: None,
-            is_streaming: Some(true),
-            attempt_index: Some(index),
-            selected_route_id: Some(route.into()),
-            request_model: self.report.request_model.clone(),
-            usage: None,
-            images: None,
-            audio: None,
-            pricing: self.report.pricing.clone(),
-            spend_mode: self.report.spend_mode,
-            tenant: self.report.tenant,
-            virtual_key_id: self.report.virtual_key_id,
-            error_source: None,
-            error_message: None,
-            prefix_hash: self.report.prefix_hash.clone(),
-            session_kind: self.report.session_kind,
-        };
-        let control = self.report.control.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                control.consult_post(&report).await;
-            });
-        }
     }
 }
 impl AccountingHandle {
@@ -323,24 +293,34 @@ impl AccountingHandle {
         }
         state.last_usage = Some(usage);
     }
-    pub fn selected(&self, route: String, attempt: u32, status: u16) {
+    pub fn selected(&self, route: String, attempts: &[FailedAttempt], status: u16) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(mut meter) = state.pending.take() {
+            meter.failed_attempts(attempts, true);
+            meter.disarm();
+        }
         state.report.selected_route_id = Some(route);
-        state.report.attempt_index = attempt;
+        state.report.attempt_index = attempts.len() as u32;
         state.report.upstream_status = status;
     }
-    pub fn disarm(&self) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .settled = true;
+    pub(super) fn forward_failure(
+        &self,
+        surface: Surface,
+        received: &[u8],
+        result: Result<MiddlewareForwardResult, ServiceError>,
+    ) -> u16 {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.settled = true;
+        state.pending.take().map_or(502, |mut meter| {
+            meter.account_forward_failure(surface, received, result)
+        })
     }
     /// Client usage is a projection only; it never feeds accounting.
     pub(crate) fn decorate(&self, record: &mut Record, failure: bool) -> Option<Value> {
         record.event()?;
         self.first_byte();
         let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let destination = sse_protocol(&state.report.endpoint);
+        let destination = state.destination;
         let mut wire_usage = None;
         record.edit_json(|body| {
             let start = message_start_usage(body).is_some();
@@ -352,24 +332,29 @@ impl AccountingHandle {
                 body.get_mut("response").and_then(|r| r.get_mut("usage"))
             };
             let Some(usage) = usage.filter(|u| !u.is_null()) else {
-                return;
+                return false;
             };
+            let mut changed = false;
             if failure && state.source != Some(destination) {
                 if let Some(projected) = state.projected_usage(destination) {
+                    changed |= *usage != projected;
                     *usage = projected;
                 }
             }
-            filter_observed_usage(Some(usage), destination, Some(&state.report.endpoint));
-            response_transform::normalize_reasoning_usage_value(usage);
+            changed |=
+                filter_observed_usage(Some(usage), destination, Some(&state.report.endpoint));
+            changed |= response_transform::normalize_reasoning_usage_value(usage).unwrap_or(false);
             if start && !failure {
-                return;
+                return changed;
             }
             if let Some(cost) = state.price() {
+                changed |= usage.get("cost") != Some(&cost);
                 usage["cost"] = cost;
             }
             if failure {
                 wire_usage = Some(usage.clone());
             }
+            changed
         });
         wire_usage
     }
@@ -398,7 +383,7 @@ pub(crate) fn source_usage(body: &Value, protocol: SseProtocol) -> Option<Value>
 
 pub(super) fn message_start_usage(value: &Value) -> Option<&Value> {
     // Usage follows the payload schema, independently of the event's classified
-    // control meaning. This is the same extraction used before typed events.
+    // control meaning.
     if value.get("type").and_then(Value::as_str) != Some("message_start") {
         return None;
     }
@@ -462,7 +447,7 @@ impl Stream for KeepAliveStream {
             Poll::Ready(Some(item)) => {
                 if item
                     .as_ref()
-                    .is_ok_and(|record| matches!(record, Record::NonSse(_)))
+                    .is_ok_and(|record| matches!(record, Record::NonSse(_) | Record::BeginNonSse))
                 {
                     this.interval = None;
                     this.sleep = None;

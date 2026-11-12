@@ -198,7 +198,6 @@ struct MiddlewareReceiptJournalState {
     /// the authoritative list).
     abandoned: Vec<FailedAttempt>,
     source_finished: bool,
-    source_status: u16,
 }
 
 impl MiddlewareReceiptJournal {
@@ -284,22 +283,10 @@ impl MiddlewareReceiptJournal {
             .take()
     }
 
-    pub(crate) fn set_source_status(&self, status: u16) {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .source_status = status;
-    }
-    pub(crate) fn source_status(&self) -> u16 {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .source_status
-    }
     pub(crate) fn response_model(&self) -> Option<String> {
         self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("middleware receipt journal poisoned")
             .draft
             .as_ref()
             .and_then(|draft| draft.response_model.clone())
@@ -307,14 +294,14 @@ impl MiddlewareReceiptJournal {
     pub(crate) fn source_finished(&self) -> bool {
         self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("middleware receipt journal poisoned")
             .source_finished
     }
     pub(crate) fn finish_source(&self, hash: String) -> Result<(), ServiceError> {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("middleware receipt journal poisoned");
         if let Some(draft) = &mut inner.draft {
             draft.builder.add_response_received_hash(hash)?;
         }
@@ -325,7 +312,7 @@ impl MiddlewareReceiptJournal {
         let mut inner = self
             .inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("middleware receipt journal poisoned");
         if let Some(draft) = &mut inner.draft {
             draft.builder.set_chat_id(ids.chat_id.clone());
             draft

@@ -719,7 +719,6 @@ impl AciService {
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                     let keyset_digest = keyset.digest().to_string();
-                    receipt_journal.set_source_status(status);
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         MiddlewareReceiptDraft {
@@ -732,6 +731,7 @@ impl AciService {
                         },
                         receipt_journal,
                         self.metrics.clone(),
+                        status,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
@@ -1039,7 +1039,7 @@ impl AciService {
                 ResponseInput::Events(events),
                 journal,
                 context,
-                Some(accounting),
+                accounting,
             )),
             e2ee: info,
         }
@@ -1065,7 +1065,7 @@ impl AciService {
                     request_id,
                     identity: None,
                 },
-                Some(accounting),
+                accounting,
             )),
             e2ee: None,
         }

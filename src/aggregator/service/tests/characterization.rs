@@ -1,10 +1,8 @@
 //! Exact entity-byte and settlement snapshots, recorded against 0edde219.
 //! Run with UPDATE_STREAMING_CORPUS=1 only when intentionally recording a baseline.
-use crate::common;
+use super::common;
 
-#[path = "support.rs"]
-mod support;
-use support::{normalize_snapshot, normalize_wire, verify_e2ee_wire};
+use super::support::{normalize_snapshot, normalize_wire, verify_e2ee_wire};
 
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -308,13 +306,13 @@ async fn capture(case: &Case) -> Value {
         ..TrackingSessions::default()
     });
     let receipts = Arc::new(TrackingReceipts::default());
-    let clock = Arc::new(common::admission::TestClock(
-        std::sync::atomic::AtomicU64::new(1_700_000_000),
-    ));
+    let clock = Arc::new(common::TestClock(std::sync::atomic::AtomicU64::new(
+        1_700_000_000,
+    )));
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(common::StaticKeyProvider::default()),
-            Arc::new(common::StubQuoter::default()),
+            Arc::new(common::StubQuoter),
             Arc::new(Backend {
                 source: case.source.as_bytes().to_vec(),
                 content_type: if case.non_sse || case.buffered {
@@ -540,7 +538,7 @@ async fn capture(case: &Case) -> Value {
 async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
     let service = AciService::new(
         Arc::new(common::StaticKeyProvider::default()),
-        Arc::new(common::StubQuoter::default()),
+        Arc::new(common::StubQuoter),
         Arc::new(Backend {
             source: vec![],
             content_type: "text/event-stream",
@@ -1122,15 +1120,18 @@ fn read_json_lines(input: &str) -> Vec<Value> {
 }
 
 fn corpus_corrections() -> HashMap<String, Value> {
-    read_json_lines(include_str!("../fixtures/streaming_corrections.jsonl"))
-        .into_iter()
-        .map(|correction| {
-            (
-                correction["expected"]["name"].as_str().unwrap().to_string(),
-                correction,
-            )
-        })
-        .collect()
+    read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_corrections.jsonl"
+    )))
+    .into_iter()
+    .map(|correction| {
+        (
+            correction["expected"]["name"].as_str().unwrap().to_string(),
+            correction,
+        )
+    })
+    .collect()
 }
 
 #[tokio::test]
@@ -1202,7 +1203,7 @@ async fn exact_wire_characterization_corpus() {
     }
     cases.push(Case::new("legacy_completion",Endpoint::Complete,"data: {\"log_id\":\"upstream-id\",\"model\":\"upstream-model\",\"completion\":\"hi\",\"stop_reason\":\"stop_sequence\"}\n\ndata: [DONE]\n\n","anthropic"));
     cases.push(Case::new("native_responses",Endpoint::CreateModelResponse,"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":{\"id\":\"upstream-id\",\"model\":\"upstream-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n","openai"));
-    for (name, source) in crate::aci::upstream::characterization_provider_sources().await {
+    for (name, source) in crate::aci::upstream::tests::characterization_provider_sources().await {
         cases.push(Case::new(name, Endpoint::ChatComplete, &source, "openai"));
     }
     cases.extend(review_cases());
@@ -1385,7 +1386,10 @@ async fn declared_non_sse_json_observes_filtered_source_usage_without_changing_b
 
 #[tokio::test]
 async fn over_cap_non_sse_matches_main_on_normal_and_early_paths() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     let corrections = corpus_corrections();
     for case in review_cases().into_iter().take(2) {
         let actual = capture(&case).await;
@@ -1542,7 +1546,10 @@ async fn usage_after_native_chat_error_is_filtered_on_wire_and_in_report() {
 
 #[tokio::test]
 async fn native_failures_preserve_content_and_the_existing_sanitizer_contract() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     for case in native_failure_content_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines
@@ -1954,7 +1961,10 @@ async fn incomplete_events_end_with_protocol_error_tails_and_one_failure_report(
 
 #[tokio::test]
 async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     for case in failed_bridge_accounting_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
@@ -2014,7 +2024,10 @@ async fn failed_bridge_accounting_observes_source_usage_past_stop_boundaries() {
 
 #[tokio::test]
 async fn inband_timeout_reports_match_main_on_native_and_bridged_paths() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     let corrections = corpus_corrections();
     for case in inband_timeout_cases() {
         let snapshot = capture(&case).await;
@@ -2051,7 +2064,10 @@ fn assert_report_outcomes(snapshot: &Value, baseline: &Value) {
 
 #[tokio::test]
 async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_position() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     for case in source_billing_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines.iter().find(|v| v["name"] == case.name).unwrap();
@@ -2111,7 +2127,10 @@ async fn source_billing_is_filtered_cumulative_and_independent_of_bridge_or_posi
 
 #[tokio::test]
 async fn source_billing_prices_cache_writes_strings_and_partial_messages_on_every_bridge() {
-    let baselines = read_json_lines(include_str!("../fixtures/streaming_wire.jsonl"));
+    let baselines = read_json_lines(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/streaming_wire.jsonl"
+    )));
     for case in cache_billing_cases() {
         let snapshot = capture(&case).await;
         let baseline = baselines

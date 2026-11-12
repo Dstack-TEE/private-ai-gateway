@@ -6,8 +6,7 @@ use serde_json::{json, Value};
 use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 use crate::aci::digest;
 
-/// JCS bytes for the AAD documents — same bytes main's `canonical` module
-/// produced for these integer-and-ASCII inputs.
+/// Canonical JCS bytes for the AAD documents.
 fn canonicalize(value: &Value) -> Result<Vec<u8>, digest::JcsError> {
     digest::jcs_bytes(value)
 }
@@ -559,11 +558,13 @@ pub(super) fn encrypt_e2ee_record(
     if event.meaning.kind == crate::sse_protocol::EventKind::Done {
         return Ok(());
     }
-    let value = event
-        .payload
-        .json()
-        .ok_or(E2eeError::EncryptionFailed)?
-        .clone();
+    let Some(event) = record.event_mut() else {
+        return Ok(());
+    };
+    let crate::sse::Payload::Json(value) = &mut event.payload else {
+        return Err(E2eeError::EncryptionFailed);
+    };
+    let value = value.take();
     record.set_encrypted(encrypt_e2ee_stream_value(value, ctx, endpoint_path)?);
     Ok(())
 }
@@ -574,6 +575,8 @@ pub(super) fn encrypt_e2ee_stream_value(
     endpoint_path: &str,
 ) -> Result<Value, E2eeError> {
     if endpoint_path == EMBEDDINGS_PATH {
+        // Embeddings are buffered-only. A streaming embedding is an internal
+        // inconsistency: fail closed rather than send unencrypted vectors.
         return Err(E2eeError::EncryptionFailed);
     }
     let response_id = payload

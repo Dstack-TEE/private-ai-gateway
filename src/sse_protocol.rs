@@ -10,8 +10,8 @@
 
 use serde_json::{json, Value};
 
-use crate::aggregator::service::{MESSAGES_PATH, RESPONSES_PATH};
 use crate::error_payload::{error_type, upstream_message, Surface};
+use crate::middleware::{request_transform::Endpoint, types::ProviderFormat};
 
 /// Streaming protocol of a downstream endpoint. Narrower than [`Surface`],
 /// which groups all OpenAI-compatible endpoints together: the chat/completions
@@ -23,12 +23,35 @@ pub enum SseProtocol {
     AnthropicMessages,
 }
 
-/// The streaming protocol an endpoint speaks.
-pub fn sse_protocol(endpoint_path: &str) -> SseProtocol {
-    match endpoint_path {
-        MESSAGES_PATH => SseProtocol::AnthropicMessages,
-        RESPONSES_PATH => SseProtocol::OpenaiResponses,
-        _ => SseProtocol::OpenaiChat,
+impl From<Endpoint> for SseProtocol {
+    fn from(endpoint: Endpoint) -> Self {
+        match endpoint {
+            Endpoint::Messages => Self::AnthropicMessages,
+            Endpoint::CreateModelResponse => Self::OpenaiResponses,
+            _ => Self::OpenaiChat,
+        }
+    }
+}
+
+impl From<(ProviderFormat, Endpoint)> for SseProtocol {
+    fn from((format, endpoint): (ProviderFormat, Endpoint)) -> Self {
+        match (format, endpoint) {
+            (ProviderFormat::Anthropic, endpoint) if endpoint != Endpoint::Complete => {
+                Self::AnthropicMessages
+            }
+            (ProviderFormat::Openai, Endpoint::CreateModelResponse) => Self::OpenaiResponses,
+            _ => Self::OpenaiChat,
+        }
+    }
+}
+
+impl From<SseProtocol> for Endpoint {
+    fn from(protocol: SseProtocol) -> Self {
+        match protocol {
+            SseProtocol::OpenaiChat => Self::ChatComplete,
+            SseProtocol::AnthropicMessages => Self::Messages,
+            SseProtocol::OpenaiResponses => Self::CreateModelResponse,
+        }
     }
 }
 
@@ -205,7 +228,8 @@ pub(crate) fn classify(
     let value = payload.json();
     let payload_type = value.and_then(|v| v.get("type")).and_then(Value::as_str);
     let name = name.filter(|name| !name.is_empty());
-    let kind = event_kind(name.or(payload_type).unwrap_or_default());
+    let payload_kind = event_kind(payload_type.unwrap_or_default());
+    let kind = name.map_or(payload_kind, event_kind);
     let mut meaning = protocol.map_or(
         EventMeaning {
             kind,
@@ -214,8 +238,7 @@ pub(crate) fn classify(
         |protocol| EventMeaning::generated(protocol, kind),
     );
     if let (Some(name), Some(payload_type)) = (name, payload_type) {
-        let named_kind = event_kind(name);
-        let payload_kind = event_kind(payload_type);
+        let named_kind = kind;
         // Known control names and payload types must agree. Unknown extensions
         // remain opaque; a trailing space never acquires a control meaning.
         if named_kind != EventKind::Data && payload_kind != EventKind::Data && name != payload_type
@@ -249,19 +272,17 @@ pub(crate) fn classify(
             || nested_error
             || choices_error
             || stop_error
-            || payload_type == Some("error")
-            || payload_type == Some("response.failed")
-            || payload_type == Some("response.error")
+            || matches!(payload_kind, EventKind::Error | EventKind::ResponseFailed)
         {
             meaning.failure.get_or_insert(FailureEvidence::Inband);
             // An extension event can still carry a protocol failure terminal.
             if meaning.terminal.is_none() {
-                meaning.terminal = match (protocol, payload_type) {
-                    (Some(SseProtocol::OpenaiResponses), Some("response.failed")) => {
+                meaning.terminal = match (protocol, payload_kind) {
+                    (Some(SseProtocol::OpenaiResponses), EventKind::ResponseFailed) => {
                         Some(TerminalKind::Failed)
                     }
-                    (Some(SseProtocol::OpenaiResponses), Some("error" | "response.error"))
-                    | (Some(SseProtocol::AnthropicMessages), Some("error")) => {
+                    (Some(SseProtocol::OpenaiResponses), EventKind::Error)
+                    | (Some(SseProtocol::AnthropicMessages), EventKind::Error) => {
                         Some(TerminalKind::Error)
                     }
                     _ => None,

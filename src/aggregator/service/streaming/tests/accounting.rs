@@ -101,7 +101,7 @@ fn owner_for(
         SseProtocol::OpenaiResponses => "/v1/responses",
     };
     report.endpoint = endpoint.into();
-    let accounting = Accounting::new(report, None);
+    let accounting = Accounting::new(report);
     let events = decode_source(
         inner,
         protocol,
@@ -111,7 +111,7 @@ fn owner_for(
     );
     ResponseOwner::new(
         ResponseInput::Events(events),
-        Some(accounting),
+        ResponseMode::Middleware(accounting),
         None,
         endpoint.into(),
         Some(protocol),
@@ -315,7 +315,7 @@ async fn response_owner_settles_once_on_cancellation_completion_and_e2ee_failure
             stream.e2ee = Some(E2eeRequestContext {
                 version: "2".into(),
                 algo: crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM.into(),
-                aad_mode: super::super::wire::E2eeAadMode::AciV2,
+                aad_mode: E2eeAadMode::AciV2,
                 request_model: "fixture".into(),
                 client_public_key_hex: "11".repeat(32),
                 nonce: None,
@@ -369,7 +369,7 @@ async fn transformed_response(
     };
     let mut report = control.report();
     report.endpoint = endpoint_path.into();
-    let accounting = Accounting::new(report, None);
+    let accounting = Accounting::new(report);
     let mut chunks = vec![Ok(Bytes::from(wire))];
     if read_timeout {
         chunks.push(Err(ServiceError::Upstream(
@@ -417,10 +417,12 @@ async fn transformed_response(
     ));
     let output: Vec<_> = ResponseOwner::new(
         ResponseInput::Events(sanitized),
-        Some(accounting),
+        ResponseMode::Middleware(accounting),
         None,
         endpoint_path.into(),
-        Some(crate::sse_protocol::sse_protocol(endpoint_path)),
+        Some(SseProtocol::from(
+            crate::middleware::request_transform::Endpoint::from_path(endpoint_path),
+        )),
         None,
     )
     .collect()
@@ -847,7 +849,7 @@ async fn owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect() {
         stream.e2ee = Some(E2eeRequestContext {
             version: "2".into(),
             algo: crate::aci::e2ee::E2EE_ALGO_X25519_AESGCM.into(),
-            aad_mode: super::super::wire::E2eeAadMode::AciV2,
+            aad_mode: E2eeAadMode::AciV2,
             request_model: "fixture".into(),
             client_public_key_hex: "11".repeat(32),
             nonce: None,

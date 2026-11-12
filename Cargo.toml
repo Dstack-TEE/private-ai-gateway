@@ -74,6 +74,9 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body-util = "0.1"
 async-stream = "0.3"
 
+# Server-sent event framing at provider and client boundaries.
+sse-stream = "0.3"
+
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
 # validation normal without linking against system OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream", "multipart"] }
@@ -89,7 +92,6 @@ async-trait = "0.1"
 
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
-sse-stream = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

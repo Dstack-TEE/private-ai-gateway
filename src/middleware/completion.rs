@@ -441,10 +441,10 @@ async fn run_inner(
 
     // An unset interval uses the 5-second default. Only 0 disables the
     // heartbeat and, with it, the pre-first-byte early commit below.
-    let keepalive = match sse_keepalive_ms.unwrap_or(5_000) {
-        0 => None,
-        ms => Some(Duration::from_millis(ms)),
-    };
+    let keepalive = sse_keepalive_ms
+        .map(Duration::from_millis)
+        .unwrap_or(crate::sse::DEFAULT_KEEP_ALIVE);
+    let keepalive = (!keepalive.is_zero()).then_some(keepalive);
 
     // The forward is driven as an owned future so that, when the upstream is
     // slow, it can be moved into the response body and kept running while the
@@ -828,7 +828,7 @@ async fn run_inner(
                 attempt_index,
                 upstream_status,
             );
-            let accounting = Accounting::new(report, None);
+            let accounting = Accounting::new(report);
             let inputs = StreamPipelineInputs {
                 endpoint: client_endpoint,
                 endpoint_path,
@@ -882,11 +882,11 @@ async fn run_inner(
             };
             let status = StatusCode::from_u16(upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
             let mut headers = gateway_owned_headers(&content_type);
+            let has_receipt = receipt_id.is_some();
             if let Some(receipt_id) = receipt_id {
                 insert_header(&mut headers, "x-receipt-id", &receipt_id);
                 insert_header(&mut headers, "x-aci-keyset-digest", &forward.keyset_digest);
             }
-            let has_receipt = headers.contains_key("x-receipt-id");
             apply_e2ee_headers(&mut headers, finalized.e2ee.as_ref(), has_receipt);
             headers.insert(
                 HeaderName::from_static("x-accel-buffering"),
@@ -990,7 +990,8 @@ fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCan
             Some(first) if *first != candidate => {
                 tracing::error!(
                     route_id = %candidate.route_id,
-                    "control returned conflicting candidates under one route id; dropping the later copy"
+                    "control returned conflicting candidates under one route id; \
+                     dropping the later copy"
                 );
             }
             _ => kept.push(candidate),
@@ -1009,8 +1010,7 @@ fn drop_conflicting_route_twins(candidates: Vec<RouteCandidate>) -> Vec<RouteCan
 // because the client connection closed while the upstream was still being
 // waited for. While `armed` holds the forward's journal, that drop reports a
 // client disconnect against the candidate that was in flight.
-#[derive(Clone)]
-struct Meter {
+pub(super) struct Meter {
     images: Option<super::images::ImageUsage>,
     audio: Option<super::audio::AudioUsage>,
     control: ControlClient,
@@ -1037,7 +1037,7 @@ impl Meter {
     /// immediate match arms do; used by the early-committed streaming path,
     /// which cannot take those arms because it has already sent 200 headers
     /// and delivers the failure in-band.
-    fn account_forward_failure(
+    pub(super) fn account_forward_failure(
         &mut self,
         surface: Surface,
         received_body: &[u8],
@@ -1131,7 +1131,7 @@ impl Meter {
 #[allow(clippy::too_many_arguments)]
 fn build_early_streaming_response(
     service: Arc<AciService>,
-    mut meter: Meter,
+    meter: Meter,
     forward: Pin<Box<dyn Future<Output = Result<MiddlewareForwardResult, ServiceError>> + Send>>,
     journal: MiddlewareReceiptJournal,
     inputs: StreamPipelineInputs,
@@ -1142,16 +1142,13 @@ fn build_early_streaming_response(
     request_id: String,
 ) -> Response {
     let endpoint_path = inputs.endpoint_path;
-    let protocol = errors::sse_protocol(endpoint_path);
+    let protocol = SseProtocol::from(inputs.endpoint);
     let content_type = "text/event-stream";
     // The pending forward resumes in the body, after these headers commit.
     // Its receipt must cite this snapshot rather than a later renewal.
     let keyset = service.current_keyset();
     journal.set_early_response_keyset(keyset.clone());
-    let mut pending_report = meter.clone().into_stream_report(String::new(), 0, 200);
-    pending_report.selected_route_id = None;
-    meter.disarm();
-    let accounting = Accounting::new(pending_report, Some(journal.clone()));
+    let accounting = Accounting::pending(meter);
     let accounting_handle = accounting.handle.clone();
     let stream_control = accounting.control.clone();
     let source_journal = journal.clone();
@@ -1161,27 +1158,45 @@ fn build_early_streaming_response(
         yield Ok::<Record, ServiceError>(Record::Heartbeat);
         match forward.await {
             Ok(MiddlewareForwardResult::Stream(f)) => {
-                let attempt_index = f.failed_attempts.len() as u32;
-                meter.failed_attempts(&f.failed_attempts, true);
-                accounting_handle.selected(f.selected_route.clone(), attempt_index, f.upstream_status);
-                if f.upstream_headers.get("content-type").is_some_and(|value| !is_sse_content_type(Some(value))) {
+                accounting_handle.selected(
+                    f.selected_route.clone(), &f.failed_attempts, f.upstream_status,
+                );
+                if f.upstream_headers.get("content-type")
+                    .is_some_and(|value| !is_sse_content_type(Some(value)))
+                {
                     // Switch the response owner to the explicit byte path before
                     // polling the body, so EOF cannot synthesize an SSE terminal.
-                    yield Ok(Record::NonSse(Bytes::new()));
-                    let protocol = selected_route(&inputs.candidates, &f.selected_route, f.selected_path, inputs.echo.is_some(), inputs.endpoint).protocol();
-                    let mut body = json_stream(f.body, accounting_handle.clone(), inputs.clone(), protocol);
+                    yield Ok(Record::BeginNonSse);
+                    let protocol = selected_route(
+                        &inputs.candidates,
+                        &f.selected_route,
+                        f.selected_path,
+                        inputs.echo.is_some(),
+                        inputs.endpoint,
+                    ).protocol();
+                    let mut body = json_stream(
+                        f.body, accounting_handle.clone(), inputs.clone(), protocol,
+                    );
                     while let Some(item) = body.next().await {
                         yield item.map(Record::NonSse);
                     }
                 } else {
-                    let mut pipeline = build_metered_pipeline(f.body, &f.selected_route, f.selected_path, accounting_handle, stream_control, source_journal, &inputs);
-                    while let Some(item) = pipeline.next().await { yield item; }
+                    let mut pipeline = build_metered_pipeline(
+                        f.body, &f.selected_route, f.selected_path, accounting_handle,
+                        stream_control, source_journal, &inputs,
+                    );
+                    while let Some(item) = pipeline.next().await {
+                        yield item;
+                    }
                 }
             }
             other => {
-                accounting_handle.disarm();
-                let status = meter.account_forward_failure(surface, received_body.as_ref(), other);
-                for record in error_records(protocol, status, Some(&stream_request_id), None) { yield Ok(record); }
+                let status = accounting_handle.forward_failure(
+                    surface, received_body.as_ref(), other,
+                );
+                for record in error_records(protocol, status, Some(&stream_request_id), None) {
+                    yield Ok(record);
+                }
             }
         }
     };
@@ -1242,13 +1257,7 @@ struct SelectedRoute {
 
 impl SelectedRoute {
     fn protocol(&self) -> SseProtocol {
-        match self.format {
-            ProviderFormat::Anthropic if self.endpoint != Endpoint::Complete => {
-                SseProtocol::AnthropicMessages
-            }
-            ProviderFormat::Openai if self.responses_passthrough => SseProtocol::OpenaiResponses,
-            _ => SseProtocol::OpenaiChat,
-        }
+        (self.format, self.endpoint).into()
     }
 }
 
@@ -1344,9 +1353,8 @@ pub(super) fn build_metered_pipeline(
         }
         None => transformed,
     };
-    // Unconditional, unlike the two above: same-format streaming skips every
-    // other transform, and that is exactly the path that used to hand the
-    // provider's bytes to the client verbatim.
+    // Every client stream is sanitized, including native streams that need
+    // neither format conversion nor reasoning exclusion.
     let sanitized: EventStream = Box::pin(EventTransformStream::new(
         surfaced,
         StreamTransform::SanitizeResponse(inputs.identity.clone(), inputs.endpoint),
@@ -1355,10 +1363,20 @@ pub(super) fn build_metered_pipeline(
 }
 
 fn graceful_body(body: ServiceResponseStream, request_id: String) -> Body {
-    Body::from_stream(body.scan((), move |_, item| std::future::ready(match item {
-        Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
-        Err(error) => { tracing::warn!(target: "stream_abort", request_id = %request_id, error = %error, "response stream error; ending body gracefully"); None }
-    })))
+    Body::from_stream(body.scan((), move |_, item| {
+        std::future::ready(match item {
+            Ok(bytes) => Some(Ok::<_, std::io::Error>(bytes)),
+            Err(error) => {
+                tracing::warn!(
+                    target: "stream_abort",
+                    request_id = %request_id,
+                    error = %error,
+                    "response stream error; ending body gracefully"
+                );
+                None
+            }
+        })
+    }))
 }
 
 fn json_stream(
@@ -1381,11 +1399,17 @@ fn json_stream(
         if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) {
             if value.is_object() {
                 accounting.observe_payload(&value, protocol);
-                if inputs.exclude_reasoning { response_transform::exclude_reasoning(&mut value); }
+                if inputs.exclude_reasoning {
+                    response_transform::exclude_reasoning(&mut value);
+                }
                 response_transform::rewrite_identity(&mut value, &inputs.identity);
-                response_transform::canonicalize(&mut value, inputs.endpoint, Some(&inputs.identity.request_id));
+                response_transform::canonicalize(
+                    &mut value, inputs.endpoint, Some(&inputs.identity.request_id),
+                );
                 bytes = serde_json::to_vec(&value)
-                    .map_err(|_| ServiceError::AdmissionInvariant("JSON response encoding failed"))?;
+                    .map_err(|_| {
+                        ServiceError::AdmissionInvariant("JSON response encoding failed")
+                    })?;
             }
         }
         accounting.first_byte();
@@ -1405,7 +1429,7 @@ impl Meter {
     /// The request's outcome is settled without a report — a client-
     /// attributable failure that the usage pipeline deliberately does not
     /// record. A later drop must then stay silent.
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = None;
     }
 
@@ -1416,7 +1440,16 @@ impl Meter {
         attempt_index: u32,
         upstream_status: u16,
     ) -> StreamReport {
-        self.armed = None;
+        self.disarm();
+        self.stream_report(Some(selected_route_id), attempt_index, upstream_status)
+    }
+
+    pub(super) fn stream_report(
+        &self,
+        selected_route_id: Option<String>,
+        attempt_index: u32,
+        upstream_status: u16,
+    ) -> StreamReport {
         StreamReport {
             control: self.control.clone(),
             request_id: self.request_id.clone(),
@@ -1426,7 +1459,7 @@ impl Meter {
             spend_mode: self.spend_mode,
             tenant: self.tenant,
             virtual_key_id: self.virtual_key_id,
-            selected_route_id: Some(selected_route_id),
+            selected_route_id,
             attempt_index,
             upstream_status,
             prefix_hash: self.prefix_hash.clone(),
@@ -1504,7 +1537,7 @@ impl Meter {
         });
     }
 
-    fn failed_attempts(&self, attempts: &[FailedAttempt], is_streaming: bool) {
+    pub(super) fn failed_attempts(&self, attempts: &[FailedAttempt], is_streaming: bool) {
         for (index, attempt) in attempts.iter().enumerate() {
             if attempt.status == 0 {
                 continue;

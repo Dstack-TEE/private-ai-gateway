@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 // place; the definitions are shared because the service layer builds them too.
 pub use crate::error_payload::{error_type, upstream_message, Surface};
 pub use crate::sse_protocol::{
-    chat_gateway_error, responses_error_event, responses_gateway_code, sse_protocol, SseProtocol,
+    chat_gateway_error, responses_error_event, responses_gateway_code, SseProtocol,
 };
 
 use super::types::ErrorClass;

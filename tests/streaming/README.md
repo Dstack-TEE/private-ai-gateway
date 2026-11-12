@@ -27,6 +27,16 @@ JSON ordering/whitespace and SSE framing are preserved. The source stream
 deliberately splits every seven bytes and withholds EOF separately from its
 terminal event.
 
+The white-box tests live in standard source test modules:
+`src/aggregator/service/tests/characterization.rs` and `support.rs`,
+`src/aggregator/service/streaming/tests/accounting.rs`, and
+`src/sse/tests/library_contract.rs`. Provider envelope fixture builders live in
+Chutes and 0G test modules. Production modules expose no fixture helper functions.
+
+An incomplete provider-envelope line at clean EOF is an upstream transport
+failure (502, `upstream_transport`), with no synthesized DONE or receipt.
+A pending read error, including a timeout, retains its original classification.
+
 Run without credentials or inference requests:
 
 ```sh
@@ -92,7 +102,7 @@ including the exact `response.error` stream in the sanitizer-renaming regression
 Status and attribution remain main's; usage now follows the source billing rule.
 
 Framing normalization and rejection cases are pinned separately by
-`library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,
+`src/sse/tests/library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,
 CRLF and bare CR at every split, BOM removal, canonical field spacing and order,
 last valid duplicate metadata, numeric retry formatting, omitted unknown fields,
 comments and empty blocks, retained empty-data contributions, exact terminals,
@@ -101,7 +111,7 @@ final field line is dispatched even without the blank delimiter (LF, CRLF and CR
 are all supported). Only a genuinely incomplete line is discarded. Transport
 errors and truncated clean EOF before a terminal emit the protocol error tail;
 no partial payload has reached the client.
-Unedited JSON text retains its whitespace. `accounting.rs` exercises the production
+Unedited JSON text retains its whitespace. `src/aggregator/service/streaming/tests/accounting.rs` exercises the production
 typed stages and response owner for cost, usage, timeout, cancellation and E2EE
 failure settlement, without a public byte-transform API.
 

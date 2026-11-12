@@ -233,14 +233,22 @@ struct SignatureCheck {
 impl SignatureCheck {
     async fn verify(&self, expected_text: &str) -> Result<(), UpstreamError> {
         let signature = self.fetch().await.map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_unavailable", %reason, "0G response signature could not be fetched");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_unavailable", %reason,
+                "0G response signature could not be fetched"
+            );
             match reason {
                 UpstreamError::ResponseTooLarge => reason,
                 _ => UpstreamError::Transport("0G response signature unavailable".to_string()),
             }
         })?;
         verify_signature(&signature, expected_text, &self.signer).map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_invalid", %reason, "0G response signature failed verification");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_invalid", %reason,
+                "0G response signature failed verification"
+            );
             UpstreamError::Transport("0G response signature invalid".to_string())
         })
     }
@@ -393,7 +401,4 @@ fn is_empty(value: &Value) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-pub(super) use tests::characterization_source;
+pub(super) mod tests;

@@ -15,14 +15,3 @@ pub mod http;
 pub mod middleware;
 pub(crate) mod sse;
 pub(crate) mod sse_protocol;
-
-#[cfg(test)]
-extern crate self as private_ai_gateway;
-
-#[cfg(test)]
-#[path = "../tests/common/mod.rs"]
-mod common;
-
-#[cfg(test)]
-#[path = "../tests/streaming/library_contract.rs"]
-mod sse_library_contract;
