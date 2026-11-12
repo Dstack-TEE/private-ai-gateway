@@ -258,7 +258,9 @@ Middleware uses `middleware.sse_keepalive_ms`; zero disables middleware heartbea
 and early commitment.
 
 Protocol event names and `[DONE]` data are matched exactly, including whitespace.
-Known control names that contradict the payload type fail the upstream stream.
+Known control names that contradict the payload type fail client output at the
+source-control boundary after readable usage is observed. Source observation
+continues; invalid UTF-8 and size overflow remain fatal decoder errors.
 The middleware response owner uses the protocol meaning assigned at ingress. It
 records usage from a failed event and sanitizes native records in place. Native
 Chat retains allowlisted chunk fields, content and failure finish reasons; a
@@ -277,29 +279,39 @@ once as one payload.
 
 Failure evidence remains sticky through the source protocol's terminal. Later
 source events cannot change that outcome; their bytes are still hashed through
-EOF, and usage and billing retain the existing behavior of the selected bridge.
+EOF. Accounting reads usage only from source payloads in the source protocol,
+before conversion. It observes usage through source EOF or client disconnect,
+including usage after terminals, failures and malformed records. Chat uses the
+latest cumulative usage; Messages merges start and delta counters; Responses uses
+its reported response usage. Repeated cumulative values are never added together.
+Every usage object is filtered by the source protocol's allowlist before pricing
+and reporting, including native Messages and buffered responses. Client usage is a
+projection and never a billing input.
 After the owner emits a destination terminal for a failed response, no further
-records are converted or sent to the client. Source reading still continues to
-EOF. Accounting retains the selected bridge's existing billing boundaries:
-Chat-source bridges stop at their source terminal, and every bridge stops at a
-malformed continuation that its converter would reject. Earlier usage remains
-billable; later usage is ignored. A native failure record without
-a terminal continues normally until its protocol terminal arrives.
+records are converted or sent to the client. A native failure record without a
+terminal continues normally until its protocol terminal arrives. When conversion,
+encoding or E2EE fails, source observation continues synchronously to EOF or client
+disconnect, without further client output. The report retains its failure status,
+attribution and label and includes usage observed so far; its publication is
+delayed until that observation ends. Receipts remain suppressed where the previous
+abort path suppressed them. A buffered response that parses but fails conversion
+likewise retains filtered source usage on its existing 502 report.
 A source terminal alone does not prove a conversion succeeded: the destination
 terminal must be produced. Gateway stage failures still fail the response, even
 if the destination terminal has already been sent; no error tail is appended
 after that terminal.
 After an in-band failure, a later upstream read error supplies the report status
 and class, including after a failure terminal: a timeout reports 504
-`upstream_timeout`, and a reset reports 502 `upstream_transport`. Usage and pricing
-retain the selected bridge's billing rules.
+`upstream_timeout`, and a reset reports 502 `upstream_transport`. Usage follows
+the source rule above.
 
 Application blocks are limited to 16 MiB. A clean EOF between events retains the
 existing completion policy: Chat gets a missing `data: [DONE]` marker, while
 Messages and Responses receive no fabricated success terminal. Legacy Anthropic
 completion conversion emits exactly one typed `data: [DONE]` marker. A body that
-explicitly declares a non-SSE content type follows an unbilled byte path: valid
-JSON objects receive identity rewriting and sanitization, while invalid JSON and
+explicitly declares a non-SSE content type follows a byte path: valid
+JSON objects report filtered source usage before identity rewriting and sanitization,
+without adding cost to the client body, while invalid JSON and
 non-object bodies pass through. It gets no SSE blank-line suffix or sentinel.
 This path retains the 16 MiB buffering bound. Overflow ends the body and records
 an upstream `502` with `upstream_transport` and no usage.

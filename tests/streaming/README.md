@@ -34,7 +34,8 @@ any approved parsing correction with its old and new expectation.
 Both fixtures use compact JSON Lines, one object per case sorted by case name.
 `streaming_corrections.jsonl` records every approved difference with the original
 wire bytes and the corrected snapshot; its case name is `expected.name`.
-Of the 110 cases, 54 match main exactly and 56 pin approved corrections. The eight
+The corpus retains 128 main-recorded cases; exact-match and correction counts
+are reported in the PR verification results. The eight
 failed-bridge accounting/reset cases were also recorded on `9b745bda`; their
 complete snapshots are identical on both main revisions.
 The failure cases cover each destination and bridge. Native failures retain
@@ -50,27 +51,33 @@ omit startup events or the Chat chunk wrapper that existed only to carry an erro
 After content has been emitted, the owner asks the bridge to use its existing
 close path, keeping closing frames and partial Responses output before failure.
 Once the owner emits a failed response's destination terminal, no continuation
-records are converted or forwarded. Accounting still observes the source to EOF
-with main's bridge usage rules: Chat-source bridges stop accounting at their source
-terminal, and all bridges stop at a malformed continuation that main's converter
-would reject. Until then, usage after the destination failure terminal remains
-billable. The report retains the conversion failure's `upstream_transport` label;
-a later upstream read failure supplies its report status and class even after a
-failure terminal: reset is 502 `upstream_transport`, timeout is 504
-`upstream_timeout`. The eight `failed_bridge_accounting_cases` snapshots pin
-complete reports against main, including retained pre-terminal usage. Malformed
-continuations still cannot produce another client error tail; reading and receipt
-publication continue to EOF. Native nonterminal failure records continue normally
-until their protocol terminal. The `diff_messages_chat_usage_after_error_1` case
-pins the removed continuation chunk and the unchanged completion-token report.
+records are converted or forwarded. Accounting observes source records until EOF or client disconnect, independently
+of terminal position, failures, malformed records or destination protocol. Reports
+use the source protocol's filtered usage: the latest cumulative value for Chat,
+merged start/delta counters for Messages, and reported response usage for Responses.
+Repeated cumulative observations are never summed. All usage passes its protocol
+allowlist before pricing or reporting, including Messages and buffered responses.
+A contradictory control is rejected after source usage observation; later source
+records remain observable. Invalid UTF-8 and size overflow remain fatal decoding
+errors.
+Buffered conversion failures retain readable source usage on their existing 502
+report. Declared non-SSE JSON objects also report filtered source usage, on normal
+and early paths, without changing client bytes or injecting cost. Opaque, invalid,
+non-object and over-cap bodies report no usage. Conversion, encoding and E2EE failures suppress further output while source
+observation continues synchronously; there is no background drain. Their reports
+therefore settle at EOF or disconnect, retaining the original failure status,
+attribution and label, with no receipt where the old abort suppressed publication.
+A malformed continuation's report label is separate from billing. A later upstream
+read failure still supplies its existing status/class: reset is 502
+`upstream_transport`, timeout is 504 `upstream_timeout`. Native nonterminal failure
+records continue until their protocol terminal.
 Legacy Anthropic completion reports a source failure instead of success.
 
 Nine `inband_timeout_cases` were recorded on main `0edde219`, covering each native
 protocol and bridge, a native failed Messages delta, and both native Responses
 failure terminals. Every complete report matches main's 504 `upstream_timeout`,
 including the exact `response.error` stream in the sanitizer-renaming regression.
-Usage and pricing retain each path's main semantics. Six complete snapshots match
-main exactly; the other three pin existing framing/canonical-failure corrections.
+Status and attribution remain main's; usage now follows the source billing rule.
 
 Framing normalization and rejection cases are pinned separately by
 `library_contract.rs`, `src/sse.rs` tests and typed pipeline tests. They cover LF,
@@ -91,5 +98,8 @@ unknown event names. Unrepresentable bridge payloads are upstream read failures;
 queue overflow remains a gateway failure. Direct serving uses the existing idle
 keep-alive stage at its fixed 5-second default without a new configuration API.
 Middleware's zero keep-alive setting disables middleware heartbeat and early commit.
-Native Messages usage retains main's existing unfiltered report semantics; adding
-a Messages usage allowlist is a separate privacy follow-up.
+The `source_billing_is_filtered_cumulative_and_independent_of_bridge_or_position`
+regression covers cumulative duplicates, all supported bridges, post-terminal and
+post-malformed usage, Messages cache merging/filtering, and buffered filtering.
+`owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect` checks fatal output
+failure and cancellation while source observation is pending.

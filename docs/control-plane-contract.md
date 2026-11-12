@@ -164,6 +164,20 @@ token_cost = uncached_input * input_rate + cache_read * cache_read_rate
 cost = count * image_unit_rate + token_cost
 ```
 
+Token usage reports always use the upstream's source schema, independently of the
+client's format. Streaming usage is observed through EOF or client disconnect,
+even after a terminal, failure or malformed record. Chat reports its latest
+cumulative value; Messages merges start and delta counters; Responses reports its
+response usage. Duplicate cumulative values are not summed. Source usage is
+allowlisted before pricing or reporting, including native Messages and buffered
+responses. Readable usage from a buffered body that fails conversion is retained
+on its existing failure report. Valid declared non-SSE JSON objects on streaming
+requests also report filtered source usage, including after early commitment;
+opaque, invalid, non-object and over-cap bodies report no usage. This byte path
+does not inject client cost. Stream conversion, encoding or E2EE failures retain
+their status and attribution while source observation continues synchronously;
+the report is emitted at EOF or disconnect with the usage observed so far.
+
 Token rates and usage follow the existing token normalization rules; absent
 usage or rates contribute zero. Arithmetic is checked: if an image or token
 component or their sum cannot be represented, the gateway logs a warning and
@@ -173,8 +187,8 @@ plane computes billing independently from its pricing snapshot and reported
 usage; the gateway's `usage.cost` is informational. On a successful image
 response with representable pricing, the gateway adds `usage.cost`. Client
 image responses always contain the SDK-required token usage fields, filled
-with zero when the provider reports none. The post report preserves raw
-provider usage before these defaults and cost injection, and never bills image
+with zero when the provider reports none. The post report preserves filtered source
+usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
 
@@ -394,7 +408,7 @@ The stable fields are:
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
-| `usage` | Always, nullable | Raw provider usage before client cost injection, except audio transcription uses duration-only usage with no provider token counters or cost. |
+| `usage` | Always, nullable | Filtered source-protocol usage before client conversion and cost injection; audio transcription uses duration-only usage with no provider token counters or cost. |
 | `audio` | Successful transcription only | `{seconds, raw_duration?}`; `seconds` is a positive ceil integer. See [Audio transcription](#audio-transcription). |
 | `images` | Successful image generation only | `{count, size, quality}`: upstream image count before canonicalization; size and quality resolved from response, then request, then `"auto"`. Used with `imageCostPerImage` as described above. |
 | `pricing` | Always, nullable | Pricing returned by the pre-consult. |
