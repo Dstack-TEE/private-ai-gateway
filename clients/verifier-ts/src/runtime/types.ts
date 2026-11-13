@@ -70,7 +70,10 @@ export interface ConnectAciOptions {
   proxy?: string;
   /** Additional CA certificate for private gateway deployments. */
   ca?: string | Buffer;
-  /** Number of receipt-bearing POST exchanges retained for audit. Default: 32. */
+  /** Number of receipt-bearing POST exchanges retained for audit. Default: 32.
+   * Set to 0 to disable receipt recording entirely — useful when the client
+   * never calls verifyReceipt() and wants to skip the per-response clone and
+   * digest work. */
   receiptHistorySize?: number;
 }
 

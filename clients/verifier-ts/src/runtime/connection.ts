@@ -374,6 +374,8 @@ class RuntimeAciConnection implements AciConnection {
     identity: VerifiedAciIdentity,
     members: ReadonlyMap<string, VerifiedAciIdentity>,
   ): void {
+    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
+    if (cap === 0) return;
     const entry: InternalExchange = {
       receiptId,
       method: prepared.request.method,
@@ -397,7 +399,6 @@ class RuntimeAciConnection implements AciConnection {
       entry.responseComplete = true;
     });
     this.exchanges.push(entry);
-    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
     if (this.exchanges.length > cap) this.exchanges.splice(0, this.exchanges.length - cap);
   }
 
@@ -516,10 +517,10 @@ function citedSessionId(receipt: ReceiptEnvelope): string | undefined {
 
 function validateOptions(options: ConnectAciOptions): void {
   const cap = options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
-  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1_000) {
+  if (!Number.isSafeInteger(cap) || cap < 0 || cap > 1_000) {
     throw new AciConnectionError(
       'invalid_policy',
-      'receiptHistorySize must be an integer between 1 and 1000',
+      'receiptHistorySize must be an integer between 0 and 1000',
     );
   }
   for (const [name, value] of [
