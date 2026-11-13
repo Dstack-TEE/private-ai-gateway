@@ -508,3 +508,70 @@ test('multipart preserves wire bytes and audits the effective header pins with l
     }
   }
 });
+
+test('caller abort signal cancels a pending inline identity refresh', async () => {
+  const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  for (const trigger of ['expired', 'digest'] as const) {
+    const entered = deferred();
+    const release = deferred();
+    let identityCalls = 0;
+    const provider = async () => {
+      identityCalls += 1;
+      if (identityCalls > 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST);
+    };
+    const factory: PinnedTransportFactory = () => ({
+      observedSpkiSha256: () => 'c0'.repeat(32),
+      close: async () => {},
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+        if (path.endsWith('/attestation')) return Response.json({});
+        const headers = trigger === 'digest'
+          ? { 'x-aci-keyset-digest': `sha256:${'d'.repeat(64)}` }
+          : {};
+        return new Response('{}', { headers });
+      },
+    });
+    const connection = await connectAciWithTransport({
+      baseURL: 'https://api.example.com/v1',
+      serving: { requireReceipt: false, requireVerified: false },
+    }, factory, provider);
+    try {
+      if (trigger === 'expired') {
+        (connection.identity as { expiresAt: number }).expiresAt = 0;
+      } else {
+        await connection.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+      }
+      const controller = new AbortController();
+      let settled = false;
+      let failure: unknown;
+      const request = connection.fetch('https://api.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      }).then(() => { settled = true; }, (error: unknown) => { settled = true; failure = error; });
+      await entered.promise;
+      controller.abort();
+      await turn();
+      assert.equal(settled, true, `abort must settle the request while the inline refresh is pending (trigger=${trigger})`);
+      assert.ok(failure instanceof Error, `request must reject (trigger=${trigger})`);
+      assert.equal(failure.name, 'AbortError', `caller abort must surface as AbortError (trigger=${trigger})`);
+      release.resolve();
+      await request;
+      // The backgrounded refresh still lands, so the connection recovers.
+      const response = await connection.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+      assert.equal(response.status, 200);
+    } finally {
+      release.resolve();
+      await connection.close();
+    }
+  }
+});
