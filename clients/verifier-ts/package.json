@@ -87,7 +87,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@phala/dcap-qvl": "^0.7.0",
+    "@phala/dcap-qvl": "^0.7.1",
     "undici": "7.30.1"
   }
 }
