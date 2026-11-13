@@ -102,6 +102,9 @@ pub struct FailedAttempt {
     pub route_id: String,
     pub status: u16,
     pub duration_ms: u64,
+    /// The request id the candidate stated in its response headers, when it
+    /// answered and stated one.
+    pub upstream_request_id: Option<String>,
 }
 
 pub struct MiddlewareAllFailed {

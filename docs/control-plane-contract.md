@@ -396,6 +396,7 @@ gateway failures. The JSON shape is camelCase:
   "requestModel": "public-model-id",
   "prefixHash": "0123456789abcdef0123456789abcdef",
   "sessionKind": "inferred",
+  "upstreamRequestId": "req_8f2c1e0b9a",
   "usage": {
     "prompt_tokens": 12,
     "completion_tokens": 8,
@@ -435,6 +436,7 @@ The stable fields are:
 | `spendMode`, `userId`, `organizationId`, `workspaceId`, `virtualKeyId` | Optional | Values copied from the pre-consult; the three tenant identity fields travel together. |
 | `errorSource` | Optional | `control`, `upstream`, or `gateway`. |
 | `errorMessage` | Optional | One failure class from the closed list below, never provider or request text. |
+| `upstreamRequestId` | Optional | The upstream's own identifier for this attempt, to quote when reporting a problem to that upstream. Taken from the response header `x-request-id`, else `request-id`, else the first header in name order ending in `-request-id`; when that yields no usable value and the upstream answered 2xx, from the `id` of its response body, so a value shaped like `chatcmpl-…` is expected. Kept only when it is 1–128 characters of `A-Z a-z 0-9 _ . : -`, and absent otherwise. An error body is never read for it. |
 
 A request can produce multiple reports. Count attempts only when
 `selectedRouteId` is non-null. A record with a null route and a non-empty

@@ -21,6 +21,7 @@ use std::pin::Pin;
 use futures_util::StreamExt;
 use serde_json::Value;
 
+use crate::aci::upstream::request_id::{request_id_from_body, request_id_from_headers};
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::ResponseContext;
 use crate::aggregator::service::{
@@ -564,6 +565,13 @@ async fn run_inner(
                 responses_passthrough,
             } = route;
             let parsed_upstream = serde_json::from_slice::<Value>(&forward.upstream_body);
+            let upstream_request_id =
+                request_id_from_headers(&forward.upstream_headers).or_else(|| {
+                    (200..300)
+                        .contains(&forward.upstream_status)
+                        .then(|| parsed_upstream.as_ref().ok().and_then(request_id_from_body))
+                        .flatten()
+                });
             let mut raw_usage = parsed_upstream
                 .as_ref()
                 .ok()
@@ -640,6 +648,7 @@ async fn run_inner(
                             usage: raw_usage,
                             error_source: Some(ErrorSource::Upstream),
                             error_message: Some(ErrorClass::UpstreamMalformedResponse),
+                            upstream_request_id,
                             ..meter.base()
                         });
                         let body = errors::envelope_bytes(
@@ -748,6 +757,7 @@ async fn run_inner(
                     Some(&forward.selected_route),
                     raw_usage,
                     failed_response.then_some(ErrorClass::UpstreamResponseFailed),
+                    upstream_request_id,
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (
@@ -773,6 +783,7 @@ async fn run_inner(
                     Some(&forward.selected_route),
                     raw_usage,
                     Some(class),
+                    upstream_request_id,
                 );
                 meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
@@ -819,6 +830,7 @@ async fn run_inner(
                 forward.selected_route.clone(),
                 attempt_index,
                 upstream_status,
+                request_id_from_headers(&forward.upstream_headers),
             );
             let accounting = Accounting::new(report);
             let inputs = StreamPipelineInputs {
@@ -915,6 +927,7 @@ async fn run_inner(
                 attempt_index,
                 &forward.selected_route,
                 Some(class),
+                request_id_from_headers(&forward.error.upstream_headers),
             );
             finalize_generated(status, body, &[], e2ee, outcome_ctx)
         }
@@ -1060,6 +1073,7 @@ impl Meter {
                     attempt_index,
                     &forward.selected_route,
                     Some(class),
+                    request_id_from_headers(&forward.error.upstream_headers),
                 );
                 status
             }
@@ -1151,6 +1165,7 @@ fn build_early_streaming_response(
                     f.selected_route.clone(),
                     &f.failed_attempts,
                     f.upstream_status,
+                    request_id_from_headers(&f.upstream_headers),
                 );
                 if !f.is_sse {
                     // Switch the response owner to the explicit byte path before
@@ -1423,9 +1438,13 @@ impl Meter {
         selected_route_id: String,
         attempt_index: u32,
         upstream_status: u16,
+        upstream_request_id: Option<String>,
     ) -> StreamReport {
         self.disarm();
-        self.stream_report(Some(selected_route_id), attempt_index, upstream_status)
+        StreamReport {
+            upstream_request_id,
+            ..self.stream_report(Some(selected_route_id), attempt_index, upstream_status)
+        }
     }
 
     pub(super) fn stream_report(
@@ -1446,6 +1465,7 @@ impl Meter {
             selected_route_id,
             attempt_index,
             upstream_status,
+            upstream_request_id: None,
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
             started: self.started,
@@ -1472,6 +1492,7 @@ impl Meter {
             virtual_key_id: self.virtual_key_id,
             error_source: None,
             error_message: None,
+            upstream_request_id: None,
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
         }
@@ -1489,11 +1510,13 @@ impl Meter {
         selected_route_id: Option<&str>,
         usage: Option<Value>,
         error_class: Option<ErrorClass>,
+        upstream_request_id: Option<String>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
             status,
             attempt_index: Some(attempt_index),
+            upstream_request_id,
             selected_route_id: selected_route_id.map(str::to_string),
             images: self.images.clone().filter(|_| (200..300).contains(&status)),
             audio: self.audio.clone().filter(|_| (200..300).contains(&status)),
@@ -1509,10 +1532,12 @@ impl Meter {
         attempt_index: u32,
         selected_route_id: &str,
         error_class: Option<ErrorClass>,
+        upstream_request_id: Option<String>,
     ) {
         self.armed = None;
         self.spawn(PostReport {
             status,
+            upstream_request_id,
             is_streaming: Some(true),
             attempt_index: Some(attempt_index),
             selected_route_id: Some(selected_route_id.to_string()),
@@ -1532,6 +1557,7 @@ impl Meter {
                 is_streaming: Some(is_streaming),
                 attempt_index: Some(index as u32),
                 selected_route_id: Some(attempt.route_id.clone()),
+                upstream_request_id: attempt.upstream_request_id.clone(),
                 ..self.base()
             });
         }

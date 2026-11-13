@@ -34,6 +34,7 @@ mod cache_salt;
 mod chutes;
 mod openai;
 mod privatemode;
+pub mod request_id;
 mod router;
 mod streaming_usage;
 mod tls;

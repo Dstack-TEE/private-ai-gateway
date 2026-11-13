@@ -6339,3 +6339,135 @@ async fn buffered_non_success_reports_filtered_source_usage() {
     );
     assert!(report["errorSource"].is_null());
 }
+
+const CHAT_SUCCESS_BODY: &[u8] = br#"{"id":"7bdaaade50304502b0fe7e66e9a4bec2","object":"chat.completion","model":"vendor-model-int","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+
+async fn single_candidate_control() -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "acme:model-a", "format": "openai" }] }),
+    )
+    .await
+}
+
+// The usage report names the upstream's own request id, from its response
+// header; the client still sees neither that header nor the upstream's body id.
+#[tokio::test]
+async fn usage_report_carries_the_upstream_request_id_header() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        CHAT_SUCCESS_BODY.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
+    let (status, headers, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_no_upstream_headers(&headers);
+    assert_eq!(body["id"], json!("req-1"));
+
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(
+        report["upstreamRequestId"],
+        json!("fa57b5a8-4967-4e5c-9ab8-103a9feeeb14")
+    );
+}
+
+// With no request-id header, a success body's own id stands in, buffered and
+// streamed alike.
+#[tokio::test]
+async fn usage_report_falls_back_to_the_success_body_id() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream(200, CHAT_SUCCESS_BODY.to_vec());
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(
+        report["upstreamRequestId"],
+        json!("7bdaaade50304502b0fe7e66e9a4bec2")
+    );
+
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        b"data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n".to_vec(),
+        vec![("content-type", "text/event-stream")],
+    );
+    let mut input = chat_input();
+    input.stream = true;
+    let (_, body) = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, input)
+            .await,
+    )
+    .await;
+    assert!(!body.contains("b4fa5a1dc59c4b41"), "{body}");
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(report["upstreamRequestId"], json!("b4fa5a1dc59c4b41"));
+}
+
+// A value that is not a plain identifier is left out, and the field with it.
+#[tokio::test]
+async fn usage_report_omits_an_upstream_request_id_that_is_not_an_identifier() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        br#"{"id":"not an identifier","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+        vec![("x-request-id", "served by acme, see https://acme.example")],
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert!(report.get("upstreamRequestId").is_none(), "{report}");
+}
+
+// Every attempt that got an answer reports the id that answer carried: the one
+// failed over and the one finally returned. An error body's id is never read.
+#[tokio::test]
+async fn failed_attempts_report_their_upstream_request_id() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"id":"error-body-id","error":"unavailable"}"#.to_vec(),
+        vec![("x-acme-request-id", "req_9c1f")],
+    );
+    let (status, _, _) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 503);
+    for index in [0, 1] {
+        let report = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(index)).await;
+        assert_eq!(report["status"], 503, "{report}");
+        assert_eq!(report["upstreamRequestId"], json!("req_9c1f"), "{report}");
+    }
+
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream(
+        503,
+        br#"{"id":"error-body-id","error":"unavailable"}"#.to_vec(),
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 503);
+    let report = wait_for_post(&posts, |r| r["status"] == 503).await;
+    assert!(report.get("upstreamRequestId").is_none(), "{report}");
+}

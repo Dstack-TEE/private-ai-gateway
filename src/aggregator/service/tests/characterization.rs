@@ -749,6 +749,13 @@ async fn capture_with_upstream(
     });
     server.abort();
     let _ = server.await;
+    // The corpus was recorded before reports carried the upstream's request
+    // id; tests/middleware_completion.rs covers that field.
+    for report in &mut all_reports {
+        if let Some(report) = report.as_object_mut() {
+            report.remove("upstreamRequestId");
+        }
+    }
     let mut snapshot = json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports});
     if case.fail_publish || case.metrics {
         snapshot["metrics"] = String::from_utf8(service.metrics().unwrap().body)

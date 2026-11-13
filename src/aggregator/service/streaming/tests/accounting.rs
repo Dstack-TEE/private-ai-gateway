@@ -72,6 +72,7 @@ impl Control {
             selected_route_id: Some("fixture:route".into()),
             attempt_index: 0,
             upstream_status: 200,
+            upstream_request_id: None,
             prefix_hash: None,
             session_kind: None,
             started: Instant::now(),
