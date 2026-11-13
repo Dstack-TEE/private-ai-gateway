@@ -297,7 +297,9 @@ class RuntimeAciConnection implements AciConnection {
     if (this.closed || !this.transport) {
       throw new AciConnectionError('closed', 'ACI connection is closed');
     }
-    await this.ensureFreshIdentity();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    signal?.throwIfAborted();
+    await this.ensureFreshIdentity(signal);
     const transport = this.transport;
     if (!transport) throw new AciConnectionError('closed', 'ACI connection is closed');
     const identity = this.identity;
@@ -329,13 +331,17 @@ class RuntimeAciConnection implements AciConnection {
     return response;
   }
 
-  private async ensureFreshIdentity(): Promise<void> {
+  private async ensureFreshIdentity(signal?: AbortSignal | null): Promise<void> {
     const expired = ![...this.members.values()].some((member) => Date.now() < member.expiresAt);
     if (!this.pendingDigest && !expired) return;
     let rotated: boolean;
     try {
-      rotated = await this.refreshIdentity();
+      rotated = await raceAbortSignal(this.refreshIdentity(), signal);
     } catch (error) {
+      // A caller-side abort must surface as-is so cancellable callers (e.g.
+      // streaming clients) can unwind promptly instead of waiting out the
+      // full inline re-verification.
+      if (isAbortError(error)) throw error;
       throw new AciConnectionError(
         expired ? 'identity_expired' : 'attestation_verification',
         expired
@@ -487,6 +493,51 @@ async function digestResponse(response: Response): Promise<string> {
 
 function digestBytes(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * Await a shared in-flight operation while staying responsive to a caller's
+ * AbortSignal. The underlying operation keeps running (other callers may
+ * still benefit from it), but this waiter rejects as soon as the signal
+ * aborts.
+ */
+async function raceAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+  // The promise is typically the deduplicated connection refresh; keep it
+  // handled even when the caller aborts before it settles.
+  void promise.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 function publicExchange(exchange: InternalExchange): RecordedAciExchange {
