@@ -708,20 +708,86 @@ async function timedFetch(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
   }
+  const deadlineError = () =>
+    new AciConnectionError('attestation_fetch', `ACI request exceeded the ${timeoutMs}ms deadline`);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let expired = false;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const timeout = setTimeout(() => {
+    expired = true;
+    controller.abort(deadlineError());
+    if (bodyController) {
+      try {
+        bodyController.error(deadlineError());
+      } catch {
+        // The wrapped stream already settled.
+      }
+    }
+    void bodyReader?.cancel().catch(() => {});
+  }, timeoutMs);
   timeout.unref();
+  const callerSignal = init.signal ?? null;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) onCallerAbort();
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal });
+    const response = await fetchImpl(input, { ...init, signal: controller.signal });
+    if (!response.body) {
+      clearTimeout(timeout);
+      return response;
+    }
+    // The deadline covers the whole response, not just its headers: keep the
+    // timer armed until the body is consumed, and surface body-read stalls
+    // as the same deadline failure.
+    const reader = response.body.getReader();
+    bodyReader = reader;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+        if (expired) controller.error(deadlineError());
+      },
+      async pull(controller) {
+        if (expired) {
+          controller.error(deadlineError());
+          return;
+        }
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            clearTimeout(timeout);
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          clearTimeout(timeout);
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        clearTimeout(timeout);
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(stream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
+    clearTimeout(timeout);
     if (error instanceof AciConnectionError) throw error;
+    if (expired) throw deadlineError();
     throw new AciConnectionError(
       'attestation_fetch',
       `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   } finally {
-    clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
   }
 }
 
