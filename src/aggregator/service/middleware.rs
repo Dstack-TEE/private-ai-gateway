@@ -20,6 +20,7 @@ use super::{
     StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
+use crate::aci::upstream::request_id::request_id_from_headers;
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
@@ -446,11 +447,14 @@ impl AciService {
                 // Mirrored into the journal as well as the local list: the
                 // local list reaches the caller only through the forward
                 // result, which a request cancelled mid-walk never sees.
-                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>,
+                               status: u16,
+                               upstream_request_id: Option<String>| {
                     let attempt = FailedAttempt {
                         route_id: route_id.clone(),
                         status,
                         duration_ms: attempt_started.elapsed().as_millis() as u64,
+                        upstream_request_id,
                     };
                     receipt_journal.record_abandoned(attempt.clone());
                     failed_attempts.push(attempt);
@@ -492,7 +496,7 @@ impl AciService {
                     }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -501,7 +505,7 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
@@ -509,7 +513,7 @@ impl AciService {
 
                 let mut prepared = prepared;
                 if let Err(err) = prepared.encode_audio().await {
-                    abandon(&mut failed_attempts, 502);
+                    abandon(&mut failed_attempts, 502, None);
                     upgrade_err(&mut aggregated_err, 2, err.into());
                     continue;
                 }
@@ -546,7 +550,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -635,7 +639,7 @@ impl AciService {
                         Ok(response) => response,
                         Err(status) => {
                             if let Some(status) = status {
-                                abandon(&mut failed_attempts, status);
+                                abandon(&mut failed_attempts, status, None);
                             }
                             continue;
                         }
@@ -666,7 +670,11 @@ impl AciService {
                             Ok(body) => body,
                             Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
                                 if let Some(status) = abandoned_status(&err, &prepared) {
-                                    abandon(&mut failed_attempts, status);
+                                    abandon(
+                                        &mut failed_attempts,
+                                        status,
+                                        request_id_from_headers(&upstream_headers),
+                                    );
                                 }
                                 upgrade_err(&mut aggregated_err, 2, err.into());
                                 continue;
@@ -689,6 +697,7 @@ impl AciService {
                                 capacity_indices.push(index);
                                 capacity_wait = capacity_wait.max(retry_after(&upstream_headers));
                             }
+                            let upstream_request_id = request_id_from_headers(&upstream_headers);
                             retained = Some(RetainedResponse::Streaming {
                                 error: StreamingUpstreamError {
                                     upstream_status: status,
@@ -698,7 +707,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            abandon(&mut failed_attempts, attempt_status);
+                            abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                             continue;
                         }
                         self.metrics
@@ -832,7 +841,7 @@ impl AciService {
                     Ok(response) => response,
                     Err(status) => {
                         if let Some(status) = status {
-                            abandon(&mut failed_attempts, status);
+                            abandon(&mut failed_attempts, status, None);
                         }
                         continue;
                     }
@@ -875,6 +884,7 @@ impl AciService {
                         capacity_indices.push(index);
                         capacity_wait = capacity_wait.max(retry_after(&upstream_response.headers));
                     }
+                    let upstream_request_id = request_id_from_headers(&upstream_response.headers);
                     retained = Some(RetainedResponse::Buffered {
                         inputs: Box::new(BufferedCommit {
                             response: upstream_response,
@@ -888,7 +898,7 @@ impl AciService {
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    abandon(&mut failed_attempts, attempt_status);
+                    abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                     continue;
                 }
 

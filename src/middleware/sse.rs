@@ -14,6 +14,7 @@ use tokio::time::{sleep, Sleep};
 use super::completion::Meter;
 use super::errors::Surface;
 use super::request_transform::Endpoint;
+use crate::aci::upstream::request_id::request_id_from_body;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::ServiceError;
 use crate::aggregator::service::{FailedAttempt, MiddlewareForwardResult};
@@ -86,6 +87,9 @@ pub(crate) struct StreamReport {
     pub selected_route_id: Option<String>,
     pub attempt_index: u32,
     pub upstream_status: u16,
+    /// The request id the upstream stated in its response headers. When it
+    /// stated none, the first identifier a success stream carries fills in.
+    pub upstream_request_id: Option<String>,
     /// Echoed on the settle report; see `PostReport::prefix_hash`.
     pub prefix_hash: Option<String>,
     pub session_kind: Option<SessionKind>,
@@ -119,6 +123,7 @@ impl StreamReport {
             virtual_key_id: self.virtual_key_id,
             error_source: failure.and_then(|failure| failure.source),
             error_message: failure.and_then(|failure| failure.class),
+            upstream_request_id: self.upstream_request_id.clone(),
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
         };
@@ -284,6 +289,11 @@ impl AccountingHandle {
     pub(crate) fn observe_payload(&self, body: &Value, protocol: SseProtocol) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         state.source = Some(protocol);
+        if state.report.upstream_request_id.is_none()
+            && (200..300).contains(&state.report.upstream_status)
+        {
+            state.report.upstream_request_id = request_id_from_body(body);
+        }
         let Some(mut usage) = source_usage(body, protocol) else {
             return;
         };
@@ -300,7 +310,13 @@ impl AccountingHandle {
         }
         state.last_usage = Some(usage);
     }
-    pub fn selected(&self, route: String, attempts: &[FailedAttempt], status: u16) {
+    pub fn selected(
+        &self,
+        route: String,
+        attempts: &[FailedAttempt],
+        status: u16,
+        upstream_request_id: Option<String>,
+    ) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(mut meter) = state.pending.take() {
             meter.failed_attempts(attempts, true);
@@ -309,6 +325,7 @@ impl AccountingHandle {
         state.report.selected_route_id = Some(route);
         state.report.attempt_index = attempts.len() as u32;
         state.report.upstream_status = status;
+        state.report.upstream_request_id = upstream_request_id;
     }
     pub(super) fn forward_failure(
         &self,

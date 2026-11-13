@@ -462,6 +462,12 @@ pub struct PostReport {
     /// Serialized as `errorMessage`: the class's fixed token, never free text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<ErrorClass>,
+    /// The upstream's own identifier for this attempt: its request-id response
+    /// header, or the `id` of a success body when it sent no such header. A
+    /// bounded plain identifier, never free text (see
+    /// `aci::upstream::request_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
     /// Echo of the pre-consult request features' session key, so billing can
     /// record which deployment actually served this session (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]
