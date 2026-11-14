@@ -307,6 +307,28 @@ host. Policy flags narrow what it accepts:
 Without a custody policy, the CLI reports custody as skipped. The TypeScript
 verifier does not check custody.
 
+The dstack event-log reference is upstream
+[`cc-eventlog` at `verifier-v0.6.3`](https://github.com/Dstack-TEE/dstack/tree/verifier-v0.6.3/dstack/cc-eventlog).
+Rust and TypeScript port its V1/V2 digest, preimage and replay semantics.
+Rust uses the pinned upstream crate only as a test oracle: its `serde_jcs`
+dependency forces `serde_json/float_roundtrip`, which breaks the desktop's
+historical connection-config recovery. Rust can switch to the crate when
+upstream drops or gates that dependency; TS awaits an upstream JS/wasm package. Both recompute every
+RTMR3 runtime digest, require it to match the advertised digest and replay to
+the quoted RTMR3, and select the first runtime `compose-hash` before
+`system-ready`, following upstream `find_event`. V2 additionally requires the
+supplied preimage to match both the digest and the canonical JCS event bytes.
+RTMR3 entries of other types are rejected because their payload binding cannot
+be reconstructed. Shared fixtures generated with upstream check both ports. Regenerate them from
+the repository root with `cargo run -q -p aci-verify --example dstack_event_vectors > clients/verifier-ts/test/fixtures/dstack_event_vectors.json`.
+This authenticates the compose measurement when combined with quote verification;
+release acceptance remains caller policy.
+
+The unpublished Rust `aci-verify` API now follows upstream `TdxEvent`:
+`DstackEventLog.digest` and `event_payload` are decoded byte vectors (use
+`hex::encode` for display), with upstream-compatible `version` and `preimage` fields.
+The JSON wire format remains hex strings.
+
 Clients do not check whether the gateway runs a production or development dstack
 OS image. A development image permits operator access to the gateway. Users who
 need assurance about the OS image should verify the quote, event log, and VM
