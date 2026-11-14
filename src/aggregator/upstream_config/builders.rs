@@ -436,7 +436,8 @@ fn build_aci_service_verifier(
                 connect_timeout_seconds,
                 request_timeout_seconds,
             )
-            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes),
         )),
         None => Ok(Arc::new(
             AciServiceUpstreamVerifier::with_default_pccs_and_timeouts(
@@ -446,7 +447,8 @@ fn build_aci_service_verifier(
                 connect_timeout_seconds,
                 request_timeout_seconds,
             )
-            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes),
         )),
     }
 }
