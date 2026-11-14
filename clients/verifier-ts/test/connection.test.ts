@@ -508,3 +508,61 @@ test('multipart preserves wire bytes and audits the effective header pins with l
     }
   }
 });
+
+test('receiptHistorySize 0 disables receipt recording and its response clone', async () => {
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const makeConnection = (historySize: number) => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const factory: PinnedTransportFactory = () => ({
+      observedSpkiSha256: () => 'c0'.repeat(32),
+      close: async () => {},
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+        if (path.endsWith('/attestation')) return Response.json({});
+        return new Response(new ReadableStream<Uint8Array>({ start(c) { source = c; } }), {
+          headers: { 'x-receipt-id': 'receipt-test' },
+        });
+      },
+    });
+    const opened = connectAciWithTransport({
+      baseURL: 'https://api.example.com/v1',
+      receiptHistorySize: historySize,
+      serving: { requireReceipt: false, requireVerified: false },
+    }, factory, async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST));
+    return { opened, getSource: () => source };
+  };
+
+  // Disabled: nothing is retained and cancelling the caller's body is not
+  // blocked by a recorder-side clone reader.
+  const disabled = makeConnection(0);
+  const off = await disabled.opened;
+  try {
+    const response = await off.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+    assert.equal(off.receipts().length, 0);
+    let settled = false;
+    const cancelled = response.body!.cancel().then(() => { settled = true; });
+    await turn();
+    await turn();
+    assert.equal(settled, true, 'body cancel must settle promptly when recording is disabled');
+  } finally {
+    await off.close();
+  }
+
+  // Enabled (default cap): the exchange is retained and the recorder's clone
+  // keeps consuming the stream until the source closes.
+  const enabled = makeConnection(32);
+  const on = await enabled.opened;
+  try {
+    const response = await on.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+    assert.equal(on.receipts().length, 1);
+    let settled = false;
+    const cancelled = response.body!.cancel().then(() => { settled = true; });
+    await turn();
+    await turn();
+    assert.equal(settled, false, 'recorder clone keeps the body open until the source closes');
+    enabled.getSource().close();
+    await cancelled;
+  } finally {
+    await on.close();
+  }
+});
