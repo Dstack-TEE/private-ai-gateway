@@ -245,16 +245,18 @@ test("npm publishes the channel wrapper after its platform versions", async () =
     return position;
   };
 
-  // Trusted publishing cannot run `npm dist-tag`, so the channel tag moves
-  // with the wrapper publish, which comes last: the packument that carries the
-  // new wrapper then also carries every platform version it aliases.
-  assert.equal(index("Publish wrapper with the channel dist-tag"), steps.length - 1);
+  // The wrapper publish and any beta promotion follow every platform publish.
   assert.ok(index("Publish platform versions") < index("Publish wrapper with the channel dist-tag"));
   assert.match(publish.steps[index("Publish wrapper with the channel dist-tag")].run, /--tag "\$DIST_TAG"/);
   // Platform versions of the same package must never take the channel tag.
   assert.match(publish.steps[index("Publish platform versions")].run, /--tag "\$platform_tag"/);
   assert.doesNotMatch(publish.steps[index("Publish platform versions")].run, /--tag "\$DIST_TAG"/);
-  assert.doesNotMatch(JSON.stringify(publish.steps), /dist-tag add/);
+  const beta = publish.steps[index("Advance beta to the stable wrapper when newer")];
+  assert.equal(index(beta.name), steps.length - 1);
+  assert.equal(beta.if, "needs.package.outputs.dist_tag == 'latest'");
+  assert.match(beta.run, /npm@11\.21\.2 semver@7\.8\.6/);
+  assert.match(beta.run, /test "\$\(npm --version\)" = 11\.21\.2/);
+  assert.match(beta.run, /npm dist-tag add "private-ai-proxy@\$VERSION" beta/);
 
   assert.ok(direct.jobs["publish-npm"]["timeout-minutes"] > npm.jobs.package["timeout-minutes"] + publish["timeout-minutes"]);
 });
