@@ -92,11 +92,12 @@ pub(crate) struct ObservedPrivatemodeManifest {
     bytes: Vec<u8>,
     pub(crate) sha256: String,
     pub(crate) observed_at: String,
+    pub(crate) secret_id: Option<String>,
 }
 
 impl ObservedPrivatemodeManifest {
     pub(crate) fn evidence(&self) -> Value {
-        serde_json::json!({
+        let mut evidence = serde_json::json!({
             "type": "privatemode_manifest_observation",
             "observation": "latest_proxy_fetch_log",
             "bound_to_active_secret": false,
@@ -106,7 +107,11 @@ impl ObservedPrivatemodeManifest {
                 "data:application/json;base64,{}",
                 BASE64.encode(&self.bytes)
             ),
-        })
+        });
+        if let Some(secret_id) = &self.secret_id {
+            evidence["secret_id"] = Value::String(secret_id.clone());
+        }
+        evidence
     }
 }
 
@@ -186,9 +191,7 @@ impl PrivatemodeProxyDeployment {
                 "manifest log is empty".to_string(),
             )
         })?;
-        // The proxy logs an entry before writing its manifest file, so the
-        // newest manifest may still be missing or partially written. Report
-        // the previous complete observation during that window.
+        // Older proxies log before writing the manifest; v1.64 writes it first.
         match (self.read_logged_manifest(newest), entries.next()) {
             (Err(err), Some(previous)) if err.is_pending_manifest() => {
                 self.read_logged_manifest(previous)
@@ -205,11 +208,11 @@ impl PrivatemodeProxyDeployment {
             PrivatemodeDeploymentConfigError::InvalidManifestLog(message.to_string())
         };
         let mut fields = line.split_ascii_whitespace();
-        let (Some(observed_at), Some(logged_path), None) =
-            (fields.next(), fields.next(), fields.next())
+        let (Some(observed_at), Some(logged_path), secret_id, None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
         else {
             return Err(invalid_log(
-                "latest entry must contain a timestamp and manifest path",
+                "latest entry must contain a timestamp, manifest path, and optional secret ID",
             ));
         };
         let file_name = Path::new(logged_path)
@@ -245,6 +248,7 @@ impl PrivatemodeProxyDeployment {
         Ok(ObservedPrivatemodeManifest {
             sha256: sha256_bare_hex(&bytes),
             observed_at: observed_at.to_string(),
+            secret_id: secret_id.map(str::to_string),
             bytes,
         })
     }

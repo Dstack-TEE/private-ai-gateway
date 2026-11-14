@@ -1402,6 +1402,87 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
 }
 
 #[tokio::test]
+async fn privatemode_observes_legacy_and_rotating_secret_ids_without_claiming_binding() {
+    let (base_url, _hits) = serve_counted_readiness_fixture().await;
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 0);
+    let mut log = "2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n".to_string();
+
+    for (timestamp, secret_id) in [
+        ("2026-07-31T00:00:00Z", None),
+        ("2026-11-14T01:00:00Z", Some(BASE64.encode([1; 32]))),
+        ("2026-11-14T02:00:00Z", Some(BASE64.encode([2; 32]))),
+    ] {
+        if let Some(secret_id) = &secret_id {
+            log.push_str(&format!(
+                "{timestamp} /var/lib/privatemode/manifests/1.json {secret_id}\n"
+            ));
+        }
+        std::fs::write(
+            &fixture.manifest_log_path,
+            format!("{log}2026-11-14T03:00:00Z /var/lib/privatemode/manifests/1.json torn"),
+        )
+        .unwrap();
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(
+            event.result,
+            VerificationResult::Verified,
+            "{:?}",
+            event.reason
+        );
+        let evidence = event.evidence.unwrap();
+        let claims = event.provider_claims.unwrap();
+        assert_eq!(claims["observed_manifest_sha256"], fixture.manifest_digest);
+        assert_eq!(evidence["observed_at"], timestamp);
+        assert_eq!(claims["manifest_observed_at"], timestamp);
+        assert_eq!(evidence["secret_id"].as_str(), secret_id.as_deref());
+        assert_eq!(claims["observed_secret_id"].as_str(), secret_id.as_deref());
+        assert_eq!(evidence["bound_to_active_secret"], false);
+        assert_eq!(claims["manifest_bound_to_active_secret"], false);
+    }
+
+    log.push_str("2026-11-14T03:00:00Z /var/lib/privatemode/manifests/2.json pending-secret\n");
+    std::fs::write(&fixture.manifest_log_path, &log).unwrap();
+    for manifest_bytes in [None, Some(br#"{"Policies":{"#.as_slice())] {
+        if let Some(bytes) = manifest_bytes {
+            std::fs::write(fixture.manifest_dir.path().join("2.json"), bytes).unwrap();
+        }
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(event.result, VerificationResult::Verified);
+        assert_eq!(event.evidence.unwrap()["secret_id"], BASE64.encode([2; 32]));
+        assert_eq!(
+            event.provider_claims.unwrap()["observed_secret_id"],
+            BASE64.encode([2; 32])
+        );
+    }
+}
+
+#[tokio::test]
+async fn privatemode_rejects_malformed_complete_manifest_log_entries() {
+    let (base_url, _hits) = serve_counted_readiness_fixture().await;
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 0);
+
+    for malformed in [
+        "\n",
+        "2026-11-14T00:00:00Z\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.json id extra\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/one.json id\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.txt id\n",
+    ] {
+        std::fs::write(
+            &fixture.manifest_log_path,
+            format!("2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n{malformed}"),
+        )
+        .unwrap();
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(event.result, VerificationResult::Failed, "{malformed:?}");
+        assert!(event.evidence.is_none());
+        assert!(event.provider_claims.is_none());
+    }
+}
+
+#[tokio::test]
 async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_written() {
     let (base_url, _provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
@@ -1453,6 +1534,12 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     let (base_url, provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
     let fixture = PrivatemodeTestDeployment::new(base_url.clone());
+    let secret_id = BASE64.encode([3; 32]);
+    std::fs::write(
+        &fixture.manifest_log_path,
+        format!("2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.json {secret_id}\n"),
+    )
+    .unwrap();
 
     let (_config_path_dir, config_path) = temp_config_path();
     let mut options = runtime_options(UpstreamVerifierMode::None);
@@ -1487,6 +1574,7 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
         "contrast-attested-e2ee-secret"
     );
     assert_eq!(document["claims"]["extra"]["manifest_mode"], "dynamic");
+    assert_eq!(document["claims"]["extra"]["observed_secret_id"], secret_id);
     assert_eq!(
         document["claims"]["extra"]["manifest_bound_to_active_secret"],
         false

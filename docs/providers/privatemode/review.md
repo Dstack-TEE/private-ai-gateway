@@ -5,7 +5,7 @@ Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
 traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-reference deployment pins v1.62.0, rechecked locally on 2026-11-05 PST;
+reference deployment pins v1.64.0, with source checked on 2026-11-14 PST;
 production rollout remains pending.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
@@ -118,6 +118,16 @@ production rollout remains pending.
 > using 16 maximum output tokens each. No Phala test CVM was created; production
 > rollout and any effect on the incident remain unverified.
 
+> **Status (2026-11-14 PST, v1.64.0 manifest log):** the official OCI index
+> digest is
+> `sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`.
+> The manifest log now records the exchanged secret ID; see
+> [verification.md](verification.md#what-the-manifest-observation-proves).
+> The exact pinned image passed locally and on a throwaway Phala CVM with the
+> test key: startup attestation, buffered and streaming `glm-5.3` calls, receipt
+> audit with zero failures, and a secret rotation picked up by the gateway.
+> Proxy responses carry no secret-ID header, so manifest binding stays false.
+> Production rollout remains pending.
 [v162-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.59.0...v1.62.0
 
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
