@@ -1,14 +1,13 @@
-//! The sign-in password and expiring browser sessions for the web UI.
+//! The sign-in password and browser sessions for the web UI.
 //!
 //! Session tokens are kept only as SHA-256 digests. Signing in sets the token
-//! in an `HttpOnly` cookie; the page never sees it. Sessions end after an idle
-//! period and, however active, after an absolute lifetime. A per-client rate limit bounds sign-in attempts
-//! and other unauthenticated requests.
+//! in an `HttpOnly` cookie; the page never sees it. As in code-server, a
+//! session does not time out: it lasts until the browser signs out, the
+//! password changes, or the service drops it (see [`MAX_SESSIONS`]). A
+//! per-client rate limit bounds sign-in attempts and other unauthenticated
+//! requests.
 
-use std::{
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::{sync::Mutex, time::Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::{rngs::SysRng, TryRng};
@@ -17,9 +16,7 @@ use subtle::ConstantTimeEq;
 
 use super::password::Secret;
 
-pub const SESSION_IDLE: Duration = Duration::from_secs(60 * 60);
-/// Open pages keep a session active, so this bounds every session regardless.
-pub const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+/// Signing in beyond this many sessions ends the least recently used one.
 const MAX_SESSIONS: usize = 16;
 
 type Digested = [u8; 32];
@@ -33,15 +30,7 @@ pub struct Auth {
 
 struct Session {
     digest: Digested,
-    created: Instant,
     used: Instant,
-}
-
-impl Session {
-    fn live(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.used) < SESSION_IDLE
-            && now.saturating_duration_since(self.created) < SESSION_LIFETIME
-    }
 }
 
 impl Auth {
@@ -102,14 +91,19 @@ impl Auth {
 
     fn open_session_at(&self, now: Instant) -> Option<String> {
         let mut sessions = self.sessions.lock().ok()?;
-        sessions.retain(|session| session.live(now));
         if sessions.len() >= MAX_SESSIONS {
-            sessions.remove(0);
+            if let Some(oldest) = sessions
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, session)| session.used)
+                .map(|(index, _)| index)
+            {
+                sessions.swap_remove(oldest);
+            }
         }
         let token = secret();
         sessions.push(Session {
             digest: digest(&token),
-            created: now,
             used: now,
         });
         Some(token)
@@ -119,7 +113,6 @@ impl Auth {
         let Ok(mut sessions) = self.sessions.lock() else {
             return false;
         };
-        sessions.retain(|session| session.live(now));
         match position(&sessions, &digest(token)) {
             Some(index) => {
                 sessions[index].used = now;
@@ -206,28 +199,21 @@ mod tests {
     }
 
     #[test]
-    fn sessions_expire_when_idle_and_activity_extends_them() {
+    fn sessions_do_not_time_out_and_the_least_recently_used_makes_room() {
         let auth = Auth::default();
         let start = Instant::now();
-        let token = auth.open_session_at(start).unwrap();
-        let later = start + SESSION_IDLE - Duration::from_secs(1);
-        assert!(auth.authorize_at(&token, later));
-        assert!(auth.authorize_at(&token, later + SESSION_IDLE - Duration::from_secs(1)));
-        assert!(!auth.authorize_at(&token, later + SESSION_IDLE * 3));
-        assert!(!auth.authorize_at("missing", start));
-    }
-
-    #[test]
-    fn sessions_end_at_their_absolute_lifetime_despite_activity() {
-        let auth = Auth::default();
-        let start = Instant::now();
-        let token = auth.open_session_at(start).unwrap();
-        let mut now = start;
-        while now + SESSION_IDLE / 2 < start + SESSION_LIFETIME {
-            now += SESSION_IDLE / 2;
-            assert!(auth.authorize_at(&token, now));
+        let kept = auth.open_session_at(start).unwrap();
+        let dropped = auth.open_session_at(start).unwrap();
+        let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+        assert!(auth.authorize_at(&kept, start + year));
+        for _ in 2..MAX_SESSIONS {
+            auth.open_session_at(start + year).unwrap();
         }
-        assert!(!auth.authorize_at(&token, start + SESSION_LIFETIME));
+        let newest = auth.open_session_at(start + year).unwrap();
+        assert!(!auth.authorize_at(&dropped, start + year));
+        assert!(auth.authorize_at(&kept, start + year));
+        assert!(auth.authorize_at(&newest, start + year));
+        assert!(!auth.authorize_at("missing", start));
     }
 
     #[test]

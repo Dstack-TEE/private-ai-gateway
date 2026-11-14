@@ -19,7 +19,7 @@ use tokio::{runtime::Handle, sync::Semaphore, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use url::{Position, Url};
 
-use super::{auth::SESSION_LIFETIME, throttle::THROTTLE_REFILL, Auth, Throttle};
+use super::{throttle::THROTTLE_REFILL, Auth, Throttle};
 use crate::{
     api::{self, Api, Caller, ServiceBackend, ServiceHost},
     controller::DesktopRuntime,
@@ -37,7 +37,11 @@ use desktop_core::{
 #[allow_missing = true]
 struct WebAssets;
 
-const SESSION_ENDED: &str = "This web UI session has ended or expired. Sign in again.";
+/// Sessions do not time out, so the cookie asks to be kept as long as browsers
+/// allow: they cap `Max-Age` at 400 days (RFC 6265bis section 5.6.2).
+const COOKIE_MAX_AGE: time::Duration = time::Duration::days(400);
+
+const SESSION_ENDED: &str = "This web UI session has ended. Sign in again.";
 /// The same answer whether the password is wrong or none is set.
 const SIGN_IN_FAILED: &str = "Sign-in failed. Check the password and try again.";
 const THROTTLED: &str = "Too many sign-in attempts. Wait a few seconds and try again.";
@@ -341,7 +345,7 @@ fn session_cookie(name: &str, token: &str) -> Cookie<'static> {
         .http_only(true)
         .same_site(SameSite::Strict)
         .path("/")
-        .max_age(time::Duration::try_from(SESSION_LIFETIME).unwrap_or(time::Duration::MAX))
+        .max_age(COOKIE_MAX_AGE)
         .build()
 }
 
@@ -421,9 +425,17 @@ async fn asset(request: Request<Body>) -> Response {
     if path == "api" || path.starts_with("api/") {
         return status(ErrorCode::NotFound, "Unknown API endpoint");
     }
-    // Unknown client routes render the single-page app.
+    // Unknown client routes render the single-page app; a missing file, such
+    // as an old build's script or a browser's `/favicon.ico` probe, is a 404.
     let path = if WebAssets::get(path).is_some() {
         path
+    } else if path.starts_with("assets/")
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
+    {
+        return status(ErrorCode::NotFound, "File not found");
     } else {
         "index.html"
     };
@@ -751,7 +763,7 @@ mod tests {
         assert_eq!(set.secure(), None);
         assert_eq!(
             set.max_age().map(|age| age.whole_seconds()),
-            Some(SESSION_LIFETIME.as_secs() as i64)
+            Some(COOKIE_MAX_AGE.whole_seconds())
         );
         let token = set_cookie(&response).unwrap();
         assert_eq!(stop(&fixture.router, &token).await.status(), StatusCode::OK);
@@ -927,6 +939,9 @@ mod tests {
                 cache(get(&format!("/{fingerprinted}")).await),
                 "public, max-age=31536000, immutable"
             );
+        }
+        for uri in ["/favicon.ico", "/assets/missing.js"] {
+            assert_eq!(get(uri).await.status(), StatusCode::NOT_FOUND, "{uri}");
         }
         for uri in ["/api", "/api/unknown"] {
             let token = fixture.auth.open_session().unwrap();
