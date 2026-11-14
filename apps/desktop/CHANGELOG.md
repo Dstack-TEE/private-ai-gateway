@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.5](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.4...desktop-v0.8.5) (2026-11-14)
+
+
+### Bug Fixes
+
+* **desktop:** point RedPill organization and credits links at /orgs/{slug} ([#556](https://github.com/Dstack-TEE/private-ai-gateway/issues/556)) ([f1aac39](https://github.com/Dstack-TEE/private-ai-gateway/commit/f1aac39cdf0229ecb22d169ce4b2b7f03dd41755))
+
+
+### Miscellaneous Chores
+
+* **desktop:** release 0.8.5 ([79c3833](https://github.com/Dstack-TEE/private-ai-gateway/commit/79c38336f621b09d80443e6402858b44fff7b833))
+
 ## [0.8.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.3...desktop-v0.8.4) (2026-11-05)
 
 Private AI Proxy 0.8.4 adds image generation and audio transcription examples to the Local API examples dialog.
