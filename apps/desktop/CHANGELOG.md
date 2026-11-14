@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.8.6-beta.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **desktop:** keep web UI sessions signed in and add page basics ([#577](https://github.com/Dstack-TEE/private-ai-gateway/issues/577)) ([7584f49](https://github.com/Dstack-TEE/private-ai-gateway/commit/7584f49bd46d18f6c502d0c408f1e8328b611e08))
+
 ## [0.8.5](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.4...desktop-v0.8.5) (2026-11-14)
 
 Private AI Proxy 0.8.5 fixes the RedPill account and top-up links and updates dependencies.
