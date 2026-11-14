@@ -72,29 +72,45 @@ this is not planned.
 
 ## What the manifest observation proves
 
-Privatemode v1.62 writes every fetched manifest to
-`<workspace>/manifests/log.txt`, the manifest history its documentation
-describes for audit. The documentation does not specify the line format; the
-gateway parses the v1.62 format (`<RFC 3339 time> <path>/<N>.json`, from
-[`internal/manifestlog`][manifestlog-source] in the tagged source) and resolves
-`<N>.json` next to the log. Recheck that format whenever the pinned proxy image
-changes. The gateway reads the latest version from the shared read-only
-manifest-history volume and reports:
+Privatemode v1.64 writes the attested manifest before appending an entry to
+`<workspace>/manifests/log.txt` after a successful secret exchange. Its format
+is `<RFC 3339 time> <path>/<N>.json <secret ID>`; unchanged manifests reuse
+the same numbered file across secret rotations. See the tagged
+[logger][manifestlog-source] and [secret-exchange setup][setup-source]. The
+gateway also accepts the legacy timestamp/path format, which v1.62 wrote before
+Coordinator verification and secret exchange. It resolves `<N>.json` next to
+the log, ignores an incomplete final line, and tolerates a pending manifest
+file from older proxies. The gateway reports:
 
 - `observed_manifest_sha256`
 - `manifest_observed_at`
 - `manifest_observation: "latest-proxy-fetch-log"`
+- `observed_secret_id` when present in the log (omitted for legacy entries)
 - `manifest_bound_to_active_secret: false`
 
-This is useful update visibility, but it is not a channel binding. The proxy
-writes the history entry before Coordinator verification and before secret
-exchange completes. The v1.62 API does not expose the manifest associated with
-the secret used for a request. A receipt therefore must not use the observation
-to assert manifest-specific GPU, OS, serving-software, or model-weight claims.
+The observation evidence also includes `secret_id` when present and always
+sets `bound_to_active_secret: false`. The ID identifies a successful secret
+exchange associated with that manifest on v1.64. It does not identify the
+secret used for this gateway request. The [proxy handler][handler-source]
+selects `LatestSecret` for each attempt and sets `Privatemode-Secret-ID` only
+on the outbound request. Its response mapper does not return that selected ID
+to the gateway. Concurrent requests, secret rotation, and retries prevent
+inferring the request's ID from the newest log entry. A receipt therefore must
+not assert manifest-specific GPU, OS, serving-software, or model-weight claims
+on this basis.
 
 The observation may also be older than the request by the route's
-`verifier_cache_seconds` lease. Its timestamp states when the proxy fetched the
-manifest, not when the gateway emitted the receipt.
+`verifier_cache_seconds` lease. On v1.64 its timestamp states when the proxy
+logged the successful exchange; on older proxies it records a manifest fetch.
+It is not the time the gateway emitted the receipt.
+
+To prove request binding, upstream would need to expose the secret ID selected
+for the final attempt in a response header from the measured proxy. A separate
+native transport implementation could instead observe secret selection
+directly. The gateway would then need to match
+that ID against manifest history and seal the request's result after observing
+the response, rather than equating a cached pre-request observation with the
+request's secret. The pinned v1.64 proxy does not provide the response header.
 
 ## Verification and forwarding
 
@@ -120,7 +136,7 @@ startup and liveness. It does not use or identify the current inference secret.
 The refresh loop now retries failed background updates with bounded backoff;
 `LatestSecret` still fails closed if an expired secret cannot be refreshed.
 
-For inference, the gateway permits only these v1.62 handlers, all of which the
+For inference, the gateway permits only these v1.64 handlers, all of which the
 proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
 unstructured handlers, which the gateway does not expose; it forwards
 `/v1/models` unencrypted.
@@ -301,11 +317,12 @@ To test a Phala deployment, follow the
 - [Privatemode TCB source](https://github.com/edgelesssys/privatemode-public)
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
-[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/internal/manifestlog/manifestlog.go
-[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/cmd/cmd.go
-[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/privatemode-proxy/internal/server/server.go
-[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/internal/oss/mutators/mutators.go
-[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/inference-proxy/internal/adapter/inference/inference.go
+[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[setup-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/setup/setup.go
+[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/cmd/cmd.go
+[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/server/server.go
+[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/internal/oss/mutators/mutators.go
+[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/inference-proxy/internal/adapter/inference/inference.go
 
-[persist-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.62.0/internal/oss/persist/persist.go
+[persist-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/internal/oss/persist/persist.go
 [go-server-source]: https://github.com/golang/go/blob/go1.27.0/src/net/http/server.go

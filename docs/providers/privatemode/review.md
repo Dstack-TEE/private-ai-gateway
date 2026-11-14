@@ -5,7 +5,7 @@ Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
 changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
 manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
 traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-reference deployment pins v1.62.0, rechecked locally on 2026-11-05 PST;
+reference deployment pins v1.64.0, with source checked on 2026-11-14 PST;
 production rollout remains pending.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
@@ -118,6 +118,31 @@ production rollout remains pending.
 > using 16 maximum output tokens each. No Phala test CVM was created; production
 > rollout and any effect on the incident remain unverified.
 
+> **Status (2026-11-14 PST, v1.64.0 manifest log):** the official OCI index
+> digest is
+> `sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`.
+> The [tagged logger][v164-manifestlog] writes the manifest file first and logs
+> `<RFC3339> <manifestPath> <secretID>` after a successful exchange in
+> [setup][v164-setup]. Repeated exchanges can reuse the same manifest path with
+> different secret IDs. The gateway accepts both this and the legacy format,
+> exposing the logged ID in observation evidence and session claims.
+> [The handler][v164-handlers] sends the selected ID upstream per attempt but
+> does not add it to the proxy response. The gateway cannot identify the secret
+> used by a particular request, so both manifest-binding booleans remain false.
+> See [verification.md](verification.md#what-the-manifest-observation-proves)
+> for the interface needed to establish request binding.
+> A local run of the exact pinned image with the test key completed startup
+> attestation and secret exchange and wrote the three-field log. Buffered and
+> streaming `glm-5.3` calls passed directly through the proxy and through the
+> gateway (HTTP 200, at most 16 output tokens). Neither proxy response carried
+> a secret-ID header. Gateway receipts cited sessions with the live log's
+> `observed_secret_id`, the pinned image, and manifest binding set to false.
+> A `gpt-oss-120b` attempt returned HTTP 403 for that test key. Production
+> rollout remains pending.
+
+[v164-manifestlog]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[v164-setup]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/setup/setup.go
+[v164-handlers]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/server/server.go
 [v162-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.59.0...v1.62.0
 
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027

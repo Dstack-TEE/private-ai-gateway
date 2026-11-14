@@ -439,7 +439,7 @@ routes at another proxy or change the measured pins.
 | Field | Contract |
 | --- | --- |
 | `base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
-| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. The latest complete entry is reported as unbound observation metadata. |
+| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. Accepts the legacy timestamp/path and v1.64 timestamp/path/secret-ID formats. The latest complete entry, including `observed_secret_id` when available, is reported as unbound observation metadata. |
 | `credential_path` | Absolute path to the Compose secret mounted into both gateway and proxy. The gateway checks it at startup and never forwards it. |
 | `credential_sha256` | SHA-256 of that credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch fails startup. |
 | `proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, as `sha256:<64-hex>`. |
@@ -448,8 +448,8 @@ For `privatemode`, dstack Compose owns the proxy process, image pin, shared
 manifest-history volume, restart policy, and private network. Mutable routes
 must match the static origin and cannot set `bearer_token` or `path`; all share
 the measured Compose credential. The gateway validates the credential digest, requires the proxy's
-`/readyz` readiness probe to succeed, reports the latest fetched manifest as explicitly
-unbound metadata, and forwards only to the encrypted v1.59 handlers. Separate
+`/readyz` readiness probe to succeed, reports the latest logged manifest and secret ID as explicitly
+unbound metadata, and forwards only to the encrypted v1.64 handlers. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 
@@ -523,7 +523,7 @@ Middleware audio candidates must explicitly list `/v1/audio/transcriptions` in
 rejected for Chutes, 0G Private Computer, and
 Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
 blocked until multipart encryption/decryption is verified in the exact pinned
-v1.62.0 proxy image (`sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b`).
+v1.64.0 proxy image (`sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`).
 Public source refs did not establish that support; do not add an unencrypted
 fallback. NEAR's launch model is `openai/whisper-large-v3`. Its native `json`
 response contains only `text`, without the duration needed for billing. The

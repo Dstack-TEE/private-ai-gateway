@@ -1,6 +1,6 @@
 # Deploy with the Privatemode proxy
 
-`compose.privatemode.yaml` runs the gateway and the official v1.62.0, digest-pinned
+`compose.privatemode.yaml` runs the gateway and the official v1.64.0, digest-pinned
 [Privatemode](../docs/providers/privatemode/verification.md) proxy in one
 measured dstack workload. The proxy owns Privatemode attestation, secret
 exchange, and E2EE; the gateway pins the proxy image, credential digest, and
@@ -12,7 +12,10 @@ Clients call the gateway exactly as they would with any other provider.
 The proxy keeps its existing command flags. Its new timeout flags retain the
 v1.59.0 defaults and allow long buffered and streaming inference responses;
 see [Proxy timeouts](../docs/providers/privatemode/verification.md#proxy-timeouts)
-for source analysis and the v1.62.0 local verification.
+for source analysis. The [provider review](../docs/providers/privatemode/review.md)
+records local image verification. The v1.64 manifest log includes the exchanged
+secret ID; the gateway exposes it as an observation and keeps request binding
+false because the proxy response does not identify the secret used per request.
 
 ## Testing and quota operations
 
@@ -228,7 +231,7 @@ jq -e '
 credential_sha256="$(
   printf %s "$PRIVATEMODE_API_KEY" | sha256sum | cut -d' ' -f1
 )"
-proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b"
+proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334"
 
 # Require the signed receipt's cited session to describe the measured
 # Privatemode deployment that handled this request.
@@ -242,6 +245,7 @@ jq -e \
     .claims.extra.manifest_mode == "dynamic" and
     .claims.extra.manifest_observation == "latest-proxy-fetch-log" and
     .claims.extra.manifest_bound_to_active_secret == false and
+    (.claims.extra.observed_secret_id | type == "string" and length > 0) and
     (.claims.extra.observed_manifest_sha256 | test("^[0-9a-f]{64}$"))
   ' "$artifact_dir/session.json"
 ```
