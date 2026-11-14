@@ -47,7 +47,7 @@ fn privatemode_deployment_contract_is_pinned() {
             "proxy service",
             proxy,
             &[
-                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:b2d564aa5f51dfc3cee60424108ca3de1ed0b5349d67e7eac7efe17e62d68d5b",
+                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334",
                 r#"    command:
       - --workspace
       - /var/lib/privatemode
@@ -73,6 +73,7 @@ fn privatemode_deployment_contract_is_pinned() {
             &[
                 r#""base_url": "http://privatemode-proxy:8080""#,
                 r#""manifest_log_path": "/run/privatemode-manifests/log.txt""#,
+                r#""proxy_image_digest": "sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334""#,
                 r#""credential_path": "/run/secrets/privatemode-api-key""#,
                 "PRIVATEMODE_CREDENTIAL_SHA256:?",
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
