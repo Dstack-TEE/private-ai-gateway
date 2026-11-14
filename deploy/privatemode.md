@@ -12,10 +12,8 @@ Clients call the gateway exactly as they would with any other provider.
 The proxy keeps its existing command flags. Its new timeout flags retain the
 v1.59.0 defaults and allow long buffered and streaming inference responses;
 see [Proxy timeouts](../docs/providers/privatemode/verification.md#proxy-timeouts)
-for source analysis. The [provider review](../docs/providers/privatemode/review.md)
-records local image verification. The v1.64 manifest log includes the exchanged
-secret ID; the gateway exposes it as an observation and keeps request binding
-false because the proxy response does not identify the secret used per request.
+for source analysis and the [provider review](../docs/providers/privatemode/review.md)
+for the v1.64.0 verification.
 
 ## Testing and quota operations
 

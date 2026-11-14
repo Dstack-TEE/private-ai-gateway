@@ -1367,7 +1367,7 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
         &fixture.manifest_log_path,
         concat!(
             "2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n",
-            "2026-07-31T01:00:00Z /var/lib/privatemode/manifests/2.json rotated-secret\n"
+            "2026-07-31T01:00:00Z /var/lib/privatemode/manifests/2.json\n"
         ),
     )
     .unwrap();
@@ -1382,12 +1382,6 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
         fixture.manifest_digest
     );
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert!(cached
-        .provider_claims
-        .as_ref()
-        .unwrap()
-        .get("observed_secret_id")
-        .is_none());
 
     let refreshed = verifier
         .refresh(fixture.verification_request("model-c"))
@@ -1398,14 +1392,6 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
         normalized_sha256(&updated_manifest)
     );
     assert_eq!(hits.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        refreshed.provider_claims.as_ref().unwrap()["observed_secret_id"],
-        "rotated-secret"
-    );
-    assert_eq!(
-        refreshed.provider_claims.as_ref().unwrap()["manifest_bound_to_active_secret"],
-        false
-    );
 
     verifier.invalidate(&fixture.verification_request("model-d"));
     let after_invalidate = verifier

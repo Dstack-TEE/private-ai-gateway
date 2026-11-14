@@ -104,13 +104,8 @@ The observation may also be older than the request by the route's
 logged the successful exchange; on older proxies it records a manifest fetch.
 It is not the time the gateway emitted the receipt.
 
-To prove request binding, upstream would need to expose the secret ID selected
-for the final attempt in a response header from the measured proxy. A separate
-native transport implementation could instead observe secret selection
-directly. The gateway would then need to match
-that ID against manifest history and seal the request's result after observing
-the response, rather than equating a cached pre-request observation with the
-request's secret. The pinned v1.64 proxy does not provide the response header.
+Request binding would need the measured proxy to return the selected secret ID
+in its response; v1.64 does not.
 
 ## Verification and forwarding
 
