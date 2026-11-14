@@ -2,15 +2,16 @@
 
 ## [0.8.5](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.4...desktop-v0.8.5) (2026-11-14)
 
+Private AI Proxy 0.8.5 fixes the RedPill account and top-up links and updates dependencies.
 
 ### Bug Fixes
 
-* **desktop:** point RedPill organization and credits links at /orgs/{slug} ([#556](https://github.com/Dstack-TEE/private-ai-gateway/issues/556)) ([f1aac39](https://github.com/Dstack-TEE/private-ai-gateway/commit/f1aac39cdf0229ecb22d169ce4b2b7f03dd41755))
+* **RedPill account links.** RedPill moved organization pages under `/orgs/{slug}`, so **Manage account** and **Top up** opened pages that returned 404. They now open `https://redpill.ai/orgs/{slug}` and `https://redpill.ai/orgs/{slug}/credits` ([#556](https://github.com/Dstack-TEE/private-ai-gateway/pull/556)).
 
+### Maintenance
 
-### Miscellaneous Chores
-
-* **desktop:** release 0.8.5 ([79c3833](https://github.com/Dstack-TEE/private-ai-gateway/commit/79c38336f621b09d80443e6402858b44fff7b833))
+* Update desktop npm dependencies ([#551](https://github.com/Dstack-TEE/private-ai-gateway/pull/551), [#566](https://github.com/Dstack-TEE/private-ai-gateway/pull/566)).
+* Update desktop Rust dependencies, including zbus 6 and dcap-qvl 0.7.1 ([#552](https://github.com/Dstack-TEE/private-ai-gateway/pull/552), [#553](https://github.com/Dstack-TEE/private-ai-gateway/pull/553), [#570](https://github.com/Dstack-TEE/private-ai-gateway/pull/570)).
 
 ## [0.8.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.3...desktop-v0.8.4) (2026-11-05)
 
