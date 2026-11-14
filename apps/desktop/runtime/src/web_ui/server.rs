@@ -429,12 +429,7 @@ async fn asset(request: Request<Body>) -> Response {
     // as an old build's script or a browser's `/favicon.ico` probe, is a 404.
     let path = if WebAssets::get(path).is_some() {
         path
-    } else if path.starts_with("assets/")
-        || path
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.contains('.'))
-    {
+    } else if std::path::Path::new(path).extension().is_some() {
         return status(ErrorCode::NotFound, "File not found");
     } else {
         "index.html"

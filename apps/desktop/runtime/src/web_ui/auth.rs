@@ -92,12 +92,8 @@ impl Auth {
     fn open_session_at(&self, now: Instant) -> Option<String> {
         let mut sessions = self.sessions.lock().ok()?;
         if sessions.len() >= MAX_SESSIONS {
-            if let Some(oldest) = sessions
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, session)| session.used)
-                .map(|(index, _)| index)
-            {
+            let oldest = (0..sessions.len()).min_by_key(|&index| sessions[index].used);
+            if let Some(oldest) = oldest {
                 sessions.swap_remove(oldest);
             }
         }
