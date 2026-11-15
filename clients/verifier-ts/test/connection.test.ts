@@ -574,6 +574,7 @@ test('caller abort signal cancels a pending inline identity refresh', async () =
       await connection.close();
     }
   }
+});
 
 test('request deadline covers the response body, not just the headers', async () => {
   const hangingBody = () => new Response(
