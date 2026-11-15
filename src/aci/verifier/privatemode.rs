@@ -15,7 +15,8 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 /// the gateway. The proxy completes its initial Contrast verification and
 /// secret exchange before serving, so its readiness probe corroborates startup
 /// and liveness. Dynamic manifest history is reported as an observation only:
-/// v1.59 does not bind a logged manifest to the secret used for a request.
+/// v1.64 logs exchanged secret IDs but does not expose the secret ID used for
+/// each request in its response.
 #[derive(Debug, Clone)]
 pub struct PrivatemodeProviderVerifier {
     deployment: Arc<PrivatemodeProxyDeployment>,
@@ -78,7 +79,7 @@ impl PrivatemodeProviderVerifier {
         event.result = VerificationResult::Verified;
         event.evidence = Some(manifest.evidence());
         event.channel_bindings = vec![self.deployment.channel_binding()];
-        event.provider_claims = Some(serde_json::json!({
+        let mut claims = serde_json::json!({
             "session_material_version": "privatemode/1",
             "trust_boundary": "attested-compose-privatemode-proxy",
             "attestation_scope": "contrast-attested-e2ee-secret",
@@ -90,7 +91,11 @@ impl PrivatemodeProviderVerifier {
             "manifest_observed_at": manifest.observed_at,
             "manifest_observation": "latest-proxy-fetch-log",
             "manifest_bound_to_active_secret": false,
-        }));
+        });
+        if let Some(secret_id) = manifest.secret_id {
+            claims["observed_secret_id"] = serde_json::Value::String(secret_id);
+        }
+        event.provider_claims = Some(claims);
         event
     }
 

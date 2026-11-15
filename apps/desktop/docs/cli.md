@@ -496,11 +496,11 @@ it asks `Web UI is off. Enable it on <address>:<port>? [y/N]`; `--yes` enables i
 `--yes` fails with a hint to run `pap settings set web-ui.enabled true`.
 
 Signing in sets a session cookie, so reloading and other tabs of the same
-browser share the session until it ends. Sessions end
-after an hour without requests or an open page, 12 hours after sign-in even
-while a page stays open, when the page signs out (Settings > Connections > Sign
+browser share the session until it ends. As in code-server, sessions do not
+time out. They end when the page signs out (Settings > Connections > Sign
 Out), when the password changes, when the web UI is turned off or its listener
-moves, when settings are reset, and when the service restarts. The page then
+moves, when settings are reset, when the service restarts, and, for the least
+recently used of 16 open sessions, when another browser signs in. The page then
 returns to the sign-in page. Browsers cannot read or change the password; as
 with code-server and Jupyter, it is managed outside the browser.
 
@@ -514,7 +514,7 @@ Security model:
   version is verified with Argon2id until replaced.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
-  12-hour `Max-Age`; the service stores only its SHA-256 digest, so page
+  400-day `Max-Age`, the longest browsers keep; the service stores only its SHA-256 digest, so page
   scripts never see it. The cookie cannot be `Secure` because the listener
   speaks plain HTTP, even on loopback. Cookies are not scoped to a port, so the
   name carries the port: a local web UI and a tunneled one on another port keep

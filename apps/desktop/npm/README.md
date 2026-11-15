@@ -53,16 +53,13 @@ rather than to the wrapper `0.2.0-beta.2`. The
 [install guide](../../../docs/private-ai-proxy-install.md#npm) therefore tells
 users to install a tag or an exact version.
 
-A publish sets exactly one dist-tag, and trusted publishing cannot run
-`npm dist-tag` (see [Trusted publishing](#trusted-publishing)). A stable
-release therefore moves only `latest`; `beta` keeps naming the last prerelease
-until the next beta is published. Right after `0.2.0` ships,
-`npm install private-ai-proxy@beta` still installs `0.2.0-beta.N`, an older
-version than `latest`. Install `private-ai-proxy` to get the newest stable
-release. The updater's beta feed differs: a stable release also
-advances it when it is newer. A maintainer can move `beta` by hand with an
-interactive `npm dist-tag add private-ai-proxy@<version> beta`, which uses
-their own npm login rather than OIDC.
+A stable release moves `latest`, then the workflow advances `beta` to the same
+wrapper if its version is newer than the current `beta`, or if `beta` is unset.
+The comparison uses SemVer: `0.2.0` replaces `0.2.0-beta.N`, but does not replace
+`0.2.1-beta.1`. An equal version is skipped on reruns. Like the updater's beta
+feed, `npm install private-ai-proxy@beta` therefore receives a newer stable
+release as well as prereleases. Only the wrapper gets `beta`; stable platform
+versions keep their `<os>-<cpu>` tags.
 
 For about five minutes after a publish, `npm install private-ai-proxy@latest`
 or `@beta` can fail with `ETARGET`. npm can read the dist-tag from the
@@ -137,12 +134,13 @@ Publishing runs in this order:
    same packument, each with its own dist-tag (see above).
 2. Publish the wrapper with the channel dist-tag: `latest` for stable releases
    and `beta` for prereleases.
+3. For a stable release, advance `beta` to the wrapper when newer than the
+   current `beta`, or when `beta` is unset.
 
 The channel tag must never point at a wrapper whose platform versions are not
 resolvable, or `npm install private-ai-proxy` fails for every user of that
-channel. Trusted publishing only authorizes `npm publish`, not `npm dist-tag`,
-so the channel tag moves when the wrapper is published, and the wrapper goes
-last, after every platform version has been published. Codex publishes in the
+channel. The channel tag moves when the wrapper is published, and the wrapper
+goes after every platform version has been published. Codex publishes in the
 same order without waiting in between. The order does not make the registry
 consistent at once: for a few minutes a copy of the packument can list the new
 wrapper before all of its platform versions (see
@@ -167,10 +165,13 @@ Node 24 and requests `id-token: write`. Because it publishes a public package
 from a public repository through trusted publishing, npm generates provenance
 attestations automatically
 ([npm trusted publishing](https://docs.npmjs.com/trusted-publishers#automatic-provenance-generation)).
-It uses no npm publish token. OIDC authentication covers
-`npm publish` and `npm stage publish` only
-([npm trusted publishing limitations](https://docs.npmjs.com/trusted-publishers#limitations-and-future-improvements)),
-so the workflow never runs `npm dist-tag`.
+It uses no npm publish token. OIDC authentication also covers `npm dist-tag`
+when **Allow npm dist-tag** is enabled on the trusted publisher, as it is for
+this package, and npm CLI is at least 11.21.0
+([managing dist-tags with trusted publishing](https://docs.npmjs.com/trusted-publishers#managing-dist-tags-with-trusted-publishing)).
+The stable release step installs and verifies npm 11.21.2 because Node 24 can
+bundle an older version. It uses the semver CLI at the same pinned version as
+the desktop release tooling's dependency to compare the wrapper with `beta`.
 
 The other release channels are listed in the
 [release contract](../docs/cli-distribution.md#release-contract).

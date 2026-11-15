@@ -235,10 +235,10 @@ lists only the commits since the last beta, so curate the notes before merging.
    - run the tap's `update.yml`
      (`gh workflow run update.yml --repo Dstack-TEE/homebrew-private-ai`) or
      wait for its daily schedule, then merge its `private-ai-proxy <version>` pull
-     request;
-   - optionally, from a maintainer's npm login (OIDC cannot move dist-tags),
-     `npm dist-tag add private-ai-proxy@<version> beta`
-     ([Dist-tags](../npm/README.md#dist-tags-and-version-ranges)).
+     request.
+
+   The npm workflow advances `beta` to the stable wrapper when it is newer
+   ([Dist-tags](../npm/README.md#dist-tags-and-version-ranges)).
 
 #### If the App Store job fails on the tag
 
@@ -289,7 +289,7 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
 
 2. Make the previous stable release Latest again:
    `gh release edit desktop-v<previous> --latest`.
-3. From a maintainer's npm login, since OIDC cannot move dist-tags:
+3. From a maintainer's npm login, move the npm tags back:
    `npm dist-tag add private-ai-proxy@<previous> latest`. If `beta` was moved to
    `<version>`, move it back with
    `npm dist-tag add private-ai-proxy@<latest-beta> beta`.
