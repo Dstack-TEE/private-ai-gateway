@@ -508,3 +508,43 @@ test('multipart preserves wire bytes and audits the effective header pins with l
     }
   }
 });
+
+test('request deadline covers the response body, not just the headers', async () => {
+  const hangingBody = () => new Response(
+    new ReadableStream<Uint8Array>({ start() { /* never enqueues */ } }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+  const deadline = 50;
+  const assertDeadline = async (promise: Promise<unknown>, label: string) => {
+    const start = Date.now();
+    await assert.rejects(promise, (error: unknown) => {
+      assert.ok(error instanceof AciConnectionError, `${label} must reject with AciConnectionError`);
+      return true;
+    });
+    assert.ok(Date.now() - start < 2_000, `${label} must reject at the deadline, not hang indefinitely`);
+  };
+
+  // Bootstrap attestation fetch: headers resolve, JSON body stalls forever.
+  await assertDeadline(connectAciWithTransport({
+    baseURL: 'https://api.example.com/v1',
+    timeoutMs: deadline,
+    bootstrapFetch: async () => hangingBody(),
+  }, () => ({
+    observedSpkiSha256: () => 'c0'.repeat(32),
+    close: async () => {},
+    fetch: async () => Response.json({}),
+  })), 'bootstrap attestation fetch');
+
+  // Pinned-channel probe: headers resolve, attestation JSON body stalls forever.
+  await assertDeadline(connectAciWithTransport({
+    baseURL: 'https://api.example.com/v1',
+    timeoutMs: deadline,
+  }, () => ({
+    observedSpkiSha256: () => 'c0'.repeat(32),
+    close: async () => {},
+    fetch: async (input) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+      return path.endsWith('/attestation') ? hangingBody() : new Response('{}');
+    },
+  }), async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST)), 'pinned channel probe');
+});
