@@ -353,3 +353,10 @@ pub fn large_embeddings_response() -> Vec<u8> {
     body.push_str(r#"],"usage":{"prompt_tokens":290000,"total_tokens":290000}}"#);
     body.into_bytes()
 }
+
+/// A single-image multipart edit with caller-controlled filename and MIME headers.
+pub fn image_edit_request(model: &str) -> Vec<u8> {
+    let mut raw = format!("--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.exe\"\r\nContent-Type: text/private\r\n\r\n").into_bytes();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    raw
+}

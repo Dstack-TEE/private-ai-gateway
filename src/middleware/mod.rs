@@ -55,10 +55,6 @@ pub(crate) fn validate_buffered(
             images::validate_request(params)?;
             images::upstream_body(params)
         }
-        Endpoint::ImagesEdits => {
-            image_edits::validate_request(params)?;
-            image_edits::upstream_fields(params)
-        }
         Endpoint::AudioSpeech => {
             speech::validate_request(params)?;
             speech::upstream_body(params)

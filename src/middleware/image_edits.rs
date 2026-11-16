@@ -21,7 +21,6 @@ const FIELDS: &[&str] = &[
     "response_format",
     "n",
     "user",
-    "provider",
     "quality",
     "background",
     "output_format",
@@ -31,7 +30,6 @@ const FIELDS: &[&str] = &[
 const KIND: FormKind = FormKind::ImageEdit;
 
 pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
-    images::object_with(params, FIELDS)?;
     images::validate_request(params)?;
     for &key in FIELDS {
         if key == "prompt" {
@@ -95,7 +93,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             }));
             continue;
         }
-        if name == "provider" || !FIELDS.contains(&name.as_str()) {
+        if !FIELDS.contains(&name.as_str()) {
             return Err(MediaError {
                 code: "unknown_parameter",
                 ..KIND.invalid(&name)
@@ -161,31 +159,14 @@ pub fn upstream_fields(params: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::StreamExt;
     use serde_json::json;
 
     async fn request(fields: &[(&str, &str)], images: &[(&str, Bytes)]) -> (Bytes, String) {
-        let mut form = reqwest::multipart::Form::new();
-        for (key, value) in fields {
-            form = form.text(key.to_string(), value.to_string());
-        }
-        for (key, data) in images {
-            form = form.part(
-                key.to_string(),
-                reqwest::multipart::Part::stream(data.clone())
-                    .file_name("private.exe")
-                    .mime_str("text/private")
-                    .unwrap(),
-            );
-        }
-        let ct = format!("multipart/form-data; boundary={}", form.boundary());
-        let stream = form.into_stream();
-        futures_util::pin_mut!(stream);
-        let mut bytes = bytes::BytesMut::new();
-        while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(&chunk.unwrap());
-        }
-        (bytes.freeze(), ct)
+        let files: Vec<_> = images
+            .iter()
+            .map(|(name, data)| (*name, data.clone(), "private.exe"))
+            .collect();
+        media::test_multipart(fields, &files).await
     }
 
     #[tokio::test]

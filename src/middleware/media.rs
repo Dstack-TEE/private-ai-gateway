@@ -28,7 +28,6 @@ pub(crate) struct FormSpec {
     pub(crate) max_body_bytes: usize,
     max_text_bytes: usize,
     upstream_fields: fn(&Value) -> Value,
-    pub(crate) record_failure: fn(&crate::aggregator::service::AciService, &str),
 }
 
 const TRANSCRIPTION: FormSpec = FormSpec {
@@ -39,7 +38,6 @@ const TRANSCRIPTION: FormSpec = FormSpec {
     max_body_bytes: super::audio::MAX_BODY_BYTES,
     max_text_bytes: super::audio::MAX_TEXT_BYTES,
     upstream_fields: super::audio::upstream_fields,
-    record_failure: crate::aggregator::service::AciService::record_audio_failure,
 };
 const IMAGE_EDIT: FormSpec = FormSpec {
     label: "image edit",
@@ -49,7 +47,6 @@ const IMAGE_EDIT: FormSpec = FormSpec {
     max_body_bytes: super::image_edits::MAX_BODY_BYTES,
     max_text_bytes: super::image_edits::MAX_TEXT_BYTES,
     upstream_fields: super::image_edits::upstream_fields,
-    record_failure: crate::aggregator::service::AciService::record_image_failure,
 };
 
 impl FormKind {
@@ -64,7 +61,7 @@ impl FormKind {
 // Account for audio and image bytes together, including uploads awaiting consult.
 const UPLOAD_BYTE_BUDGET: usize = 16 * super::audio::MAX_BODY_BYTES;
 const READ_DEADLINE: Duration = Duration::from_secs(60);
-pub(crate) static UPLOAD_BYTES: LazyLock<Arc<Semaphore>> =
+static UPLOAD_BYTES: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(UPLOAD_BYTE_BUDGET)));
 
 #[derive(Debug)]
@@ -166,7 +163,7 @@ pub async fn read_upload(
     .map_err(|_| kind.timeout())?
 }
 
-pub(crate) async fn collect_upload(
+async fn collect_upload(
     body: Body,
     budget: Arc<Semaphore>,
     kind: FormKind,
@@ -294,5 +291,138 @@ impl MediaForm {
             bytes.extend_from_slice(&chunk);
         }
         Ok((bytes.freeze(), content_type))
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn test_multipart(
+    fields: &[(&str, &str)],
+    files: &[(&str, Bytes, &str)],
+) -> (Bytes, String) {
+    let mut form = reqwest::multipart::Form::new();
+    for (key, value) in fields {
+        form = form.text(key.to_string(), value.to_string());
+    }
+    for (key, data, filename) in files {
+        form = form.part(
+            key.to_string(),
+            reqwest::multipart::Part::stream(data.clone())
+                .file_name(filename.to_string())
+                .mime_str("text/private")
+                .unwrap(),
+        );
+    }
+    let content_type = format!("multipart/form-data; boundary={}", form.boundary());
+    let stream = form.into_stream();
+    futures_util::pin_mut!(stream);
+    let mut bytes = bytes::BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        bytes.extend_from_slice(&chunk.unwrap());
+    }
+    (bytes.freeze(), content_type)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::audio::MAX_BODY_BYTES;
+    use super::*;
+    const KIND: FormKind = FormKind::Transcription;
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
+        let available = UPLOAD_BYTES.available_permits();
+        let body = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
+                .chain(stream::pending()),
+        );
+        let result = read_upload(&HeaderMap::new(), body, KIND).await;
+        let error = result.unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(response.headers()[header::CONNECTION], "close");
+        assert_eq!(UPLOAD_BYTES.available_permits(), available);
+    }
+
+    #[tokio::test]
+    async fn declared_and_received_oversized_uploads_close_the_connection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, (MAX_BODY_BYTES + 1).into());
+        let unread = Body::from_stream(stream::poll_fn(
+            |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+                panic!("declared oversize upload must not be read")
+            },
+        ));
+        let declared = read_upload(&headers, unread, KIND).await.unwrap_err();
+        let received = read_upload(
+            &HeaderMap::new(),
+            Body::from(vec![0; MAX_BODY_BYTES + 1]),
+            KIND,
+        )
+        .await
+        .unwrap_err();
+        for error in [declared, received] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(response.headers()[header::CONNECTION], "close");
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_budget_counts_chunks_and_is_held_until_handoff() {
+        let budget = Arc::new(Semaphore::new(7));
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
+            Ok(Bytes::from_static(b"cde")),
+        ]));
+        let (bytes, permit) = collect_upload(body, budget.clone(), KIND).await.unwrap();
+        assert_eq!(bytes, "abcde");
+        assert_eq!(permit.num_permits(), 5);
+        assert_eq!(budget.available_permits(), 2);
+
+        let rejected = collect_upload(Body::from("xyz"), budget.clone(), KIND)
+            .await
+            .unwrap_err();
+        let response = rejected.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        assert_eq!(budget.available_permits(), 2);
+        drop(permit);
+        assert_eq!(budget.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn upload_errors_and_disconnects_release_partial_byte_reservations() {
+        let budget = Arc::new(Semaphore::new(7));
+        let body = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(b"ab")),
+            Err(std::io::Error::other("upload interrupted")),
+        ]));
+        assert_eq!(
+            collect_upload(body, budget.clone(), KIND)
+                .await
+                .unwrap_err()
+                .code,
+            "invalid_parameter"
+        );
+        assert_eq!(budget.available_permits(), 7);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let body = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"ab")) }).chain(
+                stream::poll_fn(move |_| {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                    std::task::Poll::Pending
+                }),
+            ),
+        );
+        let task = tokio::spawn(collect_upload(body, budget.clone(), KIND));
+        rx.await.unwrap();
+        assert_eq!(budget.available_permits(), 5);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(budget.available_permits(), 7);
     }
 }

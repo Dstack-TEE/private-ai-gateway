@@ -123,6 +123,8 @@ pub struct MiddlewareAllFailed {
 }
 
 pub struct MiddlewareForwarded {
+    /// Validated gateway-derived usage for a buffered binary response.
+    pub usage: Option<serde_json::Value>,
     pub receipt_id: String,
     pub receipt: MiddlewareReceiptDraft,
     pub upstream_status: u16,
@@ -442,8 +444,8 @@ pub struct LegacySignatureResult {
 /// [`AciService::forward_chat_completion`] is a thin wrapper that
 /// forwards `requester: None`.
 pub struct ChatCompletionRequest<'a> {
-    /// Buffered audio slice shared across attempted routes; never serialized as JSON.
-    pub audio_form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
+    /// Buffered multipart file shared across attempted routes; never serialized as JSON.
+    pub form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
     pub context: GatewayRequestContext,
     pub endpoint_path: &'a str,
     /// Bytes the service observed after TLS / E2EE termination.

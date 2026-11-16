@@ -29,7 +29,7 @@ pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
     pub(super) endpoint_path: &'static str,
     pub(super) received_body: axum::body::Bytes,
-    pub(super) audio_form: Option<Arc<crate::middleware::media::MediaForm>>,
+    pub(super) form: Option<Arc<crate::middleware::media::MediaForm>>,
     pub(super) forwarded_body: Option<Vec<u8>>,
     pub(super) aci_required: bool,
     pub(super) aci_session_ids: Vec<String>,
@@ -64,7 +64,7 @@ async fn forward_to_backend_inner(
     if input.stream {
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
-                audio_form: input.audio_form.clone(),
+                form: input.form.clone(),
                 context: input.context,
                 endpoint_path: input.endpoint_path,
                 received_body: &input.received_body,
@@ -175,7 +175,7 @@ async fn forward_to_backend_inner(
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
-            audio_form: input.audio_form.clone(),
+            form: input.form.clone(),
             context: input.context,
             endpoint_path: input.endpoint_path,
             received_body: &input.received_body,
@@ -193,7 +193,6 @@ async fn forward_to_backend_inner(
             // envelope (with a matching receipt + E2EE wire body), so the buffered
             // response is returned uniformly here.
             let content_type = if Endpoint::from_path(input.endpoint_path) == Endpoint::AudioSpeech
-                && (200..300).contains(&forward.upstream_status)
             {
                 forward
                     .upstream_headers

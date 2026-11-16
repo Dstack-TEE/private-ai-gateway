@@ -98,6 +98,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validates_nonempty_audio_and_canonicalizes_the_media_type() {
+        for (content_type, body, expected) in [
+            (Some("audio/wav"), b"audio".as_slice(), Some("audio/wav")),
+            (Some("audio/mpeg"), b"audio".as_slice(), Some("audio/mpeg")),
+            (
+                Some("Audio/WAV; rate=24000"),
+                b"audio".as_slice(),
+                Some("audio/wav"),
+            ),
+            (Some("audio/wav"), b"".as_slice(), None),
+            (None, b"audio".as_slice(), None),
+            (Some("application/json"), b"audio".as_slice(), None),
+            (Some("text/event-stream"), b"audio".as_slice(), None),
+            (Some("text/plain"), b"audio".as_slice(), None),
+            (Some("audio/wav, text/html"), b"audio".as_slice(), None),
+            (Some("audio/wav/extra"), b"audio".as_slice(), None),
+            (Some("audio/"), b"audio".as_slice(), None),
+            (Some("audio/wav text/html"), b"audio".as_slice(), None),
+        ] {
+            let headers = content_type
+                .into_iter()
+                .map(|value| ("content-type".into(), value.into()))
+                .collect();
+            assert_eq!(
+                response_content_type(&headers, body).as_deref(),
+                expected,
+                "{content_type:?}"
+            );
+        }
+    }
+
+    #[test]
     fn validates_speech_fields_and_counts_unicode_scalars() {
         let request = json!({"model":"tts", "input":"界🙂e\u{301}", "voice":"ryan", "instructions":"Speak clearly", "speed":0.25, "response_format":"wav", "stream_format":"audio", "provider":{}});
         validate_request(&request).unwrap();

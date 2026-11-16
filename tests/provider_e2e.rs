@@ -1653,7 +1653,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
         let result = service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
-                    audio_form: None,
+                    form: None,
                     context: GatewayRequestContext {
                         user_model: Some("public-model".to_string()),
                         ..GatewayRequestContext::default()
@@ -2593,7 +2593,7 @@ async fn chutes_responses_route_decodes_and_bills_the_responses_protocol() {
         .handle_completion(
             &service,
             CompletionInput {
-                audio_form: None,
+                form: None,
                 upload_permit: None,
                 endpoint: Endpoint::CreateModelResponse,
                 endpoint_path: "/v1/responses",

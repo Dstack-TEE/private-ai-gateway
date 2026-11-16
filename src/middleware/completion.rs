@@ -52,7 +52,7 @@ use crate::sse_protocol::SseProtocol;
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
 /// termination and JSON normalization.
 pub struct CompletionInput {
-    pub audio_form: Option<Arc<super::media::MediaForm>>,
+    pub form: Option<Arc<super::media::MediaForm>>,
     /// Byte-budget reservation for the buffered upload, held through consult.
     pub upload_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub endpoint: Endpoint,
@@ -132,7 +132,7 @@ async fn run_inner(
     inference_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let CompletionInput {
-        audio_form,
+        form,
         upload_permit,
         endpoint,
         endpoint_path,
@@ -465,7 +465,7 @@ async fn run_inner(
         forward_service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
-                    audio_form,
+                    form,
                     context,
                     endpoint_path,
                     received_body: forward_body.as_ref(),
@@ -539,7 +539,7 @@ async fn run_inner(
     };
 
     match result {
-        Ok(MiddlewareForwardResult::Forwarded(forward)) => {
+        Ok(MiddlewareForwardResult::Forwarded(mut forward)) => {
             let upstream_status = forward.upstream_status;
             // The forwarder tries candidates in order and pushes exactly one
             // `failed_attempts` entry per candidate it abandons, so the serving
@@ -551,54 +551,29 @@ async fn run_inner(
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
             let upstream_request_id = request_id_from_headers(&forward.upstream_headers);
-            if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&upstream_status) {
-                let (status, body, content_type) = match super::speech::response_content_type(
-                    &forward.upstream_headers,
-                    &forward.upstream_body,
+            if client_endpoint == Endpoint::AudioSpeech {
+                if let (Some(usage), Some(content_type)) = (
+                    forward.usage.take(),
+                    forward.upstream_headers.get("content-type"),
                 ) {
-                    Some(content_type) => {
-                        meter.success(
-                            upstream_status,
-                            attempt_index,
-                            Some(&forward.selected_route),
-                            super::speech::usage(&params),
-                            None,
-                            upstream_request_id,
-                        );
-                        (upstream_status, forward.upstream_body, content_type)
-                    }
-                    None => {
-                        meter.disarm();
-                        meter.spawn(PostReport {
-                            status: 502,
-                            attempt_index: Some(attempt_index),
-                            selected_route_id: Some(forward.selected_route.clone()),
-                            error_source: Some(ErrorSource::Upstream),
-                            error_message: Some(ErrorClass::UpstreamMalformedResponse),
-                            upstream_request_id,
-                            ..meter.base()
-                        });
-                        (
-                            502,
-                            errors::envelope_bytes(
-                                surface,
-                                errors::error_type(surface, 502),
-                                "upstream returned a non-audio speech response",
-                                Some(&request_id),
-                            ),
-                            "application/json".into(),
-                        )
-                    }
-                };
-                meter.failed_attempts(&forward.failed_attempts, false);
-                return finalize_buffered(
-                    forward.receipt,
-                    status,
-                    body,
-                    &content_type,
-                    e2ee,
-                    outcome_ctx,
-                );
+                    meter.success(
+                        upstream_status,
+                        attempt_index,
+                        Some(&forward.selected_route),
+                        Some(usage),
+                        None,
+                        upstream_request_id,
+                    );
+                    meter.failed_attempts(&forward.failed_attempts, false);
+                    return finalize_buffered(
+                        forward.receipt,
+                        upstream_status,
+                        forward.upstream_body,
+                        content_type,
+                        e2ee,
+                        outcome_ctx,
+                    );
+                }
             }
             let route = selected_route(
                 forward.selected_format,
@@ -653,6 +628,9 @@ async fn run_inner(
                     parsed_upstream
                         .map_err(|err| err.to_string())
                         .and_then(|mut upstream_json| {
+                            if client_endpoint == Endpoint::AudioSpeech {
+                                return Err("upstream returned an invalid speech response".into());
+                            }
                             if client_endpoint == Endpoint::AudioTranscriptions {
                                 let (body, audio) =
                                     super::audio::sanitize_response(upstream_json, &params)
@@ -700,11 +678,7 @@ async fn run_inner(
                             status: 502,
                             attempt_index: Some(attempt_index),
                             selected_route_id: Some(forward.selected_route.clone()),
-                            usage: if client_endpoint == Endpoint::ImagesEdits {
-                                None
-                            } else {
-                                raw_usage
-                            },
+                            usage: raw_usage,
                             error_source: Some(ErrorSource::Upstream),
                             error_message: Some(ErrorClass::UpstreamMalformedResponse),
                             upstream_request_id,

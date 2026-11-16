@@ -271,7 +271,7 @@ impl AciService {
         user_model: Option<String>,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let BufferedCommit {
-            response,
+            mut response,
             response_model,
             admission,
             route_id,
@@ -314,16 +314,30 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
-        if client_endpoint == Endpoint::AudioSpeech
-            && (200..300).contains(&status)
-            && crate::middleware::speech::response_content_type(&response.headers, &response.body)
-                .is_some()
-        {
-            Self::append_speech_usage(&mut builder, received_body)?;
-        }
+        let usage = if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&status) {
+            if let Some(content_type) =
+                crate::middleware::speech::response_content_type(&response.headers, &response.body)
+            {
+                response.headers.insert("content-type".into(), content_type);
+                let params: serde_json::Value =
+                    serde_json::from_slice(received_body).map_err(|_| {
+                        UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                    })?;
+                let usage = crate::middleware::speech::usage(&params).ok_or_else(|| {
+                    UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                })?;
+                Self::append_speech_usage(&mut builder, usage.clone())?;
+                Some(usage)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
+                usage,
                 receipt_id: receipt_id.clone(),
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
@@ -476,7 +490,7 @@ impl AciService {
                     .prepare(UpstreamRequest {
                         cache_salt: req.context.cache_salt.clone(),
                         body: candidate.body.clone().into(),
-                        form: req.audio_form.clone(),
+                        form: req.form.clone(),
                         content_type: None,
                         headers: upstream_headers.clone(),
                         path: Some(candidate.endpoint.path().to_string()),

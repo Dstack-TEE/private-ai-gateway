@@ -552,7 +552,7 @@ async fn capture_with_upstream(
     let response = if case.direct_idle || case.direct {
         let StreamingForwardResult::Stream(forward) = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
-                audio_form: None,
+                form: None,
                 endpoint_path: path,
                 received_body: &serde_json::to_vec(&params).unwrap(),
                 forwarded_body: None,
@@ -577,7 +577,7 @@ async fn capture_with_upstream(
         mw.handle_completion(
             &service,
             CompletionInput {
-                audio_form: None,
+                form: None,
                 upload_permit: None,
                 endpoint: case.endpoint,
                 endpoint_path: path,

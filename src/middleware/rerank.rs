@@ -171,13 +171,12 @@ pub fn canonicalize(body: &mut Value) {
     }
 }
 
-/// Validate and reduce provider output before metering or signing a direct receipt.
-/// Gateway cost is injected later and preserved by the final canonicalizer.
+/// Validate output and drop provider billing before metering or receipt signing.
+/// Middleware canonicalizes after cost injection, as for image generation.
 pub fn sanitize_response(body: &mut Value, request: &Value) -> Result<(), &'static str> {
     validate_response(body, request)?;
-    canonicalize(body);
     if let Some(usage) = body.get_mut("usage").and_then(Value::as_object_mut) {
-        usage.remove("cost");
+        usage.retain(|key, _| matches!(key.as_str(), "prompt_tokens" | "total_tokens"));
     }
     if let Some(results) = body.get_mut("results").and_then(Value::as_array_mut) {
         for result in results {
@@ -197,6 +196,7 @@ pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
     let request: Value = serde_json::from_slice(request).ok()?;
     let mut body: Value = serde_json::from_slice(response).ok()?;
     sanitize_response(&mut body, &request).ok()?;
+    canonicalize(&mut body);
     serde_json::to_vec(&body).ok()
 }
 

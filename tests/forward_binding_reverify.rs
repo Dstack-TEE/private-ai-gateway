@@ -281,7 +281,7 @@ fn forward_request(
     upstream_verification_event: Option<UpstreamVerifiedEvent>,
 ) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext::default(),
         endpoint_path: "/v1/chat/completions",
         received_body: CHAT_BODY,
@@ -600,7 +600,7 @@ async fn audio_binding_retry_reuses_exact_encoded_bytes_and_boundary() {
     request.endpoint_path = "/v1/audio/transcriptions";
     request.received_body = b"raw multipart bytes";
     request.forwarded_body = Some(br#"{"model":"model-a","response_format":"json"}"#.to_vec());
-    request.audio_form = Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+    request.form = Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
         kind: private_ai_gateway::middleware::media::FormKind::Transcription,
         file: bytes::Bytes::from_static(b"spoken audio"),
         extension: "wav".into(),

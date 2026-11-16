@@ -38,20 +38,6 @@ impl RequestError {
     }
 }
 
-pub(crate) fn reject_unknown(
-    object: &Map<String, Value>,
-    allowed: &[&str],
-) -> Result<(), RequestError> {
-    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        return Err(RequestError {
-            code: "unknown_parameter",
-            param: key.clone(),
-            message: format!("unknown parameter: {key}"),
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn object_with<'a>(
     body: &'a Value,
     allowed: &[&str],
@@ -59,7 +45,13 @@ pub(crate) fn object_with<'a>(
     let object = body
         .as_object()
         .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    reject_unknown(object, allowed)?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(RequestError {
+            code: "unknown_parameter",
+            param: key.clone(),
+            message: format!("unknown parameter: {key}"),
+        });
+    }
     Ok(object)
 }
 

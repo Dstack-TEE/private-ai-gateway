@@ -1,19 +1,9 @@
 //! Bounded OpenAI multipart transcription input and sanitized JSON output.
 
 use axum::body::Bytes;
-#[cfg(test)]
-use axum::{
-    body::Body,
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
-};
-#[cfg(test)]
-use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{collections::HashSet, sync::Arc};
-#[cfg(test)]
-use tokio::sync::Semaphore;
 
 pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -26,11 +16,11 @@ const UPSTREAM_FIELDS: &[&str] = &[
     "response_format",
     "timestamp_granularities[]",
 ];
-use super::media::{self, FormKind};
-pub use super::media::{MediaError as AudioError, MediaForm as AudioForm};
+use super::media::{self, FormKind, MediaError, MediaForm};
+const KIND: FormKind = FormKind::Transcription;
 
-pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioForm>), AudioError> {
-    let mut multipart = media::multipart(body, content_type, FormKind::Transcription)?;
+pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaForm>), MediaError> {
+    let mut multipart = media::multipart(body, content_type, KIND)?;
     let mut params = Map::new();
     let mut seen = HashSet::new();
     let mut timestamps = Vec::new();
@@ -40,22 +30,22 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| FormKind::Transcription.invalid("multipart"))?
+        .map_err(|_| KIND.invalid("multipart"))?
     {
         // Only parsed values are used; reqwest re-encodes caller part headers.
-        let name = media::field_name(&field, FormKind::Transcription)?;
+        let name = media::field_name(&field, KIND)?;
         let timestamp = matches!(
             name.as_str(),
             "timestamp_granularities" | "timestamp_granularities[]"
         );
         if !timestamp && !seen.insert(name.clone()) {
-            return Err(FormKind::Transcription.invalid(&name));
+            return Err(KIND.invalid(&name));
         }
         if name == "file" {
             let filename = field
                 .file_name()
                 .filter(|v| v.len() <= 255)
-                .ok_or_else(|| FormKind::Transcription.invalid("file"))?;
+                .ok_or_else(|| KIND.invalid("file"))?;
             let ext = filename
                 .rsplit_once('.')
                 .map(|(_, e)| e.to_ascii_lowercase())
@@ -65,16 +55,13 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                     ]
                     .contains(&e.as_str())
                 })
-                .ok_or_else(|| FormKind::Transcription.invalid("file"))?;
-            let data = field
-                .bytes()
-                .await
-                .map_err(|_| FormKind::Transcription.large())?;
+                .ok_or_else(|| KIND.invalid("file"))?;
+            let data = field.bytes().await.map_err(|_| KIND.large())?;
             if data.is_empty() {
-                return Err(FormKind::Transcription.invalid("file"));
+                return Err(KIND.invalid("file"));
             }
-            file = Some(Arc::new(AudioForm {
-                kind: crate::middleware::media::FormKind::Transcription,
+            file = Some(Arc::new(MediaForm {
+                kind: KIND,
                 file: data,
                 extension: ext,
             }));
@@ -84,27 +71,23 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
             && !matches!(name.as_str(), "user" | "stream")
             && !timestamp
         {
-            return Err(AudioError {
+            return Err(MediaError {
                 code: "unknown_parameter",
-                ..FormKind::Transcription.invalid(&name)
+                ..KIND.invalid(&name)
             });
         }
         if field.file_name().is_some() {
-            return Err(FormKind::Transcription.invalid(&name));
+            return Err(KIND.invalid(&name));
         }
-        let data = field
-            .bytes()
-            .await
-            .map_err(|_| FormKind::Transcription.invalid(&name))?;
+        let data = field.bytes().await.map_err(|_| KIND.invalid(&name))?;
         text_bytes += data.len();
         if text_bytes > MAX_TEXT_BYTES {
-            return Err(FormKind::Transcription.invalid("fields"));
+            return Err(KIND.invalid("fields"));
         }
-        let value =
-            std::str::from_utf8(&data).map_err(|_| FormKind::Transcription.invalid(&name))?;
+        let value = std::str::from_utf8(&data).map_err(|_| KIND.invalid(&name))?;
         if name == "stream" {
             if value != "false" {
-                return Err(FormKind::Transcription.invalid(&name));
+                return Err(KIND.invalid(&name));
             }
         } else if timestamp {
             if timestamp_name.as_ref().is_some_and(|n| n != &name)
@@ -112,7 +95,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                 || !["word", "segment"].contains(&value)
                 || timestamps.len() >= 2
             {
-                return Err(FormKind::Transcription.invalid(&name));
+                return Err(KIND.invalid(&name));
             }
             timestamp_name = Some(name);
             timestamps.push(value.to_string());
@@ -121,7 +104,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
-                .ok_or_else(|| FormKind::Transcription.invalid(&name))?;
+                .ok_or_else(|| KIND.invalid(&name))?;
             params.insert(name, json!(temperature));
         } else {
             params.insert(name, Value::String(value.into()));
@@ -132,35 +115,35 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<AudioF
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty())
     {
-        return Err(FormKind::Transcription.invalid("model"));
+        return Err(KIND.invalid("model"));
     }
     if params.get("language").is_some_and(|v| {
         !v.as_str().is_some_and(|s| {
             (2..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase())
         })
     }) {
-        return Err(FormKind::Transcription.invalid("language"));
+        return Err(KIND.invalid("language"));
     }
     if params
         .get("prompt")
         .and_then(Value::as_str)
         .is_some_and(|s| s.chars().count() > 4096)
     {
-        return Err(FormKind::Transcription.invalid("prompt"));
+        return Err(KIND.invalid("prompt"));
     }
     let format = params.entry("response_format").or_insert(json!("json"));
     if !matches!(format.as_str(), Some("json" | "verbose_json")) {
-        return Err(FormKind::Transcription.invalid("response_format"));
+        return Err(KIND.invalid("response_format"));
     }
     if !timestamps.is_empty() {
         if format != "verbose_json" {
-            return Err(FormKind::Transcription.invalid("timestamp_granularities"));
+            return Err(KIND.invalid("timestamp_granularities"));
         }
         params.insert("timestamp_granularities[]".into(), json!(timestamps));
     }
     Ok((
         Value::Object(params),
-        file.ok_or_else(|| FormKind::Transcription.invalid("file"))?,
+        file.ok_or_else(|| KIND.invalid("file"))?,
     ))
 }
 
@@ -300,24 +283,10 @@ fn canonicalize(body: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     async fn request(fields: &[(&str, &str)], data: Bytes, filename: &str) -> (Bytes, String) {
-        let mut form = reqwest::multipart::Form::new();
-        for (k, v) in fields {
-            form = form.text(k.to_string(), v.to_string());
-        }
-        form = form.part(
-            "file",
-            reqwest::multipart::Part::stream(data).file_name(filename.to_string()),
-        );
-        let content_type = format!("multipart/form-data; boundary={}", form.boundary());
-        let stream = form.into_stream();
-        futures_util::pin_mut!(stream);
-        let mut bytes = bytes::BytesMut::new();
-        while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(&chunk.unwrap());
-        }
-        (bytes.freeze(), content_type)
+        media::test_multipart(fields, &[("file", data, filename)]).await
     }
 
     #[tokio::test]
@@ -432,113 +401,6 @@ mod tests {
             b"--x\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\xff\r\n--x--\r\n",
         );
         assert!(parse(raw, "multipart/form-data; boundary=x").await.is_err());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
-        let available = media::UPLOAD_BYTES.available_permits();
-        let body = Body::from_stream(
-            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
-                .chain(stream::pending()),
-        );
-        let result = media::read_upload(&HeaderMap::new(), body, FormKind::Transcription).await;
-        let error = result.unwrap_err();
-        let response = error.into_response();
-        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(response.headers()[header::CONNECTION], "close");
-        assert_eq!(media::UPLOAD_BYTES.available_permits(), available);
-    }
-
-    #[tokio::test]
-    async fn declared_and_received_oversized_uploads_close_the_connection() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_LENGTH, (MAX_BODY_BYTES + 1).into());
-        let unread = Body::from_stream(stream::poll_fn(
-            |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
-                panic!("declared oversize upload must not be read")
-            },
-        ));
-        let declared = media::read_upload(&headers, unread, FormKind::Transcription)
-            .await
-            .unwrap_err();
-        let received = media::read_upload(
-            &HeaderMap::new(),
-            Body::from(vec![0; MAX_BODY_BYTES + 1]),
-            FormKind::Transcription,
-        )
-        .await
-        .unwrap_err();
-        for error in [declared, received] {
-            let response = error.into_response();
-            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-            assert_eq!(response.headers()[header::CONNECTION], "close");
-        }
-    }
-
-    #[tokio::test]
-    async fn upload_budget_counts_chunks_and_is_held_until_handoff() {
-        let budget = Arc::new(Semaphore::new(7));
-        let body = Body::from_stream(stream::iter([
-            Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
-            Ok(Bytes::from_static(b"cde")),
-        ]));
-        let (bytes, permit) = media::collect_upload(body, budget.clone(), FormKind::Transcription)
-            .await
-            .unwrap();
-        assert_eq!(bytes, "abcde");
-        assert_eq!(permit.num_permits(), 5);
-        assert_eq!(budget.available_permits(), 2);
-
-        let rejected =
-            media::collect_upload(Body::from("xyz"), budget.clone(), FormKind::Transcription)
-                .await
-                .unwrap_err();
-        let response = rejected.into_response();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-        assert_eq!(budget.available_permits(), 2);
-        drop(permit);
-        assert_eq!(budget.available_permits(), 7);
-    }
-
-    #[tokio::test]
-    async fn upload_errors_and_disconnects_release_partial_byte_reservations() {
-        let budget = Arc::new(Semaphore::new(7));
-        let body = Body::from_stream(stream::iter([
-            Ok(Bytes::from_static(b"ab")),
-            Err(std::io::Error::other("upload interrupted")),
-        ]));
-        assert_eq!(
-            media::collect_upload(body, budget.clone(), FormKind::Transcription)
-                .await
-                .unwrap_err()
-                .code,
-            "invalid_parameter"
-        );
-        assert_eq!(budget.available_permits(), 7);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut tx = Some(tx);
-        let body = Body::from_stream(
-            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"ab")) }).chain(
-                stream::poll_fn(move |_| {
-                    if let Some(tx) = tx.take() {
-                        let _ = tx.send(());
-                    }
-                    std::task::Poll::Pending
-                }),
-            ),
-        );
-        let task = tokio::spawn(media::collect_upload(
-            body,
-            budget.clone(),
-            FormKind::Transcription,
-        ));
-        rx.await.unwrap();
-        assert_eq!(budget.available_permits(), 5);
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(budget.available_permits(), 7);
     }
 
     #[test]

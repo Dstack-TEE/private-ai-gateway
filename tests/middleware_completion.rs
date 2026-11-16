@@ -1079,7 +1079,7 @@ fn attempts(chain: &[FailedAttempt]) -> Vec<(String, u16)> {
 
 fn chat_input() -> CompletionInput {
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::ChatComplete,
         endpoint_path: "/v1/chat/completions",
@@ -1114,7 +1114,7 @@ fn systemone_input() -> CompletionInput {
         "stream": true
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::SystemOne,
         endpoint_path: "/v1/systemone",
@@ -1141,7 +1141,7 @@ fn responses_input(stream: bool) -> CompletionInput {
         "max_output_tokens": 16
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::CreateModelResponse,
         endpoint_path: "/v1/responses",
@@ -2375,7 +2375,7 @@ fn messages_input(stream: bool) -> CompletionInput {
         "messages": [{ "role": "user", "content": "hi" }]
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::Messages,
         endpoint_path: "/v1/messages",
@@ -3068,7 +3068,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
     .unwrap();
 
     let request = |session_ids| ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             ..GatewayRequestContext::default()
@@ -3623,7 +3623,7 @@ fn build_sequenced_service_with(
 
 fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             user_tier: user_tier.map(str::to_string),
@@ -5615,7 +5615,7 @@ async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
 fn images_input() -> CompletionInput {
     let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","safety_identifier":"hashed-user","style":"vivid"});
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::ImagesGenerations,
         endpoint_path: "/v1/images/generations",
@@ -5880,7 +5880,7 @@ fn audio_input() -> CompletionInput {
         endpoint_path: "/v1/audio/transcriptions",
         params,
         received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
-        audio_form: Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
+        form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
             kind: private_ai_gateway::middleware::media::FormKind::Transcription,
             file: bytes::Bytes::from_static(b"sensitive audio"),
             extension: "wav".into(),
@@ -6527,7 +6527,7 @@ fn image_edits_input() -> CompletionInput {
         endpoint_path: "/v1/images/edits",
         params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
         received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
-        audio_form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
+        form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
             kind: private_ai_gateway::middleware::media::FormKind::ImageEdit,
             file: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
             extension: "jpg".into(),
@@ -6633,7 +6633,14 @@ async fn image_edits_no_opt_in_or_malformed_success_never_bills() {
         }
         let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
         assert!(report.get("images").is_none());
-        assert!(report["usage"].is_null());
+        assert_eq!(
+            report["usage"],
+            if opt_in {
+                json!({"total_tokens":99})
+            } else {
+                Value::Null
+            }
+        );
     }
 }
 
@@ -6660,8 +6667,7 @@ async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
         .unwrap();
     let service = build_service_with_backend(Arc::new(router));
     let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
-    let mut raw = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ngpt-test\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.png\"\r\n\r\n".to_vec();
-    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    let raw = common::image_edit_request("gpt-test");
     let request = |provider: Value| {
         axum::http::Request::builder()
             .method("POST")
@@ -6824,19 +6830,12 @@ async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
 }
 
 #[tokio::test]
-async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
+async fn speech_invalid_requests_never_consult_or_forward() {
     let (url, pres, _) = spawn_control_capturing_pre(
         json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
     )
     .await;
     let (service, requests) = build_recording_service(200, b"audio".to_vec(), "audio/wav");
-    let (status, _, _) = response_parts(
-        middleware(url.clone())
-            .handle_completion(&service, speech_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
     for patch in [
         json!({"stream_format":"sse"}),
         json!({"voice":null}),
@@ -6857,7 +6856,7 @@ async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
         .await;
         assert_eq!(status, 400);
     }
-    assert_eq!(pres.lock().unwrap().len(), 1);
+    assert!(pres.lock().unwrap().is_empty());
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -6865,9 +6864,6 @@ async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
 async fn speech_failures_keep_receipts_without_billable_characters() {
     for (upstream_status, content_type, body, expected) in [
         (200, "audio/wav", b"".as_slice(), 502),
-        (200, "text/event-stream", b"private".as_slice(), 502),
-        (200, "audio/wav, text/html", b"private".as_slice(), 502),
-        (200, "audio/wav/extra", b"private".as_slice(), 502),
         (200, "application/json", b"private".as_slice(), 502),
         (
             400,
@@ -6911,7 +6907,12 @@ async fn buffered_native_endpoints_require_explicit_opt_in() {
     )
     .await;
     let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    for input in [images_input(), audio_input(), rerank_input()] {
+    for input in [
+        images_input(),
+        audio_input(),
+        rerank_input(),
+        speech_input(),
+    ] {
         let (status, _, body) = response_parts(
             middleware(url.clone())
                 .handle_completion(&service, input)

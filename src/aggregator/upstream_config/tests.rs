@@ -1098,7 +1098,7 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
                 body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
                 path: Some("/v1/audio/transcriptions".into()),
                 form: audio.then(|| {
-                    Arc::new(crate::middleware::audio::AudioForm {
+                    Arc::new(crate::middleware::media::MediaForm {
                         kind: crate::middleware::media::FormKind::Transcription,
                         file: Bytes::from_static(b"audio"),
                         extension: "wav".into(),

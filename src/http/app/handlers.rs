@@ -520,7 +520,7 @@ pub(super) async fn rerank(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::Rerank).await
+    buffered_native_endpoint(state, headers, body, Endpoint::Rerank).await
 }
 
 pub(super) async fn images_edits(
@@ -528,7 +528,7 @@ pub(super) async fn images_edits(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesEdits).await
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesEdits).await
 }
 
 pub(super) async fn images_generations(
@@ -536,7 +536,7 @@ pub(super) async fn images_generations(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
 }
 
 pub(super) async fn audio_speech(
@@ -544,7 +544,7 @@ pub(super) async fn audio_speech(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioSpeech).await
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioSpeech).await
 }
 
 pub(super) async fn audio_transcriptions(
@@ -552,10 +552,10 @@ pub(super) async fn audio_transcriptions(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
 }
 
-async fn buffered_multimodal_endpoint(
+async fn buffered_native_endpoint(
     state: AppState,
     headers: HeaderMap,
     body: Body,
@@ -601,7 +601,7 @@ async fn buffered_multimodal_endpoint(
     if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let (received_body, parsed, audio_form, upload_permit) = if let Some(kind) = media {
+    let (received_body, parsed, form, upload_permit) = if let Some(kind) = media {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
@@ -632,7 +632,9 @@ async fn buffered_multimodal_endpoint(
         let (bytes, permit, mut params, form) = match upload {
             Ok(upload) => upload,
             Err(err) => {
-                (kind.spec().record_failure)(&state.service, "upload_rejection");
+                if kind == FormKind::Transcription {
+                    state.service.record_audio_failure("upload_rejection");
+                }
                 return err.into_response();
             }
         };
@@ -669,7 +671,7 @@ async fn buffered_multimodal_endpoint(
         Ok(input) => input,
         Err(response) => return *response,
     };
-    input.audio_form = audio_form;
+    input.form = form;
     input.upload_permit = upload_permit;
     if state.middleware.is_some() {
         return dispatch_completion(state, input, true).await;
@@ -1055,7 +1057,7 @@ fn completion_input(
         }
     });
     Ok(CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint,
         endpoint_path: endpoint.path(),
@@ -1106,7 +1108,7 @@ async fn dispatch_completion(
     forward_to_backend(
         state.service,
         BackendForwardInput {
-            audio_form: input.audio_form,
+            form: input.form,
             context: GatewayRequestContext {
                 request_id: input.request_id,
                 user_model: input.user_model,

@@ -84,7 +84,10 @@ use tower_http::cors::CorsLayer;
 /// unlimited.
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-use crate::aggregator::service::{AciService, AUDIO_TRANSCRIPTIONS_PATH, IMAGES_GENERATIONS_PATH};
+use crate::aggregator::service::{
+    AciService, AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, IMAGES_EDITS_PATH,
+    IMAGES_GENERATIONS_PATH, RERANK_PATH,
+};
 use crate::aggregator::upstream_config::UpstreamConfigManager;
 use crate::middleware::Middleware;
 
@@ -232,16 +235,10 @@ fn build_router_inner(
         .route("/v1/responses", post(responses))
         .route("/v1/systemone", post(systemone))
         .route(AUDIO_TRANSCRIPTIONS_PATH, post(audio_transcriptions))
-        .route(
-            crate::aggregator::service::AUDIO_SPEECH_PATH,
-            post(audio_speech),
-        )
+        .route(AUDIO_SPEECH_PATH, post(audio_speech))
         .route(IMAGES_GENERATIONS_PATH, post(images_generations))
-        .route(
-            crate::aggregator::service::IMAGES_EDITS_PATH,
-            post(images_edits),
-        )
-        .route(crate::aggregator::service::RERANK_PATH, post(rerank))
+        .route(IMAGES_EDITS_PATH, post(images_edits))
+        .route(RERANK_PATH, post(rerank))
         .route("/v2/rerank", post(rerank))
         .route("/rerank", post(rerank))
         // Gateway operations.
