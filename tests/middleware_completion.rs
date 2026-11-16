@@ -6837,6 +6837,7 @@ async fn speech_invalid_requests_and_missing_opt_in_never_forward() {
     for patch in [
         json!({"stream_format":"sse"}),
         json!({"voice":null}),
+        json!({"input":""}),
         json!({"input":"🙂".repeat(4097)}),
     ] {
         let mut input = speech_input();

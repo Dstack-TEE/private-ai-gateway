@@ -20,19 +20,15 @@ Last reviewed: 2026-11-16.
 
 Providers prove different claims; see [Provider verification](providers/README.md).
 
-Image generation (`/v1/images/generations`) and single-image multipart edits
-(`/v1/images/edits`) are available in direct and middleware modes with inline
-base64 output, per-image pricing, and receipts. Middleware routes require
-separate opt-in for each exact endpoint; merging support does not launch a
-model. Edits accept one PNG/JPEG/WebP image and share generation admission and
-transcription's upload-byte budget. Streaming, image E2EE, and public-launch
-compliance controls remain outside the current scope.
-
-Reranking (`/v1/rerank`, with `/v2/rerank` and `/rerank` aliases) supports
-buffered JSON, validated input-token accounting, and receipts. Speech synthesis
-(`/v1/audio/speech`) returns buffered audio with signed character usage and
-shares transcription admission. Both require explicit middleware endpoint
-opt-in and reject E2EE. Speech pricing must be confirmed before a model is listed.
+Buffered image generation and single-image multipart edits are available in
+direct and middleware modes, with separate endpoint opt-in, inline base64 output
+and receipts. Reranking (including SDK aliases) and buffered speech synthesis
+also require explicit middleware opt-in and reject E2EE. See the
+[API reference](api-reference.md#reranking) for their contracts and limits.
+Merging support does not launch a model: client capability negotiation and live
+acceptance remain rollout gates, and speech pricing needs operator confirmation.
+Streaming, image E2EE, and public-launch compliance controls remain outside the
+image endpoints' current scope.
 
 Audio transcription (`/v1/audio/transcriptions`) supports buffered multipart,
 JSON/verbose JSON, strict duration accounting, receipts, and per-second pricing

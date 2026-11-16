@@ -31,6 +31,9 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         ],
     )?;
     require_strings(body, &["model", "input", "voice"])?;
+    if body["input"].as_str().is_some_and(str::is_empty) {
+        return Err(RequestError::invalid("input", "input must not be empty"));
+    }
     max_chars(
         body,
         &["input", "instructions"],
@@ -73,7 +76,7 @@ pub fn upstream_body(body: &Value) -> Value {
 
 pub fn usage(body: &Value) -> Option<Value> {
     let characters = body.get("input")?.as_str()?.chars().count();
-    Some(json!({"type":"characters", "characters":characters}))
+    (characters > 0).then(|| json!({"type":"characters", "characters":characters}))
 }
 
 /// Return one canonical audio media type, without provider parameters.

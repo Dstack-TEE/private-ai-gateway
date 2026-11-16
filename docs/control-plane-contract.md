@@ -554,39 +554,29 @@ policy service.
 
 ### Rerank routing and metering
 
-`/v1/rerank` is default-off: candidates must explicitly include `/v1/rerank` in
-`supportedEndpoints` and use `format: "openai"`. Consult pre receives that exact
-endpoint; no eligible candidate yields `404 model_not_found`. A valid response
-requires `usage.prompt_tokens` and `usage.total_tokens` as JSON integers in the
-shared pricing range, 0..9007199254740991 (total at least prompt).
-Consult post receives the sanitized token usage; pricing
-uses `inputCostPerToken` with no generated tokens. Provider billing extensions
-and cost are removed before metering; the gateway computes display cost from the
-same reported usage. Malformed successes return a receipted `502` without usage.
-Existing candidates remain inert until the control plane opts them in.
+`/v1/rerank` post reports contain only validated `usage.prompt_tokens` and
+`usage.total_tokens`: JSON integers in the shared pricing range,
+0..9007199254740991, with total at least prompt. Pricing uses
+`inputCostPerToken` with no generated tokens; provider billing extensions and
+cost are removed before metering. Malformed successes report `502` without
+usage. See the [API reference](api-reference.md#reranking) for the wire contract
+and the candidate table above for endpoint opt-in.
 
 ### Image edit routing and metering
 
-`/v1/images/edits` requires OpenAI-format candidates to opt into that exact path
-independently of generations. Routing policy uses the `X-ACI-Provider` carrier,
-which is consumed by the gateway and never forwarded upstream. Edits are billed
-exactly like generations: returned image count plus token components only when
-the provider reports usage and the model has token prices configured; FLUX/NEAR
-has neither and bills only returned images.
+`/v1/images/edits` reports returned image counts and uses the
+[generation pricing contract](#image-generation), including token components
+only when reported usage and configured token prices exist. FLUX/NEAR bills
+returned images only. Multipart routing policy is described in the
+[API reference](api-reference.md#image-edits).
 
 ### Speech routing and metering
 
-`/v1/audio/speech` requires OpenAI-format candidates to opt into that exact path.
-Successful binary responses report `usage: {type: "characters", characters: N}`,
-where `N` is the Unicode scalar count of `input` (integer 0..4096), rather than
-upstream token/duration usage. The signed receipt includes the same gateway-derived
-usage in a `usage.reported` extension event; audio bytes are preserved, the
-validated audio media type is lowercased with parameters removed, and no new
-client cost header is added.
-
-`pricing.speechCostPerCharacter` is a decimal string in USD per Unicode scalar;
-control bills `characters × speechCostPerCharacter` only for 2xx reports and
-must deny missing or invalid pricing. Failed, rejected or non-audio responses
-carry no billable character usage. The gateway passes the consult pricing snapshot
-through unchanged in the post report. Tinfoil publishes no confirmed TTS rate
-here; an operator must check the dashboard before listing a speech model.
+Successful `/v1/audio/speech` reports carry
+`usage: {type: "characters", characters: N}`, where `N` is the request input's
+Unicode scalar count (integer 1..4096). Failed or malformed responses carry no
+character usage. `pricing.speechCostPerCharacter` is a decimal string in USD
+per Unicode scalar; control bills `N × speechCostPerCharacter` only for 2xx
+reports and must deny missing or invalid pricing. The gateway echoes the pricing
+snapshot unchanged. Tinfoil's TTS rate needs operator confirmation before listing.
+Receipt and response details are in the [API reference](api-reference.md#speech-synthesis).

@@ -227,7 +227,7 @@ pub fn response_body_for_count(response: &[u8], requested_count: usize) -> Optio
     let mut body: Value = serde_json::from_slice(response).ok()?;
     validate_response(&body, requested_count).ok()?;
     canonicalize(&mut body);
-    Some(serde_json::to_vec(&body).unwrap_or_default())
+    serde_json::to_vec(&body).ok()
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

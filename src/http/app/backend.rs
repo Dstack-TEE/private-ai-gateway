@@ -17,6 +17,7 @@ use crate::aggregator::service::{
     ReceiptOwner, ServiceError, StreamingForwardResult, UpstreamVerificationError,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
+use crate::endpoint::Endpoint;
 
 use super::error_responses::{
     e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
@@ -191,8 +192,7 @@ async fn forward_to_backend_inner(
             // The service already normalized an upstream error into the gateway's
             // envelope (with a matching receipt + E2EE wire body), so the buffered
             // response is returned uniformly here.
-            let content_type = if input.endpoint_path
-                == crate::aggregator::service::AUDIO_SPEECH_PATH
+            let content_type = if Endpoint::from_path(input.endpoint_path) == Endpoint::AudioSpeech
                 && (200..300).contains(&forward.upstream_status)
             {
                 forward

@@ -216,41 +216,42 @@ impl AciService {
 
     fn sanitize_media_success(
         &self,
-        endpoint_path: &str,
-        response: &[u8],
+        endpoint: Endpoint,
+        response: Vec<u8>,
         request: &[u8],
         audio_metadata: Option<&Value>,
         headers: &mut std::collections::HashMap<String, String>,
     ) -> Result<Vec<u8>, &'static str> {
-        if endpoint_path == super::AUDIO_SPEECH_PATH {
-            let content_type = crate::middleware::speech::audio_content_type(headers)
-                .ok_or("upstream returned a non-audio speech response")?;
-            headers.insert("content-type".into(), content_type);
-            return Ok(response.to_vec());
-        }
-        if endpoint_path == super::RERANK_PATH {
-            return crate::middleware::rerank::response_body(response, request)
-                .ok_or("upstream returned a malformed success body");
-        }
-        if endpoint_path == super::IMAGES_EDITS_PATH {
-            return crate::middleware::images::response_body_for_count(response, 1)
-                .ok_or("upstream returned a malformed success body");
-        }
-        if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-            return crate::middleware::images::response_body(response, request)
-                .ok_or("upstream returned a malformed success body");
-        }
-        let message = "upstream returned a malformed transcription response";
-        let body = serde_json::from_slice::<Value>(response).map_err(|_| message)?;
-        let (body, _) = crate::middleware::audio::sanitize_response(
-            body,
-            audio_metadata.unwrap_or(&Value::Null),
-        )
-        .map_err(|_| {
-            self.metrics.record_audio_failure("malformed_duration");
-            message
-        })?;
-        serde_json::to_vec(&body).map_err(|_| message)
+        let body = match endpoint {
+            Endpoint::AudioSpeech => {
+                let content_type = crate::middleware::speech::audio_content_type(headers)
+                    .ok_or("upstream returned a non-audio speech response")?;
+                headers.insert("content-type".into(), content_type);
+                return Ok(response);
+            }
+            Endpoint::Rerank => crate::middleware::rerank::response_body(&response, request),
+            Endpoint::ImagesEdits => {
+                crate::middleware::images::response_body_for_count(&response, 1)
+            }
+            Endpoint::ImagesGenerations => {
+                crate::middleware::images::response_body(&response, request)
+            }
+            Endpoint::AudioTranscriptions => {
+                let message = "upstream returned a malformed transcription response";
+                let body = serde_json::from_slice::<Value>(&response).map_err(|_| message)?;
+                let (body, _) = crate::middleware::audio::sanitize_response(
+                    body,
+                    audio_metadata.unwrap_or(&Value::Null),
+                )
+                .map_err(|_| {
+                    self.metrics.record_audio_failure("malformed_duration");
+                    message
+                })?;
+                return serde_json::to_vec(&body).map_err(|_| message);
+            }
+            _ => None,
+        };
+        body.ok_or("upstream returned a malformed success body")
     }
 
     pub async fn forward_chat_completion(
@@ -288,6 +289,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let endpoint = Endpoint::from_path(endpoint_path);
         self.metrics.record_request(
             endpoint_path,
             RequestMode::Buffered,
@@ -297,7 +299,7 @@ impl AciService {
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
-        let audio_metadata = (endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH)
+        let audio_metadata = (endpoint == Endpoint::AudioTranscriptions)
             .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
         let mut prepared = self.upstream.prepare(UpstreamRequest {
             cache_salt: req.context.cache_salt.clone(),
@@ -357,10 +359,7 @@ impl AciService {
         let selected = (*admission).select(upstream_response.served_instance_id.as_deref())?;
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body)
-                .or_else(|| {
-                    (Endpoint::from_path(endpoint_path).is_media())
-                        .then(|| prepared.model_id.clone())
-                });
+                .or_else(|| endpoint.is_media().then(|| prepared.model_id.clone()));
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -377,15 +376,15 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            if Endpoint::from_path(endpoint_path).is_buffered_native() {
+            if endpoint.is_buffered_native() {
                 let sanitized = self.sanitize_media_success(
-                    endpoint_path,
-                    &upstream_response.body,
+                    endpoint,
+                    upstream_response.body,
                     &forwarded_body,
                     audio_metadata.as_ref(),
                     &mut upstream_headers,
                 );
-                if endpoint_path != super::AUDIO_SPEECH_PATH || sanitized.is_err() {
+                if endpoint != Endpoint::AudioSpeech || sanitized.is_err() {
                     upstream_headers.insert("content-type".into(), "application/json".into());
                 }
                 match sanitized {
@@ -416,7 +415,7 @@ impl AciService {
             )
         };
 
-        let chat_id = if Endpoint::from_path(endpoint_path).is_media() {
+        let chat_id = if endpoint.is_media() {
             None
         } else {
             extract_chat_id(&client_body)
@@ -467,7 +466,7 @@ impl AciService {
         }
         // §7.4 wire bytes: whatever is actually served — after E2EE sealing
         // or an image-input 400 remap, when either applies.
-        if endpoint_path == super::AUDIO_SPEECH_PATH && (200..300).contains(&client_status) {
+        if endpoint == Endpoint::AudioSpeech && (200..300).contains(&client_status) {
             Self::append_speech_usage(&mut builder, received_body)?;
         }
         builder.add_response_returned(&wire_response_body)?;

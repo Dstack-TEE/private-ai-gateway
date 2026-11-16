@@ -281,11 +281,12 @@ impl AciService {
             forwarded_body,
         } = commit;
         let status = response.status_code;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
 
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = if Endpoint::from_path(endpoint_path).is_media() {
+        let chat_id = if client_endpoint.is_media() {
             None
         } else {
             extract_chat_id(&response.body)
@@ -313,7 +314,7 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
-        if endpoint_path == super::AUDIO_SPEECH_PATH
+        if client_endpoint == Endpoint::AudioSpeech
             && (200..300).contains(&status)
             && crate::middleware::speech::audio_content_type(&response.headers).is_some()
         {
@@ -360,6 +361,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
         // The user-requested model, recorded as the receipt's top-level `model`.
         let user_model = req.context.user_model.clone();
         let mode = if stream {
@@ -859,7 +861,8 @@ impl AciService {
                 let status = upstream_response.status_code;
                 let response_model = accepted_response_model(status, &upstream_response.body)
                     .or_else(|| {
-                        (Endpoint::from_path(endpoint_path).is_media())
+                        client_endpoint
+                            .is_media()
                             .then(|| prepared.model_id.clone())
                     });
                 self.metrics.record_upstream_response(

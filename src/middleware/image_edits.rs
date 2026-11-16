@@ -31,9 +31,7 @@ const FIELDS: &[&str] = &[
 const KIND: FormKind = FormKind::ImageEdit;
 
 pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
-    if let Some(object) = params.as_object() {
-        images::reject_unknown(object, FIELDS)?;
-    }
+    images::object_with(params, FIELDS)?;
     images::validate_request(params)?;
     for &key in FIELDS {
         if key == "prompt" {
@@ -149,16 +147,12 @@ fn image_extension(bytes: &[u8]) -> Option<&'static str> {
 
 pub fn upstream_fields(params: &Value) -> Value {
     let mut fields = images::upstream_body(params);
-    if let Some(fields) = fields.as_object_mut() {
-        fields.retain(|key, _| {
-            [
-                "model",
-                "prompt",
-                "size",
-                "response_format",
-                "output_format",
-            ]
-            .contains(&key.as_str())
+    if let Some(object) = fields.as_object_mut() {
+        object.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "model" | "prompt" | "size" | "response_format" | "output_format"
+            )
         });
     }
     fields
@@ -245,7 +239,6 @@ mod tests {
         let (params, form) = parse(raw, &ct).await.unwrap();
         assert!(params.get("stream").is_none());
         let expected = json!({"model":"alias", "prompt":"edit", "output_format":"png", "response_format":"b64_json"});
-        assert_eq!(upstream_fields(&params), expected);
         let (encoded, ct) = form.encode(&params).await.unwrap();
         let (forwarded, _) = parse(encoded, &ct).await.unwrap();
         assert_eq!(forwarded, expected);

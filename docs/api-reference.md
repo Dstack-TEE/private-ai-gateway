@@ -573,14 +573,13 @@ is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
 
 Responses use the sanitized inline generation schema, with at most one image;
 URL-only or excess-image successes produce a receipted `502` without billable
-usage. Billing matches generations: returned image count plus token components
-only when usage and token prices exist (FLUX/NEAR bills returned images only).
+usage. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
 Edits share the 402 MiB upload-byte budget and 60-second deadline with
 transcriptions, and inference admission with generations.
 
 ### Speech synthesis
 
-`POST /v1/audio/speech` takes JSON `model`, `input` (≤4096 Unicode scalars),
+`POST /v1/audio/speech` takes JSON `model`, `input` (1–4096 Unicode scalars),
 and string `voice`. Optional fields are `response_format`
 (`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
 `stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
@@ -590,8 +589,7 @@ The body is exact buffered audio with a validated lowercase `audio/<subtype>`
 content type, parameters stripped; malformed/non-audio successes yield receipted
 `502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
 Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
-(`502`). Successful receipts sign a §7.4 `usage.reported` extension with
-`{usage: {type: "characters", characters: N}}`, counting Unicode scalars of
-`input`; consult/post carries the same usage, billable only for 2xx responses.
-Audio is not wrapped in JSON and has no new cost header; listing a Tinfoil speech
-model requires operator-confirmed pricing.
+(`502`). Successful receipts sign the request's Unicode scalar count via the
+[ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).
+Audio is not wrapped in JSON and has no new cost header; see
+[speech metering](control-plane-contract.md#speech-routing-and-metering) for billing and pricing requirements.
