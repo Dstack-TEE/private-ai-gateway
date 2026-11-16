@@ -558,7 +558,7 @@ Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
 exceed `top_n`; null documents are absent, and `return_documents: false`
 suppresses documents. Billing uses validated input-token usage; absent or
 malformed usage produces a receipted `502` instead of a free request. Token
-counts must be JSON integers in the pricing system's range, 0..9007199254740991.
+counts must be JSON integers in the pricing system's range, 1..9007199254740991.
 
 ### Image edits
 
@@ -586,7 +586,7 @@ and string `voice`. Optional fields are `response_format`
 routing/pinning. Tinfoil examples: `qwen3-tts`/`ryan`, `voxtral-tts`/`neutral_female`.
 
 The body is exact buffered audio with a validated lowercase `audio/<subtype>`
-content type, parameters stripped; malformed/non-audio successes yield receipted
+content type, parameters stripped; empty, malformed or non-audio successes yield receipted
 `502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
 Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
 (`502`). Successful receipts sign the request's Unicode scalar count via the

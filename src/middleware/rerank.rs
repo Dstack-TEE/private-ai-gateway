@@ -134,7 +134,7 @@ pub fn validate_response(body: &Value, request: &Value) -> Result<(), &'static s
     };
     let prompt = token_count("prompt_tokens").ok_or(message)?;
     let total = token_count("total_tokens").ok_or(message)?;
-    if total < prompt {
+    if prompt == 0 || total < prompt {
         return Err(message);
     }
     Ok(())
@@ -255,6 +255,7 @@ mod tests {
             json!({"results":[{"index":1,"relevance_score":"0.8"}]}),
             json!({"results":[{"index":1,"relevance_score":0.8},{"index":1,"relevance_score":0.7}]}),
             json!({"usage":null}),
+            json!({"usage":{"prompt_tokens":0,"total_tokens":0}}),
             json!({"usage":{"prompt_tokens":-1,"total_tokens":5}}),
             json!({"usage":{"prompt_tokens":5,"total_tokens":4}}),
             json!({"usage":{"prompt_tokens":"5","total_tokens":5}}),

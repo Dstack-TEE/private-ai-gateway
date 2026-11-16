@@ -316,7 +316,8 @@ impl AciService {
         builder.add_response_received(&response.body)?;
         if client_endpoint == Endpoint::AudioSpeech
             && (200..300).contains(&status)
-            && crate::middleware::speech::audio_content_type(&response.headers).is_some()
+            && crate::middleware::speech::response_content_type(&response.headers, &response.body)
+                .is_some()
         {
             Self::append_speech_usage(&mut builder, received_body)?;
         }

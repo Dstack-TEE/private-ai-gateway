@@ -224,8 +224,9 @@ impl AciService {
     ) -> Result<Vec<u8>, &'static str> {
         let body = match endpoint {
             Endpoint::AudioSpeech => {
-                let content_type = crate::middleware::speech::audio_content_type(headers)
-                    .ok_or("upstream returned a non-audio speech response")?;
+                let content_type =
+                    crate::middleware::speech::response_content_type(headers, &response)
+                        .ok_or("upstream returned a non-audio speech response")?;
                 headers.insert("content-type".into(), content_type);
                 return Ok(response);
             }

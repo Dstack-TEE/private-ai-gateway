@@ -1113,6 +1113,31 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
 }
 
 #[test]
+fn near_image_edits_keep_inline_base64_format_before_encoding() {
+    use crate::aci::upstream::UpstreamRequest;
+    use crate::middleware::media::{FormKind, MediaForm};
+    use bytes::Bytes;
+
+    let config = test_upstream_config("images", UpstreamProvider::NearAi, "flux", "upstream-flux");
+    let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
+    let prepared = state
+        .backend
+        .prepare(UpstreamRequest {
+            body: Bytes::from_static(br#"{"model":"flux","response_format":"b64_json"}"#),
+            path: Some("/v1/images/edits".into()),
+            form: Some(Arc::new(MediaForm {
+                kind: FormKind::ImageEdit,
+                file: Bytes::from_static(b"\xff\xd8\xffimage"),
+                extension: "jpg".into(),
+            })),
+            ..Default::default()
+        })
+        .unwrap();
+    let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+    assert_eq!(fields["response_format"], "b64_json");
+}
+
+#[test]
 fn cache_salt_provider_mapping_uses_stable_serde_tags() {
     use crate::aci::upstream::CacheSaltField;
     for provider in [

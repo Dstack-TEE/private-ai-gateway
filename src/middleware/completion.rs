@@ -552,42 +552,44 @@ async fn run_inner(
             let attempt_index = forward.failed_attempts.len() as u32;
             let upstream_request_id = request_id_from_headers(&forward.upstream_headers);
             if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&upstream_status) {
-                let (status, body, content_type) =
-                    match super::speech::audio_content_type(&forward.upstream_headers) {
-                        Some(content_type) => {
-                            meter.success(
-                                upstream_status,
-                                attempt_index,
-                                Some(&forward.selected_route),
-                                super::speech::usage(&params),
-                                None,
-                                upstream_request_id,
-                            );
-                            (upstream_status, forward.upstream_body, content_type)
-                        }
-                        None => {
-                            meter.disarm();
-                            meter.spawn(PostReport {
-                                status: 502,
-                                attempt_index: Some(attempt_index),
-                                selected_route_id: Some(forward.selected_route.clone()),
-                                error_source: Some(ErrorSource::Upstream),
-                                error_message: Some(ErrorClass::UpstreamMalformedResponse),
-                                upstream_request_id,
-                                ..meter.base()
-                            });
-                            (
-                                502,
-                                errors::envelope_bytes(
-                                    surface,
-                                    errors::error_type(surface, 502),
-                                    "upstream returned a non-audio speech response",
-                                    Some(&request_id),
-                                ),
-                                "application/json".into(),
-                            )
-                        }
-                    };
+                let (status, body, content_type) = match super::speech::response_content_type(
+                    &forward.upstream_headers,
+                    &forward.upstream_body,
+                ) {
+                    Some(content_type) => {
+                        meter.success(
+                            upstream_status,
+                            attempt_index,
+                            Some(&forward.selected_route),
+                            super::speech::usage(&params),
+                            None,
+                            upstream_request_id,
+                        );
+                        (upstream_status, forward.upstream_body, content_type)
+                    }
+                    None => {
+                        meter.disarm();
+                        meter.spawn(PostReport {
+                            status: 502,
+                            attempt_index: Some(attempt_index),
+                            selected_route_id: Some(forward.selected_route.clone()),
+                            error_source: Some(ErrorSource::Upstream),
+                            error_message: Some(ErrorClass::UpstreamMalformedResponse),
+                            upstream_request_id,
+                            ..meter.base()
+                        });
+                        (
+                            502,
+                            errors::envelope_bytes(
+                                surface,
+                                errors::error_type(surface, 502),
+                                "upstream returned a non-audio speech response",
+                                Some(&request_id),
+                            ),
+                            "application/json".into(),
+                        )
+                    }
+                };
                 meter.failed_attempts(&forward.failed_attempts, false);
                 return finalize_buffered(
                     forward.receipt,

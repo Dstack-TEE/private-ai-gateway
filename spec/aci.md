@@ -466,7 +466,7 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
-| `POST /v1/rerank` | OPTIONAL (buffered JSON; unique in-range result indices, finite relevance scores, required token usage; no E2EE) |
+| `POST /v1/rerank` | OPTIONAL (buffered JSON; unique in-range result indices, finite relevance scores, required prompt-token usage in 1..9007199254740991; no E2EE) |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
 | `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, exactly one PNG/JPEG/WebP image, non-streaming, inline base64 output; constraints via §5.3; charges use returned image count) |
 | `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output; request up to `n` images, 1..10, default 1; providers may return fewer; image charges use the returned count) |

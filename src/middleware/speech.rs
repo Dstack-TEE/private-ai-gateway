@@ -80,7 +80,10 @@ pub fn usage(body: &Value) -> Option<Value> {
 }
 
 /// Return one canonical audio media type, without provider parameters.
-pub fn audio_content_type(headers: &HashMap<String, String>) -> Option<String> {
+pub fn response_content_type(headers: &HashMap<String, String>, body: &[u8]) -> Option<String> {
+    if body.is_empty() {
+        return None;
+    }
     let value = headers.get("content-type")?;
     if value.contains(',') || HeaderValue::from_str(value).is_err() {
         return None;
