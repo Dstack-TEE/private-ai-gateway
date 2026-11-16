@@ -6604,7 +6604,7 @@ async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() 
 }
 
 #[tokio::test]
-async fn image_edits_no_opt_in_or_malformed_success_never_bills() {
+async fn image_edits_require_opt_in_and_omit_image_count_on_failure() {
     for (opt_in, status) in [(false, 404), (true, 502)] {
         let endpoints = if opt_in {
             json!(["/v1/images/edits"])
@@ -6898,27 +6898,24 @@ async fn speech_failures_keep_receipts_without_billable_characters() {
 
 #[tokio::test]
 async fn buffered_native_endpoints_require_explicit_opt_in() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[
-            {"routeId":"plain:model","format":"openai"},
-            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
-        ]}),
-    )
-    .await;
     let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    for input in [
-        images_input(),
-        audio_input(),
-        rerank_input(),
-        speech_input(),
+    for (input, endpoints) in [
+        (images_input(), json!([])),
+        (audio_input(), json!([])),
+        (rerank_input(), json!([])),
+        (speech_input(), json!([])),
+        (speech_input(), json!(["/v1/audio/transcriptions"])),
     ] {
-        let (status, _, body) = response_parts(
-            middleware(url.clone())
-                .handle_completion(&service, input)
-                .await,
+        let (url, _) = spawn_control_capturing(
+            200,
+            json!({"allow":true,"candidates":[
+                {"routeId":"plain:model","format":"openai"},
+                {"routeId":"near:model","format":"openai","supportedEndpoints":endpoints}
+            ]}),
         )
         .await;
+        let (status, _, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
         assert_eq!(status, 404);
         assert_eq!(body["error"]["type"], "model_not_found");
     }

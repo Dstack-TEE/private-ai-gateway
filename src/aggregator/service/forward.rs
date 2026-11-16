@@ -216,7 +216,7 @@ impl AciService {
         endpoint: Endpoint,
         response: Vec<u8>,
         request: &[u8],
-        audio_metadata: Option<&Value>,
+        request_metadata: Option<&Value>,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<(Vec<u8>, String), &'static str> {
         let body = match endpoint {
@@ -238,7 +238,7 @@ impl AciService {
                 let body = serde_json::from_slice::<Value>(&response).map_err(|_| message)?;
                 let (body, _) = crate::middleware::audio::sanitize_response(
                     body,
-                    audio_metadata.unwrap_or(&Value::Null),
+                    request_metadata.unwrap_or(&Value::Null),
                 )
                 .map_err(|_| {
                     self.metrics.record_audio_failure("malformed_duration");

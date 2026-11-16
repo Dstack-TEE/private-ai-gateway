@@ -319,13 +319,12 @@ impl AciService {
                 crate::middleware::speech::response_content_type(&response.headers, &response.body)
             {
                 response.headers.insert("content-type".into(), content_type);
-                let params: serde_json::Value =
-                    serde_json::from_slice(received_body).map_err(|_| {
+                let usage = serde_json::from_slice::<serde_json::Value>(received_body)
+                    .ok()
+                    .and_then(|params| crate::middleware::speech::usage(&params))
+                    .ok_or_else(|| {
                         UpstreamError::InvalidRequest("invalid speech input metadata".into())
                     })?;
-                let usage = crate::middleware::speech::usage(&params).ok_or_else(|| {
-                    UpstreamError::InvalidRequest("invalid speech input metadata".into())
-                })?;
                 Self::append_speech_usage(&mut builder, usage.clone())?;
                 Some(usage)
             } else {

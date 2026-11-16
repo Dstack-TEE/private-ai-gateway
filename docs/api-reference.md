@@ -155,8 +155,8 @@ is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
 `X-ACI-Provider`; caller filenames and MIME headers are replaced upstream.
 
 Responses use the sanitized inline generation schema, with at most one image;
-URL-only or excess-image successes produce a receipted `502` without billable
-usage. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
+URL-only or excess-image successes produce a receipted `502` without a billable
+image count. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
 Edits use the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
 and share inference admission with generations.
 

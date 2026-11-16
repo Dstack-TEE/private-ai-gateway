@@ -29,7 +29,7 @@ const FIELDS: &[&str] = &[
 ];
 const KIND: FormKind = FormKind::ImageEdit;
 
-pub fn validate_request(params: &Value) -> Result<(), images::RequestError> {
+fn validate_request(params: &Value) -> Result<(), images::RequestError> {
     images::validate_request(params)?;
     for &key in FIELDS {
         if key == "prompt" {
