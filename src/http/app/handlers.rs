@@ -622,7 +622,10 @@ async fn buffered_native_endpoint(
                 Endpoint::AudioTranscriptions => {
                     crate::middleware::audio::parse(bytes.clone(), content_type).await?
                 }
-                _ => crate::middleware::image_edits::parse(bytes.clone(), content_type).await?,
+                Endpoint::ImagesEdits => {
+                    crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
+                }
+                _ => unreachable!("non-multipart endpoints take the JSON branch"),
             };
             Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
         }

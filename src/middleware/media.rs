@@ -16,7 +16,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub(crate) struct FormSpec {
     label: &'static str,
-    file_field: &'static str,
     pub(crate) max_body_bytes: usize,
     max_text_bytes: usize,
     file_limits: &'static [(&'static str, usize)],
@@ -24,14 +23,12 @@ pub(crate) struct FormSpec {
 
 pub(crate) const TRANSCRIPTION: FormSpec = FormSpec {
     label: "transcription",
-    file_field: "file",
     max_body_bytes: super::audio::MAX_BODY_BYTES,
     max_text_bytes: super::audio::MAX_TEXT_BYTES,
     file_limits: &[("file", super::audio::MAX_FILE_BYTES)],
 };
 pub(crate) const IMAGE_EDIT: FormSpec = FormSpec {
     label: "image edit",
-    file_field: "image",
     max_body_bytes: super::image_edits::MAX_BODY_BYTES,
     max_text_bytes: super::image_edits::MAX_TEXT_BYTES,
     file_limits: &[
@@ -80,7 +77,7 @@ impl FormSpec {
         MediaError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "request_too_large",
-            param: self.file_field.into(),
+            param: self.file_limits[0].0.into(),
             message: format!(
                 "{} upload exceeds the file or request size limit",
                 self.label
