@@ -39,7 +39,7 @@ error behavior below.
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
 | `POST /v1/audio/speech` | OpenAI speech synthesis | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered audio with exact-byte receipts and character usage; explicit endpoint opt-in. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
-| `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | One input image; inline base64 output; separate endpoint opt-in and multipart constraints. |
+| `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Up to 16 input images; inline base64 output; separate endpoint opt-in and multipart constraints. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
 | `POST /v1/rerank` | Reranking | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON; explicit endpoint opt-in required. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
@@ -71,8 +71,10 @@ mode, credentials continue through the existing control-plane authorization.
 
 `POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
 or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
-(1..document count), boolean `return_documents`, positive `max_tokens_per_doc`
-and `truncate_prompt_tokens`, and `instruction` (≤32000 Unicode scalars).
+(positive integer, clamped to the document count), boolean `return_documents`,
+positive `max_tokens_per_doc` and `truncate_prompt_tokens`, and `instruction`
+(≤32000 Unicode scalars).
+Explicit null `top_n` and `return_documents` are treated as absent.
 `user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
 and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
 
@@ -90,11 +92,11 @@ Image generation requires string `model` and `prompt` (at most 32,000 Unicode
 characters). Request up to `n` images (`n` is an integer from 1 through 10,
 default 1); providers may return fewer, and image charges use the returned
 count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
-`background`, `output_format`, and `moderation` are strings;
+`background`, `output_format`, `input_fidelity`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
-for the string options are validated upstream. `size`, `quality`, and `background`
-set to `"auto"` are omitted upstream to use the provider defaults; request-based
-billing dimensions stay unchanged. `response_format` must be absent
+for the string options are validated upstream, including explicit `"auto"` values;
+the gateway forwards these parameters as-is, so support depends on the routed
+provider. `response_format` must be absent
 or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
@@ -145,19 +147,38 @@ follows the [control-plane pricing contract](control-plane-contract.md#image-gen
 
 ### Image edits
 
-`POST /v1/images/edits` takes multipart `model`, `prompt` (≤32000 Unicode
-scalars), and one PNG/JPEG/WebP `image` or `image[]` part, detected by magic
-bytes. Multiple images or mixed names are rejected. Limits are 20 MiB/image,
-21 MiB/body, 1 MiB aggregate text, and 1024 bytes per non-prompt string field.
-Optional `size` and `output_format` use generation shaping; `response_format`
-is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
-`safety_identifier`, and `stream=false` are accepted no-ops. Routing/pinning uses
-`X-ACI-Provider`; caller filenames and MIME headers are replaced upstream.
+`POST /v1/images/edits` accepts the OpenAI SDK multipart surface: required
+`model`, `prompt` (1–32000 Unicode scalars), and either one `image` part or
+1–16 repeated `image[]` parts. Mixed names and repeated bare `image` parts are
+rejected. Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
+and be at most 50 MiB each. Optional `mask` is one PNG at most 4 MiB; optional
+`markup` is one PNG within the body limit. `mask` and `markup` are mutually
+exclusive. Dimension and transparency validation is left to the provider. The complete
+multipart body is limited to 64 MiB, including files, text and framing; aggregate
+text is limited to 1 MiB, and each non-prompt string field to 1024 bytes.
 
-Responses use the sanitized inline generation schema, with at most one image;
-URL-only or excess-image successes produce a receipted `502` without a billable
-image count. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
-Edits use the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
+Optional forwarded fields are `n` (integer 1–10, default 1), `size`, `quality`,
+`background`, `output_format`, `input_fidelity`, `moderation`, and
+`output_compression` (integer 0–100). Other optional fields above are strings;
+no provider-specific enum is enforced. Parameters are forwarded as-is, so support
+depends on the routed provider. `user`, `safety_identifier`, `stream=false`, and
+`response_format=b64_json` are accepted and removed before forwarding.
+Routing/pinning uses `X-ACI-Provider`.
+
+The gateway re-encodes one input as `image`, multiple inputs as ordered repeated
+`image[]`, and the optional PNG as `mask` or `markup`. It replaces caller
+filenames and MIME headers with safe names and media types detected from bytes.
+The receipt hashes these exact encoded bytes. Responses use the sanitized inline
+generation schema with 1..n returned images; billing uses the returned count and
+provider-reported token usage when configured. URL-only or excess-image successes
+produce a receipted `502` without a billable image count, following the
+[generation pricing contract](control-plane-contract.md#image-generation).
+
+Gateway limits: `stream=true` and `partial_images` are unsupported by the buffered
+path, and `response_format=url` is unsupported by inline-only output. JSON edit
+bodies, `file_id`, remote image URLs, and GIF/SVG preview parameters are not
+implemented; unknown multipart fields return `400 unknown_parameter`. Edits use
+the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
 and share inference admission with generations.
 
 ### Audio transcription

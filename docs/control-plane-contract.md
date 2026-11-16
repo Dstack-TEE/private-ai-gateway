@@ -221,7 +221,13 @@ successful report's `images.count`, using the same lookup and token formula.
 
 ### Image edit routing and metering
 
-`/v1/images/edits` uses the [image-generation metering rules](#image-generation).
+`/v1/images/edits` uses the [image-generation metering rules](#image-generation):
+`n` is forwarded unchanged and only the returned count (1..n) is billable as
+images on success; an excess count becomes a receipted `502` with no image count.
+Filtered provider token usage follows the same rules as generations. No edit
+parameter is gated on provider capabilities: parameters are forwarded as-is,
+so support depends on the routed provider. See the
+[API reference](api-reference.md#image-edits) for the multipart surface and limits.
 
 ### Audio transcription
 

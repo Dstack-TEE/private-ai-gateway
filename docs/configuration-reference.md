@@ -533,8 +533,15 @@ the requested format. No word timestamps are added unless requested.
 
 Transcription limits are process constants: 25 MiB file, 64 KiB text,
 independent 16 inference slots, and 8 MiB upstream response. Audio transcription
-and image edit uploads share one process-wide 402 MiB upload byte budget and a
-60-second read deadline; buffered uploads for either endpoint reduce the bytes
+and image edit uploads share one process-wide 402 MiB upload byte budget
+(16 × (25 MiB + 64 KiB + 64 KiB)) and a 60-second read deadline. Edits allow
+50 MiB per input image, a 4 MiB PNG mask, and 64 MiB per complete request,
+including an optional PNG markup instead of a mask. Six full-size edit uploads
+fit in the budget (384 MiB), leaving 18 MiB for other uploads; the body cap limits
+the aggregate size even with 16 images. Edit parameters are forwarded as-is,
+so support depends on the routed provider. See the
+[API reference](api-reference.md#image-edits) for field limits. Buffered uploads
+for either endpoint reduce the bytes
 available to the other. Upload bytes are charged chunk by chunk
 until handoff or drop; connections with no buffered data and declared
 `Content-Length` do not reserve upload capacity.
