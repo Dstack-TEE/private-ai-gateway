@@ -25,8 +25,6 @@ direct and middleware modes, with separate endpoint opt-in, inline base64 output
 and receipts. Reranking (including SDK aliases) and buffered speech synthesis
 also require explicit middleware opt-in and reject E2EE. See the
 [API reference](api-reference.md#reranking) for their contracts and limits.
-Merging support does not launch a model: client capability negotiation and live
-acceptance remain rollout gates, and speech pricing needs operator confirmation.
 Streaming, image E2EE, and public-launch compliance controls remain outside the
 image endpoints' current scope.
 

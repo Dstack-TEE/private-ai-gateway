@@ -62,6 +62,30 @@ without interpreting question types, scores, probabilities, or confidence. In
 middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
 
+Images, rerank and audio require an `Authorization` header in both direct and middleware
+modes. Requests missing it receive `401` before parsing, buffering, or admission,
+using the bounded discard described in the configuration reference. In middleware
+mode, credentials continue through the existing control-plane authorization.
+
+### Reranking
+
+`POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
+or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
+(1..document count), boolean `return_documents`, positive `max_tokens_per_doc`
+and `truncate_prompt_tokens`, and `instruction` (≤32000 Unicode scalars).
+`user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
+and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
+
+Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
+`relevance_score`, optional `document: {text}`) and `usage`
+(`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
+exceed `top_n`; null documents are absent, and `return_documents: false`
+suppresses documents. Billing uses validated input-token usage; absent or
+malformed usage produces a receipted `502` instead of a free request. Token
+counts must be JSON integers in the pricing system's range, 1..9007199254740991.
+
+### Image generation
+
 Image generation requires string `model` and `prompt` (at most 32,000 Unicode
 characters). Request up to `n` images (`n` is an integer from 1 through 10,
 default 1); providers may return fewer, and image charges use the returned
@@ -119,12 +143,24 @@ URLs, provider IDs, model IDs, and other fields are removed. Image
 receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Image pricing
 follows the [control-plane pricing contract](control-plane-contract.md#image-generation).
 
-### Audio transcription
+### Image edits
 
-Images, rerank and audio require an `Authorization` header in both direct and middleware
-modes. Requests missing it receive `401` before parsing, buffering, or admission,
-using the bounded discard described in the configuration reference. In middleware
-mode, credentials continue through the existing control-plane authorization.
+`POST /v1/images/edits` takes multipart `model`, `prompt` (≤32000 Unicode
+scalars), and one PNG/JPEG/WebP `image` or `image[]` part, detected by magic
+bytes. Multiple images or mixed names are rejected. Limits are 20 MiB/image,
+21 MiB/body, 1 MiB aggregate text, and 1024 bytes per non-prompt string field.
+Optional `size` and `output_format` use generation shaping; `response_format`
+is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
+`safety_identifier`, and `stream=false` are accepted no-ops. Routing/pinning uses
+`X-ACI-Provider`; caller filenames and MIME headers are replaced upstream.
+
+Responses use the sanitized inline generation schema, with at most one image;
+URL-only or excess-image successes produce a receipted `502` without billable
+usage. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
+Edits use the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
+and share inference admission with generations.
+
+### Audio transcription
 
 Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
 `model` and exactly one nonempty `file` (up to 25 MiB), with filename extension
@@ -144,8 +180,8 @@ removed; `stream=true` or any other value returns `400`. `provider` form fields,
 parts, and malformed multipart return `400`.
 
 Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
-255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Audio and image-edit uploads share a
-402 MiB byte budget (16 times the whole-body limit) and a 60-second whole-upload deadline
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads use the
+[shared byte budget and 60-second deadline](configuration-reference.md#transcription-routing-and-launch-gate)
 (`408 upload_timeout`). A 25 MiB file needs about 3.5 Mbps to finish within
 that deadline. Each received chunk reserves only its actual bytes;
 `Content-Length` is used only for early 413 rejection. Connections with no
@@ -215,6 +251,22 @@ and 32 separate discard slots. This preserves the 400 JSON through streaming
 reverse proxies for uploads within those bounds. Exhausted slots, excess bytes,
 transport errors, or a deadline cause immediate connection closure; upload
 capacity and inference permits are never held by the discard.
+
+### Speech synthesis
+
+`POST /v1/audio/speech` takes JSON `model`, `input` (1–4096 Unicode scalars),
+and string `voice`. Optional fields are `response_format`
+(`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
+`stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
+routing/pinning.
+
+The body is exact buffered audio with a validated lowercase `audio/<subtype>`
+content type, parameters stripped; empty, malformed or non-audio successes yield receipted
+`502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
+Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
+(`502`). Successful receipts sign the request's Unicode scalar count via the
+[ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).
+See [speech metering](control-plane-contract.md#speech-routing-and-metering) for billing and pricing requirements.
 
 ### Inference responses
 
@@ -542,54 +594,3 @@ an early commit, are represented inside the stream where the protocol permits
 it. Receipt or E2EE finalization errors end the body without forcing a TCP
 reset. The statuses middleware reports to the control plane for these failures
 are listed under [`POST /consult/post`](control-plane-contract.md#post-consultpost).
-
-### Reranking
-
-`POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
-or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
-(1..document count), boolean `return_documents`, positive `max_tokens_per_doc`
-and `truncate_prompt_tokens`, and `instruction` (≤32000 Unicode scalars).
-`user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
-and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
-
-Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
-`relevance_score`, optional `document: {text}`) and `usage`
-(`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
-exceed `top_n`; null documents are absent, and `return_documents: false`
-suppresses documents. Billing uses validated input-token usage; absent or
-malformed usage produces a receipted `502` instead of a free request. Token
-counts must be JSON integers in the pricing system's range, 1..9007199254740991.
-
-### Image edits
-
-`POST /v1/images/edits` takes multipart `model`, `prompt` (≤32000 Unicode
-scalars), and one PNG/JPEG/WebP `image` or `image[]` part, detected by magic
-bytes. Multiple images or mixed names are rejected. Limits are 20 MiB/image,
-21 MiB/body, 1 MiB aggregate text, and 1024 bytes per non-prompt string field.
-Optional `size` and `output_format` use generation shaping; `response_format`
-is forced to `b64_json`. `n=1`, `quality=auto`, `background=auto`, `user`,
-`safety_identifier`, and `stream=false` are accepted no-ops. Routing/pinning uses
-`X-ACI-Provider`; caller filenames and MIME headers are replaced upstream.
-
-Responses use the sanitized inline generation schema, with at most one image;
-URL-only or excess-image successes produce a receipted `502` without billable
-usage. Billing follows the [generation pricing contract](control-plane-contract.md#image-generation).
-Edits share the 402 MiB upload-byte budget and 60-second deadline with
-transcriptions, and inference admission with generations.
-
-### Speech synthesis
-
-`POST /v1/audio/speech` takes JSON `model`, `input` (1–4096 Unicode scalars),
-and string `voice`. Optional fields are `response_format`
-(`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
-`stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
-routing/pinning. Tinfoil examples: `qwen3-tts`/`ryan`, `voxtral-tts`/`neutral_female`.
-
-The body is exact buffered audio with a validated lowercase `audio/<subtype>`
-content type, parameters stripped; empty, malformed or non-audio successes yield receipted
-`502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
-Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
-(`502`). Successful receipts sign the request's Unicode scalar count via the
-[ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).
-Audio is not wrapped in JSON and has no new cost header; see
-[speech metering](control-plane-contract.md#speech-routing-and-metering) for billing and pricing requirements.

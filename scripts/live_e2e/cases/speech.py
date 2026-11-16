@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from ..common import Provider, json_bytes, request_json, write_bytes
-from .lifecycle import verify_served_request
+from .lifecycle import REQUESTER_TOKEN, verify_served_request
 
 
-REQUESTER_TOKEN = "live-e2e-requester"
 PROBE_INPUT = "Hello from confidential speech synthesis."
 
 
@@ -50,7 +49,7 @@ def run_speech_case(
     summary = verify_served_request(
         base_url=base_url, provider=provider, endpoint="/v1/audio/speech", headers=headers,
         provider_dir=provider_dir, request_path=request_path, response_path=response_path,
-        status=status, requester_token=REQUESTER_TOKEN,
+        status=status,
         receipt_check=lambda receipt: _check_receipt(provider, receipt),
     )
     return {**summary, "audio_bytes": len(response_body), "content_type": headers.get("content-type")}

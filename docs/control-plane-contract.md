@@ -125,6 +125,16 @@ An allow response:
 | `userTier` | No | Sent to every upstream attempt as the `x-user-tier` header. |
 | `rateLimit` | No | Used on a denied `429`; object fields are `limit` and Unix-seconds `resetAt`. |
 
+### Rerank routing and metering
+
+`/v1/rerank` post reports contain only validated `usage.prompt_tokens` and
+`usage.total_tokens`: JSON integers in the shared pricing range,
+1..9007199254740991, with total at least prompt. Pricing uses
+`inputCostPerToken` with no generated tokens; provider billing extensions and
+cost are removed before metering. Malformed successes report `502` without
+usage. See the [API reference](api-reference.md#reranking) for the wire contract
+and the candidate table above for endpoint opt-in.
+
 ### Image generation
 
 `/v1/images/generations` is default-off in middleware mode: each eligible
@@ -209,6 +219,10 @@ usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
 
+### Image edit routing and metering
+
+`/v1/images/edits` uses the [image-generation metering rules](#image-generation).
+
 ### Audio transcription
 
 `/v1/audio/transcriptions` is default-off: candidates must list that exact path
@@ -246,6 +260,17 @@ production model; that cross-repository billing work is a separate launch gate.
 **Known follow-up:** Token-billed ASR models such as `gpt-4o-transcribe`, with
 `usage: {"type":"tokens"}`, need a contract extension before support. Whisper
 continues to use duration billing.
+
+### Speech routing and metering
+
+Successful `/v1/audio/speech` reports carry
+`usage: {type: "characters", characters: N}`, where `N` is the request input's
+Unicode scalar count (integer 1..4096). Failed or malformed responses carry no
+character usage. `pricing.speechCostPerCharacter` is a decimal string in USD
+per Unicode scalar; control bills `N × speechCostPerCharacter` only for 2xx
+reports and must deny missing or invalid pricing. The gateway echoes the pricing
+snapshot unchanged.
+Receipt and response details are in the [API reference](api-reference.md#speech-synthesis).
 
 ### Reasoning format
 
@@ -551,32 +576,3 @@ route for those hostnames.
 small config-backed server for local integration tests. It implements the core
 `/models` and consult routes. It is not a production billing, TEE-catalog, or
 policy service.
-
-### Rerank routing and metering
-
-`/v1/rerank` post reports contain only validated `usage.prompt_tokens` and
-`usage.total_tokens`: JSON integers in the shared pricing range,
-0..9007199254740991, with total at least prompt. Pricing uses
-`inputCostPerToken` with no generated tokens; provider billing extensions and
-cost are removed before metering. Malformed successes report `502` without
-usage. See the [API reference](api-reference.md#reranking) for the wire contract
-and the candidate table above for endpoint opt-in.
-
-### Image edit routing and metering
-
-`/v1/images/edits` reports returned image counts and uses the
-[generation pricing contract](#image-generation), including token components
-only when reported usage and configured token prices exist. FLUX/NEAR bills
-returned images only. Multipart routing policy is described in the
-[API reference](api-reference.md#image-edits).
-
-### Speech routing and metering
-
-Successful `/v1/audio/speech` reports carry
-`usage: {type: "characters", characters: N}`, where `N` is the request input's
-Unicode scalar count (integer 1..4096). Failed or malformed responses carry no
-character usage. `pricing.speechCostPerCharacter` is a decimal string in USD
-per Unicode scalar; control bills `N × speechCostPerCharacter` only for 2xx
-reports and must deny missing or invalid pricing. The gateway echoes the pricing
-snapshot unchanged. Tinfoil's TTS rate needs operator confirmation before listing.
-Receipt and response details are in the [API reference](api-reference.md#speech-synthesis).

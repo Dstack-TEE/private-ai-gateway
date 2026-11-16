@@ -719,8 +719,7 @@ the required types. Verifiers ignore event types they don't recognize
 unless local policy cares. The reference speech endpoint adds a signed
 `usage.reported` extension event on success with
 `{"usage":{"type":"characters","characters":N}}`, derived from the request's
-Unicode scalar count (1..4096); this does not alter the exact audio `response.returned`
-body hash and is absent for failed speech requests.
+Unicode scalar count (1..4096).
 
 ### 7.5 `upstream.verified`
 

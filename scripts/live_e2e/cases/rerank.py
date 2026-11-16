@@ -4,10 +4,9 @@ from pathlib import Path
 from typing import Any
 
 from ..common import Provider, json_bytes, request_json, write_bytes
-from .lifecycle import verify_served_request
+from .lifecycle import REQUESTER_TOKEN, verify_served_request
 
 
-REQUESTER_TOKEN = "live-e2e-requester"
 PROBE_INPUT = "What is confidential inference?"
 
 
@@ -51,7 +50,7 @@ def run_rerank_case(
     summary = verify_served_request(
         base_url=base_url, provider=provider, endpoint="/v1/rerank", headers=headers,
         provider_dir=provider_dir, request_path=request_path, response_path=response_path,
-        status=status, requester_token=REQUESTER_TOKEN,
+        status=status,
     )
     return {**summary, "result_count": len(parsed["results"])}
 

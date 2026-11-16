@@ -155,7 +155,6 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
 def verify_served_request(
     *, base_url: str, provider: Provider, endpoint: str, headers: dict[str, str],
     provider_dir: Path, request_path: Path, response_path: Path, status: int,
-    requester_token: str,
     receipt_check: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     receipt_id = headers.get("x-receipt-id")
@@ -178,7 +177,7 @@ def verify_served_request(
     receipt_status, _, receipt_body, receipt = request_json(
         "GET",
         f"{base_url}/v1/aci/receipts/{receipt_id}",
-        headers={"Authorization": f"Bearer {requester_token}"},
+        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}"},
         timeout=120,
     )
     receipt_path = provider_dir / "receipt.json"
