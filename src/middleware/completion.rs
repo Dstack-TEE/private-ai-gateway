@@ -550,6 +550,7 @@ async fn run_inner(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            let upstream_request_id = request_id_from_headers(&forward.upstream_headers);
             if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&upstream_status) {
                 let (status, body, content_type) =
                     match super::speech::audio_content_type(&forward.upstream_headers) {
@@ -560,18 +561,21 @@ async fn run_inner(
                                 Some(&forward.selected_route),
                                 super::speech::usage(&params),
                                 None,
+                                upstream_request_id,
                             );
                             (upstream_status, forward.upstream_body, content_type)
                         }
                         None => {
-                            meter.gateway_failure_at(
-                                attempt_index,
-                                Some(&forward.selected_route),
-                                502,
-                                ErrorSource::Upstream,
-                                ErrorClass::UpstreamMalformedResponse,
-                                false,
-                            );
+                            meter.disarm();
+                            meter.spawn(PostReport {
+                                status: 502,
+                                attempt_index: Some(attempt_index),
+                                selected_route_id: Some(forward.selected_route.clone()),
+                                error_source: Some(ErrorSource::Upstream),
+                                error_message: Some(ErrorClass::UpstreamMalformedResponse),
+                                upstream_request_id,
+                                ..meter.base()
+                            });
                             (
                                 502,
                                 errors::envelope_bytes(
@@ -607,19 +611,21 @@ async fn run_inner(
                 responses_passthrough,
             } = route;
             let parsed_upstream = serde_json::from_slice::<Value>(&forward.upstream_body);
-            let upstream_request_id =
-                request_id_from_headers(&forward.upstream_headers).or_else(|| {
-                    (200..300)
-                        .contains(&forward.upstream_status)
-                        .then(|| parsed_upstream.as_ref().ok().and_then(request_id_from_body))
-                        .flatten()
-                });
+            let upstream_request_id = upstream_request_id.or_else(|| {
+                (200..300)
+                    .contains(&forward.upstream_status)
+                    .then(|| parsed_upstream.as_ref().ok().and_then(request_id_from_body))
+                    .flatten()
+            });
             let mut raw_usage = parsed_upstream
                 .as_ref()
                 .ok()
                 .and_then(|body| super::sse::source_usage(body, protocol));
-            if client_endpoint == Endpoint::AudioTranscriptions {
-                // Only validated duration usage may be billed.
+            if matches!(
+                client_endpoint,
+                Endpoint::AudioTranscriptions | Endpoint::AudioSpeech | Endpoint::Rerank
+            ) {
+                // Only validated duration/tokens or gateway-derived characters may be billed.
                 raw_usage = None;
             } else if client_endpoint == Endpoint::SystemOne {
                 response_transform::filter_systemone_usage(raw_usage.as_mut());
@@ -659,6 +665,7 @@ async fn run_inner(
                             if client_endpoint == Endpoint::Rerank {
                                 super::rerank::sanitize_response(&mut upstream_json, &params)
                                     .map_err(str::to_string)?;
+                                raw_usage = upstream_json.get("usage").cloned();
                             }
                             if client_endpoint.is_image() {
                                 super::images::validate_response(
@@ -691,7 +698,11 @@ async fn run_inner(
                             status: 502,
                             attempt_index: Some(attempt_index),
                             selected_route_id: Some(forward.selected_route.clone()),
-                            usage: raw_usage,
+                            usage: if client_endpoint == Endpoint::ImagesEdits {
+                                None
+                            } else {
+                                raw_usage
+                            },
                             error_source: Some(ErrorSource::Upstream),
                             error_message: Some(ErrorClass::UpstreamMalformedResponse),
                             upstream_request_id,
@@ -703,7 +714,7 @@ async fn run_inner(
                             "upstream returned a malformed success body",
                             Some(&request_id),
                         );
-                        // Images are always buffered: retain the served route's
+                        // Native buffered endpoints retain the served route's
                         // receipt draft and attest the sanitized error bytes.
                         if client_endpoint.is_buffered_native() {
                             return finalize_buffered(
@@ -720,7 +731,8 @@ async fn run_inner(
                 };
                 // Report usage before cost or image SDK defaults. Audio usage
                 // has already been normalized to duration only.
-                meter.images = (client_endpoint.is_image())
+                meter.images = client_endpoint
+                    .is_image()
                     .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
@@ -1845,7 +1857,7 @@ fn service_error_response(
     finalize_generated(status, body, &[], e2ee, outcome)
 }
 
-// Finalize a buffered answer, including a sanitized malformed-image error.
+// Finalize a buffered answer, including a sanitized malformed-success error.
 fn finalize_buffered(
     draft: MiddlewareReceiptDraft,
     client_status: u16,

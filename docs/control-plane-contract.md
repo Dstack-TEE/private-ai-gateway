@@ -557,8 +557,9 @@ policy service.
 `/v1/rerank` is default-off: candidates must explicitly include `/v1/rerank` in
 `supportedEndpoints` and use `format: "openai"`. Consult pre receives that exact
 endpoint; no eligible candidate yields `404 model_not_found`. A valid response
-requires `usage.prompt_tokens` and `usage.total_tokens` as nonnegative integers
-(total at least prompt). Consult post receives the sanitized token usage; pricing
+requires `usage.prompt_tokens` and `usage.total_tokens` as JSON integers in the
+shared pricing range, 0..9007199254740991 (total at least prompt).
+Consult post receives the sanitized token usage; pricing
 uses `inputCostPerToken` with no generated tokens. Provider billing extensions
 and cost are removed before metering; the gateway computes display cost from the
 same reported usage. Malformed successes return a receipted `502` without usage.

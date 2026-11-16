@@ -127,11 +127,13 @@ pub fn validate_response(body: &Value, request: &Value) -> Result<(), &'static s
         return Err(message);
     }
     // Meter only validated input tokens; never turn absent usage into a free request.
-    let prompt = body["usage"]["prompt_tokens"]
-        .as_i64()
-        .filter(|n| *n >= 0)
-        .ok_or(message)?;
-    let total = body["usage"]["total_tokens"].as_i64().ok_or(message)?;
+    let token_count = |key| {
+        let value = body.get("usage")?.get(key)?;
+        value.as_u64()?;
+        super::pricing::usage_counter(value)
+    };
+    let prompt = token_count("prompt_tokens").ok_or(message)?;
+    let total = token_count("total_tokens").ok_or(message)?;
     if total < prompt {
         return Err(message);
     }
@@ -255,6 +257,9 @@ mod tests {
             json!({"usage":null}),
             json!({"usage":{"prompt_tokens":-1,"total_tokens":5}}),
             json!({"usage":{"prompt_tokens":5,"total_tokens":4}}),
+            json!({"usage":{"prompt_tokens":"5","total_tokens":5}}),
+            json!({"usage":{"prompt_tokens":9_007_199_254_740_992_u64,"total_tokens":9_007_199_254_740_992_u64}}),
+            json!({"usage":{"prompt_tokens":5,"total_tokens":9_007_199_254_740_992_u64}}),
         ] {
             let mut body = success.clone();
             body.as_object_mut()

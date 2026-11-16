@@ -2,8 +2,6 @@
 //! middleware and finalizing the receipt/response it returns.
 //!
 
-use crate::middleware::request_transform::Endpoint;
-
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
 use super::forward::{attested_route_eligible, ReverifyOutcome, SelectedUpstream};
 use super::helpers::{

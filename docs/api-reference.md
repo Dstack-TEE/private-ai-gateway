@@ -557,7 +557,8 @@ Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
 (`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
 exceed `top_n`; null documents are absent, and `return_documents: false`
 suppresses documents. Billing uses validated input-token usage; absent or
-malformed usage produces a receipted `502` instead of a free request.
+malformed usage produces a receipted `502` instead of a free request. Token
+counts must be JSON integers in the pricing system's range, 0..9007199254740991.
 
 ### Image edits
 

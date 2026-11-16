@@ -6490,6 +6490,7 @@ async fn rerank_opt_in_sanitizes_before_pricing_and_reporting() {
         .is_some());
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
     assert_eq!(report["selectedRouteId"], "rank:model");
+    assert_eq!(report["upstreamRequestId"], "upstream-id");
     assert_eq!(report["usage"], json!({"prompt_tokens":5,"total_tokens":5}));
 }
 
@@ -6513,6 +6514,7 @@ async fn rerank_malformed_usage_is_receipted_and_unbilled() {
         .is_some());
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
     assert_eq!(report["status"], 502);
+    assert_eq!(report["upstreamRequestId"], "upstream-id");
     assert!(report.get("usage").is_none_or(Value::is_null));
 }
 
@@ -6590,6 +6592,7 @@ async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() 
     );
     let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
     assert_eq!(report["selectedRouteId"], "edit:model");
+    assert_eq!(report["upstreamRequestId"], "upstream-id");
     assert_eq!(
         report["images"],
         json!({"count":1,"size":"512x512","quality":"auto"})
@@ -6608,7 +6611,8 @@ async fn image_edits_no_opt_in_or_malformed_success_never_bills() {
         let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"edit:model","format":"openai","supportedEndpoints":endpoints}],"pricing":{"imageCostPerImage":"0.012"}})).await;
         let (service, requests) = build_recording_service(
             200,
-            br#"{"data":[{"url":"private"}]}"#.to_vec(),
+            br#"{"data":[{"url":"private"}],"usage":{"prompt_tokens":99,"total_tokens":99}}"#
+                .to_vec(),
             "application/json",
         );
         let (actual, headers, _) = response_parts(
@@ -6637,6 +6641,7 @@ async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
     let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}]})).await;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let backend = Arc::new(RecordingUpstream {
+        format: ProviderFormat::Openai,
         requests: requests.clone(),
         status: 200,
         body: br#"{"data":[{"b64_json":"image"}]}"#.to_vec(),
@@ -6812,6 +6817,7 @@ async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
     assert_eq!(report["usage"], json!({"type":"characters","characters":4}));
     assert_eq!(report["pricing"]["speechCostPerCharacter"], "0.01");
     assert_eq!(report["selectedRouteId"], "tts:model");
+    assert_eq!(report["upstreamRequestId"], "upstream-id");
 }
 
 #[tokio::test]
@@ -6863,7 +6869,7 @@ async fn speech_failures_keep_receipts_without_billable_characters() {
         let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}]})).await;
         let (service, _) = build_recording_service(
             upstream_status,
-            br#"{"error":{"message":"bad voice private"}}"#.to_vec(),
+            br#"{"error":{"message":"bad voice private"},"usage":{"prompt_tokens":99}}"#.to_vec(),
             content_type,
         );
         let (status, headers, _) = response_parts(
@@ -6883,6 +6889,7 @@ async fn speech_failures_keep_receipts_without_billable_characters() {
             .any(|event| event["type"] == "usage.reported"));
         let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
         assert_eq!(report["status"], expected);
+        assert_eq!(report["upstreamRequestId"], "upstream-id");
         assert!(report["usage"].is_null());
     }
 }
@@ -6909,4 +6916,30 @@ async fn buffered_native_endpoints_require_explicit_opt_in() {
         assert_eq!(body["error"]["type"], "model_not_found");
     }
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn buffered_native_reports_success_body_id_before_sanitation() {
+    for (input, body) in [
+        (
+            rerank_input(),
+            json!({"id":"provider-rank-id","results":[{"index":0,"relevance_score":1}],"usage":{"prompt_tokens":5,"total_tokens":5}}),
+        ),
+        (
+            image_edits_input(),
+            json!({"id":"provider-edit-id","data":[{"b64_json":"image"}]}),
+        ),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{
+            "routeId":"provider:model","format":"openai","supportedEndpoints":[input.endpoint_path]
+        }]})).await;
+        let service = build_service_with_upstream(200, serde_json::to_vec(&body).unwrap());
+        let (status, headers, returned) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, 200);
+        assert_ne!(returned.get("id"), body.get("id"));
+        assert_no_upstream_headers(&headers);
+        let report = wait_for_post(&posts, |p| p["status"] == 200).await;
+        assert_eq!(report["upstreamRequestId"], body["id"]);
+    }
 }

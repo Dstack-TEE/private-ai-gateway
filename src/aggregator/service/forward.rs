@@ -1,4 +1,3 @@
-use crate::middleware::request_transform::Endpoint;
 use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
@@ -19,6 +18,7 @@ use crate::aggregator::session::{
     SESSION_API_VERSION,
 };
 use crate::aggregator::session_store::SessionLease;
+use crate::endpoint::Endpoint;
 
 use super::claims::{
     instance_id, is_multi_instance, per_instance_session_claims, session_claims_for_event,
@@ -416,7 +416,7 @@ impl AciService {
             )
         };
 
-        let chat_id = if Endpoint::from_path(endpoint_path).is_some_and(Endpoint::is_media) {
+        let chat_id = if Endpoint::from_path(endpoint_path).is_media() {
             None
         } else {
             extract_chat_id(&client_body)
