@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, write_bytes
-from .lifecycle import REQUESTER_TOKEN, verify_served_request
+from ..common import Provider, json_bytes
+from .lifecycle import post_request, verify_served_request
 
 
 PROBE_INPUT = "Hello from confidential speech synthesis."
@@ -26,24 +26,11 @@ def run_speech_case(
     }
     request_body = json_bytes(body)
     request_path = provider_dir / "request.json"
-    write_bytes(request_path, request_body)
-    status, headers, response_body, _ = request_json(
-        "POST",
-        f"{base_url}/v1/audio/speech",
-        headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        body=request_body,
-        timeout=240,
-    )
     response_path = provider_dir / "response.audio"
-    write_bytes(response_path, response_body)
-    if not 200 <= status < 300:
-        raise RuntimeError(
-            f"{provider.name} speech request failed with HTTP {status}: "
-            f"{response_body.decode('utf-8', errors='replace')[:600]}"
-        )
+    status, headers, response_body, _ = post_request(
+        base_url=base_url, provider=provider, endpoint="/v1/audio/speech",
+        request_body=request_body, request_path=request_path, response_path=response_path,
+    )
     if not response_body or not headers.get("content-type", "").lower().startswith("audio/"):
         raise RuntimeError(f"{provider.name} speech response is not buffered audio")
     summary = verify_served_request(

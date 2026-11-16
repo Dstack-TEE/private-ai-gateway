@@ -152,6 +152,28 @@ def assert_receipt_log(provider: Provider, receipt: dict[str, Any]) -> None:
         raise RuntimeError(f"{provider.name} receipt records no request.forwarded rewrite")
 
 
+def post_request(
+    *, base_url: str, provider: Provider, endpoint: str, request_body: bytes,
+    request_path: Path, response_path: Path, content_type: str = "application/json",
+    headers: dict[str, str] | None = None, timeout: int = 240,
+) -> tuple[int, dict[str, str], bytes, Any]:
+    write_bytes(request_path, request_body)
+    result = request_json(
+        "POST", f"{base_url}{endpoint}",
+        headers={"Authorization": f"Bearer {REQUESTER_TOKEN}",
+                 "Content-Type": content_type, **(headers or {})},
+        body=request_body, timeout=timeout,
+    )
+    status, _, response_body, _ = result
+    write_bytes(response_path, response_body)
+    if not 200 <= status < 300:
+        raise RuntimeError(
+            f"{provider.name} {endpoint} request failed with HTTP {status}: "
+            f"{response_body.decode('utf-8', errors='replace')[:600]}"
+        )
+    return result
+
+
 def verify_served_request(
     *, base_url: str, provider: Provider, endpoint: str, headers: dict[str, str],
     provider_dir: Path, request_path: Path, response_path: Path, status: int,

@@ -3,11 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..common import Provider, json_bytes, request_json, write_bytes
-from .lifecycle import REQUESTER_TOKEN, verify_served_request
-
-
-PROBE_INPUT = "What is confidential inference?"
+from ..common import Provider, json_bytes
+from .lifecycle import post_request, verify_served_request
 
 
 def run_rerank_case(
@@ -19,31 +16,17 @@ def run_rerank_case(
     provider_dir = artifact_dir / provider.name / "rerank"
     body = {
         "model": provider.public_model,
-        "query": PROBE_INPUT,
+        "query": "What is confidential inference?",
         "documents": ["Inference inside a trusted execution environment.", "A recipe for soup."],
         "top_n": 1,
-        "return_documents": True,
     }
     request_body = json_bytes(body)
     request_path = provider_dir / "request.json"
-    write_bytes(request_path, request_body)
-    status, headers, response_body, parsed = request_json(
-        "POST",
-        f"{base_url}/v1/rerank",
-        headers={
-            "Authorization": f"Bearer {REQUESTER_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        body=request_body,
-        timeout=240,
-    )
     response_path = provider_dir / "response.json"
-    write_bytes(response_path, response_body)
-    if not 200 <= status < 300:
-        raise RuntimeError(
-            f"{provider.name} rerank request failed with HTTP {status}: "
-            f"{response_body.decode('utf-8', errors='replace')[:600]}"
-        )
+    status, headers, response_body, parsed = post_request(
+        base_url=base_url, provider=provider, endpoint="/v1/rerank",
+        request_body=request_body, request_path=request_path, response_path=response_path,
+    )
     if not isinstance(parsed, dict):
         raise RuntimeError(f"{provider.name} rerank response is not JSON")
     assert_rerank_shape(provider, parsed)

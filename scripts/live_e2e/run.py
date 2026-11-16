@@ -123,11 +123,6 @@ def main() -> None:
                 )
             summary["phases"]["embeddings"] = embeddings
 
-            summary["phases"]["rerank"] = [
-                run_rerank_case(base_url=aggregator.base_url, provider=provider, artifact_dir=artifact_dir)
-                for provider in providers if provider.has_capability("rerank")
-            ]
-
             images = []
             for provider in providers:
                 if provider.has_capability("images"):
@@ -137,11 +132,6 @@ def main() -> None:
                         artifact_dir=artifact_dir,
                     ))
             summary["phases"]["images"] = images
-
-            summary["phases"]["images_edits"] = [
-                run_images_edits_case(base_url=aggregator.base_url, provider=provider, artifact_dir=artifact_dir)
-                for provider in providers if provider.has_capability("images_edits")
-            ]
 
             audio = []
             for provider in providers:
@@ -153,10 +143,15 @@ def main() -> None:
                     ))
             summary["phases"]["audio_transcriptions"] = audio
 
-            summary["phases"]["speech"] = [
-                run_speech_case(base_url=aggregator.base_url, provider=provider, artifact_dir=artifact_dir)
-                for provider in providers if provider.has_capability("speech")
-            ]
+            for capability, runner in [
+                ("rerank", run_rerank_case),
+                ("images_edits", run_images_edits_case),
+                ("speech", run_speech_case),
+            ]:
+                summary["phases"][capability] = [
+                    runner(base_url=aggregator.base_url, provider=provider, artifact_dir=artifact_dir)
+                    for provider in providers if provider.has_capability(capability)
+                ]
 
             if args.profile in ("full", "strict-release"):
                 structured = []
