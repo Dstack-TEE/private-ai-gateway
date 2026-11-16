@@ -58,6 +58,7 @@ impl FormKind {
     }
 }
 
+// 16 × (25 MiB file + 64 KiB text + 64 KiB framing) = 402 MiB.
 // Account for audio and image bytes together, including uploads awaiting consult.
 const UPLOAD_BYTE_BUDGET: usize = 16 * super::audio::MAX_BODY_BYTES;
 const READ_DEADLINE: Duration = Duration::from_secs(60);
@@ -192,10 +193,39 @@ async fn collect_upload(
 
 /// Shared slices of the buffered upload; no caller filename or MIME is forwarded.
 #[derive(Debug, Clone)]
-pub struct MediaForm {
-    pub kind: FormKind,
-    pub file: Bytes,
-    pub extension: String,
+pub enum MediaForm {
+    Transcription {
+        file: Bytes,
+        extension: String,
+    },
+    ImageEdit {
+        images: Vec<ImageFile>,
+        mask: Option<Bytes>,
+        markup: Option<Bytes>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ImageFile {
+    pub data: Bytes,
+    pub format: ImageFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl ImageFormat {
+    fn encoding(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Png => ("png", "image/png"),
+            Self::Jpeg => ("jpg", "image/jpeg"),
+            Self::Webp => ("webp", "image/webp"),
+        }
+    }
 }
 
 pub(crate) fn multipart(
@@ -217,7 +247,10 @@ pub(crate) fn multipart(
         .per_field(spec.max_text_bytes as u64)
         .for_field(spec.file_field, spec.max_file_bytes as u64);
     if kind == FormKind::ImageEdit {
-        limits = limits.for_field("image[]", spec.max_file_bytes as u64);
+        limits = limits
+            .for_field("image[]", spec.max_file_bytes as u64)
+            .for_field("mask", super::image_edits::MAX_MASK_BYTES as u64)
+            .for_field("markup", spec.max_body_bytes as u64);
     }
     let constraints = multer::Constraints::new().size_limit(limits);
     Ok(multer::Multipart::with_constraints(
@@ -243,6 +276,13 @@ pub(crate) fn field_name(field: &multer::Field<'_>, kind: FormKind) -> Result<St
 }
 
 impl MediaForm {
+    pub(crate) fn kind(&self) -> FormKind {
+        match self {
+            Self::Transcription { .. } => FormKind::Transcription,
+            Self::ImageEdit { .. } => FormKind::ImageEdit,
+        }
+    }
+
     /// Encode once after model selection. These exact immutable bytes are both
     /// hashed and transmitted, including on channel binding retries.
     pub async fn encode(
@@ -250,7 +290,7 @@ impl MediaForm {
         params: &Value,
     ) -> Result<(Bytes, String), crate::aci::upstream::UpstreamError> {
         use crate::aci::upstream::UpstreamError;
-        let kind = self.kind;
+        let kind = self.kind();
         let mut form = reqwest::multipart::Form::new();
         for (key, value) in (kind.spec().upstream_fields)(params)
             .as_object()
@@ -271,12 +311,44 @@ impl MediaForm {
                 );
             }
         }
-        let file =
-            reqwest::multipart::Part::stream_with_length(self.file.clone(), self.file.len() as u64)
-                .file_name(format!("{}.{}", kind.spec().filename_stem, self.extension))
-                .mime_str("application/octet-stream")
-                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
-        form = form.part(kind.spec().file_field, file);
+        let files = match self {
+            Self::Transcription { file, extension } => {
+                vec![("file", file, extension.as_str(), "application/octet-stream")]
+            }
+            Self::ImageEdit {
+                images,
+                mask,
+                markup,
+            } => {
+                let name = if images.len() == 1 {
+                    "image"
+                } else {
+                    "image[]"
+                };
+                let mut files: Vec<_> = images
+                    .iter()
+                    .map(|image| {
+                        let (extension, mime) = image.format.encoding();
+                        (name, &image.data, extension, mime)
+                    })
+                    .collect();
+                files.extend(mask.as_ref().map(|data| ("mask", data, "png", "image/png")));
+                files.extend(
+                    markup
+                        .as_ref()
+                        .map(|data| ("markup", data, "png", "image/png")),
+                );
+                files
+            }
+        };
+        for (name, data, extension, mime) in files {
+            let file =
+                reqwest::multipart::Part::stream_with_length(data.clone(), data.len() as u64)
+                    .file_name(format!("{}.{extension}", kind.spec().filename_stem))
+                    .mime_str(mime)
+                    .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
+            form = form.part(name, file);
+        }
         let content_type = format!("multipart/form-data; boundary={}", form.boundary());
         let chunks = form.into_stream();
         futures_util::pin_mut!(chunks);
@@ -388,6 +460,49 @@ mod tests {
         assert_eq!(budget.available_permits(), 2);
         drop(permit);
         assert_eq!(budget.available_permits(), 7);
+    }
+
+    #[tokio::test]
+    async fn edit_body_limit_fits_shared_budget_and_releases_bytes_on_oversize() {
+        let kind = FormKind::ImageEdit;
+        let limit = super::super::image_edits::MAX_BODY_BYTES;
+        let budget = Arc::new(Semaphore::new(UPLOAD_BYTE_BUDGET));
+        assert_eq!(UPLOAD_BYTE_BUDGET, 402 * 1024 * 1024);
+        let chunk = Bytes::from(vec![0; limit]);
+        let (bytes, permit) = collect_upload(Body::from(chunk.clone()), budget.clone(), kind)
+            .await
+            .unwrap();
+        assert_eq!(bytes.len(), limit);
+        assert_eq!(permit.num_permits(), limit);
+        assert_eq!(budget.available_permits(), UPLOAD_BYTE_BUDGET - limit);
+        drop((bytes, permit));
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, std::io::Error>(chunk),
+            Ok(Bytes::from_static(b"x")),
+        ]));
+        assert_eq!(
+            collect_upload(body, budget.clone(), kind)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(budget.available_permits(), UPLOAD_BYTE_BUDGET);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, (limit + 1).into());
+        let unread = Body::from_stream(stream::poll_fn(
+            |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+                panic!("declared oversize edit must not be read")
+            },
+        ));
+        assert_eq!(
+            read_upload(&headers, unread, kind)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     #[tokio::test]

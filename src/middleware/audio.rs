@@ -60,8 +60,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             if data.is_empty() {
                 return Err(KIND.invalid("file"));
             }
-            file = Some(Arc::new(MediaForm {
-                kind: KIND,
+            file = Some(Arc::new(MediaForm::Transcription {
                 file: data,
                 extension: ext,
             }));

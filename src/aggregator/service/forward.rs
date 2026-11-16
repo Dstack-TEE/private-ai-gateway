@@ -227,9 +227,12 @@ impl AciService {
                 return Ok((response, content_type));
             }
             Endpoint::Rerank => crate::middleware::rerank::response_body(&response, request),
-            Endpoint::ImagesEdits => {
-                crate::middleware::images::response_body_for_count(&response, 1)
-            }
+            Endpoint::ImagesEdits => crate::middleware::images::response_body_for_count(
+                &response,
+                crate::middleware::images::requested_count(
+                    request_metadata.unwrap_or(&Value::Null),
+                ),
+            ),
             Endpoint::ImagesGenerations => {
                 crate::middleware::images::response_body(&response, request)
             }
@@ -301,7 +304,7 @@ impl AciService {
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let request_metadata = matches!(
             endpoint,
-            Endpoint::AudioTranscriptions | Endpoint::AudioSpeech
+            Endpoint::AudioTranscriptions | Endpoint::AudioSpeech | Endpoint::ImagesEdits
         )
         .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
         let mut prepared = self.upstream.prepare(UpstreamRequest {

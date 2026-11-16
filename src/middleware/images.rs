@@ -104,6 +104,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "output_format",
             "output_compression",
             "moderation",
+            "input_fidelity",
             "response_format",
             "user",
             "safety_identifier",
@@ -126,6 +127,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
         "background",
         "output_format",
         "moderation",
+        "input_fidelity",
         "user",
         "safety_identifier",
         "style",
@@ -178,11 +180,9 @@ pub fn upstream_body(body: &Value) -> Value {
             "output_format",
             "output_compression",
             "moderation",
+            "input_fidelity",
         ],
     );
-    output.retain(|key, value| {
-        !(matches!(key.as_str(), "size" | "quality" | "background") && value == "auto")
-    });
     output.insert("response_format".into(), json!("b64_json"));
     Value::Object(output)
 }
@@ -326,13 +326,13 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "input_fidelity":"provider-value", "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
         assert_eq!(
             upstream,
-            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "output_compression":100, "response_format":"b64_json"})
+            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "input_fidelity":"provider-value", "response_format":"b64_json"})
         );
         for key in ["user", "safety_identifier", "style", "provider"] {
             assert!(upstream.get(key).is_none());

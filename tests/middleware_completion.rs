@@ -5880,11 +5880,12 @@ fn audio_input() -> CompletionInput {
         endpoint_path: "/v1/audio/transcriptions",
         params,
         received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
-        form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
-            kind: private_ai_gateway::middleware::media::FormKind::Transcription,
-            file: bytes::Bytes::from_static(b"sensitive audio"),
-            extension: "wav".into(),
-        })),
+        form: Some(Arc::new(
+            private_ai_gateway::middleware::media::MediaForm::Transcription {
+                file: bytes::Bytes::from_static(b"sensitive audio"),
+                extension: "wav".into(),
+            },
+        )),
         request_id: "req-audio".into(),
         ..chat_input()
     }
@@ -6078,7 +6079,9 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
         .await
         .unwrap();
         assert_eq!(fields["response_format"], "json");
-        assert_eq!(form.file, "sensitive audio");
+        assert!(
+            matches!(form.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "sensitive audio")
+        );
         let receipt = service
             .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
             .unwrap();
@@ -6527,11 +6530,16 @@ fn image_edits_input() -> CompletionInput {
         endpoint_path: "/v1/images/edits",
         params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
         received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
-        form: Some(Arc::new(private_ai_gateway::middleware::media::MediaForm {
-            kind: private_ai_gateway::middleware::media::FormKind::ImageEdit,
-            file: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
-            extension: "jpg".into(),
-        })),
+        form: Some(Arc::new(
+            private_ai_gateway::middleware::media::MediaForm::ImageEdit {
+                images: vec![private_ai_gateway::middleware::media::ImageFile {
+                    data: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
+                    format: private_ai_gateway::middleware::media::ImageFormat::Jpeg,
+                }],
+                mask: None,
+                markup: None,
+            },
+        )),
         request_id: "req-edits".into(),
         ..chat_input()
     }
@@ -6569,9 +6577,11 @@ async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() 
     .unwrap();
     assert_eq!(
         params,
-        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","response_format":"b64_json"})
+        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512"})
     );
-    assert_eq!(image.file, b"\xff\xd8\xffimage".as_slice());
+    assert!(
+        matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\xff\xd8\xffimage".as_slice())
+    );
     assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/images/edits");
     assert_eq!(
         pres.lock().unwrap()[0]["provider"],
@@ -6601,6 +6611,59 @@ async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() 
         json!({"count":1,"size":"512x512","quality":"auto"})
     );
     assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn image_edits_meter_only_returned_images_within_requested_count() {
+    for (requested, returned, upstream_status, expected) in [
+        (1, 1, 200, 200),
+        (10, 2, 200, 200),
+        (10, 10, 200, 200),
+        (1, 2, 200, 502),
+        (10, 11, 200, 502),
+        (10, 2, 400, 400),
+    ] {
+        let (url, posts) = spawn_control_capturing(
+            200,
+            json!({"allow":true,"candidates":[{
+            "routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]
+        }],"pricing":{"imageCostPerImage":"0.012"}}),
+        )
+        .await;
+        let (service, requests) = build_recording_service(
+            upstream_status,
+            serde_json::to_vec(&json!({"data":vec![json!({"b64_json":"image"}); returned]}))
+                .unwrap(),
+            "application/json",
+        );
+        let mut input = image_edits_input();
+        input.params["n"] = json!(requested);
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, expected, "n={requested}, returned={returned}");
+        let request = requests.lock().unwrap()[0].clone();
+        let (params, _) = private_ai_gateway::middleware::image_edits::parse(
+            request.raw_body,
+            request.content_type.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(params["n"], requested);
+        assert!(service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .is_some());
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+        assert_eq!(report["status"], expected);
+        assert!(report["usage"].is_null());
+        if expected == 200 {
+            assert_eq!(body["data"].as_array().unwrap().len(), returned);
+            assert_eq!(report["images"]["count"], returned);
+            assert_eq!(body["usage"]["cost"], json!(returned as f64 * 0.012));
+        } else {
+            assert!(report.get("images").is_none());
+            assert!(body["usage"]["cost"].is_null());
+        }
+    }
 }
 
 #[tokio::test]
@@ -6667,7 +6730,7 @@ async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
         .unwrap();
     let service = build_service_with_backend(Arc::new(router));
     let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
-    let raw = common::image_edit_request("gpt-test");
+    let raw = common::image_edit_request("gpt-test", 1);
     let request = |provider: Value| {
         axum::http::Request::builder()
             .method("POST")
