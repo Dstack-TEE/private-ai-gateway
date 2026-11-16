@@ -42,17 +42,19 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
             "each document must be a string or an object containing only text",
         ));
     }
-    if body.get("top_n").is_some_and(|v| {
-        !v.as_u64()
-            .is_some_and(|n| n >= 1 && n <= documents.len() as u64)
-    }) {
+    if body
+        .get("top_n")
+        .filter(|v| !v.is_null())
+        .is_some_and(|v| !v.as_u64().is_some_and(|n| n >= 1))
+    {
         return Err(RequestError::invalid(
             "top_n",
-            "top_n must be an integer from 1 to the document count",
+            "top_n must be a positive integer",
         ));
     }
     if body
         .get("return_documents")
+        .filter(|v| !v.is_null())
         .is_some_and(|v| !v.is_boolean())
     {
         return Err(RequestError::invalid(
@@ -101,13 +103,25 @@ pub fn upstream_body(body: &Value) -> Value {
             }
         }
     }
+    for key in ["top_n", "return_documents"] {
+        if output.get(key).is_some_and(Value::is_null) {
+            output.remove(key);
+        }
+    }
+    if let Some(top_n) = output.get("top_n").and_then(Value::as_u64) {
+        let count = body["documents"].as_array().map_or(0, Vec::len) as u64;
+        output.insert("top_n".into(), Value::from(top_n.min(count)));
+    }
     Value::Object(output)
 }
 
 pub fn validate_response(body: &Value, request: &Value) -> Result<(), &'static str> {
     let message = "upstream returned a malformed rerank success body";
     let documents = request["documents"].as_array().ok_or(message)?.len();
-    let top_n = request["top_n"].as_u64().unwrap_or(documents as u64);
+    let top_n = request["top_n"]
+        .as_u64()
+        .unwrap_or(documents as u64)
+        .min(documents as u64);
     let results = body["results"].as_array().ok_or(message)?;
     let mut indices = HashSet::new();
     if results.len() as u64 > top_n
@@ -226,7 +240,6 @@ mod tests {
             json!({"documents":[{"text":"a","url":"private"}]}),
             json!({"query":1}),
             json!({"top_n":0}),
-            json!({"top_n":3}),
             json!({"top_n":1.5}),
             json!({"return_documents":1}),
             json!({"stream":false}),
@@ -270,5 +283,40 @@ mod tests {
         }
         let duplicate = json!({"results":[{"index":0,"relevance_score":0.8},{"index":0,"relevance_score":0.7}],"usage":{"prompt_tokens":5,"total_tokens":5}});
         assert!(validate_response(&duplicate, &json!({"documents":["a","b"]})).is_err());
+    }
+
+    #[test]
+    fn clamps_top_n_and_treats_optional_nulls_as_absent() {
+        for (top_n, return_documents, expected_top_n) in [
+            (json!(100), json!(true), Some(2)),
+            (json!(1), json!(false), Some(1)),
+            (Value::Null, Value::Null, None),
+        ] {
+            let request = json!({"model":"ranker","query":"q","documents":["a","b"],
+                "top_n":top_n,"return_documents":return_documents});
+            validate_request(&request).unwrap();
+            let forwarded = upstream_body(&request);
+            assert_eq!(
+                forwarded.get("top_n").and_then(Value::as_u64),
+                expected_top_n
+            );
+            assert_eq!(
+                forwarded.get("return_documents"),
+                if return_documents.is_null() {
+                    None
+                } else {
+                    Some(&return_documents)
+                }
+            );
+            let mut response = json!({"results":[{"index":0,"relevance_score":1}],
+                "usage":{"prompt_tokens":1,"total_tokens":1}});
+            if expected_top_n != Some(1) {
+                response["results"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"index":1,"relevance_score":0.5}));
+            }
+            validate_response(&response, &request).unwrap();
+        }
     }
 }
