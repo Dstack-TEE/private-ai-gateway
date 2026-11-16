@@ -20,17 +20,12 @@ Last reviewed: 2026-11-16.
 
 Providers prove different claims; see [Provider verification](providers/README.md).
 
-Buffered image generation and OpenAI SDK multipart edits (up to 16 input images,
-optional PNG mask or markup, and up to 10 requested outputs) are available in
-direct and middleware modes, with separate endpoint opt-in, inline base64 output
-and receipts. Edit uploads have a 64 MiB body cap and 50 MiB per-image limit;
-non-default parameters are forwarded as-is, so support depends on the routed provider.
-JSON/URL/file-ID inputs and GIF/SVG preview parameters are not implemented.
-Reranking (including SDK aliases) and buffered speech synthesis
-also require explicit middleware opt-in and reject E2EE. See the
-[API reference](api-reference.md#reranking) for their contracts and limits.
-Streaming, image E2EE, and public-launch compliance controls remain outside the
-image endpoints' current scope.
+Buffered image generation, OpenAI SDK multipart edits, reranking (including
+SDK aliases), and speech synthesis are available in direct and middleware modes,
+with receipts and explicit per-endpoint middleware opt-in. See the
+[API reference](api-reference.md#reranking) for contracts and limits.
+Streaming media, media E2EE, JSON/URL/file-ID edit inputs, GIF/SVG preview parameters,
+and public-launch compliance controls remain out of scope.
 
 Audio transcription (`/v1/audio/transcriptions`) supports buffered multipart,
 JSON/verbose JSON, strict duration accounting, receipts, and per-second pricing

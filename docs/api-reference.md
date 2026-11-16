@@ -95,9 +95,9 @@ count. `n` is forwarded unchanged without retries to fill the count. `size`, `qu
 `background`, `output_format`, `input_fidelity`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
 for the string options are validated upstream. The default `"auto"` values of
-`size`, `quality`, and `background` are omitted upstream for both image endpoints;
-other values are forwarded as-is, so support depends on the routed provider. `response_format` must be absent
-or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
+`size`, `quality`, and `background` are omitted upstream for both image endpoints.
+`response_format` must be absent or `"b64_json"`; the gateway always forwards
+`"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
@@ -150,22 +150,20 @@ follows the [control-plane pricing contract](control-plane-contract.md#image-gen
 `POST /v1/images/edits` accepts the OpenAI SDK multipart surface: required
 `model`, `prompt` (1–32000 Unicode scalars), and either one `image` part or
 1–16 repeated `image[]` parts. Mixed names and repeated bare `image` parts are
-rejected. Unlike the SDK defaults, `model` is required for gateway routing.
-Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
+rejected. Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
 and be at most 50 MiB each. Optional `mask` is one PNG at most 4 MiB; optional
 `markup` is one PNG within the body limit. `mask` and `markup` are mutually
 exclusive. Dimension and transparency validation is left to the provider. The complete
 multipart body is limited to 64 MiB, including files, text and framing; aggregate
-text is limited to 1 MiB, and each non-prompt string field to 1024 bytes.
+text is limited to 1 MiB.
 
 Optional forwarded fields are `n` (integer 1–10, default 1), `size`, `quality`,
 `background`, `output_format`, `input_fidelity`, `moderation`, and
 `output_compression` (integer 0–100). Other optional fields above are strings;
-no provider-specific enum is enforced. Default `auto` values are omitted as for
-generations; other values are forwarded as-is, so support depends on the routed
-provider. `user`, `safety_identifier`, and `stream=false` are accepted and removed.
-`response_format` must be absent or `b64_json`; both image endpoints always send
-`response_format=b64_json` upstream.
+no provider-specific enum is enforced. Non-default parameters are forwarded as-is,
+so support depends on the routed provider. Default `auto` values and
+`response_format` follow [image generation](#image-generation).
+`user`, `safety_identifier`, and `stream=false` are accepted and removed.
 Routing/pinning uses `X-ACI-Provider`.
 
 The gateway re-encodes one input as `image`, multiple inputs as ordered repeated
@@ -211,8 +209,8 @@ that deadline. Each received chunk reserves only its actual bytes;
 `Content-Length` is used only for early 413 rejection. Connections with no
 buffered data reserve no upload capacity. Budget exhaustion returns
 `429 rate_limit_exceeded` with `Retry-After: 1`. Size failures (`413`) and upload
-timeouts (`408`) close the connection. A separate 16-slot transcription inference
-admission follows validation and, in middleware mode, successful control-plane
+timeouts (`408`) close the connection. A 16-slot inference admission shared by
+transcription and speech follows validation and, in middleware mode, successful control-plane
 authorization and route selection. Upload accounting remains held until that
 handoff. Response bodies and pending write buffers own inference admission until
 completion or disconnect. There are no queue or whitespace heartbeats.
@@ -286,7 +284,7 @@ routing/pinning.
 
 The body is exact buffered audio with a validated lowercase `audio/<subtype>`
 content type, parameters stripped; empty, malformed or non-audio successes yield receipted
-`502`s. Speech and transcriptions share the 16-slot AUDIO admission limit.
+`502`s.
 Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
 (`502`). Successful receipts sign the request's Unicode scalar count via the
 [ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).

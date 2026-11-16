@@ -466,18 +466,14 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
-| `POST /v1/rerank` | OPTIONAL (buffered JSON; unique in-range result indices, finite relevance scores, required prompt-token usage in 1..9007199254740991; no E2EE) |
+| `POST /v1/rerank` | OPTIONAL (non-streaming JSON; prompt-token usage) |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
-| `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, 1–16 ordered PNG/JPEG/WebP images (≤50 MiB each), optional PNG mask (≤4 MiB) or markup, ≤64 MiB body; non-streaming, inline base64 output; constraints via §5.3; charges use returned image count (1..n, n ≤10)) |
+| `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, non-streaming, inline base64 output; constraints via §5.3) |
 | `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output; request up to `n` images, 1..10, default 1; providers may return fewer; image charges use the returned count) |
-| `POST /v1/audio/speech` | OPTIONAL (buffered binary `audio/*`; JSON input of 1–4096 Unicode scalars; character usage; no streaming or E2EE) |
+| `POST /v1/audio/speech` | OPTIONAL (non-streaming binary `audio/*`; character usage) |
 | `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
-
-Image-edit non-default parameters are forwarded as-is, so support depends on the routed
-provider. The gateway's multipart field surface and buffered/inline-only limits
-are defined in the [API reference](../docs/api-reference.md#image-edits).
 
 Trust metadata is service-level and lives in the attestation report. Clients
 MUST NOT infer trust from `/v1/models` entries.
@@ -548,8 +544,7 @@ For `multipart/form-data`, the carrier is a single HTTP header
 same schema and semantics as the JSON `provider` field above, including
 non-empty session lists, boolean `aci_verified`, and rejection of unknown
 `aci_` members. The v1 multipart paths are `POST /v1/audio/transcriptions` and
-`POST /v1/images/edits`; clients MUST use only paths advertised in
-`service_capabilities.supported_multipart_constraint_endpoints`.
+`POST /v1/images/edits`.
 The field value MUST contain only US-ASCII bytes for HTTP
 field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
 surrogate pairs where needed, for non-ASCII characters in strings.
