@@ -14,49 +14,33 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormKind {
-    Transcription,
-    ImageEdit,
-}
-
 pub(crate) struct FormSpec {
     label: &'static str,
     file_field: &'static str,
-    filename_stem: &'static str,
-    max_file_bytes: usize,
     pub(crate) max_body_bytes: usize,
     max_text_bytes: usize,
-    upstream_fields: fn(&Value) -> Value,
+    file_limits: &'static [(&'static str, usize)],
 }
 
-const TRANSCRIPTION: FormSpec = FormSpec {
+pub(crate) const TRANSCRIPTION: FormSpec = FormSpec {
     label: "transcription",
     file_field: "file",
-    filename_stem: "audio",
-    max_file_bytes: super::audio::MAX_FILE_BYTES,
     max_body_bytes: super::audio::MAX_BODY_BYTES,
     max_text_bytes: super::audio::MAX_TEXT_BYTES,
-    upstream_fields: super::audio::upstream_fields,
+    file_limits: &[("file", super::audio::MAX_FILE_BYTES)],
 };
-const IMAGE_EDIT: FormSpec = FormSpec {
+pub(crate) const IMAGE_EDIT: FormSpec = FormSpec {
     label: "image edit",
     file_field: "image",
-    filename_stem: "image",
-    max_file_bytes: super::image_edits::MAX_FILE_BYTES,
     max_body_bytes: super::image_edits::MAX_BODY_BYTES,
     max_text_bytes: super::image_edits::MAX_TEXT_BYTES,
-    upstream_fields: super::image_edits::upstream_fields,
+    file_limits: &[
+        ("image", super::image_edits::MAX_FILE_BYTES),
+        ("image[]", super::image_edits::MAX_FILE_BYTES),
+        ("mask", super::image_edits::MAX_MASK_BYTES),
+        ("markup", super::image_edits::MAX_BODY_BYTES),
+    ],
 };
-
-impl FormKind {
-    pub(crate) fn spec(self) -> &'static FormSpec {
-        match self {
-            Self::Transcription => &TRANSCRIPTION,
-            Self::ImageEdit => &IMAGE_EDIT,
-        }
-    }
-}
 
 // 16 × (25 MiB file + 64 KiB text + 64 KiB framing) = 402 MiB.
 // Account for audio and image bytes together, including uploads awaiting consult.
@@ -73,49 +57,43 @@ pub struct MediaError {
     pub(crate) message: String,
     pub(crate) error_type: &'static str,
 }
-impl FormKind {
-    pub(crate) fn invalid(self, param: &str) -> MediaError {
+impl FormSpec {
+    pub(crate) fn invalid(&self, param: &str) -> MediaError {
         MediaError {
             status: StatusCode::BAD_REQUEST,
             code: "invalid_parameter",
             param: param.into(),
-            message: format!("invalid {} parameter: {param}", self.spec().label),
+            message: format!("invalid {} parameter: {param}", self.label),
             error_type: "invalid_request_error",
         }
     }
-    fn capacity(self) -> MediaError {
+    fn capacity(&self) -> MediaError {
         MediaError {
             status: StatusCode::TOO_MANY_REQUESTS,
             code: "rate_limit_exceeded",
             param: "body".into(),
-            message: format!(
-                "{} upload byte capacity reached; retry shortly",
-                self.spec().label
-            ),
+            message: format!("{} upload byte capacity reached; retry shortly", self.label),
             error_type: "rate_limit_error",
         }
     }
-    pub(crate) fn large(self) -> MediaError {
+    pub(crate) fn large(&self) -> MediaError {
         MediaError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: "request_too_large",
-            param: self.spec().file_field.into(),
+            param: self.file_field.into(),
             message: format!(
                 "{} upload exceeds the file or request size limit",
-                self.spec().label
+                self.label
             ),
             error_type: "invalid_request_error",
         }
     }
-    fn timeout(self) -> MediaError {
+    fn timeout(&self) -> MediaError {
         MediaError {
             status: StatusCode::REQUEST_TIMEOUT,
             code: "upload_timeout",
             param: "body".into(),
-            message: format!(
-                "{} upload exceeded the 60-second read deadline",
-                self.spec().label
-            ),
+            message: format!("{} upload exceeded the 60-second read deadline", self.label),
             error_type: "invalid_request_error",
         }
     }
@@ -143,48 +121,48 @@ impl IntoResponse for MediaError {
 
 /// Account for each received chunk until inference admission takes over, or
 /// the upload is refused, times out, or drops. Opening a connection reserves no bytes.
-pub async fn read_upload(
+pub(crate) async fn read_upload(
     headers: &HeaderMap,
     body: Body,
-    kind: FormKind,
+    spec: &FormSpec,
 ) -> Result<(Bytes, OwnedSemaphorePermit), MediaError> {
     if headers
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|v| v > kind.spec().max_body_bytes as u64)
+        .is_some_and(|v| v > spec.max_body_bytes as u64)
     {
-        return Err(kind.large());
+        return Err(spec.large());
     }
     tokio::time::timeout(
         READ_DEADLINE,
-        collect_upload(body, UPLOAD_BYTES.clone(), kind),
+        collect_upload(body, UPLOAD_BYTES.clone(), spec),
     )
     .await
-    .map_err(|_| kind.timeout())?
+    .map_err(|_| spec.timeout())?
 }
 
 async fn collect_upload(
     body: Body,
     budget: Arc<Semaphore>,
-    kind: FormKind,
+    spec: &FormSpec,
 ) -> Result<(Bytes, OwnedSemaphorePermit), MediaError> {
     let mut permit = budget
         .clone()
         .try_acquire_many_owned(0)
-        .map_err(|_| kind.capacity())?;
+        .map_err(|_| spec.capacity())?;
     let mut chunks = body.into_data_stream();
     let mut bytes = bytes::BytesMut::new();
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|_| kind.invalid("body"))?;
-        if chunk.len() > kind.spec().max_body_bytes - bytes.len() {
-            return Err(kind.large());
+        let chunk = chunk.map_err(|_| spec.invalid("body"))?;
+        if chunk.len() > spec.max_body_bytes - bytes.len() {
+            return Err(spec.large());
         }
-        let count = u32::try_from(chunk.len()).map_err(|_| kind.large())?;
+        let count = u32::try_from(chunk.len()).map_err(|_| spec.large())?;
         let chunk_permit = budget
             .clone()
             .try_acquire_many_owned(count)
-            .map_err(|_| kind.capacity())?;
+            .map_err(|_| spec.capacity())?;
         permit.merge(chunk_permit);
         bytes.extend_from_slice(&chunk);
     }
@@ -200,8 +178,7 @@ pub enum MediaForm {
     },
     ImageEdit {
         images: Vec<ImageFile>,
-        mask: Option<Bytes>,
-        markup: Option<Bytes>,
+        overlay: Option<(&'static str, Bytes)>,
     },
 }
 
@@ -231,26 +208,21 @@ impl ImageFormat {
 pub(crate) fn multipart(
     body: Bytes,
     content_type: &str,
-    kind: FormKind,
+    spec: &FormSpec,
 ) -> Result<multer::Multipart<'static>, MediaError> {
     let boundary =
-        multer::parse_boundary(content_type).map_err(|_| kind.invalid("content-type"))?;
+        multer::parse_boundary(content_type).map_err(|_| spec.invalid("content-type"))?;
     if boundary.is_empty()
         || boundary.len() > 70
         || !boundary.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
     {
-        return Err(kind.invalid("boundary"));
+        return Err(spec.invalid("boundary"));
     }
-    let spec = kind.spec();
     let mut limits = multer::SizeLimit::new()
         .whole_stream(spec.max_body_bytes as u64)
-        .per_field(spec.max_text_bytes as u64)
-        .for_field(spec.file_field, spec.max_file_bytes as u64);
-    if kind == FormKind::ImageEdit {
-        limits = limits
-            .for_field("image[]", spec.max_file_bytes as u64)
-            .for_field("mask", super::image_edits::MAX_MASK_BYTES as u64)
-            .for_field("markup", spec.max_body_bytes as u64);
+        .per_field(spec.max_text_bytes as u64);
+    for &(name, limit) in spec.file_limits {
+        limits = limits.for_field(name, limit as u64);
     }
     let constraints = multer::Constraints::new().size_limit(limits);
     Ok(multer::Multipart::with_constraints(
@@ -260,8 +232,8 @@ pub(crate) fn multipart(
     ))
 }
 
-pub(crate) fn field_name(field: &multer::Field<'_>, kind: FormKind) -> Result<String, MediaError> {
-    let name = field.name().ok_or_else(|| kind.invalid("field"))?;
+pub(crate) fn field_name(field: &multer::Field<'_>, spec: &FormSpec) -> Result<String, MediaError> {
+    let name = field.name().ok_or_else(|| spec.invalid("field"))?;
     if name.len() > 64
         || field
             .headers()
@@ -270,19 +242,12 @@ pub(crate) fn field_name(field: &multer::Field<'_>, kind: FormKind) -> Result<St
             .sum::<usize>()
             > 8192
     {
-        return Err(kind.invalid("multipart"));
+        return Err(spec.invalid("multipart"));
     }
     Ok(name.to_string())
 }
 
 impl MediaForm {
-    pub(crate) fn kind(&self) -> FormKind {
-        match self {
-            Self::Transcription { .. } => FormKind::Transcription,
-            Self::ImageEdit { .. } => FormKind::ImageEdit,
-        }
-    }
-
     /// Encode once after model selection. These exact immutable bytes are both
     /// hashed and transmitted, including on channel binding retries.
     pub async fn encode(
@@ -290,13 +255,16 @@ impl MediaForm {
         params: &Value,
     ) -> Result<(Bytes, String), crate::aci::upstream::UpstreamError> {
         use crate::aci::upstream::UpstreamError;
-        let kind = self.kind();
+        let (fields, filename_stem, spec) = match self {
+            Self::Transcription { .. } => (
+                super::audio::upstream_fields(params),
+                "audio",
+                &TRANSCRIPTION,
+            ),
+            Self::ImageEdit { .. } => (super::images::upstream_body(params), "image", &IMAGE_EDIT),
+        };
         let mut form = reqwest::multipart::Form::new();
-        for (key, value) in (kind.spec().upstream_fields)(params)
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
+        for (key, value) in fields.as_object().into_iter().flatten() {
             if let Some(values) = value.as_array() {
                 for value in values {
                     form = form.text(key.clone(), value.as_str().unwrap_or_default().to_string());
@@ -315,11 +283,7 @@ impl MediaForm {
             Self::Transcription { file, extension } => {
                 vec![("file", file, extension.as_str(), "application/octet-stream")]
             }
-            Self::ImageEdit {
-                images,
-                mask,
-                markup,
-            } => {
+            Self::ImageEdit { images, overlay } => {
                 let name = if images.len() == 1 {
                     "image"
                 } else {
@@ -332,11 +296,10 @@ impl MediaForm {
                         (name, &image.data, extension, mime)
                     })
                     .collect();
-                files.extend(mask.as_ref().map(|data| ("mask", data, "png", "image/png")));
                 files.extend(
-                    markup
+                    overlay
                         .as_ref()
-                        .map(|data| ("markup", data, "png", "image/png")),
+                        .map(|(name, data)| (*name, data, "png", "image/png")),
                 );
                 files
             }
@@ -344,7 +307,7 @@ impl MediaForm {
         for (name, data, extension, mime) in files {
             let file =
                 reqwest::multipart::Part::stream_with_length(data.clone(), data.len() as u64)
-                    .file_name(format!("{}.{extension}", kind.spec().filename_stem))
+                    .file_name(format!("{filename_stem}.{extension}"))
                     .mime_str(mime)
                     .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
             form = form.part(name, file);
@@ -355,7 +318,7 @@ impl MediaForm {
         let mut bytes = bytes::BytesMut::new();
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk.map_err(|e| UpstreamError::Transport(e.to_string()))?;
-            if chunk.len() > kind.spec().max_body_bytes - bytes.len() {
+            if chunk.len() > spec.max_body_bytes - bytes.len() {
                 return Err(UpstreamError::InvalidRequest(
                     "encoded multipart body exceeds limit".into(),
                 ));
@@ -396,9 +359,8 @@ pub(super) async fn test_multipart(
 
 #[cfg(test)]
 mod tests {
-    use super::super::audio::MAX_BODY_BYTES;
     use super::*;
-    const KIND: FormKind = FormKind::Transcription;
+    const SPEC: &FormSpec = &TRANSCRIPTION;
 
     #[tokio::test(start_paused = true)]
     async fn slow_upload_has_deadline_and_releases_buffered_bytes() {
@@ -407,7 +369,7 @@ mod tests {
             stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"x")) })
                 .chain(stream::pending()),
         );
-        let result = read_upload(&HeaderMap::new(), body, KIND).await;
+        let result = read_upload(&HeaderMap::new(), body, SPEC).await;
         let error = result.unwrap_err();
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
@@ -417,25 +379,27 @@ mod tests {
 
     #[tokio::test]
     async fn declared_and_received_oversized_uploads_close_the_connection() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_LENGTH, (MAX_BODY_BYTES + 1).into());
-        let unread = Body::from_stream(stream::poll_fn(
-            |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
-                panic!("declared oversize upload must not be read")
-            },
-        ));
-        let declared = read_upload(&headers, unread, KIND).await.unwrap_err();
-        let received = read_upload(
-            &HeaderMap::new(),
-            Body::from(vec![0; MAX_BODY_BYTES + 1]),
-            KIND,
-        )
-        .await
-        .unwrap_err();
-        for error in [declared, received] {
-            let response = error.into_response();
-            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-            assert_eq!(response.headers()[header::CONNECTION], "close");
+        for spec in [&TRANSCRIPTION, &IMAGE_EDIT] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_LENGTH, (spec.max_body_bytes + 1).into());
+            let unread = Body::from_stream(stream::poll_fn(
+                |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+                    panic!("declared oversize upload must not be read")
+                },
+            ));
+            let declared = read_upload(&headers, unread, spec).await.unwrap_err();
+            let received = read_upload(
+                &HeaderMap::new(),
+                Body::from(vec![0; spec.max_body_bytes + 1]),
+                spec,
+            )
+            .await
+            .unwrap_err();
+            for error in [declared, received] {
+                let response = error.into_response();
+                assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                assert_eq!(response.headers()[header::CONNECTION], "close");
+            }
         }
     }
 
@@ -446,12 +410,12 @@ mod tests {
             Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
             Ok(Bytes::from_static(b"cde")),
         ]));
-        let (bytes, permit) = collect_upload(body, budget.clone(), KIND).await.unwrap();
+        let (bytes, permit) = collect_upload(body, budget.clone(), SPEC).await.unwrap();
         assert_eq!(bytes, "abcde");
         assert_eq!(permit.num_permits(), 5);
         assert_eq!(budget.available_permits(), 2);
 
-        let rejected = collect_upload(Body::from("xyz"), budget.clone(), KIND)
+        let rejected = collect_upload(Body::from("xyz"), budget.clone(), SPEC)
             .await
             .unwrap_err();
         let response = rejected.into_response();
@@ -463,49 +427,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_body_limit_fits_shared_budget_and_releases_bytes_on_oversize() {
-        let kind = FormKind::ImageEdit;
-        let limit = super::super::image_edits::MAX_BODY_BYTES;
-        let budget = Arc::new(Semaphore::new(UPLOAD_BYTE_BUDGET));
-        assert_eq!(UPLOAD_BYTE_BUDGET, 402 * 1024 * 1024);
-        let chunk = Bytes::from(vec![0; limit]);
-        let (bytes, permit) = collect_upload(Body::from(chunk.clone()), budget.clone(), kind)
-            .await
-            .unwrap();
-        assert_eq!(bytes.len(), limit);
-        assert_eq!(permit.num_permits(), limit);
-        assert_eq!(budget.available_permits(), UPLOAD_BYTE_BUDGET - limit);
-        drop((bytes, permit));
-        let body = Body::from_stream(stream::iter([
-            Ok::<_, std::io::Error>(chunk),
-            Ok(Bytes::from_static(b"x")),
-        ]));
-        assert_eq!(
-            collect_upload(body, budget.clone(), kind)
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-        assert_eq!(budget.available_permits(), UPLOAD_BYTE_BUDGET);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_LENGTH, (limit + 1).into());
-        let unread = Body::from_stream(stream::poll_fn(
-            |_| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
-                panic!("declared oversize edit must not be read")
-            },
-        ));
-        assert_eq!(
-            read_upload(&headers, unread, kind)
-                .await
-                .unwrap_err()
-                .status,
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-    }
-
-    #[tokio::test]
     async fn upload_errors_and_disconnects_release_partial_byte_reservations() {
         let budget = Arc::new(Semaphore::new(7));
         let body = Body::from_stream(stream::iter([
@@ -513,7 +434,7 @@ mod tests {
             Err(std::io::Error::other("upload interrupted")),
         ]));
         assert_eq!(
-            collect_upload(body, budget.clone(), KIND)
+            collect_upload(body, budget.clone(), SPEC)
                 .await
                 .unwrap_err()
                 .code,
@@ -533,7 +454,7 @@ mod tests {
                 }),
             ),
         );
-        let task = tokio::spawn(collect_upload(body, budget.clone(), KIND));
+        let task = tokio::spawn(collect_upload(body, budget.clone(), SPEC));
         rx.await.unwrap();
         assert_eq!(budget.available_permits(), 5);
         task.abort();

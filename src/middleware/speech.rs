@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 
-use axum::http::HeaderValue;
 use serde_json::{json, Value};
 
 use super::images::{max_chars, object_with, pick, require_strings, RequestError};
@@ -19,16 +18,7 @@ const UPSTREAM_FIELDS: &[&str] = &[
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
     object_with(
         body,
-        &[
-            "model",
-            "input",
-            "voice",
-            "response_format",
-            "speed",
-            "instructions",
-            "stream_format",
-            "provider",
-        ],
+        &[UPSTREAM_FIELDS, &["stream_format", "provider"]].concat(),
     )?;
     require_strings(body, &["model", "input", "voice"])?;
     if body["input"].as_str().is_some_and(str::is_empty) {
@@ -85,7 +75,7 @@ pub fn response_content_type(headers: &HashMap<String, String>, body: &[u8]) -> 
         return None;
     }
     let value = headers.get("content-type")?;
-    if value.contains(',') || HeaderValue::from_str(value).is_err() {
+    if value.contains(',') {
         return None;
     }
     let media_type = value.parse::<mime::Mime>().ok()?;

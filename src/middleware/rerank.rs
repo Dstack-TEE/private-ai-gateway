@@ -6,22 +6,19 @@ use serde_json::Value;
 
 use super::images::{max_chars, object_with, pick, require_strings, RequestError};
 
+const UPSTREAM_FIELDS: &[&str] = &[
+    "model",
+    "query",
+    "documents",
+    "top_n",
+    "return_documents",
+    "max_tokens_per_doc",
+    "instruction",
+    "truncate_prompt_tokens",
+];
+
 pub fn validate_request(body: &Value) -> Result<(), RequestError> {
-    object_with(
-        body,
-        &[
-            "model",
-            "query",
-            "documents",
-            "top_n",
-            "return_documents",
-            "max_tokens_per_doc",
-            "instruction",
-            "truncate_prompt_tokens",
-            "user",
-            "provider",
-        ],
-    )?;
+    object_with(body, &[UPSTREAM_FIELDS, &["user", "provider"]].concat())?;
     require_strings(body, &["model", "query"])?;
     if body.get("user").is_some_and(|v| !v.is_string()) {
         return Err(RequestError::invalid("user", "parameter must be a string"));
@@ -83,19 +80,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 }
 
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = pick(
-        body,
-        &[
-            "model",
-            "query",
-            "documents",
-            "top_n",
-            "return_documents",
-            "max_tokens_per_doc",
-            "instruction",
-            "truncate_prompt_tokens",
-        ],
-    );
+    let mut output = pick(body, UPSTREAM_FIELDS);
     if let Some(documents) = output.get_mut("documents").and_then(Value::as_array_mut) {
         for document in documents {
             if let Some(text) = document.get("text").and_then(Value::as_str) {
@@ -103,11 +88,7 @@ pub fn upstream_body(body: &Value) -> Value {
             }
         }
     }
-    for key in ["top_n", "return_documents"] {
-        if output.get(key).is_some_and(Value::is_null) {
-            output.remove(key);
-        }
-    }
+    output.retain(|_, value| !value.is_null());
     if let Some(top_n) = output.get("top_n").and_then(Value::as_u64) {
         let count = body["documents"].as_array().map_or(0, Vec::len) as u64;
         output.insert("top_n".into(), Value::from(top_n.min(count)));
@@ -206,10 +187,9 @@ pub fn sanitize_response(body: &mut Value, request: &Value) -> Result<(), &'stat
     Ok(())
 }
 
-pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
-    let request: Value = serde_json::from_slice(request).ok()?;
+pub fn response_body(response: &[u8], request: &Value) -> Option<Vec<u8>> {
     let mut body: Value = serde_json::from_slice(response).ok()?;
-    sanitize_response(&mut body, &request).ok()?;
+    sanitize_response(&mut body, request).ok()?;
     canonicalize(&mut body);
     serde_json::to_vec(&body).ok()
 }
@@ -218,6 +198,30 @@ pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn response_body_strips_provider_cost_and_optional_documents() {
+        for (return_documents, document) in [
+            (None, Value::Null),
+            (Some(false), Value::Null),
+            (Some(false), json!({"text":"private text","url":"private"})),
+            (Some(false), json!("private")),
+        ] {
+            let response = serde_json::to_vec(&json!({
+                "results":[{"index":0,"relevance_score":0.9,"document":document}],
+                "usage":{"prompt_tokens":5,"total_tokens":5,"cost":99,"completion_tokens":100}
+            }))
+            .unwrap();
+            let mut request = json!({"documents":["a"]});
+            if let Some(value) = return_documents {
+                request["return_documents"] = value.into();
+            }
+            let body: Value =
+                serde_json::from_slice(&response_body(&response, &request).unwrap()).unwrap();
+            assert_eq!(body["results"], json!([{"index":0,"relevance_score":0.9}]));
+            assert_eq!(body["usage"], json!({"prompt_tokens":5,"total_tokens":5}));
+        }
+    }
 
     #[test]
     fn validates_inputs_without_forwarding_routing_metadata() {

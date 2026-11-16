@@ -175,16 +175,13 @@ pub fn transform_to_provider_request(
         (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
             return Ok(super::speech::upstream_body(params));
         }
-        (ProviderFormat::Openai, Endpoint::ImagesEdits) => {
-            return Ok(super::image_edits::upstream_fields(params));
-        }
         (ProviderFormat::Openai, Endpoint::Rerank) => {
             return Ok(super::rerank::upstream_body(params));
         }
         (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
             return Ok(super::audio::upstream_fields(params));
         }
-        (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
+        (ProviderFormat::Openai, Endpoint::ImagesEdits | Endpoint::ImagesGenerations) => {
             return Ok(super::images::upstream_body(params));
         }
         (ProviderFormat::Openai, Endpoint::Messages) => {

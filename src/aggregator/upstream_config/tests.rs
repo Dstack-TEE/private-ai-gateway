@@ -1083,12 +1083,35 @@ fn audio_transcription_config_rejects_unsupported_adapters() {
 #[test]
 fn near_audio_always_requests_verbose_duration_without_affecting_json_requests() {
     use crate::aci::upstream::UpstreamRequest;
+    use crate::middleware::media::{ImageFile, ImageFormat, MediaForm};
     use bytes::Bytes;
-
-    for (provider, audio, expected_format) in [
-        (UpstreamProvider::NearAi, true, "verbose_json"),
-        (UpstreamProvider::NearAi, false, "json"),
-        (UpstreamProvider::OpenAiCompatible, true, "json"),
+    let transcription = MediaForm::Transcription {
+        file: Bytes::from_static(b"audio"),
+        extension: "wav".into(),
+    };
+    for (provider, form, expected_format) in [
+        (
+            UpstreamProvider::NearAi,
+            Some(transcription.clone()),
+            "verbose_json",
+        ),
+        (UpstreamProvider::NearAi, None, "json"),
+        (
+            UpstreamProvider::OpenAiCompatible,
+            Some(transcription),
+            "json",
+        ),
+        (
+            UpstreamProvider::NearAi,
+            Some(MediaForm::ImageEdit {
+                images: vec![ImageFile {
+                    data: Bytes::from_static(b"\xff\xd8\xffimage"),
+                    format: ImageFormat::Jpeg,
+                }],
+                overlay: None,
+            }),
+            "json",
+        ),
     ] {
         let config = test_upstream_config("audio", provider, "whisper", "upstream-whisper");
         let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
@@ -1096,47 +1119,21 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
             .backend
             .prepare(UpstreamRequest {
                 body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
-                path: Some("/v1/audio/transcriptions".into()),
-                form: audio.then(|| {
-                    Arc::new(crate::middleware::media::MediaForm::Transcription {
-                        file: Bytes::from_static(b"audio"),
-                        extension: "wav".into(),
-                    })
-                }),
+                path: Some(
+                    if matches!(form, Some(MediaForm::ImageEdit { .. })) {
+                        "/v1/images/edits"
+                    } else {
+                        "/v1/audio/transcriptions"
+                    }
+                    .into(),
+                ),
+                form: form.map(Arc::new),
                 ..Default::default()
             })
             .unwrap();
         let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
         assert_eq!(fields["response_format"], expected_format);
     }
-}
-
-#[test]
-fn near_image_edits_do_not_receive_transcription_format_override() {
-    use crate::aci::upstream::UpstreamRequest;
-    use crate::middleware::media::{ImageFile, ImageFormat, MediaForm};
-    use bytes::Bytes;
-
-    let config = test_upstream_config("images", UpstreamProvider::NearAi, "flux", "upstream-flux");
-    let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
-    let prepared = state
-        .backend
-        .prepare(UpstreamRequest {
-            body: Bytes::from_static(br#"{"model":"flux"}"#),
-            path: Some("/v1/images/edits".into()),
-            form: Some(Arc::new(MediaForm::ImageEdit {
-                images: vec![ImageFile {
-                    data: Bytes::from_static(b"\xff\xd8\xffimage"),
-                    format: ImageFormat::Jpeg,
-                }],
-                mask: None,
-                markup: None,
-            })),
-            ..Default::default()
-        })
-        .unwrap();
-    let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
-    assert!(fields.get("response_format").is_none());
 }
 
 #[test]

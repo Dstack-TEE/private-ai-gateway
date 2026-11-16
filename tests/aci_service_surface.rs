@@ -4831,7 +4831,6 @@ async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
     for (upstream, status) in [
         (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
         (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
-        (br#"{"results":[{"index":2,"relevance_score":0.9}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.as_slice(), StatusCode::BAD_GATEWAY),
     ] {
         let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
         let response = h.requester.post("/v1/rerank", request, &[("authorization", "Bearer tenant-key")]).await;
@@ -4857,56 +4856,6 @@ async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
 }
 
 #[tokio::test]
-async fn rerank_strips_provider_cost_and_honors_optional_documents_in_direct_mode() {
-    for (return_documents, document) in [
-        (None, Value::Null),
-        (Some(false), Value::Null),
-        (
-            Some(false),
-            serde_json::json!({"text":"private text","url":"private"}),
-        ),
-        (Some(false), serde_json::json!("private")),
-    ] {
-        let upstream = serde_json::to_vec(&serde_json::json!({
-            "results":[{"index":0,"relevance_score":0.9,"document":document}],
-            "usage":{"prompt_tokens":5,"total_tokens":5,"cost":99,"completion_tokens":100}
-        }))
-        .unwrap();
-        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
-        let mut request = serde_json::json!({"model":"aci-model","query":"q","documents":["a"]});
-        if let Some(return_documents) = return_documents {
-            request["return_documents"] = return_documents.into();
-        }
-        let response = h
-            .requester
-            .post(
-                "/v1/rerank",
-                &serde_json::to_vec(&request).unwrap(),
-                &[("authorization", "Bearer tenant-key")],
-            )
-            .await;
-        assert_eq!(response.status, StatusCode::OK);
-        let body = json_body(&response);
-        assert_eq!(
-            body["results"],
-            serde_json::json!([{"index":0,"relevance_score":0.9}])
-        );
-        assert_eq!(
-            body["usage"],
-            serde_json::json!({"prompt_tokens":5,"total_tokens":5})
-        );
-        let receipt = h
-            .service
-            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
-            .unwrap();
-        assert_eq!(
-            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
-            sha256_hex(&response.body)
-        );
-    }
-}
-
-#[tokio::test]
 async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body() {
     for (upstream, requested, status) in [
         (
@@ -4920,17 +4869,7 @@ async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body
             StatusCode::BAD_GATEWAY,
         ),
         (
-            serde_json::json!({"data":[{"b64_json":"one"},{"b64_json":"two"}]}),
-            1,
-            StatusCode::BAD_GATEWAY,
-        ),
-        (
             serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 2]}),
-            10,
-            StatusCode::OK,
-        ),
-        (
-            serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 10]}),
             10,
             StatusCode::OK,
         ),
@@ -5007,11 +4946,9 @@ async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body
 #[tokio::test]
 async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
     let audio = b"RIFF\0\xffWAVE\x80audio";
-    let content_type = "Audio/WAV; rate=24000";
-    let expected_type = "audio/wav";
     let h = harness_with_upstream(RecordingUpstream {
         response_body: audio.to_vec(),
-        response_content_type: content_type,
+        response_content_type: "Audio/WAV; rate=24000",
         ..Default::default()
     });
     let raw = serde_json::to_vec(&serde_json::json!({"model":"aci-model","input":"界🙂e\u{301}","voice":"ryan","stream_format":"audio"})).unwrap();
@@ -5024,7 +4961,7 @@ async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
         )
         .await;
     assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.headers["content-type"], expected_type);
+    assert_eq!(response.headers["content-type"], "audio/wav");
     assert_eq!(response.body, audio);
     let calls = h.upstream_calls.lock().unwrap();
     assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));

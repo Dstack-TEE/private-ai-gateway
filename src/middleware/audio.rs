@@ -1,5 +1,7 @@
 //! Bounded OpenAI multipart transcription input and sanitized JSON output.
 
+use super::media::{self, MediaError, MediaForm, TRANSCRIPTION};
+
 use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -16,11 +18,9 @@ const UPSTREAM_FIELDS: &[&str] = &[
     "response_format",
     "timestamp_granularities[]",
 ];
-use super::media::{self, FormKind, MediaError, MediaForm};
-const KIND: FormKind = FormKind::Transcription;
 
 pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaForm>), MediaError> {
-    let mut multipart = media::multipart(body, content_type, KIND)?;
+    let mut multipart = media::multipart(body, content_type, &TRANSCRIPTION)?;
     let mut params = Map::new();
     let mut seen = HashSet::new();
     let mut timestamps = Vec::new();
@@ -30,22 +30,22 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| KIND.invalid("multipart"))?
+        .map_err(|_| TRANSCRIPTION.invalid("multipart"))?
     {
         // Only parsed values are used; reqwest re-encodes caller part headers.
-        let name = media::field_name(&field, KIND)?;
+        let name = media::field_name(&field, &TRANSCRIPTION)?;
         let timestamp = matches!(
             name.as_str(),
             "timestamp_granularities" | "timestamp_granularities[]"
         );
         if !timestamp && !seen.insert(name.clone()) {
-            return Err(KIND.invalid(&name));
+            return Err(TRANSCRIPTION.invalid(&name));
         }
         if name == "file" {
             let filename = field
                 .file_name()
                 .filter(|v| v.len() <= 255)
-                .ok_or_else(|| KIND.invalid("file"))?;
+                .ok_or_else(|| TRANSCRIPTION.invalid("file"))?;
             let ext = filename
                 .rsplit_once('.')
                 .map(|(_, e)| e.to_ascii_lowercase())
@@ -55,10 +55,10 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
                     ]
                     .contains(&e.as_str())
                 })
-                .ok_or_else(|| KIND.invalid("file"))?;
-            let data = field.bytes().await.map_err(|_| KIND.large())?;
+                .ok_or_else(|| TRANSCRIPTION.invalid("file"))?;
+            let data = field.bytes().await.map_err(|_| TRANSCRIPTION.large())?;
             if data.is_empty() {
-                return Err(KIND.invalid("file"));
+                return Err(TRANSCRIPTION.invalid("file"));
             }
             file = Some(Arc::new(MediaForm::Transcription {
                 file: data,
@@ -72,21 +72,24 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
         {
             return Err(MediaError {
                 code: "unknown_parameter",
-                ..KIND.invalid(&name)
+                ..TRANSCRIPTION.invalid(&name)
             });
         }
         if field.file_name().is_some() {
-            return Err(KIND.invalid(&name));
+            return Err(TRANSCRIPTION.invalid(&name));
         }
-        let data = field.bytes().await.map_err(|_| KIND.invalid(&name))?;
+        let data = field
+            .bytes()
+            .await
+            .map_err(|_| TRANSCRIPTION.invalid(&name))?;
         text_bytes += data.len();
         if text_bytes > MAX_TEXT_BYTES {
-            return Err(KIND.invalid("fields"));
+            return Err(TRANSCRIPTION.invalid("fields"));
         }
-        let value = std::str::from_utf8(&data).map_err(|_| KIND.invalid(&name))?;
+        let value = std::str::from_utf8(&data).map_err(|_| TRANSCRIPTION.invalid(&name))?;
         if name == "stream" {
             if value != "false" {
-                return Err(KIND.invalid(&name));
+                return Err(TRANSCRIPTION.invalid(&name));
             }
         } else if timestamp {
             if timestamp_name.as_ref().is_some_and(|n| n != &name)
@@ -94,7 +97,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
                 || !["word", "segment"].contains(&value)
                 || timestamps.len() >= 2
             {
-                return Err(KIND.invalid(&name));
+                return Err(TRANSCRIPTION.invalid(&name));
             }
             timestamp_name = Some(name);
             timestamps.push(value.to_string());
@@ -103,7 +106,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
                 .parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
-                .ok_or_else(|| KIND.invalid(&name))?;
+                .ok_or_else(|| TRANSCRIPTION.invalid(&name))?;
             params.insert(name, json!(temperature));
         } else {
             params.insert(name, Value::String(value.into()));
@@ -114,35 +117,35 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
         .and_then(Value::as_str)
         .is_some_and(|s| !s.trim().is_empty())
     {
-        return Err(KIND.invalid("model"));
+        return Err(TRANSCRIPTION.invalid("model"));
     }
     if params.get("language").is_some_and(|v| {
         !v.as_str().is_some_and(|s| {
             (2..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase())
         })
     }) {
-        return Err(KIND.invalid("language"));
+        return Err(TRANSCRIPTION.invalid("language"));
     }
     if params
         .get("prompt")
         .and_then(Value::as_str)
         .is_some_and(|s| s.chars().count() > 4096)
     {
-        return Err(KIND.invalid("prompt"));
+        return Err(TRANSCRIPTION.invalid("prompt"));
     }
     let format = params.entry("response_format").or_insert(json!("json"));
     if !matches!(format.as_str(), Some("json" | "verbose_json")) {
-        return Err(KIND.invalid("response_format"));
+        return Err(TRANSCRIPTION.invalid("response_format"));
     }
     if !timestamps.is_empty() {
         if format != "verbose_json" {
-            return Err(KIND.invalid("timestamp_granularities"));
+            return Err(TRANSCRIPTION.invalid("timestamp_granularities"));
         }
         params.insert("timestamp_granularities[]".into(), json!(timestamps));
     }
     Ok((
         Value::Object(params),
-        file.ok_or_else(|| KIND.invalid("file"))?,
+        file.ok_or_else(|| TRANSCRIPTION.invalid("file"))?,
     ))
 }
 

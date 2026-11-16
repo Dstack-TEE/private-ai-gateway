@@ -215,8 +215,7 @@ impl AciService {
         &self,
         endpoint: Endpoint,
         response: Vec<u8>,
-        request: &[u8],
-        request_metadata: Option<&Value>,
+        request_metadata: &Value,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<(Vec<u8>, String), &'static str> {
         let body = match endpoint {
@@ -226,27 +225,23 @@ impl AciService {
                         .ok_or("upstream returned a non-audio speech response")?;
                 return Ok((response, content_type));
             }
-            Endpoint::Rerank => crate::middleware::rerank::response_body(&response, request),
-            Endpoint::ImagesEdits => crate::middleware::images::response_body_for_count(
-                &response,
-                crate::middleware::images::requested_count(
-                    request_metadata.unwrap_or(&Value::Null),
-                ),
-            ),
-            Endpoint::ImagesGenerations => {
-                crate::middleware::images::response_body(&response, request)
+            Endpoint::Rerank => {
+                crate::middleware::rerank::response_body(&response, request_metadata)
+            }
+            Endpoint::ImagesEdits | Endpoint::ImagesGenerations => {
+                crate::middleware::images::response_body(
+                    &response,
+                    crate::middleware::images::requested_count(request_metadata),
+                )
             }
             Endpoint::AudioTranscriptions => {
                 let message = "upstream returned a malformed transcription response";
                 let body = serde_json::from_slice::<Value>(&response).map_err(|_| message)?;
-                let (body, _) = crate::middleware::audio::sanitize_response(
-                    body,
-                    request_metadata.unwrap_or(&Value::Null),
-                )
-                .map_err(|_| {
-                    self.metrics.record_audio_failure("malformed_duration");
-                    message
-                })?;
+                let (body, _) = crate::middleware::audio::sanitize_response(body, request_metadata)
+                    .map_err(|_| {
+                        self.metrics.record_audio_failure("malformed_duration");
+                        message
+                    })?;
                 return serde_json::to_vec(&body)
                     .map(|body| (body, "application/json".into()))
                     .map_err(|_| message);
@@ -302,11 +297,9 @@ impl AciService {
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
-        let request_metadata = matches!(
-            endpoint,
-            Endpoint::AudioTranscriptions | Endpoint::AudioSpeech | Endpoint::ImagesEdits
-        )
-        .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
+        let request_metadata = endpoint
+            .is_buffered_native()
+            .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
         let mut prepared = self.upstream.prepare(UpstreamRequest {
             cache_salt: req.context.cache_salt.clone(),
             body: backend_input_body.into(),
@@ -386,8 +379,7 @@ impl AciService {
                 let sanitized = self.sanitize_buffered_success(
                     endpoint,
                     upstream_response.body,
-                    &forwarded_body,
-                    request_metadata.as_ref(),
+                    request_metadata.as_ref().unwrap_or(&Value::Null),
                     &upstream_headers,
                 );
                 match sanitized {
@@ -424,11 +416,7 @@ impl AciService {
             )
         };
 
-        let chat_id = if endpoint.is_media() {
-            None
-        } else {
-            extract_chat_id(&client_body)
-        };
+        let chat_id = extract_chat_id(&client_body);
         let e2ee = req.e2ee.as_ref();
         let wire_response_body = match e2ee {
             Some(ctx) => encrypt_e2ee_response_body(&client_body, ctx, endpoint_path)?,

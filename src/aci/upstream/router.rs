@@ -197,7 +197,10 @@ impl UpstreamBackend for ModelRouterBackend {
         request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?.into();
         if route.force_verbose_json
             && request.form.as_ref().is_some_and(|form| {
-                form.kind() == crate::middleware::media::FormKind::Transcription
+                matches!(
+                    **form,
+                    crate::middleware::media::MediaForm::Transcription { .. }
+                )
             })
         {
             let mut metadata: serde_json::Value = serde_json::from_slice(&request.body)

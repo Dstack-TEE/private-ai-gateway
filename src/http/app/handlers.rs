@@ -592,23 +592,23 @@ async fn buffered_native_endpoint(
         .await;
     }
     let request_id = generate_request_id();
-    use crate::middleware::media::FormKind;
-    let media: Option<FormKind> = match endpoint {
-        Endpoint::AudioTranscriptions => Some(FormKind::Transcription),
-        Endpoint::ImagesEdits => Some(FormKind::ImageEdit),
+    use crate::middleware::media::{IMAGE_EDIT, TRANSCRIPTION};
+    let media = match endpoint {
+        Endpoint::AudioTranscriptions => Some(&TRANSCRIPTION),
+        Endpoint::ImagesEdits => Some(&IMAGE_EDIT),
         _ => None,
     };
     if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let (received_body, parsed, form, upload_permit) = if let Some(kind) = media {
+    let (received_body, parsed, form, upload_permit) = if let Some(spec) = media {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
                     &headers,
                     body,
-                    kind.spec().max_body_bytes,
+                    spec.max_body_bytes,
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
                 )
                 .await;
@@ -616,15 +616,13 @@ async fn buffered_native_endpoint(
         };
         let upload = async {
             let (bytes, permit) =
-                crate::middleware::media::read_upload(&headers, body, kind).await?;
+                crate::middleware::media::read_upload(&headers, body, spec).await?;
             let content_type = header_str(&headers, "content-type").unwrap_or("");
-            let (params, form) = match kind {
-                FormKind::Transcription => {
+            let (params, form) = match endpoint {
+                Endpoint::AudioTranscriptions => {
                     crate::middleware::audio::parse(bytes.clone(), content_type).await?
                 }
-                FormKind::ImageEdit => {
-                    crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
-                }
+                _ => crate::middleware::image_edits::parse(bytes.clone(), content_type).await?,
             };
             Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
         }
@@ -632,7 +630,7 @@ async fn buffered_native_endpoint(
         let (bytes, permit, mut params, form) = match upload {
             Ok(upload) => upload,
             Err(err) => {
-                if kind == FormKind::Transcription {
+                if endpoint == Endpoint::AudioTranscriptions {
                     state.service.record_audio_failure("upload_rejection");
                 }
                 return err.into_response();
@@ -686,7 +684,7 @@ async fn buffered_native_endpoint(
     let permit = match crate::middleware::admission::try_acquire(endpoint) {
         Ok(permit) => permit,
         Err(_) => {
-            if media == Some(FormKind::Transcription) {
+            if endpoint == Endpoint::AudioTranscriptions {
                 state.service.record_audio_failure("admission_rejection");
             }
             return crate::middleware::admission::capacity_response();
