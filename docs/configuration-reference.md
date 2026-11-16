@@ -538,7 +538,7 @@ and image edit uploads share one process-wide 402 MiB upload byte budget
 50 MiB per input image, a 4 MiB PNG mask, and 64 MiB per complete request,
 including an optional PNG markup instead of a mask. Six full-size edit uploads
 fit in the budget (384 MiB), leaving 18 MiB for other uploads; the body cap limits
-the aggregate size even with 16 images. Edit parameters are forwarded as-is,
+the aggregate size even with 16 images. Edit non-default parameters are forwarded as-is,
 so support depends on the routed provider. See the
 [API reference](api-reference.md#image-edits) for field limits. Buffered uploads
 for either endpoint reduce the bytes

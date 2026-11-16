@@ -475,7 +475,7 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
 
-Image-edit parameters are forwarded as-is, so support depends on the routed
+Image-edit non-default parameters are forwarded as-is, so support depends on the routed
 provider. The gateway's multipart field surface and buffered/inline-only limits
 are defined in the [API reference](../docs/api-reference.md#image-edits).
 

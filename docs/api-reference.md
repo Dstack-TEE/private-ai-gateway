@@ -94,9 +94,9 @@ default 1); providers may return fewer, and image charges use the returned
 count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
 `background`, `output_format`, `input_fidelity`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
-for the string options are validated upstream, including explicit `"auto"` values;
-the gateway forwards these parameters as-is, so support depends on the routed
-provider. `response_format` must be absent
+for the string options are validated upstream. The default `"auto"` values of
+`size`, `quality`, and `background` are omitted upstream for both image endpoints;
+other values are forwarded as-is, so support depends on the routed provider. `response_format` must be absent
 or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
@@ -150,7 +150,8 @@ follows the [control-plane pricing contract](control-plane-contract.md#image-gen
 `POST /v1/images/edits` accepts the OpenAI SDK multipart surface: required
 `model`, `prompt` (1–32000 Unicode scalars), and either one `image` part or
 1–16 repeated `image[]` parts. Mixed names and repeated bare `image` parts are
-rejected. Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
+rejected. Unlike the SDK defaults, `model` is required for gateway routing.
+Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
 and be at most 50 MiB each. Optional `mask` is one PNG at most 4 MiB; optional
 `markup` is one PNG within the body limit. `mask` and `markup` are mutually
 exclusive. Dimension and transparency validation is left to the provider. The complete
@@ -160,9 +161,11 @@ text is limited to 1 MiB, and each non-prompt string field to 1024 bytes.
 Optional forwarded fields are `n` (integer 1–10, default 1), `size`, `quality`,
 `background`, `output_format`, `input_fidelity`, `moderation`, and
 `output_compression` (integer 0–100). Other optional fields above are strings;
-no provider-specific enum is enforced. Parameters are forwarded as-is, so support
-depends on the routed provider. `user`, `safety_identifier`, `stream=false`, and
-`response_format=b64_json` are accepted and removed before forwarding.
+no provider-specific enum is enforced. Default `auto` values are omitted as for
+generations; other values are forwarded as-is, so support depends on the routed
+provider. `user`, `safety_identifier`, and `stream=false` are accepted and removed.
+`response_format` must be absent or `b64_json`; both image endpoints always send
+`response_format=b64_json` upstream.
 Routing/pinning uses `X-ACI-Provider`.
 
 The gateway re-encodes one input as `image`, multiple inputs as ordered repeated

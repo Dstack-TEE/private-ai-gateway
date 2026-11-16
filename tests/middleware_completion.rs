@@ -6577,7 +6577,7 @@ async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() 
     .unwrap();
     assert_eq!(
         params,
-        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512"})
+        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","response_format":"b64_json"})
     );
     assert!(
         matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\xff\xd8\xffimage".as_slice())

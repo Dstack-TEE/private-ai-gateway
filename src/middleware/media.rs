@@ -191,7 +191,7 @@ async fn collect_upload(
     Ok((bytes.freeze(), permit))
 }
 
-/// Shared slices of the buffered upload; no caller filename or MIME is forwarded.
+/// Parsed upload files; no caller filename or MIME is forwarded.
 #[derive(Debug, Clone)]
 pub enum MediaForm {
     Transcription {

@@ -4979,7 +4979,7 @@ async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body
         .await
         .unwrap();
         assert_eq!(params["model"], "aci-model");
-        assert!(params.get("response_format").is_none());
+        assert_eq!(params["response_format"], "b64_json");
         assert_eq!(params["n"], requested);
         assert!(
             matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\x89PNG\r\n\x1a\nimage".as_slice())

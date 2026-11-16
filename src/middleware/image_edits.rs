@@ -16,22 +16,7 @@ pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 pub const MAX_METADATA_BYTES: usize = 1024;
 pub const MAX_IMAGES: usize = 16;
-const FIELDS: &[&str] = &[
-    "model",
-    "prompt",
-    "n",
-    "size",
-    "quality",
-    "background",
-    "output_format",
-    "output_compression",
-    "input_fidelity",
-    "moderation",
-    "response_format",
-    "user",
-    "safety_identifier",
-    "stream",
-];
+const EXTRA_FIELDS: &[&str] = &["response_format", "user", "safety_identifier", "stream"];
 const KIND: FormKind = FormKind::ImageEdit;
 
 fn validate_request(params: &Value) -> Result<(), images::RequestError> {
@@ -42,7 +27,7 @@ fn validate_request(params: &Value) -> Result<(), images::RequestError> {
             "prompt must not be empty",
         ));
     }
-    for &key in FIELDS {
+    for &key in images::UPSTREAM_FIELDS.iter().chain(EXTRA_FIELDS) {
         if key != "prompt"
             && params
                 .get(key)
@@ -70,7 +55,7 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|_| KIND.invalid("multipart"))?
+        .map_err(|error| multipart_error(error, "multipart"))?
     {
         let name = media::field_name(&field, KIND)?;
         if name != "image[]" && !seen.insert(name.clone()) {
@@ -85,8 +70,11 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
                 {
                     return Err(KIND.invalid("image"));
                 }
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|error| multipart_error(error, &name))?;
                 image_name = Some(name);
-                let data = field.bytes().await.map_err(|_| KIND.large())?;
                 let format = image_format(&data).ok_or_else(|| KIND.invalid("image"))?;
                 images.push(ImageFile { data, format });
                 continue;
@@ -95,7 +83,10 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
                 if mask.is_some() || markup.is_some() {
                     return Err(KIND.invalid(&name));
                 }
-                let data = field.bytes().await.map_err(|_| KIND.large())?;
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|error| multipart_error(error, &name))?;
                 if image_format(&data) != Some(ImageFormat::Png) {
                     return Err(KIND.invalid(&name));
                 }
@@ -108,7 +99,9 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
             }
             _ => {}
         }
-        if !FIELDS.contains(&name.as_str()) {
+        if !images::UPSTREAM_FIELDS.contains(&name.as_str())
+            && !EXTRA_FIELDS.contains(&name.as_str())
+        {
             return Err(MediaError {
                 code: "unknown_parameter",
                 ..KIND.invalid(&name)
@@ -117,7 +110,10 @@ pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaF
         if field.file_name().is_some() {
             return Err(KIND.invalid(&name));
         }
-        let data = field.bytes().await.map_err(|_| KIND.invalid(&name))?;
+        let data = field
+            .bytes()
+            .await
+            .map_err(|error| multipart_error(error, &name))?;
         text_bytes += data.len();
         if text_bytes > MAX_TEXT_BYTES {
             return Err(KIND.invalid("fields"));
@@ -171,7 +167,21 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 }
 
 pub fn upstream_fields(params: &Value) -> Value {
-    Value::Object(images::pick(params, images::UPSTREAM_FIELDS))
+    images::upstream_body(params)
+}
+
+fn multipart_error(error: multer::Error, param: &str) -> MediaError {
+    match error {
+        multer::Error::FieldSizeExceeded { field_name, .. } => MediaError {
+            param: field_name.unwrap_or_else(|| param.into()),
+            ..KIND.large()
+        },
+        multer::Error::StreamSizeExceeded { .. } => MediaError {
+            param: param.into(),
+            ..KIND.large()
+        },
+        _ => KIND.invalid(param),
+    }
 }
 
 #[cfg(test)]
@@ -262,7 +272,7 @@ mod tests {
             let (forwarded, form) = parse(encoded, &ct).await.unwrap();
             assert_eq!(
                 forwarded,
-                json!({"model":"upstream-model","prompt":"edit","n":10,"size":"auto",
+                json!({"model":"upstream-model","prompt":"edit","n":10,"response_format":"b64_json",
                 "quality":"provider-quality","background":"transparent","output_format":"provider-format",
                 "output_compression":0,"input_fidelity":"high","moderation":"provider-mode"})
             );
@@ -404,10 +414,9 @@ mod tests {
                 let result = parse(raw, &ct).await;
                 assert_eq!(result.is_ok(), valid, "{name}: {length}");
                 if !valid {
-                    assert_eq!(
-                        result.unwrap_err().status,
-                        axum::http::StatusCode::PAYLOAD_TOO_LARGE
-                    );
+                    let error = result.unwrap_err();
+                    assert_eq!(error.status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+                    assert_eq!(error.param, name);
                 }
             }
         }
@@ -431,6 +440,23 @@ mod tests {
             )
             .await;
             assert!(parse(raw, &ct).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_file_parts_are_invalid_requests_not_size_overflows() {
+        for name in ["image", "mask", "markup"] {
+            let mut files = vec![];
+            if name != "image" {
+                files.push(("image", Bytes::from_static(b"\xff\xd8\xff")));
+            }
+            files.push((name, Bytes::from_static(b"\x89PNG\r\n\x1a\nimage")));
+            let (raw, ct) = request(&[("model", "alias"), ("prompt", "edit")], &files).await;
+            let boundary = multer::parse_boundary(&ct).unwrap();
+            let truncated = raw.slice(..raw.len() - boundary.len() - 8);
+            let error = parse(truncated, &ct).await.unwrap_err();
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(error.param, name);
         }
     }
 

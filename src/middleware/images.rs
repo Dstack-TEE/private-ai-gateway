@@ -181,6 +181,9 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 /// Build from an allowlist, even after a candidate replaces the model id.
 pub fn upstream_body(body: &Value) -> Value {
     let mut output = pick(body, UPSTREAM_FIELDS);
+    output.retain(|key, value| {
+        !(matches!(key.as_str(), "size" | "quality" | "background") && value == "auto")
+    });
     output.insert("response_format".into(), json!("b64_json"));
     Value::Object(output)
 }
@@ -330,7 +333,7 @@ mod tests {
         assert_eq!(upstream["response_format"], "b64_json");
         assert_eq!(
             upstream,
-            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "input_fidelity":"provider-value", "response_format":"b64_json"})
+            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "output_compression":100, "input_fidelity":"provider-value", "response_format":"b64_json"})
         );
         for key in ["user", "safety_identifier", "style", "provider"] {
             assert!(upstream.get(key).is_none());

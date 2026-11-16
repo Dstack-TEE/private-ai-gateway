@@ -24,7 +24,7 @@ Buffered image generation and OpenAI SDK multipart edits (up to 16 input images,
 optional PNG mask or markup, and up to 10 requested outputs) are available in
 direct and middleware modes, with separate endpoint opt-in, inline base64 output
 and receipts. Edit uploads have a 64 MiB body cap and 50 MiB per-image limit;
-parameters are forwarded as-is, so support depends on the routed provider.
+non-default parameters are forwarded as-is, so support depends on the routed provider.
 JSON/URL/file-ID inputs and GIF/SVG preview parameters are not implemented.
 Reranking (including SDK aliases) and buffered speech synthesis
 also require explicit middleware opt-in and reject E2EE. See the
