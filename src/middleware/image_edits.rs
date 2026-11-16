@@ -171,21 +171,7 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 }
 
 pub fn upstream_fields(params: &Value) -> Value {
-    Value::Object(images::pick(
-        params,
-        &[
-            "model",
-            "prompt",
-            "n",
-            "size",
-            "quality",
-            "background",
-            "output_format",
-            "output_compression",
-            "input_fidelity",
-            "moderation",
-        ],
-    ))
+    Value::Object(images::pick(params, images::UPSTREAM_FIELDS))
 }
 
 #[cfg(test)]

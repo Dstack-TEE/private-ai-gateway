@@ -10,6 +10,18 @@ use serde_json::{json, Map, Value};
 
 /// Protocol maximum for the requested number of images.
 pub const MAX_IMAGE_COUNT: i64 = 10;
+pub(crate) const UPSTREAM_FIELDS: &[&str] = &[
+    "model",
+    "prompt",
+    "n",
+    "size",
+    "quality",
+    "background",
+    "output_format",
+    "output_compression",
+    "moderation",
+    "input_fidelity",
+];
 #[derive(Debug)]
 pub struct RequestError {
     pub code: &'static str,
@@ -168,21 +180,7 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 
 /// Build from an allowlist, even after a candidate replaces the model id.
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = pick(
-        body,
-        &[
-            "model",
-            "prompt",
-            "n",
-            "size",
-            "quality",
-            "background",
-            "output_format",
-            "output_compression",
-            "moderation",
-            "input_fidelity",
-        ],
-    );
+    let mut output = pick(body, UPSTREAM_FIELDS);
     output.insert("response_format".into(), json!("b64_json"));
     Value::Object(output)
 }
