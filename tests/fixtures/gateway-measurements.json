@@ -1,0 +1,34 @@
+{
+  "schema": "gateway-measurements/v1",
+  "release": "gateway-prod-2026-11-04",
+  "domains": [
+    "api.redpill.ai",
+    "inference.phala.com",
+    "tee.redpill.ai"
+  ],
+  "app": {
+    "compose_hash": "3dcf9d462955a01d6f188a3dd495573d63a7dee20a0396daa25bbbf31f046a32",
+    "app_id": "fdb7a14e5a6675f752e2cb69c9067a98ca402918",
+    "repo_url": "https://github.com/Dstack-TEE/private-ai-gateway.git",
+    "repo_commit": "77fac1267000b27f09e2058923f7492e5330bb49",
+    "launcher_image": "ghcr.io/redpill-ai/private-ai-launcher@sha256:c083ff9e6a5ddf10f6c9e9bb1f74cc618deebecfea5208b563c574399db4637c"
+  },
+  "kms": {
+    "root_key": "3059301306072a8648ce3d020106082a8648ce3d030107034200048844eb42ccdf8c52fd4f174f362fcb9bbd19c45fd48f1edec2d8f1ca23536ec1a74021b4cee610c074f8294d431b2b7fee2c39e5333fdaf0a4522d43fb159d9f"
+  },
+  "os": {
+    "image": "dstack-0.5.9-bd369a8c",
+    "image_hash": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+    "mrtd": "f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa87077",
+    "rtmr0": "46a83f6bbbeaa274aaf04861ef47d7e8898d4e699126b642f72f582e8d7f5349cb266a188bbabf619940d4fece06594b",
+    "rtmr1": "07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878c",
+    "rtmr2": "df67e467e60edc1737bcf8e682d48131bfb427f523226aa7f197a7608e9b3784783fa759ef5b28191fa12f9ddb36b858",
+    "vcpus": 32,
+    "memory_bytes": 34359738368
+  },
+  "tls": {
+    "api.redpill.ai": "8a90181d3d9e5a0538e1c753b9459b385d9f064567c60abd086a2ee8d9fa30c8",
+    "inference.phala.com": "32a2825658a7377a37d6b6e854627dd16bdd8abd82353259884eac7866229ea7",
+    "tee.redpill.ai": "951885459fbd27cad038c40a198e6a1fb63f4d18dd5d5a24d408d5d951488ffe"
+  }
+}
