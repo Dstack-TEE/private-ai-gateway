@@ -37,8 +37,11 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
+| `POST /v1/audio/speech` | OpenAI speech synthesis | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered audio with exact-byte receipts and character usage; explicit endpoint opt-in. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
+| `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Up to 16 input images; inline base64 output; separate endpoint opt-in and multipart constraints. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
+| `POST /v1/rerank` | Reranking | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON; explicit endpoint opt-in required. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
 | `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the native request with gateway routing and cache controls removed; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
@@ -59,16 +62,42 @@ without interpreting question types, scores, probabilities, or confidence. In
 middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
 
+Images, rerank and audio require an `Authorization` header in both direct and middleware
+modes. Requests missing it receive `401` before parsing, buffering, or admission,
+using the bounded discard described in the configuration reference. In middleware
+mode, credentials continue through the existing control-plane authorization.
+
+### Reranking
+
+`POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
+or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
+(positive integer, clamped to the document count), boolean `return_documents`,
+positive `max_tokens_per_doc` and `truncate_prompt_tokens`, and `instruction`
+(≤32000 Unicode scalars).
+Explicit null `top_n` and `return_documents` are treated as absent.
+`user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
+and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
+
+Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
+`relevance_score`, optional `document: {text}`) and `usage`
+(`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
+exceed `top_n`; null documents are absent, and `return_documents: false`
+suppresses documents. Billing uses validated input-token usage; absent or
+malformed usage produces a receipted `502` instead of a free request. Token
+counts must be JSON integers in the pricing system's range, 1..9007199254740991.
+
+### Image generation
+
 Image generation requires string `model` and `prompt` (at most 32,000 Unicode
 characters). Request up to `n` images (`n` is an integer from 1 through 10,
 default 1); providers may return fewer, and image charges use the returned
 count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
-`background`, `output_format`, and `moderation` are strings;
+`background`, `output_format`, `input_fidelity`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
-for the string options are validated upstream. `size`, `quality`, and `background`
-set to `"auto"` are omitted upstream to use the provider defaults; request-based
-billing dimensions stay unchanged. `response_format` must be absent
-or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
+for the string options are validated upstream. The default `"auto"` values of
+`size`, `quality`, and `background` are omitted upstream for both image endpoints.
+`response_format` must be absent or `"b64_json"`; the gateway always forwards
+`"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
@@ -116,12 +145,44 @@ URLs, provider IDs, model IDs, and other fields are removed. Image
 receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Image pricing
 follows the [control-plane pricing contract](control-plane-contract.md#image-generation).
 
-### Audio transcription
+### Image edits
 
-Images and audio require an `Authorization` header in both direct and middleware
-modes. Requests missing it receive `401` before parsing, buffering, or admission,
-using the bounded discard described in the configuration reference. In middleware
-mode, credentials continue through the existing control-plane authorization.
+`POST /v1/images/edits` accepts the OpenAI SDK multipart surface: required
+`model`, `prompt` (1–32000 Unicode scalars), and either one `image` part or
+1–16 repeated `image[]` parts. Mixed names and repeated bare `image` parts are
+rejected. Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
+and be at most 50 MiB each. Optional `mask` is one PNG at most 4 MiB; optional
+`markup` is one PNG within the body limit. `mask` and `markup` are mutually
+exclusive. Dimension and transparency validation is left to the provider. The complete
+multipart body is limited to 64 MiB, including files, text and framing; aggregate
+text is limited to 1 MiB.
+
+Optional forwarded fields are `n` (integer 1–10, default 1), `size`, `quality`,
+`background`, `output_format`, `input_fidelity`, `moderation`, and
+`output_compression` (integer 0–100). Other optional fields above are strings;
+no provider-specific enum is enforced. Non-default parameters are forwarded as-is,
+so support depends on the routed provider. Default `auto` values and
+`response_format` follow [image generation](#image-generation).
+`user`, `safety_identifier`, and `stream=false` are accepted and removed.
+Routing/pinning uses `X-ACI-Provider`.
+
+The gateway re-encodes one input as `image`, multiple inputs as ordered repeated
+`image[]`, and the optional PNG as `mask` or `markup`. It replaces caller
+filenames and MIME headers with safe names and media types detected from bytes.
+The receipt hashes these exact encoded bytes. Responses use the sanitized inline
+generation schema with 1..n returned images; billing uses the returned count and
+provider-reported token usage when configured. URL-only or excess-image successes
+produce a receipted `502` without a billable image count, following the
+[generation pricing contract](control-plane-contract.md#image-generation).
+
+Gateway limits: `stream=true` and `partial_images` are unsupported by the buffered
+path, and `response_format=url` is unsupported by inline-only output. JSON edit
+bodies, `file_id`, remote image URLs, and GIF/SVG preview parameters are not
+implemented; unknown multipart fields return `400 unknown_parameter`. Edits use
+the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
+and share inference admission with generations.
+
+### Audio transcription
 
 Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
 `model` and exactly one nonempty `file` (up to 25 MiB), with filename extension
@@ -141,15 +202,15 @@ removed; `stream=true` or any other value returns `400`. `provider` form fields,
 parts, and malformed multipart return `400`.
 
 Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
-255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
-402 MiB byte budget (16 times the whole-body limit) and a 60-second whole-upload deadline
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads use the
+[shared byte budget and 60-second deadline](configuration-reference.md#transcription-routing-and-launch-gate)
 (`408 upload_timeout`). A 25 MiB file needs about 3.5 Mbps to finish within
 that deadline. Each received chunk reserves only its actual bytes;
 `Content-Length` is used only for early 413 rejection. Connections with no
 buffered data reserve no upload capacity. Budget exhaustion returns
 `429 rate_limit_exceeded` with `Retry-After: 1`. Size failures (`413`) and upload
-timeouts (`408`) close the connection. A separate 16-slot transcription inference
-admission follows validation and, in middleware mode, successful control-plane
+timeouts (`408`) close the connection. A 16-slot inference admission shared by
+transcription and speech follows validation and, in middleware mode, successful control-plane
 authorization and route selection. Upload accounting remains held until that
 handoff. Response bodies and pending write buffers own inference admission until
 completion or disconnect. There are no queue or whitespace heartbeats.
@@ -160,7 +221,7 @@ non-ASCII bytes, malformed/non-object JSON, invalid pins, and unknown `aci_`
 members return `400`.
 The header is consumed; it never reaches the upstream. JSON endpoints reject
 this carrier. The attestation report advertises support as
-`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions"]`.
+`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions", "/v1/images/edits"]`.
 Constrained clients must obtain this capability over their accepted pinned
 channel before uploading. Receipt body hashes do not commit to this header;
 clients retain their effective policy and check the cited session against it.
@@ -212,6 +273,22 @@ and 32 separate discard slots. This preserves the 400 JSON through streaming
 reverse proxies for uploads within those bounds. Exhausted slots, excess bytes,
 transport errors, or a deadline cause immediate connection closure; upload
 capacity and inference permits are never held by the discard.
+
+### Speech synthesis
+
+`POST /v1/audio/speech` takes JSON `model`, `input` (1–4096 Unicode scalars),
+and string `voice`. Optional fields are `response_format`
+(`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
+`stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
+routing/pinning.
+
+The body is exact buffered audio with a validated lowercase `audio/<subtype>`
+content type, parameters stripped; empty, malformed or non-audio successes yield receipted
+`502`s.
+Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
+(`502`). Successful receipts sign the request's Unicode scalar count via the
+[ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).
+See [speech metering](control-plane-contract.md#speech-routing-and-metering) for billing and pricing requirements.
 
 ### Inference responses
 

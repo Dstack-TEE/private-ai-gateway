@@ -211,7 +211,7 @@ impl Harness {
 
 pub fn request(ids: Vec<String>) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext::default(),
         endpoint_path: "/v1/chat/completions",
         received_body: REQUEST,

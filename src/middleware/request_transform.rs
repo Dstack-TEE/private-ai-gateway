@@ -172,10 +172,16 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
+            return Ok(super::speech::upstream_body(params));
+        }
+        (ProviderFormat::Openai, Endpoint::Rerank) => {
+            return Ok(super::rerank::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
             return Ok(super::audio::upstream_fields(params));
         }
-        (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
+        (ProviderFormat::Openai, Endpoint::ImagesEdits | Endpoint::ImagesGenerations) => {
             return Ok(super::images::upstream_body(params));
         }
         (ProviderFormat::Openai, Endpoint::Messages) => {
@@ -267,11 +273,7 @@ pub fn build_candidates(
             );
             continue;
         }
-        if matches!(
-            endpoint,
-            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
-        ) && !candidate.supports_endpoint(endpoint.path())
-        {
+        if endpoint.is_buffered_native() && !candidate.supports_endpoint(endpoint.path()) {
             continue;
         }
         let bridge = match &messages_chat {
@@ -786,13 +788,19 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, Rerank)
+        | (Openai, AudioSpeech)
         | (Openai, AudioTranscriptions)
+        | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
+        | (Anthropic, Rerank)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioSpeech)
         | (Anthropic, AudioTranscriptions)
+        | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }

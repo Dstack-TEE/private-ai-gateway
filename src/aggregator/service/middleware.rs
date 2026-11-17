@@ -271,7 +271,7 @@ impl AciService {
         user_model: Option<String>,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let BufferedCommit {
-            response,
+            mut response,
             response_model,
             admission,
             route_id,
@@ -281,14 +281,12 @@ impl AciService {
             forwarded_body,
         } = commit;
         let status = response.status_code;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
 
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = if matches!(
-            endpoint_path,
-            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
-        ) {
+        let chat_id = if client_endpoint.is_media() {
             None
         } else {
             extract_chat_id(&response.body)
@@ -316,9 +314,29 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
+        let usage = if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&status) {
+            if let Some(content_type) =
+                crate::middleware::speech::response_content_type(&response.headers, &response.body)
+            {
+                response.headers.insert("content-type".into(), content_type);
+                let usage = serde_json::from_slice::<serde_json::Value>(received_body)
+                    .ok()
+                    .and_then(|params| crate::middleware::speech::usage(&params))
+                    .ok_or_else(|| {
+                        UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                    })?;
+                Self::append_speech_usage(&mut builder, usage.clone())?;
+                Some(usage)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
+                usage,
                 receipt_id: receipt_id.clone(),
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
@@ -357,6 +375,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
         // The user-requested model, recorded as the receipt's top-level `model`.
         let user_model = req.context.user_model.clone();
         let mode = if stream {
@@ -470,7 +489,7 @@ impl AciService {
                     .prepare(UpstreamRequest {
                         cache_salt: req.context.cache_salt.clone(),
                         body: candidate.body.clone().into(),
-                        form: req.audio_form.clone(),
+                        form: req.form.clone(),
                         content_type: None,
                         headers: upstream_headers.clone(),
                         path: Some(candidate.endpoint.path().to_string()),
@@ -512,7 +531,7 @@ impl AciService {
                 };
 
                 let mut prepared = prepared;
-                if let Err(err) = prepared.encode_audio().await {
+                if let Err(err) = prepared.encode_media().await {
                     abandon(&mut failed_attempts, 502, None);
                     upgrade_err(&mut aggregated_err, 2, err.into());
                     continue;
@@ -856,11 +875,9 @@ impl AciService {
                 let status = upstream_response.status_code;
                 let response_model = accepted_response_model(status, &upstream_response.body)
                     .or_else(|| {
-                        (matches!(
-                            endpoint_path,
-                            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
-                        ))
-                        .then(|| prepared.model_id.clone())
+                        client_endpoint
+                            .is_media()
+                            .then(|| prepared.model_id.clone())
                     });
                 self.metrics.record_upstream_response(
                     endpoint_path,

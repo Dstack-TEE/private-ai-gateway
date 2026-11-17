@@ -515,12 +515,36 @@ pub(super) async fn systemone(
     openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
 }
 
+pub(super) async fn rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::Rerank).await
+}
+
+pub(super) async fn images_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesEdits).await
+}
+
 pub(super) async fn images_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+}
+
+pub(super) async fn audio_speech(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioSpeech).await
 }
 
 pub(super) async fn audio_transcriptions(
@@ -528,10 +552,10 @@ pub(super) async fn audio_transcriptions(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    buffered_multimodal_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
 }
 
-async fn buffered_multimodal_endpoint(
+async fn buffered_native_endpoint(
     state: AppState,
     headers: HeaderMap,
     body: Body,
@@ -568,39 +592,49 @@ async fn buffered_multimodal_endpoint(
         .await;
     }
     let request_id = generate_request_id();
-    let is_audio = endpoint == Endpoint::AudioTranscriptions;
-    if !is_audio && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+    use crate::middleware::media::{IMAGE_EDIT, TRANSCRIPTION};
+    let media = match endpoint {
+        Endpoint::AudioTranscriptions => Some(&TRANSCRIPTION),
+        Endpoint::ImagesEdits => Some(&IMAGE_EDIT),
+        _ => None,
+    };
+    if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
         return reject_json_provider_header(&headers, body).await;
     }
-    let (received_body, parsed, audio_form, upload_permit) = if is_audio {
+    let (received_body, parsed, form, upload_permit) = if let Some(spec) = media {
         let provider = match multipart_provider(&headers) {
             Ok(value) => value,
             Err(message) => {
                 return discard_before_reply(
                     &headers,
                     body,
-                    crate::middleware::audio::MAX_BODY_BYTES,
+                    spec.max_body_bytes,
                     error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
                 )
                 .await;
             }
         };
-        let (bytes, permit) = match crate::middleware::audio::read_upload(&headers, body).await {
+        let upload = async {
+            let (bytes, permit) =
+                crate::middleware::media::read_upload(&headers, body, spec).await?;
+            let content_type = header_str(&headers, "content-type").unwrap_or("");
+            let (params, form) = if endpoint == Endpoint::AudioTranscriptions {
+                crate::middleware::audio::parse(bytes.clone(), content_type).await?
+            } else {
+                crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
+            };
+            Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
+        }
+        .await;
+        let (bytes, permit, mut params, form) = match upload {
             Ok(upload) => upload,
             Err(err) => {
-                state.service.record_audio_failure("upload_rejection");
+                if endpoint == Endpoint::AudioTranscriptions {
+                    state.service.record_audio_failure("upload_rejection");
+                }
                 return err.into_response();
             }
         };
-        let content_type = header_str(&headers, "content-type").unwrap_or("");
-        let (mut params, form) =
-            match crate::middleware::audio::parse(bytes.clone(), content_type).await {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    state.service.record_audio_failure("upload_rejection");
-                    return err.into_response();
-                }
-            };
         if let Some(provider) = provider {
             params["provider"] = provider;
         }
@@ -634,23 +668,22 @@ async fn buffered_multimodal_endpoint(
         Ok(input) => input,
         Err(response) => return *response,
     };
-    input.audio_form = audio_form;
+    input.form = form;
     input.upload_permit = upload_permit;
     if state.middleware.is_some() {
         return dispatch_completion(state, input, true).await;
     }
-    if endpoint == Endpoint::ImagesGenerations {
-        if let Err(err) = crate::middleware::images::validate_request(&input.params) {
-            return err.into_response();
-        }
-        input.params = crate::middleware::images::upstream_body(&input.params);
+    match crate::middleware::validate_buffered(endpoint, &input.params) {
+        Ok(Some(params)) => input.params = params,
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
     }
     // Uploads and invalid requests do not reserve generation capacity.
     // Middleware admission happens after its control-plane consult instead.
     let permit = match crate::middleware::admission::try_acquire(endpoint) {
         Ok(permit) => permit,
         Err(_) => {
-            if is_audio {
+            if endpoint == Endpoint::AudioTranscriptions {
                 state.service.record_audio_failure("admission_rejection");
             }
             return crate::middleware::admission::capacity_response();
@@ -921,7 +954,7 @@ async fn reject_json_provider_header(headers: &HeaderMap, body: Body) -> Respons
         error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "X-ACI-Provider is only supported on multipart transcription requests",
+            "X-ACI-Provider is only supported on multipart media requests",
         ),
     )
     .await
@@ -1021,7 +1054,7 @@ fn completion_input(
         }
     });
     Ok(CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint,
         endpoint_path: endpoint.path(),
@@ -1072,7 +1105,7 @@ async fn dispatch_completion(
     forward_to_backend(
         state.service,
         BackendForwardInput {
-            audio_form: input.audio_form,
+            form: input.form,
             context: GatewayRequestContext {
                 request_id: input.request_id,
                 user_model: input.user_model,

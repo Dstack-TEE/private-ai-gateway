@@ -10,6 +10,18 @@ use serde_json::{json, Map, Value};
 
 /// Protocol maximum for the requested number of images.
 pub const MAX_IMAGE_COUNT: i64 = 10;
+pub(crate) const UPSTREAM_FIELDS: &[&str] = &[
+    "model",
+    "prompt",
+    "n",
+    "size",
+    "quality",
+    "background",
+    "output_format",
+    "output_compression",
+    "moderation",
+    "input_fidelity",
+];
 #[derive(Debug)]
 pub struct RequestError {
     pub code: &'static str,
@@ -18,7 +30,7 @@ pub struct RequestError {
 }
 
 impl RequestError {
-    fn invalid(param: &str, message: &str) -> Self {
+    pub(crate) fn invalid(param: &str, message: &str) -> Self {
         Self {
             code: "invalid_parameter",
             param: param.into(),
@@ -38,62 +50,90 @@ impl RequestError {
     }
 }
 
-/// Validate the complete client body before consulting or forwarding.
-pub fn validate_request(body: &Value) -> Result<(), RequestError> {
+pub(crate) fn object_with<'a>(
+    body: &'a Value,
+    allowed: &[&str],
+) -> Result<&'a Map<String, Value>, RequestError> {
     let object = body
         .as_object()
         .ok_or_else(|| RequestError::invalid("body", "request body must be a JSON object"))?;
-    for key in object.keys() {
-        if ![
-            "model",
-            "prompt",
-            "n",
-            "size",
-            "quality",
-            "background",
-            "output_format",
-            "output_compression",
-            "moderation",
-            "response_format",
-            "user",
-            "safety_identifier",
-            "style",
-            "provider",
-            "stream",
-            "partial_images",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(RequestError {
-                code: "unknown_parameter",
-                param: key.clone(),
-                message: format!("unknown parameter: {key}"),
-            });
-        }
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(RequestError {
+            code: "unknown_parameter",
+            param: key.clone(),
+            message: format!("unknown parameter: {key}"),
+        });
     }
-    for key in ["model", "prompt"] {
-        if !object.get(key).is_some_and(Value::is_string) {
+    Ok(object)
+}
+
+pub(crate) fn require_strings(body: &Value, keys: &[&str]) -> Result<(), RequestError> {
+    for &key in keys {
+        if !body.get(key).is_some_and(Value::is_string) {
             return Err(RequestError::invalid(
                 key,
                 "required parameter must be a string",
             ));
         }
     }
-    if body["prompt"]
-        .as_str()
-        .is_some_and(|s| s.chars().count() > 32_000)
-    {
-        return Err(RequestError::invalid(
-            "prompt",
-            "prompt must be at most 32000 characters",
-        ));
+    Ok(())
+}
+
+pub(crate) fn max_chars(
+    body: &Value,
+    keys: &[&str],
+    max: usize,
+    message: &str,
+) -> Result<(), RequestError> {
+    for &key in keys {
+        if body
+            .get(key)
+            .is_some_and(|value| !value.as_str().is_some_and(|s| s.chars().count() <= max))
+        {
+            return Err(RequestError::invalid(key, message));
+        }
     }
+    Ok(())
+}
+
+pub(crate) fn pick(body: &Value, keys: &[&str]) -> Map<String, Value> {
+    keys.iter()
+        .filter_map(|&key| body.get(key).map(|value| (key.into(), value.clone())))
+        .collect()
+}
+
+/// Validate the complete client body before consulting or forwarding.
+pub fn validate_request(body: &Value) -> Result<(), RequestError> {
+    let object = object_with(
+        body,
+        &[
+            UPSTREAM_FIELDS,
+            &[
+                "response_format",
+                "user",
+                "safety_identifier",
+                "style",
+                "provider",
+                "stream",
+                "partial_images",
+            ],
+        ]
+        .concat(),
+    )?;
+    require_strings(body, &["model", "prompt"])?;
+    max_chars(
+        body,
+        &["prompt"],
+        32_000,
+        "prompt must be at most 32000 characters",
+    )?;
     for key in [
         "size",
         "quality",
         "background",
         "output_format",
         "moderation",
+        "input_fidelity",
         "user",
         "safety_identifier",
         "style",
@@ -134,25 +174,10 @@ pub fn validate_request(body: &Value) -> Result<(), RequestError> {
 
 /// Build from an allowlist, even after a candidate replaces the model id.
 pub fn upstream_body(body: &Value) -> Value {
-    let mut output = Map::new();
-    for key in [
-        "model",
-        "prompt",
-        "n",
-        "size",
-        "quality",
-        "background",
-        "output_format",
-        "output_compression",
-        "moderation",
-    ] {
-        if let Some(value) = body.get(key) {
-            if matches!(key, "size" | "quality" | "background") && value == "auto" {
-                continue;
-            }
-            output.insert(key.into(), value.clone());
-        }
-    }
+    let mut output = pick(body, UPSTREAM_FIELDS);
+    output.retain(|key, value| {
+        !(matches!(key.as_str(), "size" | "quality" | "background") && value == "auto")
+    });
     output.insert("response_format".into(), json!("b64_json"));
     Value::Object(output)
 }
@@ -180,12 +205,11 @@ pub fn requested_count(request: &Value) -> usize {
 }
 
 /// Validate and reduce a direct upstream success before signing its receipt.
-pub fn response_body(response: &[u8], request: &[u8]) -> Option<Vec<u8>> {
-    let request: Value = serde_json::from_slice(request).ok()?;
+pub fn response_body(response: &[u8], requested_count: usize) -> Option<Vec<u8>> {
     let mut body: Value = serde_json::from_slice(response).ok()?;
-    validate_response(&body, requested_count(&request)).ok()?;
+    validate_response(&body, requested_count).ok()?;
     canonicalize(&mut body);
-    Some(serde_json::to_vec(&body).unwrap_or_default())
+    serde_json::to_vec(&body).ok()
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -292,13 +316,13 @@ mod tests {
 
     #[test]
     fn accepts_supported_fields_and_builds_only_upstream_allowlist() {
-        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
+        let body = json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "size":"auto", "quality":"auto", "background":"auto", "output_compression":100, "input_fidelity":"provider-value", "style":"vivid", "user":"alice", "safety_identifier":"hashed-user", "provider":{}});
         validate_request(&body).unwrap();
         let upstream = upstream_body(&body);
         assert_eq!(upstream["response_format"], "b64_json");
         assert_eq!(
             upstream,
-            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "output_compression":100, "response_format":"b64_json"})
+            json!({"model":"image", "prompt":"hello", "n":MAX_IMAGE_COUNT, "output_compression":100, "input_fidelity":"provider-value", "response_format":"b64_json"})
         );
         for key in ["user", "safety_identifier", "style", "provider"] {
             assert!(upstream.get(key).is_none());

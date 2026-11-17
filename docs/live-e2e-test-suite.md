@@ -31,7 +31,8 @@ The implementation lives in `scripts/live_e2e/`.
    and require `GET /v1/models` to list every entry's `public_model`.
 4. Run one chat lifecycle case for each provider with the `chat` capability.
 5. Run one embeddings case for each provider with the `embeddings` capability.
-6. Run one image generation case for each provider with the `images` capability.
+6. Run reranking, image generation, image edits, audio transcription and speech
+   cases for entries with the corresponding capabilities (below).
 7. Run structured-output fidelity cases for `full` and `strict-release` profiles.
 8. Write `summary.json` and stop the gateway.
 
@@ -112,6 +113,22 @@ workload, or weights. NEAR image responses carry no token usage; billing uses
 Credential-free coverage includes a buffered 120-second upstream delay using
 Tokio's controllable clock in `tests/middleware_completion.rs`, so CI does not
 wait two minutes and no heartbeat can turn an image into an SSE response.
+
+### Rerank, image edit and speech cases
+
+These cases use `cases/lifecycle.py` to fetch and verify the report, receipt,
+attested session, and exact request/response bytes with `pap audit`.
+
+| Capability / case | Endpoint and checks | Provider entry / model |
+| --- | --- | --- |
+| `rerank` / `cases/rerank.py` | `/v1/rerank`: one ranked result, numeric relevance score, positive input-token usage and response allowlist. | `near-ai-live-rerank` / `Qwen/Qwen3-Reranker-0.6B` |
+| `images_edits` / `cases/images_edits.py` | `/v1/images/edits`: committed `fixtures/edit.png`, inline image schema/base64/magic checks, exact multipart hash and null receipt `chat_id`. | `near-ai-live-images-edits` / `black-forest-labs/FLUX.2-klein-4B` |
+| `speech` / `cases/speech.py` | `/v1/audio/speech`: nonempty WAV audio, audio content type and signed `usage.reported` Unicode scalar count. | `tinfoil-live-speech` / `qwen3-tts` (voice `ryan`) |
+
+The NEAR entries require `NEARAI_API_KEY` and `DSTACK_VERIFIER_URL`; speech
+requires `TINFOIL_API_KEY`. All three use TLS SPKI binding and the suite's
+normal dstack socket and `pap` prerequisites. Select an entry with `--provider`
+as for the image generation case. Each selected case consumes provider quota.
 
 ### Embeddings case
 

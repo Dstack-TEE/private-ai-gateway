@@ -117,13 +117,21 @@ An allow response:
 | `candidates[].engine` | No | `sglang` or `vllm` for engine-specific shaping. Omit for managed APIs. |
 | `candidates[].reasoningFormat` | No | Upstream reasoning dialect: `reasoning_effort`, `reasoning`, `chat_template_thinking`, `chat_template_enable_thinking`, or `thinking_type`. `thinking_type` writes DeepSeek's `thinking.type` switch and uses `reasoning_effort` for the level. When omitted, a candidate with an `engine` uses `reasoning_effort` and any other candidate uses the nested `reasoning` object. See [Reasoning format](#reasoning-format). |
 | `candidates[].reasoningPolicy` | No | Deployment reasoning policy applied by the gateway. See [Reasoning policy](#reasoning-policy). |
-| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Audio requests go only to OpenAI-format candidates listing `/v1/audio/transcriptions`. Image requests go only to candidates listing `/v1/images/generations`; this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
+| `candidates[].supportedEndpoints` | No | Paths the upstream serves natively. Apart from dedicated System One candidates (below), a `/v1/responses` request goes unchanged to a candidate that lists `/v1/responses`; any other candidate receives a chat completion and the gateway converts the response back. A candidate that lists `/v1/systemone` is a dedicated System One upstream: it receives only `/v1/systemone` requests, and a `/v1/systemone` request goes to no other candidate and is never converted to chat. Buffered image, audio and rerank requests go only to OpenAI-format candidates listing the exact requested endpoint (`/v1/images/generations`, `/v1/images/edits`, `/v1/audio/transcriptions`, `/v1/audio/speech` or `/v1/rerank`); this opt-in does not stop those candidates serving chat. Omitted means no native endpoint. A request with no candidate left returns `404 model_not_found`. |
 | `candidates[].hoistSystemMessages` | No | When `true` on an `openai` candidate, the gateway rewrites a chat completion body, including a `/v1/responses` request converted to chat, so that it has at most one `system` message and that message is first. See [System message hoisting](#system-message-hoisting). Omitted means `false`. |
 | `userId`, `organizationId`, `workspaceId` | No for anonymous traffic; otherwise all three required | Positive integer tenant identity and resource scope, copied to post-consult reports. `userId` also keys the middleware prompt-cache partition on supported providers; organization/workspace IDs do not change that partition. Partial groups, zero, and negative values make the consult response invalid. |
 | `virtualKeyId` | No | Opaque integer copied to post-consult reports. |
 | `spendMode` | No | `regular`, `subscription`, or `subscription_overflow`. |
 | `userTier` | No | Sent to every upstream attempt as the `x-user-tier` header. |
 | `rateLimit` | No | Used on a denied `429`; object fields are `limit` and Unix-seconds `resetAt`. |
+
+### Rerank routing and metering
+
+`/v1/rerank` post reports contain only validated `usage.prompt_tokens` and
+`usage.total_tokens`. Pricing uses
+`inputCostPerToken` with no generated tokens; provider billing extensions and
+cost are removed before metering. Malformed successes report `502` without
+usage. See the [API reference](api-reference.md#reranking) for the wire contract.
 
 ### Image generation
 
@@ -209,6 +217,12 @@ usage before these defaults and cost injection, and never bills image
 counts on failed responses. A billing implementation must charge only a
 successful report's `images.count`, using the same lookup and token formula.
 
+### Image edit routing and metering
+
+`/v1/images/edits` uses the [image-generation metering rules](#image-generation)
+for returned image count and provider token usage. See the
+[API reference](api-reference.md#image-edits) for the multipart surface and limits.
+
 ### Audio transcription
 
 `/v1/audio/transcriptions` is default-off: candidates must list that exact path
@@ -246,6 +260,17 @@ production model; that cross-repository billing work is a separate launch gate.
 **Known follow-up:** Token-billed ASR models such as `gpt-4o-transcribe`, with
 `usage: {"type":"tokens"}`, need a contract extension before support. Whisper
 continues to use duration billing.
+
+### Speech routing and metering
+
+Successful `/v1/audio/speech` reports carry
+`usage: {type: "characters", characters: N}`, where `N` is the request input's
+Unicode scalar count (integer 1..4096). Failed or malformed responses carry no
+character usage. `pricing.speechCostPerCharacter` is a decimal string in USD
+per Unicode scalar; control bills `N × speechCostPerCharacter` only for 2xx
+reports and must deny missing or invalid pricing. The gateway echoes the pricing
+snapshot unchanged.
+Receipt and response details are in the [API reference](api-reference.md#speech-synthesis).
 
 ### Reasoning format
 

@@ -52,7 +52,7 @@ use crate::sse_protocol::SseProtocol;
 /// Everything the completion path needs, computed by the HTTP handler after E2EE
 /// termination and JSON normalization.
 pub struct CompletionInput {
-    pub audio_form: Option<Arc<super::audio::AudioForm>>,
+    pub form: Option<Arc<super::media::MediaForm>>,
     /// Byte-budget reservation for the buffered upload, held through consult.
     pub upload_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub endpoint: Endpoint,
@@ -132,7 +132,7 @@ async fn run_inner(
     inference_permit: &mut Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let CompletionInput {
-        audio_form,
+        form,
         upload_permit,
         endpoint,
         endpoint_path,
@@ -171,10 +171,8 @@ async fn run_inner(
         user_model: user_model.clone(),
     });
 
-    if endpoint == Endpoint::ImagesGenerations {
-        if let Err(err) = super::images::validate_request(&params) {
-            return err.into_response();
-        }
+    if let Err(err) = super::validate_buffered(endpoint, &params) {
+        return err.into_response();
     }
     let started = Instant::now();
     let client_endpoint = endpoint;
@@ -467,7 +465,7 @@ async fn run_inner(
         forward_service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
-                    audio_form,
+                    form,
                     context,
                     endpoint_path,
                     received_body: forward_body.as_ref(),
@@ -541,7 +539,7 @@ async fn run_inner(
     };
 
     match result {
-        Ok(MiddlewareForwardResult::Forwarded(forward)) => {
+        Ok(MiddlewareForwardResult::Forwarded(mut forward)) => {
             let upstream_status = forward.upstream_status;
             // The forwarder tries candidates in order and pushes exactly one
             // `failed_attempts` entry per candidate it abandons, so the serving
@@ -552,6 +550,31 @@ async fn run_inner(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            let upstream_request_id = request_id_from_headers(&forward.upstream_headers);
+            if client_endpoint == Endpoint::AudioSpeech {
+                if let (Some(usage), Some(content_type)) = (
+                    forward.usage.take(),
+                    forward.upstream_headers.get("content-type"),
+                ) {
+                    meter.success(
+                        upstream_status,
+                        attempt_index,
+                        Some(&forward.selected_route),
+                        Some(usage),
+                        None,
+                        upstream_request_id,
+                    );
+                    meter.failed_attempts(&forward.failed_attempts, false);
+                    return finalize_buffered(
+                        forward.receipt,
+                        upstream_status,
+                        forward.upstream_body,
+                        content_type,
+                        e2ee,
+                        outcome_ctx,
+                    );
+                }
+            }
             let route = selected_route(
                 forward.selected_format,
                 forward.selected_endpoint,
@@ -565,23 +588,25 @@ async fn run_inner(
                 responses_passthrough,
             } = route;
             let parsed_upstream = serde_json::from_slice::<Value>(&forward.upstream_body);
-            let upstream_request_id =
-                request_id_from_headers(&forward.upstream_headers).or_else(|| {
-                    (200..300)
-                        .contains(&forward.upstream_status)
-                        .then(|| parsed_upstream.as_ref().ok().and_then(request_id_from_body))
-                        .flatten()
-                });
+            let upstream_request_id = upstream_request_id.or_else(|| {
+                (200..300)
+                    .contains(&forward.upstream_status)
+                    .then(|| parsed_upstream.as_ref().ok().and_then(request_id_from_body))
+                    .flatten()
+            });
             let mut raw_usage = parsed_upstream
                 .as_ref()
                 .ok()
                 .and_then(|body| super::sse::source_usage(body, protocol));
-            if client_endpoint == Endpoint::AudioTranscriptions {
-                // Only validated duration usage may be billed.
+            if matches!(
+                client_endpoint,
+                Endpoint::AudioTranscriptions | Endpoint::AudioSpeech | Endpoint::Rerank
+            ) {
+                // Only validated duration/tokens or gateway-derived characters may be billed.
                 raw_usage = None;
             } else if client_endpoint == Endpoint::SystemOne {
                 response_transform::filter_systemone_usage(raw_usage.as_mut());
-            } else if client_endpoint == Endpoint::ImagesGenerations {
+            } else if client_endpoint.is_image() {
                 super::images::filter_usage(raw_usage.as_mut());
             } else {
                 response_transform::filter_usage(raw_usage.as_mut(), protocol);
@@ -603,6 +628,9 @@ async fn run_inner(
                     parsed_upstream
                         .map_err(|err| err.to_string())
                         .and_then(|mut upstream_json| {
+                            if client_endpoint == Endpoint::AudioSpeech {
+                                return Err("upstream returned an invalid speech response".into());
+                            }
                             if client_endpoint == Endpoint::AudioTranscriptions {
                                 let (body, audio) =
                                     super::audio::sanitize_response(upstream_json, &params)
@@ -614,7 +642,12 @@ async fn run_inner(
                                 upstream_json = body;
                                 meter.audio = Some(audio);
                             }
-                            if client_endpoint == Endpoint::ImagesGenerations {
+                            if client_endpoint == Endpoint::Rerank {
+                                super::rerank::sanitize_response(&mut upstream_json, &params)
+                                    .map_err(str::to_string)?;
+                                raw_usage = upstream_json.get("usage").cloned();
+                            }
+                            if client_endpoint.is_image() {
                                 super::images::validate_response(
                                     &upstream_json,
                                     super::images::requested_count(&params),
@@ -657,16 +690,14 @@ async fn run_inner(
                             "upstream returned a malformed success body",
                             Some(&request_id),
                         );
-                        // Images are always buffered: retain the served route's
+                        // Native buffered endpoints retain the served route's
                         // receipt draft and attest the sanitized error bytes.
-                        if matches!(
-                            client_endpoint,
-                            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
-                        ) {
+                        if client_endpoint.is_buffered_native() {
                             return finalize_buffered(
                                 forward.receipt,
                                 502,
                                 body,
+                                "application/json",
                                 e2ee,
                                 outcome_ctx,
                             );
@@ -676,7 +707,8 @@ async fn run_inner(
                 };
                 // Report usage before cost or image SDK defaults. Audio usage
                 // has already been normalized to duration only.
-                meter.images = (client_endpoint == Endpoint::ImagesGenerations)
+                meter.images = client_endpoint
+                    .is_image()
                     .then(|| super::images::usage(&transformed, &params));
                 if let Some(echo) = echo.as_ref().filter(|_| !responses_passthrough) {
                     transformed = response_transform::openai_chat_to_responses(
@@ -793,6 +825,7 @@ async fn run_inner(
                 forward.receipt,
                 client_status,
                 final_body,
+                "application/json",
                 e2ee,
                 outcome_ctx,
             )
@@ -1800,24 +1833,25 @@ fn service_error_response(
     finalize_generated(status, body, &[], e2ee, outcome)
 }
 
-// Finalize a buffered answer, including a sanitized malformed-image error.
+// Finalize a buffered answer, including a sanitized malformed-success error.
 fn finalize_buffered(
     draft: MiddlewareReceiptDraft,
     client_status: u16,
     final_body: Vec<u8>,
+    content_type: &str,
     e2ee: Option<E2eeRequestContext>,
     outcome: OutcomeCtx<'_>,
 ) -> Response {
     match outcome.service.finalize_middleware_receipt(
         draft,
         final_body,
-        Some("application/json"),
+        Some(content_type),
         outcome.requester.clone(),
         e2ee,
     ) {
         Ok(finalized) => {
             let status = StatusCode::from_u16(client_status).unwrap_or(StatusCode::BAD_GATEWAY);
-            let mut headers = gateway_owned_headers("application/json");
+            let mut headers = gateway_owned_headers(content_type);
             insert_header(&mut headers, "x-receipt-id", &finalized.receipt.receipt_id);
             insert_header(
                 &mut headers,

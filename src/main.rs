@@ -590,6 +590,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_capabilities: ServiceCapabilities {
             supported_multipart_constraint_endpoints: vec![
                 private_ai_gateway::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH.into(),
+                private_ai_gateway::aggregator::service::IMAGES_EDITS_PATH.into(),
             ],
             supported_e2ee_versions: if gateway_config.enable_e2ee {
                 vec!["2".to_string()]

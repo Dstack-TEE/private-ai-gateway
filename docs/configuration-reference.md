@@ -531,9 +531,13 @@ gateway therefore always requests `verbose_json` internally for NEAR audio
 and preserves the caller's requested output format. Other providers receive
 the requested format. No word timestamps are added unless requested.
 
-Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
-402 MiB upload byte budget (60-second read deadline), independent 16 inference
-slots, and 8 MiB upstream response. Upload bytes are charged chunk by chunk
+Transcription limits are process constants: 25 MiB file, 64 KiB text,
+16 inference slots shared with speech, and 8 MiB upstream response.
+Transcription and image-edit uploads share one process-wide 402 MiB byte budget
+(16 × (25 MiB + 64 KiB + 64 KiB)) and a 60-second read deadline; six full-size
+edit uploads use 384 MiB, leaving 18 MiB. See the
+[API reference](api-reference.md#image-edits) for edit limits.
+Upload bytes are charged chunk by chunk
 until handoff or drop; connections with no buffered data and declared
 `Content-Length` do not reserve upload capacity.
 Header-based audio/image refusals discard unread bytes without buffering up to
