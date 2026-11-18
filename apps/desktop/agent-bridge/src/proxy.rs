@@ -71,6 +71,11 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
 #[cfg(test)]
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
+/// How long requests wait for a session that stopped being verified, so a
+/// re-verification of a few seconds delays agents instead of failing them.
+pub const VERIFICATION_WAIT: Duration = Duration::from_secs(30);
+/// The `Retry-After` of a request refused while a session awaits verification.
+const VERIFICATION_RETRY_SECS: u64 = 5;
 /// An unknown model reads the catalog again at most this often, so a model
 /// the service just added works at once and a misspelled one costs one read.
 const CATALOG_MISS_REFRESH: Duration = Duration::from_secs(60);
@@ -169,6 +174,11 @@ struct Credentials {
 
 pub struct ProxyState {
     session: RwLock<Session>,
+    /// Wakes the requests waiting for a verification on every publication.
+    session_published: tokio::sync::Notify,
+    verification_wait: Duration,
+    /// When the session the user intends last stopped being verified.
+    pending_since: RwLock<Option<tokio::time::Instant>>,
     credentials: RwLock<Credentials>,
     /// Bumped on every token or key change; a request admitted under an
     /// older epoch is refused before it is sent.
@@ -190,9 +200,15 @@ pub struct ProxyState {
 impl ProxyState {
     /// `events` is bounded; when it is full, low-value rejection events are
     /// dropped rather than blocking a request.
-    pub fn new(events: mpsc::Sender<ProxyEvent>) -> Result<Arc<Self>, String> {
+    pub fn new(
+        events: mpsc::Sender<ProxyEvent>,
+        verification_wait: Duration,
+    ) -> Result<Arc<Self>, String> {
         Ok(Arc::new(Self {
             session: RwLock::new(Session::default()),
+            session_published: tokio::sync::Notify::new(),
+            verification_wait,
+            pending_since: RwLock::new(None),
             credentials: RwLock::new(Credentials::default()),
             credential_epoch: AtomicU64::new(1),
             gate: RwLock::new(CancellationToken::new()),
@@ -243,9 +259,36 @@ impl ProxyState {
             || current.service.is_some() != session.service.is_some()
             || current.verified != session.verified
             || current.catalog.is_some() != session.catalog.is_some();
+        // A stopped session publishes no session id; one that goes on does.
+        let pending = session.session_id.is_some()
+            && !(session.verified && session.service.is_some() && session.catalog.is_some());
         *current = session;
+        {
+            let mut since = write(&self.pending_since);
+            *since = pending.then(|| since.unwrap_or_else(tokio::time::Instant::now));
+        }
+        drop(current);
         if revoke {
             self.revoke_deliveries();
+        }
+        self.session_published.notify_waiters();
+    }
+
+    /// Waits while a session the user intends is starting, re-verifying or
+    /// being retried, until `verification_wait` after it stopped being
+    /// verified. Once an outage lasts longer, requests are refused at once.
+    async fn verification_settled(&self) {
+        loop {
+            let published = self.session_published.notified();
+            tokio::pin!(published);
+            published.as_mut().enable();
+            let Some(since) = *read(&self.pending_since) else {
+                return;
+            };
+            let deadline = since + self.verification_wait;
+            if tokio::time::timeout_at(deadline, published).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -343,6 +386,12 @@ impl ProxyState {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "gateway_not_verified",
                 "The gateway is not verified; requests are blocked until verification succeeds",
+            )
+            .retry_after(
+                session
+                    .session_id
+                    .is_some()
+                    .then_some(VERIFICATION_RETRY_SECS),
             )),
         }
     }
@@ -455,6 +504,8 @@ struct Rejection {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// Seconds after which the same request may succeed.
+    retry_after: Option<u64>,
 }
 
 impl Rejection {
@@ -463,7 +514,23 @@ impl Rejection {
             status,
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    fn retry_after(mut self, seconds: Option<u64>) -> Self {
+        self.retry_after = seconds;
+        self
+    }
+
+    fn response(&self, surface: Surface) -> Response {
+        let mut response = error_response(surface, self.status, self.code, &self.message);
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
     }
 }
 
@@ -503,12 +570,14 @@ async fn relay(
         Err(rejection) => return reject(&state, None, "POST", path, None, surface, rejection),
     };
     let agent = auth.agent.clone();
+    state.verification_settled().await;
     let Ok(_permit) = state.in_flight.clone().try_acquire_owned() else {
         let rejection = Rejection::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
             "Too many requests are in flight through the Local API; retry shortly",
-        );
+        )
+        .retry_after(Some(1));
         return reject(&state, Some(agent), "POST", path, None, surface, rejection);
     };
     let lease = match state.verified_session() {
@@ -995,12 +1064,7 @@ fn reject_with_context(
         cache_write_tokens: None,
         cost_usd: None,
     });
-    error_response(
-        surface,
-        rejection.status,
-        rejection.code,
-        &rejection.message,
-    )
+    rejection.response(surface)
 }
 
 /// An error in the surface's own envelope so the agent can display it.
