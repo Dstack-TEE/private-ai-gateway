@@ -1,8 +1,7 @@
 # User service for CLI-only Linux packages, like Syncthing's
 # syncthing.service. `pap start` enables it, so that the backend starts at
 # login and after a crash and resumes the protection it left;
-#   systemctl --user disable private-ai-proxy
-# turns that off.
+# `pap service disable` turns that off.
 [Unit]
 Description=Private AI Proxy backend
 Documentation=https://github.com/Dstack-TEE/private-ai-gateway/blob/main/apps/desktop/docs/cli-distribution.md

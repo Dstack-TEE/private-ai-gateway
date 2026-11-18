@@ -80,12 +80,14 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             // Protection the user turns on goes on across logins and crashes
             // until they stop it, so the backend moves under the service
             // manager before it starts protecting.
-            if desktop_core::supervisor::enable() {
+            if desktop_core::supervisor::automatic()
+                && desktop_core::supervisor::enable() == Ok(true)
+            {
                 if client.is_running()? {
                     client.restart_service()?;
                 }
                 if !global.json {
-                    eprintln!("Protection now resumes at login and after a crash (systemctl --user disable private-ai-proxy turns that off).");
+                    eprintln!("Protection now resumes at login and after a crash (pap service disable turns that off).");
                 }
             }
             start(&client, profile.as_deref(), *timeout)?
@@ -276,6 +278,17 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
         Service::Restart => {
             client.restart_service()?;
             value(client.version()?)
+        }
+        Service::Enable => {
+            // The backend that runs now moves under the service manager.
+            if desktop_core::supervisor::enable()? && client.is_running()? {
+                client.restart_service()?;
+            }
+            Ok(json!({"startAtLogin": true}))
+        }
+        Service::Disable => {
+            desktop_core::supervisor::disable()?;
+            Ok(json!({"startAtLogin": false}))
         }
         Service::Status => status(client),
     }
