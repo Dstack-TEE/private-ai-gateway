@@ -118,6 +118,13 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             WebUiPassword::Rotate => "Web UI password rotated.".into(),
         },
         Action::Diagnostics { .. } => exported(value),
+        Action::Update => match value["version"].as_str() {
+            Some(version) => format!(
+                "Updated to {}. Run pap start to resume protection.",
+                safe(version)
+            ),
+            None => format!("Up to date ({}).", text(&value["currentVersion"])),
+        },
         Action::Cli { .. } | Action::Doctor | Action::Completions { .. } => details(value),
     }
 }

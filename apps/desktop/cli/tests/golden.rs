@@ -154,6 +154,7 @@ Commands:
   cli          Manage installation of the private-ai-proxy command
   app          Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
   doctor       Report independent local installation and backend diagnostics without starting services
+  update       Install the newer release of the saved update channel, if there is one. This stops the backend and protection
   diagnostics  Export a redacted diagnostics report to a new file
   completions  Generate shell completions from the current command definition
   verify       Verify an ACI service and print the identity checks
@@ -246,7 +247,7 @@ Global Options:
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["af82d37347edfe91beb953120d37c3924a6f9c8ef6e404c71d5fdb06d4bc4f15"]
+        str!["dde23c82b46a79415a392858caaec002037960429d8d0b2c91f8ed652e1348b7"]
     );
 }
 
