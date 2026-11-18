@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.3...desktop-v0.9.0) (2026-11-18)
+
+
+### Documentation
+
+* **desktop:** state what the verification wait covers and what it does not ([#598](https://github.com/Dstack-TEE/private-ai-gateway/issues/598)) ([65c1602](https://github.com/Dstack-TEE/private-ai-gateway/commit/65c1602f007400dd9f944af33cd4be222babb46c))
+
 ## [0.9.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.2...desktop-v0.9.0-beta.3) (2026-11-18)
 
 
