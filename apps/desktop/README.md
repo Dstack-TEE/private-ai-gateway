@@ -192,7 +192,9 @@ The verified live catalog (`GET /v1/models` through the ACI verifier) is the
 only model list. Every listed model is offered on the Chat Completions,
 Messages and Responses surfaces unless its `output_modalities` excludes text;
 image and transcription surfaces require an explicit `image` or
-`transcription` output modality.
+`transcription` output modality. Models are listed newest first (the entry's
+`created` time), then by id, wherever the catalog is shown: `GET /v1/models`,
+the app, and connected agents' pickers.
 
 ## Branding
 

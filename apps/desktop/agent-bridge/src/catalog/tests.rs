@@ -8,14 +8,14 @@ fn remote() -> Value {
 }
 
 #[test]
-fn catalog_preserves_verified_entries_as_listed() {
+fn catalog_keeps_verified_entries_unchanged() {
     let catalog = Catalog::from_remote(&remote(), 1).unwrap();
     assert_eq!(catalog.models.len(), 2);
-    assert!(catalog.get("openai/gpt-oss-20b").is_some());
-    assert!(catalog.models[0].supports(Surface::SystemOne));
+    let listed = catalog.get("openai/gpt-oss-20b").unwrap();
+    assert!(listed.supports(Surface::SystemOne));
     let list = catalog.openai_list();
-    assert_eq!(list["data"][0]["is_tee"], json!(true));
-    assert_eq!(list["data"][0]["supported_features"], json!(["tools"]));
+    assert_eq!(list["data"][1]["is_tee"], json!(true));
+    assert_eq!(list["data"][1]["supported_features"], json!(["tools"]));
     assert!(Catalog::from_remote(&json!({ "data": [] }), 1).is_err());
     assert!(Catalog::from_remote(&json!({ "data": [{ "name": "no id" }] }), 1).is_err());
 }
@@ -109,14 +109,37 @@ fn transcriptions_require_only_transcription_output() {
     assert_eq!(ids, ["audio", "mixed-output"]);
 }
 
+/// Newest first, then by id; entries without a listing time come last. The
+/// order the service lists them in does not make a different catalog.
+#[test]
+fn catalog_lists_the_newest_models_first() {
+    let entries = [
+        json!({ "id": "b/undated" }),
+        json!({ "id": "b/old", "created": 100 }),
+        json!({ "id": "z/new", "created": 300 }),
+        json!({ "id": "a/undated" }),
+        json!({ "id": "a/new", "created": 300 }),
+    ];
+    let catalog = Catalog::from_remote(&json!({ "data": entries }), 1).unwrap();
+    let ids: Vec<_> = catalog.models.iter().map(CatalogModel::id).collect();
+    assert_eq!(ids, ["a/new", "z/new", "b/old", "a/undated", "b/undated"]);
+    let reversed: Vec<_> = entries.iter().rev().collect();
+    assert_eq!(
+        Catalog::from_remote(&json!({ "data": reversed }), 1)
+            .unwrap()
+            .revision,
+        catalog.revision
+    );
+}
+
 #[test]
 fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
     let catalog = Catalog::from_remote(
         &json!({ "data": [
             { "id": "openai/gpt-oss-120b", "name": "OpenAI: GPT OSS 120B", "is_tee": true },
             { "id": "phala/qwen", "name": " ", "is_tee": true },
-            { "id": "tagged", "name": "Tagged [TEE]", "is_tee": true },
             { "id": "plain", "name": "Plain", "is_tee": false },
+            { "id": "tagged", "name": "Tagged [TEE]", "is_tee": true },
             { "id": "unmarked" }
         ]}),
         1,
@@ -132,8 +155,8 @@ fn tee_models_show_a_tee_suffix_while_ids_and_listed_entries_stay_unchanged() {
         [
             ("openai/gpt-oss-120b", "OpenAI: GPT OSS 120B [TEE]"),
             ("phala/qwen", "phala/qwen [TEE]"),
-            ("tagged", "Tagged [TEE]"),
             ("plain", "Plain"),
+            ("tagged", "Tagged [TEE]"),
             ("unmarked", "unmarked"),
         ]
     );

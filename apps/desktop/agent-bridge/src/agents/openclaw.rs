@@ -517,7 +517,7 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::from_remote(
             &json!({"data": [
-                {"id":"vendor/model", "name":"Verified model", "context_length":32000,
+                {"id":"vendor/model", "name":"Verified model", "created":1, "context_length":32000,
                  "max_output_length":0, "input_modalities":["text","image","unknown"],
                  "pricing":{"prompt":"0.000002"}},
                 {"id":"other/model"}
