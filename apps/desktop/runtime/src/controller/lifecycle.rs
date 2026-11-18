@@ -65,6 +65,17 @@ impl DesktopRuntime {
         if retry && ((!local_service && !self.recovery.online()) || !self.recovery.retry_due()) {
             return Ok(());
         }
+        // Addresses also change when containers, VPNs and temporary IPv6
+        // addresses come and go. Restarting ends every request in flight, so
+        // a verified session is rebuilt only if its service stopped answering.
+        if !retry && state.status == VerificationStatus::Verified && self.recovery.online() {
+            if self.manager.service_answers() {
+                return Ok(());
+            }
+            tracing::info!(
+                "The network changed and the service no longer answers; restarting protection"
+            );
+        }
         self.recovery.clear_wait();
         if let Err(error) = self.stop_with_reconnect(true) {
             self.manager.cancel_reconnection();
