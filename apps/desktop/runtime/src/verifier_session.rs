@@ -104,6 +104,18 @@ pub struct VerifierConfig {
     pub remote_url: String,
 }
 
+/// What attesting a protecting session's service again found.
+pub enum Reverified {
+    /// No session is protecting; there is nothing to verify in place.
+    NotProtecting,
+    /// The same service: the session went on undisturbed.
+    Kept,
+    /// Another service that verifies: the session restarts on it.
+    Changed,
+    /// It did not verify: the session is closed and retried.
+    Failed(String),
+}
+
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
 
 /// The status and error a state change introduced, for the service log.
@@ -727,6 +739,35 @@ impl SessionManager {
         let changes = self.send(&mut runtime);
         drop(runtime);
         changes.write();
+    }
+
+    /// Attests the protecting session's service again where it runs.
+    pub async fn verify_running(&self) -> Reverified {
+        let running = self.lock().ok().and_then(|runtime| {
+            let service = runtime
+                .state
+                .is_protected()
+                .then(|| runtime.service.clone());
+            Some((runtime.generation, service.flatten()?))
+        });
+        let Some((generation, service)) = running else {
+            return Reverified::NotProtecting;
+        };
+        if let Err(reason) = service.verify_again().await {
+            return Reverified::Failed(reason);
+        }
+        // The same verifier, still open: a service that turned out to be
+        // another one retired it.
+        let kept = self.lock().is_ok_and(|runtime| {
+            runtime.generation == generation
+                && runtime.service.is_some()
+                && runtime.state.is_protected()
+        });
+        if kept {
+            Reverified::Kept
+        } else {
+            Reverified::Changed
+        }
     }
 
     /// Whether the verified session's service can still be reached. Blocks the

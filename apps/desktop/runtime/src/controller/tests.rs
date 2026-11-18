@@ -1730,7 +1730,23 @@ struct AnsweringService {
     answers: Arc<std::sync::atomic::AtomicU8>,
 }
 
+/// Fresh attestations asked of a running `AnsweringService`.
+static VERIFIED_AGAIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl proxy::VerifiedService for AnsweringService {
+    fn verify_again(
+        self: Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async move {
+            VERIFIED_AGAIN.fetch_add(1, Ordering::SeqCst);
+            if self.answers.load(Ordering::SeqCst) == ANSWERS {
+                Ok(())
+            } else {
+                Err("the report did not verify".to_string())
+            }
+        })
+    }
+
     fn call(
         self: Arc<Self>,
         _: axum::http::Request<axum::body::Body>,
@@ -1830,6 +1846,64 @@ fn an_address_change_restarts_only_a_session_whose_service_stopped_answering() {
         assert_ne!(runtime.proxy.session().generation, generation, "{gone}");
         assert!(!runtime.proxy.session().verified);
     }
+}
+
+/// Verifying the profile that is protecting attests its service where it
+/// runs. Stopping the session to verify it cut every request in flight.
+#[test]
+fn verifying_the_protecting_profile_does_not_interrupt_it() {
+    use desktop_core::contracts::ServiceProvider;
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let answers = Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS));
+    let launcher = Arc::new(AnsweringVerifier {
+        answers: answers.clone(),
+    });
+    let runtime = test_runtime_with(&executor, directory.path(), launcher);
+    let input = || ConfidentialProfileInput {
+        id: "work".into(),
+        name: "Work".into(),
+        provider: ServiceProvider::Custom,
+        remote_url: "https://inference.phala.com".into(),
+    };
+    executor
+        .block_on(runtime.save_configuration(input(), Some("sk-test-key-0123456789".into())))
+        .unwrap();
+    let started = runtime.start(runtime.state().config).unwrap();
+    executor
+        .block_on(runtime.manager.wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            std::time::Duration::from_secs(5),
+        ))
+        .unwrap();
+    let session = runtime.proxy.session();
+    let asked = VERIFIED_AGAIN.load(Ordering::SeqCst);
+
+    let state = executor
+        .block_on(runtime.verify_configuration(input(), None))
+        .unwrap();
+    assert!(state.is_protected());
+    // The session's evidence is the verifier's; saving the profile leaves it.
+    assert!(state.identity.is_some() && state.catalog.is_some());
+    assert!(state.profiles[0].verified_at.is_some());
+    assert_eq!(VERIFIED_AGAIN.load(Ordering::SeqCst), asked + 1);
+    let after = runtime.proxy.session();
+    assert_eq!(
+        (after.generation, after.epoch, after.verified),
+        (session.generation, session.epoch, true)
+    );
+
+    // A service that does not verify again is reported, not verified a
+    // second time behind a stopped session, and its time is not recorded.
+    let verified_at = state.profiles[0].verified_at;
+    answers.store(UNREACHABLE, Ordering::SeqCst);
+    let error = executor
+        .block_on(runtime.verify_configuration(input(), None))
+        .unwrap_err();
+    assert!(error.to_string().contains("did not verify again"));
+    assert_eq!(runtime.state().profiles[0].verified_at, verified_at);
+    assert_eq!(runtime.proxy.session().generation, session.generation);
+    runtime.stop().unwrap();
 }
 
 /// A profile save that fails leaves the state, the settings and the saved
