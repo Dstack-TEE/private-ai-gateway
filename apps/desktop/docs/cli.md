@@ -21,18 +21,24 @@ pap agents list                # the coding agents found on this machine
 pap agents connect codex       # route one through the Local API
 ```
 
-Connect an agent after `pap start`: with protection off the connection is only
-saved, and the command exits `1` saying the agent still uses its own provider.
+`pap agents connect` starts protection first when it is off, so the agent is
+routed when the command succeeds; if protection cannot start, it exits `1` with
+the reason and the agent keeps its own provider.
 
 With an API key instead of an account, replace the first step with
 `pap profiles add --id work --name Work --url <service URL>`, which asks for
 the key at a hidden prompt. `pap status` shows what protection is doing and why
 at any time.
 
-After a restart of the machine, `pap service start` starts the backend and
-resumes protection that was on; until then connected agents cannot reach the
-Local API. The Linux packages ship a systemd user unit that does this at login
-([Standalone CLI](cli-distribution.md#standalone-cli)).
+Protection that is on stays on until `pap stop`. On Linux and macOS, the first
+`pap start` registers the backend with the user's service manager (a systemd
+user service, a launchd agent), so it starts at login and after a crash and
+resumes protection; `pap service disable` turns that off and
+`pap service enable` on again
+([Standalone CLI](cli-distribution.md#standalone-cli)). The desktop app has its
+own Open at Login. On Windows, and where no user service manager runs, run
+`pap service start` after a restart of the machine; until then connected agents
+cannot reach the Local API.
 
 ## Discover Commands
 

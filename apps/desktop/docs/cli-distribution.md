@@ -102,25 +102,29 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
-The CLI-only packages also install an optional systemd user unit,
-`/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages do.
-Nothing enables it. Without it, the first command starts the backend. To start
-the backend at login instead, stop any backend a command started, then enable
-the unit:
+The first `pap start` registers the backend with the user's service manager,
+so it starts at login and after a crash and resumes the protection it left;
+`pap service disable` removes the registration and `pap service enable` adds
+it again.
 
-```sh
-pap --yes service stop
-systemctl --user enable --now private-ai-proxy
-```
+| Installation | Registration | Runs |
+| --- | --- | --- |
+| Linux DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages ship one | the packaged backend |
+| Linux npm, install script, archive | `~/.config/systemd/user/private-ai-proxy.service`, written with the same settings | `<command> service run` |
+| macOS npm, install script, Homebrew, archive | `~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist`, with `RunAtLoad` and `KeepAlive` on a failed exit | `<command> service run` |
+
+`<command>` is the entry on `PATH` that links to the installed command, which
+install scripts and Homebrew keep across upgrades, or else the command's own
+path, which npm keeps. `pap start` registers by itself when one of those holds;
+an archive run from its own directory needs `pap service enable`, again after
+it moves. A registration of that name which this command did not write is
+never used or changed. Where no user service manager runs (containers, WSL
+without systemd) nothing is registered and the first command starts the
+backend.
 
 `Restart=on-failure` restarts a crashed backend but not one stopped with `pap
-service stop`. After a package upgrade, the next command stops the old backend
-(a clean exit, so systemd does not restart it) and starts the new one itself,
-outside systemd. Hand the backend back to the unit with:
-
-```sh
-pap --yes service stop && systemctl --user restart private-ai-proxy
-```
+service stop`. While the unit is enabled, commands start the backend through
+it, also after a package upgrade.
 
 A plain `systemctl --user restart` would find that backend holding the instance
 lock: the unit's backend exits with status 75 (already running), and
