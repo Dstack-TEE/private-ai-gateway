@@ -264,9 +264,11 @@ unlocked OS keychain for a process running as you.
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to
-  their original provider. A Local API address change rewrites them to the
-  new address, unless the backend has not verified a catalog since it
-  started; then they are restored until verification projects them again.
+  their original provider. The backend keeps retrying the verification, backing
+  off to at most a minute, until it passes or protection is stopped. A Local
+  API address change rewrites them to the new address, unless the backend has
+  not verified a catalog since it started; then they are restored until
+  verification projects them again.
   Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
   or disconnecting an agent restores its own configuration. Quitting the app
   from the tray or menu leaves the backend running and the agents pointed at

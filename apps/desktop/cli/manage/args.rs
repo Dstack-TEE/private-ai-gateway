@@ -108,6 +108,8 @@ pub enum Service {
     Start,
     /// Stop the backend and restore managed agent configurations.
     Stop,
+    /// Restart the backend. Protection resumes and agents stay connected.
+    Restart,
     /// Show backend and protection state without starting the backend.
     Status,
 }

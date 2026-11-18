@@ -44,6 +44,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Service { command } => match command {
             Service::Start => "Backend started.".into(),
             Service::Stop => "Backend stopped.".into(),
+            Service::Restart => "Backend restarted.".into(),
             Service::Status => status(value),
         },
         Action::App {
@@ -182,7 +183,6 @@ fn status(value: &Value) -> String {
         _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",
-        Some("blocked") => "Not protected (blocked)",
         Some("error") => "Not protected (error)",
         _ => "Not protected",
     };

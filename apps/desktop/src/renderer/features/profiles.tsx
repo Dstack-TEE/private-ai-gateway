@@ -223,7 +223,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   const remove = useMutation({
     mutationFn: async () => {
       const current = await desktopApi.getState();
-      const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
+      const needsStop = !current.configurationVerification && ["verified", "verifying"].includes(current.status);
       const confirmed = await confirm({
         title: `Delete “${draft.name}”?`,
         message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",

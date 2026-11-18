@@ -859,11 +859,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     // A verification failure or block keeps the agents pointed at the Local
     // API, which refuses them; the original provider never gets their requests.
-    for status in [
-        VerificationStatus::Error,
-        VerificationStatus::Stopped,
-        VerificationStatus::Blocked,
-    ] {
+    for status in [VerificationStatus::Error, VerificationStatus::Stopped] {
         runtime.manager.restore_snapshot(AppState {
             status,
             ..verified.clone()
@@ -1332,7 +1328,6 @@ fn only_live_protection_allows_agent_projection() {
     for status in [
         VerificationStatus::Stopped,
         VerificationStatus::Verifying,
-        VerificationStatus::Blocked,
         VerificationStatus::Error,
     ] {
         state.status = status;
